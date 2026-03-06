@@ -522,6 +522,7 @@ export namespace types {
 	    linkColorLight: string;
 	    linkColorDark: string;
 	    themes: Theme[];
+	    suppressNetworkErrorNotifications: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new AppSettings(source);
@@ -547,6 +548,7 @@ export namespace types {
 	        this.linkColorLight = source["linkColorLight"];
 	        this.linkColorDark = source["linkColorDark"];
 	        this.themes = this.convertValues(source["themes"], Theme);
+	        this.suppressNetworkErrorNotifications = source["suppressNetworkErrorNotifications"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

@@ -33,6 +33,7 @@ import {
   deleteTheme as deleteThemeApi,
   reorderThemes,
   applyTheme as applyThemeApi,
+  setSuppressNetworkErrorNotifications as persistSuppressNetworkErrorNotifications,
 } from '@/core/settings/appPreferences';
 import { useTheme } from '@/core/contexts/ThemeContext';
 import {
@@ -71,6 +72,8 @@ function Settings({ onClose }: SettingsProps) {
   const [persistenceMode, setPersistenceMode] = useState<GridTablePersistenceMode>(() =>
     getGridTablePersistenceMode()
   );
+  const [suppressNetworkErrorNotifications, setSuppressNetworkErrorNotifications] =
+    useState<boolean>(false);
   // Track kubeconfig search paths for the settings panel.
   const [kubeconfigPaths, setKubeconfigPaths] = useState<string[]>([]);
   const [savedKubeconfigPaths, setSavedKubeconfigPaths] = useState<string[]>([]);
@@ -199,6 +202,7 @@ function Settings({ onClose }: SettingsProps) {
     try {
       const preferences = await hydrateAppPreferences();
       setUseShortResourceNames(preferences.useShortResourceNames);
+      setSuppressNetworkErrorNotifications(preferences.suppressNetworkErrorNotifications);
       // Palette sliders are loaded by the resolvedTheme effect.
     } catch (error) {
       errorHandler.handle(error, { action: 'loadAppSettings' });
@@ -247,6 +251,11 @@ function Settings({ onClose }: SettingsProps) {
     const mode: GridTablePersistenceMode = checked ? 'namespaced' : 'shared';
     setPersistenceMode(mode);
     setGridTablePersistenceMode(mode);
+  };
+
+  const handleSuppressNetworkErrorNotificationsToggle = (checked: boolean) => {
+    setSuppressNetworkErrorNotifications(checked);
+    persistSuppressNetworkErrorNotifications(checked);
   };
 
   // Debounced persistence for palette tint — avoids hammering the backend during fast drags.
@@ -1380,6 +1389,22 @@ function Settings({ onClose }: SettingsProps) {
                   onChange={(e) => setBackgroundRefresh(e.target.checked)}
                 />
                 Include background clusters in auto-refresh
+              </label>
+            </div>
+          </div>
+        </div>
+        <div className="settings-subsection">
+          <h4>Notifications</h4>
+          <div className="settings-items">
+            <div className="setting-item">
+              <label htmlFor="suppress-network-errors">
+                <input
+                  type="checkbox"
+                  id="suppress-network-errors"
+                  checked={suppressNetworkErrorNotifications}
+                  onChange={(e) => handleSuppressNetworkErrorNotificationsToggle(e.target.checked)}
+                />
+                Hide network connection error notifications
               </label>
             </div>
           </div>

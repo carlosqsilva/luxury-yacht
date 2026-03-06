@@ -29,24 +29,25 @@ type WindowSettings struct {
 
 // AppSettings represents the application settings
 type AppSettings struct {
-	Theme                            string   `json:"theme"`                            // "light", "dark", or "system"
-	SelectedKubeconfigs              []string `json:"selectedKubeconfigs"`              // Multi-cluster selections in "path:context" form
-	UseShortResourceNames            bool     `json:"useShortResourceNames"`            // Use short names like "po" for pods in badges/headers
-	AutoRefreshEnabled               bool     `json:"autoRefreshEnabled"`               // Enable automatic refresh cycles
-	RefreshBackgroundClustersEnabled bool     `json:"refreshBackgroundClustersEnabled"` // Refresh inactive clusters in the background
-	MetricsRefreshIntervalMs         int      `json:"metricsRefreshIntervalMs"`         // Metrics refresh interval (ms)
-	GridTablePersistenceMode         string   `json:"gridTablePersistenceMode"`         // "shared" or "namespaced"
-	PaletteHueLight                  int      `json:"paletteHueLight"`                  // Hue for gray palette tint in light theme (0-360)
-	PaletteSaturationLight           int      `json:"paletteSaturationLight"`           // Saturation intensity for gray palette tint in light theme (0-100)
-	PaletteBrightnessLight           int      `json:"paletteBrightnessLight"`           // Brightness offset for gray palette in light theme (-50 to +50)
-	PaletteHueDark                   int      `json:"paletteHueDark"`                   // Hue for gray palette tint in dark theme (0-360)
-	PaletteSaturationDark            int      `json:"paletteSaturationDark"`            // Saturation intensity for gray palette tint in dark theme (0-100)
-	PaletteBrightnessDark            int      `json:"paletteBrightnessDark"`            // Brightness offset for gray palette in dark theme (-50 to +50)
-	AccentColorLight                 string   `json:"accentColorLight"`                 // Custom accent hex for light theme (empty = default)
-	AccentColorDark                  string   `json:"accentColorDark"`                  // Custom accent hex for dark theme (empty = default)
-	LinkColorLight                   string   `json:"linkColorLight"`                   // Custom link hex for light theme (empty = default)
-	LinkColorDark                    string   `json:"linkColorDark"`                    // Custom link hex for dark theme (empty = default)
-	Themes                           []Theme  `json:"themes"`                           // Saved theme library
+	Theme                             string   `json:"theme"`                             // "light", "dark", or "system"
+	SelectedKubeconfigs               []string `json:"selectedKubeconfigs"`               // Multi-cluster selections in "path:context" form
+	UseShortResourceNames             bool     `json:"useShortResourceNames"`             // Use short names like "po" for pods in badges/headers
+	AutoRefreshEnabled                bool     `json:"autoRefreshEnabled"`                // Enable automatic refresh cycles
+	RefreshBackgroundClustersEnabled  bool     `json:"refreshBackgroundClustersEnabled"`  // Refresh inactive clusters in the background
+	MetricsRefreshIntervalMs          int      `json:"metricsRefreshIntervalMs"`          // Metrics refresh interval (ms)
+	GridTablePersistenceMode          string   `json:"gridTablePersistenceMode"`          // "shared" or "namespaced"
+	PaletteHueLight                   int      `json:"paletteHueLight"`                   // Hue for gray palette tint in light theme (0-360)
+	PaletteSaturationLight            int      `json:"paletteSaturationLight"`            // Saturation intensity for gray palette tint in light theme (0-100)
+	PaletteBrightnessLight            int      `json:"paletteBrightnessLight"`            // Brightness offset for gray palette in light theme (-50 to +50)
+	PaletteHueDark                    int      `json:"paletteHueDark"`                    // Hue for gray palette tint in dark theme (0-360)
+	PaletteSaturationDark             int      `json:"paletteSaturationDark"`             // Saturation intensity for gray palette tint in dark theme (0-100)
+	PaletteBrightnessDark             int      `json:"paletteBrightnessDark"`             // Brightness offset for gray palette in dark theme (-50 to +50)
+	AccentColorLight                  string   `json:"accentColorLight"`                  // Custom accent hex for light theme (empty = default)
+	AccentColorDark                   string   `json:"accentColorDark"`                   // Custom accent hex for dark theme (empty = default)
+	LinkColorLight                    string   `json:"linkColorLight"`                    // Custom link hex for light theme (empty = default)
+	LinkColorDark                     string   `json:"linkColorDark"`                     // Custom link hex for dark theme (empty = default)
+	Themes                            []Theme  `json:"themes"`                            // Saved theme library
+	SuppressNetworkErrorNotifications bool     `json:"suppressNetworkErrorNotifications"` // Hide network error notifications
 }
 
 // ThemeInfo represents theme information to send to frontend

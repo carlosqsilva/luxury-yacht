@@ -5,6 +5,8 @@
  * Provides shared helper functions for the frontend.
  */
 
+import { getSuppressNetworkErrorNotifications } from '@/core/settings/appPreferences';
+
 export enum ErrorCategory {
   NETWORK = 'NETWORK',
   AUTHENTICATION = 'AUTHENTICATION',
@@ -319,7 +321,8 @@ class ErrorHandler {
     const suppressNotification =
       category === ErrorCategory.PERMISSION ||
       category === ErrorCategory.AUTHENTICATION ||
-      isAuthOverlayError;
+      isAuthOverlayError ||
+      (category === ErrorCategory.NETWORK && getSuppressNetworkErrorNotifications());
 
     if (!suppressNotification) {
       // Store in history

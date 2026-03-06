@@ -466,6 +466,10 @@ export function SetSidebarVisible(arg1) {
   return window['go']['backend']['App']['SetSidebarVisible'](arg1);
 }
 
+export function SetSuppressNetworkErrorNotifications(arg1) {
+  return window['go']['backend']['App']['SetSuppressNetworkErrorNotifications'](arg1);
+}
+
 export function SetTheme(arg1) {
   return window['go']['backend']['App']['SetTheme'](arg1);
 }

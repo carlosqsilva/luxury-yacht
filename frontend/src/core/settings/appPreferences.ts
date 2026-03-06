@@ -28,6 +28,7 @@ interface AppPreferences {
   refreshBackgroundClustersEnabled: boolean;
   metricsRefreshIntervalMs: number;
   gridTablePersistenceMode: GridTablePersistenceMode;
+  suppressNetworkErrorNotifications: boolean;
   paletteHueLight: number;
   paletteSaturationLight: number;
   paletteBrightnessLight: number;
@@ -47,6 +48,7 @@ interface AppSettingsPayload {
   refreshBackgroundClustersEnabled?: boolean;
   metricsRefreshIntervalMs?: number;
   gridTablePersistenceMode?: string;
+  suppressNetworkErrorNotifications?: boolean;
   // Migration: old single-value fields.
   paletteHue?: number;
   paletteSaturation?: number;
@@ -73,6 +75,7 @@ const DEFAULT_PREFERENCES: AppPreferences = {
   refreshBackgroundClustersEnabled: true,
   metricsRefreshIntervalMs: DEFAULT_METRICS_REFRESH_INTERVAL_MS,
   gridTablePersistenceMode: 'shared',
+  suppressNetworkErrorNotifications: false,
   paletteHueLight: 0,
   paletteSaturationLight: 0,
   paletteBrightnessLight: 0,
@@ -228,6 +231,9 @@ export const hydrateAppPreferences = async (options?: {
       DEFAULT_PREFERENCES.refreshBackgroundClustersEnabled,
     metricsRefreshIntervalMs: normalizeMetricsIntervalMs(backendSettings?.metricsRefreshIntervalMs),
     gridTablePersistenceMode: normalizeGridTableMode(backendSettings?.gridTablePersistenceMode),
+    suppressNetworkErrorNotifications:
+      backendSettings?.suppressNetworkErrorNotifications ??
+      DEFAULT_PREFERENCES.suppressNetworkErrorNotifications,
     paletteHueLight: backendSettings?.paletteHueLight ?? DEFAULT_PREFERENCES.paletteHueLight,
     paletteSaturationLight:
       backendSettings?.paletteSaturationLight ?? DEFAULT_PREFERENCES.paletteSaturationLight,
@@ -272,6 +278,18 @@ export const getMetricsRefreshIntervalMs = (): number => {
 
 export const getGridTablePersistenceMode = (): GridTablePersistenceMode => {
   return preferenceCache.gridTablePersistenceMode;
+};
+
+export const getSuppressNetworkErrorNotifications = (): boolean => {
+  return preferenceCache.suppressNetworkErrorNotifications;
+};
+
+export const setSuppressNetworkErrorNotifications = (suppress: boolean): void => {
+  hydrated = true;
+  updatePreferenceCache({ suppressNetworkErrorNotifications: suppress });
+  void persistBooleanPreference('SetSuppressNetworkErrorNotifications', suppress).catch((error) => {
+    console.error('Failed to persist suppress network error notifications preference:', error);
+  });
 };
 
 // Returns palette tint values for the specified theme.

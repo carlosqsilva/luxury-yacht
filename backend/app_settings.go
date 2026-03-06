@@ -55,6 +55,9 @@ type settingsPreferences struct {
 
 	// Saved theme library. Order matters: first match wins for cluster pattern matching.
 	Themes []Theme `json:"themes,omitempty"`
+
+	// SuppressNetworkErrorNotifications hides network connection error toasts.
+	SuppressNetworkErrorNotifications bool `json:"suppressNetworkErrorNotifications"`
 }
 
 // settingsRefresh captures user-configurable refresh settings.
@@ -292,24 +295,25 @@ func (a *App) loadAppSettings() error {
 	}
 
 	a.appSettings = &AppSettings{
-		Theme:                            settings.Preferences.Theme,
-		SelectedKubeconfigs:              append([]string(nil), settings.Kubeconfig.Selected...),
-		UseShortResourceNames:            settings.Preferences.UseShortResourceNames,
-		AutoRefreshEnabled:               settings.Preferences.Refresh.Auto,
-		RefreshBackgroundClustersEnabled: settings.Preferences.Refresh.Background,
-		MetricsRefreshIntervalMs:         settings.Preferences.Refresh.MetricsIntervalMs,
-		GridTablePersistenceMode:         settings.Preferences.GridTablePersistenceMode,
-		PaletteHueLight:                  settings.Preferences.PaletteHueLight,
-		PaletteSaturationLight:           settings.Preferences.PaletteSaturationLight,
-		PaletteBrightnessLight:           settings.Preferences.PaletteBrightnessLight,
-		PaletteHueDark:                   settings.Preferences.PaletteHueDark,
-		PaletteSaturationDark:            settings.Preferences.PaletteSaturationDark,
-		PaletteBrightnessDark:            settings.Preferences.PaletteBrightnessDark,
-		AccentColorLight:                 settings.Preferences.AccentColorLight,
-		AccentColorDark:                  settings.Preferences.AccentColorDark,
-		LinkColorLight:                   settings.Preferences.LinkColorLight,
-		LinkColorDark:                    settings.Preferences.LinkColorDark,
-		Themes:                           settings.Preferences.Themes,
+		Theme:                             settings.Preferences.Theme,
+		SelectedKubeconfigs:               append([]string(nil), settings.Kubeconfig.Selected...),
+		UseShortResourceNames:             settings.Preferences.UseShortResourceNames,
+		AutoRefreshEnabled:                settings.Preferences.Refresh.Auto,
+		RefreshBackgroundClustersEnabled:  settings.Preferences.Refresh.Background,
+		MetricsRefreshIntervalMs:          settings.Preferences.Refresh.MetricsIntervalMs,
+		GridTablePersistenceMode:          settings.Preferences.GridTablePersistenceMode,
+		PaletteHueLight:                   settings.Preferences.PaletteHueLight,
+		PaletteSaturationLight:            settings.Preferences.PaletteSaturationLight,
+		PaletteBrightnessLight:            settings.Preferences.PaletteBrightnessLight,
+		PaletteHueDark:                    settings.Preferences.PaletteHueDark,
+		PaletteSaturationDark:             settings.Preferences.PaletteSaturationDark,
+		PaletteBrightnessDark:             settings.Preferences.PaletteBrightnessDark,
+		AccentColorLight:                  settings.Preferences.AccentColorLight,
+		AccentColorDark:                   settings.Preferences.AccentColorDark,
+		LinkColorLight:                    settings.Preferences.LinkColorLight,
+		LinkColorDark:                     settings.Preferences.LinkColorDark,
+		Themes:                            settings.Preferences.Themes,
+		SuppressNetworkErrorNotifications: settings.Preferences.SuppressNetworkErrorNotifications,
 	}
 	return nil
 }
@@ -345,6 +349,7 @@ func (a *App) saveAppSettings() error {
 	settings.Preferences.LinkColorLight = a.appSettings.LinkColorLight
 	settings.Preferences.LinkColorDark = a.appSettings.LinkColorDark
 	settings.Preferences.Themes = a.appSettings.Themes
+	settings.Preferences.SuppressNetworkErrorNotifications = a.appSettings.SuppressNetworkErrorNotifications
 
 	settings.Kubeconfig.Selected = append([]string(nil), a.appSettings.SelectedKubeconfigs...)
 
@@ -478,6 +483,22 @@ func (a *App) SetBackgroundRefreshEnabled(enabled bool) error {
 
 	a.logger.Info(fmt.Sprintf("Background refresh enabled changed to: %v", enabled), "Settings")
 	a.appSettings.RefreshBackgroundClustersEnabled = enabled
+	return a.saveAppSettings()
+}
+
+// SetSuppressNetworkErrorNotifications persists the preference to hide network error notifications.
+func (a *App) SetSuppressNetworkErrorNotifications(suppress bool) error {
+	a.settingsMu.Lock()
+	defer a.settingsMu.Unlock()
+
+	if a.appSettings == nil {
+		if err := a.loadAppSettings(); err != nil {
+			return err
+		}
+	}
+
+	a.logger.Info(fmt.Sprintf("Suppress network error notifications changed to: %v", suppress), "Settings")
+	a.appSettings.SuppressNetworkErrorNotifications = suppress
 	return a.saveAppSettings()
 }
 

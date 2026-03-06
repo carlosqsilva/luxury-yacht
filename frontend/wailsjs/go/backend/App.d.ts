@@ -238,6 +238,8 @@ export function SetShellSessionsPanelVisible(arg1:boolean):Promise<void>;
 
 export function SetSidebarVisible(arg1:boolean):Promise<void>;
 
+export function SetSuppressNetworkErrorNotifications(arg1:boolean):Promise<void>;
+
 export function SetTheme(arg1:string):Promise<void>;
 
 export function SetUseShortResourceNames(arg1:boolean):Promise<void>;
