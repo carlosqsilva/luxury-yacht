@@ -258,6 +258,35 @@ const KeyboardProviderInner: React.FC<KeyboardProviderProps> = ({ children, disa
         keyLower === 'c' || keyLower === 'x' || keyLower === 'v' || keyLower === 'a';
 
       if (hasCtrlOrMeta && !event.shiftKey && !event.altKey && isStandardEditKey) {
+        // Workaround for Wails bug #4918: custom menu disables clipboard shortcuts in inputs.
+        // Handle paste (Ctrl+V / Cmd+V) manually in input fields.
+        if (keyLower === 'v' && isInputElement(event.target)) {
+          const activeElement = document.activeElement;
+          if (
+            activeElement instanceof HTMLInputElement ||
+            activeElement instanceof HTMLTextAreaElement
+          ) {
+            event.preventDefault();
+            navigator.clipboard
+              .readText()
+              .then((text) => {
+                if (text) {
+                  const start = activeElement.selectionStart ?? 0;
+                  const end = activeElement.selectionEnd ?? 0;
+                  const value = activeElement.value;
+                  activeElement.value = value.substring(0, start) + text + value.substring(end);
+                  activeElement.selectionStart = start + text.length;
+                  activeElement.selectionEnd = start + text.length;
+                  activeElement.dispatchEvent(new Event('input', { bubbles: true }));
+                  activeElement.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+              })
+              .catch(() => {
+                // Clipboard read failed - let default behavior try
+              });
+            return;
+          }
+        }
         return;
       }
 
@@ -323,13 +352,40 @@ const KeyboardProviderInner: React.FC<KeyboardProviderProps> = ({ children, disa
       applySelectAll(window.getSelection(), document.activeElement as Element | null);
     };
 
+    // Handle paste from menu bar - Wails doesn't natively support this when custom menu is set
+    const handleMenuPaste = async () => {
+      const activeElement = document.activeElement;
+      if (
+        activeElement instanceof HTMLInputElement ||
+        activeElement instanceof HTMLTextAreaElement
+      ) {
+        try {
+          const text = await navigator.clipboard.readText();
+          if (text) {
+            const start = activeElement.selectionStart ?? 0;
+            const end = activeElement.selectionEnd ?? 0;
+            const value = activeElement.value;
+            activeElement.value = value.substring(0, start) + text + value.substring(end);
+            activeElement.selectionStart = start + text.length;
+            activeElement.selectionEnd = start + text.length;
+            activeElement.dispatchEvent(new Event('input', { bubbles: true }));
+            activeElement.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+        } catch {
+          // Clipboard read failed - ignore
+        }
+      }
+    };
+
     // Register event listeners
     EventsOn('menu:copy', handleMenuCopy);
+    EventsOn('menu:paste', handleMenuPaste);
     EventsOn('menu:selectAll', handleMenuSelectAll);
 
     // Cleanup
     return () => {
       EventsOff('menu:copy');
+      EventsOff('menu:paste');
       EventsOff('menu:selectAll');
     };
   }, []);

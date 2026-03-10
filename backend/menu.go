@@ -136,6 +136,14 @@ func createEditMenu(appMenu *menu.Menu, app *App) {
 		}
 	})
 
+	// Paste
+	editMenu.AddText("Paste", keys.CmdOrCtrl("v"), func(_ *menu.CallbackData) {
+		// This will be handled by the frontend
+		if app.Ctx != nil {
+			app.emitEvent("menu:paste")
+		}
+	})
+
 	// Select All
 	editMenu.AddText("Select All", keys.CmdOrCtrl("a"), func(_ *menu.CallbackData) {
 		// This will be handled by the frontend
