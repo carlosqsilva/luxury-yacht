@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -691,12 +692,20 @@ func (s *Streamer) fetchContainerTail(ctx context.Context, target containerTarge
 	return entries, nil
 }
 
+// ansiEscapeRe matches ANSI color/style escape sequences (e.g. \x1b[32m, \x1b[38;5;3m).
+var ansiEscapeRe = regexp.MustCompile(`\x1b\[[\d;]*m`)
+
+// stripAnsi removes ANSI escape sequences from a log line.
+func stripAnsi(s string) string {
+	return ansiEscapeRe.ReplaceAllString(s, "")
+}
+
 func splitTimestamp(line string) (string, string) {
 	idx := strings.IndexByte(line, ' ')
 	if idx > 0 && idx < 32 {
-		return line[:idx], line[idx+1:]
+		return line[:idx], stripAnsi(line[idx+1:])
 	}
-	return "", line
+	return "", stripAnsi(line)
 }
 
 // maxCronCacheSize limits the cron job ownership cache to prevent unbounded growth.
