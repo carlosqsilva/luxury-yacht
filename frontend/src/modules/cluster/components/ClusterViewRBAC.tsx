@@ -5,7 +5,7 @@
  * Handles rendering and interactions for the cluster feature.
  */
 
-import { DeleteResource } from '@wailsjs/go/backend/App';
+import { DeleteResourceByGVK } from '@wailsjs/go/backend/App';
 import { errorHandler } from '@utils/errorHandler';
 import { getDisplayKind } from '@/utils/kindAliasMap';
 import { getPermissionKey, useUserPermissions } from '@/core/capabilities';
@@ -26,7 +26,12 @@ import GridTable, {
   GRIDTABLE_VIRTUALIZATION_DEFAULT,
 } from '@shared/components/tables/GridTable';
 import { buildClusterScopedKey } from '@shared/components/tables/GridTable.utils';
+import {
+  formatBuiltinApiVersion,
+  resolveBuiltinGroupVersion,
+} from '@shared/constants/builtinGroupVersions';
 import { buildObjectActionItems } from '@shared/hooks/useObjectActions';
+import { useFavToggle } from '@ui/favorites/FavToggle';
 
 // Define the data structure for RBAC resources
 interface RBACData {
@@ -67,6 +72,7 @@ const RBACViewGrid: React.FC<RBACViewProps> = React.memo(
         openWithObject({
           kind: resource.kind,
           name: resource.name,
+          ...resolveBuiltinGroupVersion(resource.kind),
           clusterId: resource.clusterId ?? undefined,
           clusterName: resource.clusterName ?? undefined,
         });
@@ -136,6 +142,7 @@ const RBACViewGrid: React.FC<RBACViewProps> = React.memo(
       filters: persistedFilters,
       setFilters: setPersistedFilters,
       resetState: resetPersistedState,
+      hydrated,
     } = useGridTablePersistence<RBACData>({
       viewId: 'cluster-rbac',
       clusterIdentity: selectedClusterId,
@@ -154,18 +161,44 @@ const RBACViewGrid: React.FC<RBACViewProps> = React.memo(
       onChange: setPersistedSort,
     });
 
+    const availableKinds = useMemo(
+      () => [...new Set(data.map((r) => r.kind).filter(Boolean) as string[])].sort(),
+      [data]
+    );
+
+    const { item: favToggle, modal: favModal } = useFavToggle({
+      filters: persistedFilters,
+      sortColumn: sortConfig?.key ?? null,
+      sortDirection: sortConfig?.direction ?? 'asc',
+      columnVisibility: columnVisibility ?? {},
+      setFilters: setPersistedFilters,
+      setSortConfig: setPersistedSort,
+      setColumnVisibility,
+      hydrated,
+      availableKinds,
+    });
+
     // Handle delete confirmation
     const handleDeleteConfirm = useCallback(async () => {
       if (!deleteConfirm.resource) return;
+      const resource = deleteConfirm.resource;
 
       try {
-        const clusterId = deleteConfirm.resource.clusterId ?? selectedClusterId ?? '';
-        await DeleteResource(
-          clusterId,
-          deleteConfirm.resource.kind,
-          '',
-          deleteConfirm.resource.name
-        );
+        // Multi-cluster rule (AGENTS.md): every backend command must
+        // carry a resolved clusterId.
+        const clusterId = resource.clusterId ?? selectedClusterId ?? null;
+        if (!clusterId) {
+          throw new Error(`Cannot delete ${resource.kind}/${resource.name}: clusterId is missing`);
+        }
+        // Built-in cluster RBAC kinds (ClusterRole/ClusterRoleBinding) resolve
+        // via the lookup table.
+        const apiVersion = formatBuiltinApiVersion(resource.kind);
+        if (!apiVersion) {
+          throw new Error(
+            `Cannot delete ${resource.kind}/${resource.name}: not a known built-in kind`
+          );
+        }
+        await DeleteResourceByGVK(clusterId, apiVersion, resource.kind, '', resource.name);
         setDeleteConfirm({ show: false, resource: null });
       } catch (error) {
         errorHandler.handle(error, {
@@ -207,7 +240,7 @@ const RBACViewGrid: React.FC<RBACViewProps> = React.memo(
 
     // Resolve empty state message
     const emptyMessage = useMemo(
-      () => resolveEmptyStateMessage(error, 'No data available'),
+      () => resolveEmptyStateMessage(error, 'No cluster-scoped RBAC objects found'),
       [error]
     );
 
@@ -239,6 +272,7 @@ const RBACViewGrid: React.FC<RBACViewProps> = React.memo(
               onReset: resetPersistedState,
               options: {
                 showKindDropdown: true,
+                preActions: [favToggle],
               },
             }}
             virtualization={GRIDTABLE_VIRTUALIZATION_DEFAULT}
@@ -260,6 +294,7 @@ const RBACViewGrid: React.FC<RBACViewProps> = React.memo(
           onConfirm={handleDeleteConfirm}
           onCancel={() => setDeleteConfirm({ show: false, resource: null })}
         />
+        {favModal}
       </>
     );
   }

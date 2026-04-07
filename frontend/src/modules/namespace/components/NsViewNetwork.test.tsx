@@ -16,14 +16,14 @@ const {
   gridTablePropsRef,
   confirmationPropsRef,
   openWithObjectMock,
-  deleteResourceMock,
+  deleteResourceByGVKMock,
   permissionState,
   errorHandlerMock,
 } = vi.hoisted(() => ({
   gridTablePropsRef: { current: null as any },
   confirmationPropsRef: { current: null as any },
   openWithObjectMock: vi.fn(),
-  deleteResourceMock: vi.fn().mockResolvedValue(undefined),
+  deleteResourceByGVKMock: vi.fn().mockResolvedValue(undefined),
   permissionState: new Map<string, { allowed: boolean; pending: boolean }>(),
   errorHandlerMock: { handle: vi.fn() },
 }));
@@ -40,6 +40,29 @@ const renderOutputToText = (output: any): string => {
   }
   return renderToStaticMarkup(output);
 };
+
+vi.mock('@core/contexts/FavoritesContext', () => ({
+  useFavorites: () => ({
+    favorites: [],
+
+    addFavorite: vi.fn(),
+    updateFavorite: vi.fn(),
+    deleteFavorite: vi.fn(),
+    reorderFavorites: vi.fn(),
+  }),
+  FavoritesProvider: ({ children }: { children: React.ReactNode }) => children,
+}));
+
+vi.mock('@ui/favorites/FavToggle', () => ({
+  useFavToggle: () => ({
+    type: 'toggle',
+    id: 'favorite',
+    icon: null,
+    active: false,
+    onClick: () => {},
+    title: 'Save as favorite',
+  }),
+}));
 
 vi.mock('@shared/components/tables/GridTable', async () => {
   const actual = await vi.importActual<typeof import('@shared/components/tables/GridTable')>(
@@ -80,7 +103,7 @@ vi.mock('@shared/components/modals/ConfirmationModal', () => ({
 }));
 
 vi.mock('@wailsjs/go/backend/App', () => ({
-  DeleteResource: (...args: unknown[]) => deleteResourceMock(...args),
+  DeleteResourceByGVK: (...args: unknown[]) => deleteResourceByGVKMock(...args),
 }));
 
 vi.mock('@/hooks/useTableSort', () => ({
@@ -125,7 +148,7 @@ vi.mock('@modules/namespace/hooks/useNamespaceGridTablePersistence', () => {
       },
       columnVisibility: null,
       setColumnVisibility: vi.fn(),
-      filters: { search: '', kinds: [], namespaces: [] },
+      filters: { search: '', kinds: [], namespaces: [], caseSensitive: false },
       setFilters: vi.fn(),
       isNamespaceScoped: true,
       resetState: vi.fn(),
@@ -152,7 +175,8 @@ describe('NsViewNetwork', () => {
     gridTablePropsRef.current = null;
     confirmationPropsRef.current = null;
     openWithObjectMock.mockReset();
-    deleteResourceMock.mockReset();
+    deleteResourceByGVKMock.mockReset();
+    deleteResourceByGVKMock.mockResolvedValue(undefined);
     permissionState.clear();
     errorHandlerMock.handle.mockClear();
   });
@@ -239,8 +263,10 @@ describe('NsViewNetwork', () => {
       await confirmationPropsRef.current?.onConfirm?.();
     });
 
-    expect(deleteResourceMock).toHaveBeenCalledWith(
+    // Ingress is networking.k8s.io/v1, resolved through formatBuiltinApiVersion.
+    expect(deleteResourceByGVKMock).toHaveBeenCalledWith(
       'alpha:ctx',
+      'networking.k8s.io/v1',
       'Ingress',
       'team-a',
       'web-gateway'
@@ -277,7 +303,7 @@ describe('NsViewNetwork', () => {
   });
 
   it('handles delete failure with errorHandler', async () => {
-    deleteResourceMock.mockRejectedValueOnce(new Error('boom'));
+    deleteResourceByGVKMock.mockRejectedValueOnce(new Error('boom'));
     permissionState.set('Ingress:delete:team-a', { allowed: true, pending: false });
     const entry = baseNetwork();
     const props = await renderNetworkView([entry]);

@@ -5,7 +5,7 @@
  * Ingress Classes, and Admission Control resources.
  */
 
-import { DeleteResource } from '@wailsjs/go/backend/App';
+import { DeleteResourceByGVK } from '@wailsjs/go/backend/App';
 import { errorHandler } from '@utils/errorHandler';
 import { getDisplayKind } from '@/utils/kindAliasMap';
 import { getPermissionKey, useUserPermissions } from '@/core/capabilities';
@@ -26,7 +26,12 @@ import GridTable, {
   GRIDTABLE_VIRTUALIZATION_DEFAULT,
 } from '@shared/components/tables/GridTable';
 import { buildClusterScopedKey } from '@shared/components/tables/GridTable.utils';
+import {
+  formatBuiltinApiVersion,
+  resolveBuiltinGroupVersion,
+} from '@shared/constants/builtinGroupVersions';
 import { buildObjectActionItems } from '@shared/hooks/useObjectActions';
+import { useFavToggle } from '@ui/favorites/FavToggle';
 
 // Define the data structure for configuration resources
 interface ConfigData {
@@ -67,6 +72,7 @@ const ConfigViewGrid: React.FC<ConfigViewProps> = React.memo(
         openWithObject({
           kind: resource.kind,
           name: resource.name,
+          ...resolveBuiltinGroupVersion(resource.kind),
           clusterId: resource.clusterId ?? undefined,
           clusterName: resource.clusterName ?? undefined,
         });
@@ -136,6 +142,7 @@ const ConfigViewGrid: React.FC<ConfigViewProps> = React.memo(
       filters: persistedFilters,
       setFilters: setPersistedFilters,
       resetState: resetPersistedState,
+      hydrated,
     } = useGridTablePersistence<ConfigData>({
       viewId: 'cluster-config',
       clusterIdentity: selectedClusterId,
@@ -154,18 +161,45 @@ const ConfigViewGrid: React.FC<ConfigViewProps> = React.memo(
       onChange: setPersistedSort,
     });
 
+    const availableKinds = useMemo(
+      () => [...new Set(data.map((r) => r.kind).filter(Boolean) as string[])].sort(),
+      [data]
+    );
+
+    const { item: favToggle, modal: favModal } = useFavToggle({
+      filters: persistedFilters,
+      sortColumn: sortConfig?.key ?? null,
+      sortDirection: sortConfig?.direction ?? 'asc',
+      columnVisibility: columnVisibility ?? {},
+      setFilters: setPersistedFilters,
+      setSortConfig: setPersistedSort,
+      setColumnVisibility,
+      hydrated,
+      availableKinds,
+    });
+
     // Handle delete confirmation
     const handleDeleteConfirm = useCallback(async () => {
       if (!deleteConfirm.resource) return;
+      const resource = deleteConfirm.resource;
 
       try {
-        const clusterId = deleteConfirm.resource.clusterId ?? selectedClusterId ?? '';
-        await DeleteResource(
-          clusterId,
-          deleteConfirm.resource.kind,
-          '',
-          deleteConfirm.resource.name
-        );
+        // Multi-cluster rule (AGENTS.md): every backend command must
+        // carry a resolved clusterId.
+        const clusterId = resource.clusterId ?? selectedClusterId ?? null;
+        if (!clusterId) {
+          throw new Error(`Cannot delete ${resource.kind}/${resource.name}: clusterId is missing`);
+        }
+        // Built-in admission/storage/etc. kinds resolve via the lookup table.
+        // A miss means a non-built-in kind slipped in — fail loud.
+        //
+        const apiVersion = formatBuiltinApiVersion(resource.kind);
+        if (!apiVersion) {
+          throw new Error(
+            `Cannot delete ${resource.kind}/${resource.name}: not a known built-in kind`
+          );
+        }
+        await DeleteResourceByGVK(clusterId, apiVersion, resource.kind, '', resource.name);
       } catch (err) {
         errorHandler.handle(err, {
           action: 'delete',
@@ -207,7 +241,7 @@ const ConfigViewGrid: React.FC<ConfigViewProps> = React.memo(
 
     // Resolve empty state message
     const emptyMessage = useMemo(
-      () => resolveEmptyStateMessage(error, 'No data available'),
+      () => resolveEmptyStateMessage(error, 'No cluster-scoped config objects found'),
       [error]
     );
 
@@ -239,6 +273,7 @@ const ConfigViewGrid: React.FC<ConfigViewProps> = React.memo(
               onReset: resetPersistedState,
               options: {
                 showKindDropdown: true,
+                preActions: [favToggle],
               },
             }}
             virtualization={GRIDTABLE_VIRTUALIZATION_DEFAULT}
@@ -260,6 +295,7 @@ const ConfigViewGrid: React.FC<ConfigViewProps> = React.memo(
           onConfirm={handleDeleteConfirm}
           onCancel={() => setDeleteConfirm({ show: false, resource: null })}
         />
+        {favModal}
       </>
     );
   }

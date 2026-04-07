@@ -5,6 +5,8 @@
  * Handles rendering and interactions for the namespace feature.
  */
 
+import { resolveBuiltinGroupVersion } from '@shared/constants/builtinGroupVersions';
+import { resolveEmptyStateMessage } from '@/utils/emptyState';
 import { getPodStatusSeverity } from '@/utils/podStatusSeverity';
 import { getPermissionKey, useUserPermissions } from '@/core/capabilities';
 import { eventBus } from '@/core/events';
@@ -32,6 +34,7 @@ import { errorHandler } from '@utils/errorHandler';
 import { PortForwardModal, PortForwardTarget } from '@modules/port-forward';
 import { buildObjectActionItems } from '@shared/hooks/useObjectActions';
 import { useNavigateToView } from '@shared/hooks/useNavigateToView';
+import { useFavToggle } from '@ui/favorites/FavToggle';
 
 interface PodsViewProps {
   namespace: string;
@@ -118,6 +121,7 @@ const NsViewPods: React.FC<PodsViewProps> = React.memo(
           kind: 'Pod',
           name: pod.name,
           namespace: pod.namespace,
+          ...resolveBuiltinGroupVersion('Pod'),
           clusterId: pod.clusterId ?? undefined,
           clusterName: pod.clusterName ?? undefined,
         });
@@ -134,6 +138,7 @@ const NsViewPods: React.FC<PodsViewProps> = React.memo(
           kind: pod.ownerKind,
           name: pod.ownerName,
           namespace: pod.namespace,
+          ...resolveBuiltinGroupVersion(pod.ownerKind),
           clusterId: pod.clusterId ?? undefined,
           clusterName: pod.clusterName ?? undefined,
         });
@@ -149,6 +154,7 @@ const NsViewPods: React.FC<PodsViewProps> = React.memo(
         openWithObject({
           kind: 'Node',
           name: pod.node,
+          ...resolveBuiltinGroupVersion('Node'),
           clusterId: pod.clusterId ?? undefined,
           clusterName: pod.clusterName ?? undefined,
         });
@@ -332,6 +338,7 @@ const NsViewPods: React.FC<PodsViewProps> = React.memo(
       filters: persistedFilters,
       setFilters: setPersistedFilters,
       resetState: resetPersistedState,
+      hydrated,
     } = useNamespaceGridTablePersistence<PodSnapshotEntry>({
       viewId: 'namespace-pods',
       namespace,
@@ -348,23 +355,42 @@ const NsViewPods: React.FC<PodsViewProps> = React.memo(
       onChange: onSortChange,
     });
 
+    const availableFilterNamespaces = useMemo(
+      () => [...new Set(data.map((r) => r.namespace).filter(Boolean))].sort(),
+      [data]
+    );
+
+    const { item: favToggle, modal: favModal } = useFavToggle({
+      filters: persistedFilters,
+      sortColumn: sortConfig?.key ?? null,
+      sortDirection: sortConfig?.direction ?? 'asc',
+      columnVisibility: columnVisibility ?? {},
+      setFilters: setPersistedFilters,
+      setSortConfig: onSortChange,
+      setColumnVisibility,
+      hydrated,
+      availableFilterNamespaces,
+    });
+
     const handleDeleteConfirm = useCallback(async () => {
       if (!deleteConfirm.pod) {
         return;
       }
+      const pod = deleteConfirm.pod;
 
       try {
-        await DeletePod(
-          deleteConfirm.pod.clusterId ?? '',
-          deleteConfirm.pod.namespace,
-          deleteConfirm.pod.name
-        );
+        // Multi-cluster rule (AGENTS.md): every backend command must
+        // carry a resolved clusterId.
+        if (!pod.clusterId) {
+          throw new Error(`Cannot delete Pod/${pod.name}: clusterId is missing`);
+        }
+        await DeletePod(pod.clusterId, pod.namespace, pod.name);
         setDeleteConfirm({ show: false, pod: null });
       } catch (err) {
         errorHandler.handle(err, {
           action: 'delete',
           kind: 'Pod',
-          name: deleteConfirm.pod.name,
+          name: pod.name,
         });
         setDeleteConfirm({ show: false, pod: null });
       }
@@ -464,11 +490,20 @@ const NsViewPods: React.FC<PodsViewProps> = React.memo(
           handlers: {
             onOpen: () => handlePodOpen(pod),
             onPortForward: () => {
+              // Multi-cluster rule (AGENTS.md): port-forward is a backend
+              // command and must carry a resolved clusterId.
+              if (!pod.clusterId) {
+                errorHandler.handle(
+                  new Error(`Cannot open port-forward for Pod/${pod.name}: clusterId is missing`),
+                  { action: 'portForward', kind: 'Pod', name: pod.name }
+                );
+                return;
+              }
               setPortForwardTarget({
                 kind: 'Pod',
                 name: pod.name,
                 namespace: pod.namespace,
-                clusterId: pod.clusterId ?? '',
+                clusterId: pod.clusterId,
                 clusterName: pod.clusterName ?? '',
                 ports: [],
               });
@@ -482,6 +517,15 @@ const NsViewPods: React.FC<PodsViewProps> = React.memo(
         });
       },
       [handlePodOpen, permissionMap]
+    );
+
+    const emptyMessage = useMemo(
+      () =>
+        resolveEmptyStateMessage(
+          undefined,
+          `No pods found ${namespace === ALL_NAMESPACES_SCOPE ? 'in any namespaces' : 'in this namespace'}`
+        ),
+      [namespace]
     );
 
     return (
@@ -518,6 +562,7 @@ const NsViewPods: React.FC<PodsViewProps> = React.memo(
               options: {
                 showNamespaceDropdown: showNamespaceFilter,
                 customActions: unhealthyToggle,
+                preActions: [favToggle],
               },
             }}
             virtualization={GRIDTABLE_VIRTUALIZATION_DEFAULT}
@@ -526,6 +571,7 @@ const NsViewPods: React.FC<PodsViewProps> = React.memo(
             columnVisibility={columnVisibility}
             onColumnVisibilityChange={setColumnVisibility}
             allowHorizontalOverflow={true}
+            emptyMessage={emptyMessage}
             loadingOverlay={{
               show: Boolean(loading) && displayedPods.length > 0,
               message: 'Updating pods…',
@@ -545,6 +591,7 @@ const NsViewPods: React.FC<PodsViewProps> = React.memo(
         />
 
         <PortForwardModal target={portForwardTarget} onClose={() => setPortForwardTarget(null)} />
+        {favModal}
       </>
     );
   }

@@ -20,6 +20,8 @@ type PanelTestOptions = {
   name: string;
   namespace?: string;
   clusterId?: string;
+  group?: string;
+  version?: string;
   capabilityOverrides?: Record<string, CapabilityState>;
   logPermission?: { allowed: boolean; pending: boolean };
   scopedDomain?: { data: unknown; status: string; error: string | null };
@@ -50,7 +52,7 @@ const {
 const mockClosePanel = vi.fn();
 const mockUseCapabilities = vi.fn();
 const mockUseUserPermission = vi.fn();
-const mockEvaluateNamespacePermissions = vi.fn();
+const mockQueryNamespacePermissions = vi.fn();
 const mockUseRefreshScopedDomain = vi.fn();
 const mockUseRefreshWatcher = vi.fn();
 const mockUseShortcut = vi.fn();
@@ -77,7 +79,7 @@ const mockApp = {
   RestartWorkload: vi.fn().mockResolvedValue(undefined),
   DeletePod: vi.fn().mockResolvedValue(undefined),
   DeleteHelmRelease: vi.fn().mockResolvedValue(undefined),
-  DeleteResource: vi.fn().mockResolvedValue(undefined),
+  DeleteResourceByGVK: vi.fn().mockResolvedValue(undefined),
   ScaleWorkload: vi.fn().mockResolvedValue(undefined),
 };
 
@@ -208,8 +210,7 @@ vi.mock('@/core/refresh', () => ({
 vi.mock('@/core/capabilities', () => ({
   useCapabilities: (...args: unknown[]) => mockUseCapabilities(...(args as [])),
   useUserPermission: (...args: unknown[]) => mockUseUserPermission(...(args as [])),
-  evaluateNamespacePermissions: (...args: unknown[]) =>
-    mockEvaluateNamespacePermissions(...(args as [])),
+  queryNamespacePermissions: (...args: unknown[]) => mockQueryNamespacePermissions(...(args as [])),
 }));
 
 vi.mock('@ui/shortcuts', () => ({
@@ -272,7 +273,7 @@ describe('ObjectPanel tab availability', () => {
     mockApp.RestartWorkload.mockClear();
     mockApp.DeletePod.mockClear();
     mockApp.DeleteHelmRelease.mockClear();
-    mockApp.DeleteResource.mockClear();
+    mockApp.DeleteResourceByGVK.mockClear();
     mockApp.ScaleWorkload.mockClear();
 
     mockRefreshOrchestrator.fetchScopedDomain.mockResolvedValue(undefined);
@@ -316,6 +317,8 @@ describe('ObjectPanel tab availability', () => {
       namespace: options.namespace,
       kindAlias: options.kind,
       clusterId,
+      group: options.group,
+      version: options.version,
     };
 
     capabilityStateMap = options.capabilityOverrides ?? {};
@@ -566,11 +569,13 @@ describe('ObjectPanel tab availability', () => {
     expect(mockApp.DeleteHelmRelease).toHaveBeenCalledWith('alpha:ctx', 'helm-ns', 'demo');
   });
 
-  it('falls back to DeleteResource for generic kinds', async () => {
+  it('routes generic kind deletes through DeleteResourceByGVK', async () => {
     await renderObjectPanel({
       kind: 'ConfigMap',
       name: 'settings',
       namespace: 'team-a',
+      group: '',
+      version: 'v1',
     });
 
     act(() => {
@@ -580,8 +585,9 @@ describe('ObjectPanel tab availability', () => {
       await deleteModalPropsRef.current.onConfirm();
     });
 
-    expect(mockApp.DeleteResource).toHaveBeenCalledWith(
+    expect(mockApp.DeleteResourceByGVK).toHaveBeenCalledWith(
       'alpha:ctx',
+      'v1',
       'ConfigMap',
       'team-a',
       'settings'
@@ -746,9 +752,7 @@ describe('ObjectPanel tab availability', () => {
       namespace: ' Team-A ',
     });
 
-    expect(mockEvaluateNamespacePermissions).toHaveBeenCalledWith('Team-A', {
-      clusterId: defaultClusterId,
-    });
+    expect(mockQueryNamespacePermissions).toHaveBeenCalledWith('Team-A', defaultClusterId);
   });
 
   it('skips namespace evaluation when the object has no namespace', async () => {
@@ -758,7 +762,7 @@ describe('ObjectPanel tab availability', () => {
       namespace: undefined,
     });
 
-    expect(mockEvaluateNamespacePermissions).not.toHaveBeenCalled();
+    expect(mockQueryNamespacePermissions).not.toHaveBeenCalled();
   });
 
   it('ignores scale clicks without an explicit replica count', async () => {

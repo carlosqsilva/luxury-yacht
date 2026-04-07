@@ -22,7 +22,8 @@ import { useRefreshScopedDomain } from '@/core/refresh/store';
 import { useRefreshWatcher } from '@/core/refresh/hooks/useRefreshWatcher';
 import type { ObjectEventsRefresherName } from '@/core/refresh/refresherTypes';
 import { useObjectPanel } from '@modules/object-panel/hooks/useObjectPanel';
-import { buildClusterScope } from '@/core/refresh/clusterScope';
+import { useNavigateToView } from '@shared/hooks/useNavigateToView';
+import { parseApiVersion } from '@/shared/constants/builtinGroupVersions';
 import type { PanelObjectData } from '../types';
 import { CLUSTER_SCOPE, INACTIVE_SCOPE } from '../constants';
 import './EventsTab.css';
@@ -30,6 +31,11 @@ import './EventsTab.css';
 interface EventsTabProps {
   objectData?: PanelObjectData | null;
   isActive?: boolean;
+  // Refresh-domain scope string for the object-events provider. Owned
+  // by ObjectPanel via getObjectPanelKind so EventsTab and
+  // ObjectPanelContent (which handles full-cleanup on panel close)
+  // cannot drift apart on the same scope key.
+  eventsScope: string | null;
 }
 
 function normalizeEventSource(source: ObjectEventSummary['source'] | undefined): string {
@@ -62,28 +68,27 @@ interface EventDisplay {
   objectKind: string;
   objectName: string;
   objectNamespace: string;
+  // GVK group/version of the involved object, parsed from the event's
+  // involvedObjectApiVersion. Required so the panel can disambiguate
+  // colliding kinds (two CRDs with the same Kind in different groups)
+  // when the user clicks an event row to open the related object.
+  // Empty string for core/v1 group; undefined or null when the backend
+  // did not populate involvedObjectApiVersion (older snapshots) and the
+  // parent panel doesn't supply a fallback value.
+  objectGroup?: string | null;
+  objectVersion?: string | null;
   // Per-event cluster identity from ObjectEventSummary (extends ClusterMeta).
   clusterId?: string;
   clusterName?: string;
 }
 
-const EventsTab: React.FC<EventsTabProps> = ({ objectData, isActive }) => {
+const EventsTab: React.FC<EventsTabProps> = ({ objectData, isActive, eventsScope }) => {
   const { openWithObject } = useObjectPanel();
+  const { navigateToView } = useNavigateToView();
   const openWithObjectRef = useRef(openWithObject);
   useEffect(() => {
     openWithObjectRef.current = openWithObject;
   }, [openWithObject]);
-  const eventsScope = useMemo(() => {
-    if (!objectData?.name || !objectData?.kind) {
-      return null;
-    }
-    const namespace =
-      objectData.namespace && objectData.namespace.length > 0
-        ? objectData.namespace
-        : CLUSTER_SCOPE;
-    const rawScope = `${namespace}:${objectData.kind}:${objectData.name}`;
-    return buildClusterScope(objectData?.clusterId ?? undefined, rawScope);
-  }, [objectData?.clusterId, objectData?.kind, objectData?.name, objectData?.namespace]);
 
   const eventsSnapshot = useRefreshScopedDomain('object-events', eventsScope ?? INACTIVE_SCOPE);
 
@@ -178,6 +183,19 @@ const EventsTab: React.FC<EventsTabProps> = ({ objectData, isActive }) => {
         const objectName = event.involvedObjectName || objectData?.name || 'Unknown';
         const objectNamespace =
           event.involvedObjectNamespace ?? objectData?.namespace ?? CLUSTER_SCOPE;
+        // Carry the GVK from the event's involvedObject so opening the
+        // related object lands on the correct CRD when two CRDs share
+        // a Kind. Falls back to the parent panel's group/version when
+        // the event references the same kind as the parent (common case
+        // for object-events: the event is about THIS object).
+        const apiVersionParts = event.involvedObjectApiVersion
+          ? parseApiVersion(event.involvedObjectApiVersion)
+          : undefined;
+        const sameKindAsPanel = objectData?.kind === objectKind;
+        const objectGroup =
+          apiVersionParts?.group ?? (sameKindAsPanel ? objectData?.group : undefined);
+        const objectVersion =
+          apiVersionParts?.version ?? (sameKindAsPanel ? objectData?.version : undefined);
         return {
           type: event.eventType || 'Normal',
           source: normalizeEventSource(event.source),
@@ -190,11 +208,20 @@ const EventsTab: React.FC<EventsTabProps> = ({ objectData, isActive }) => {
           objectKind,
           objectName,
           objectNamespace,
+          objectGroup,
+          objectVersion,
           clusterId: event.clusterId,
           clusterName: event.clusterName,
         };
       }),
-    [rawEvents, objectData?.kind, objectData?.name, objectData?.namespace]
+    [
+      rawEvents,
+      objectData?.kind,
+      objectData?.name,
+      objectData?.namespace,
+      objectData?.group,
+      objectData?.version,
+    ]
   );
 
   const eventsLoading = eventsScope
@@ -227,11 +254,41 @@ const EventsTab: React.FC<EventsTabProps> = ({ objectData, isActive }) => {
         kind: item.objectKind,
         name: item.objectName,
         namespace: resolvedNamespace,
+        // group/version come from the event's involvedObject apiVersion
+        // (parsed in the events memo above) so the panel can disambiguate
+        // colliding kinds across CRD groups.
+        group: item.objectGroup,
+        version: item.objectVersion,
         clusterId: item.clusterId ?? objectData?.clusterId ?? undefined,
         clusterName: item.clusterName ?? objectData?.clusterName ?? undefined,
       });
     },
     [objectData?.clusterId, objectData?.clusterName]
+  );
+
+  // Alt+click: navigate to the related object's view and focus it.
+  const navigateToRelatedObject = useCallback(
+    (item: EventDisplay) => {
+      if (!item.objectKind || !item.objectName) {
+        return;
+      }
+
+      const resolvedNamespace =
+        item.objectNamespace && item.objectNamespace !== CLUSTER_SCOPE
+          ? item.objectNamespace
+          : undefined;
+
+      navigateToView({
+        kind: item.objectKind,
+        name: item.objectName,
+        namespace: resolvedNamespace,
+        group: item.objectGroup,
+        version: item.objectVersion,
+        clusterId: item.clusterId ?? objectData?.clusterId ?? undefined,
+        clusterName: item.clusterName ?? objectData?.clusterName ?? undefined,
+      });
+    },
+    [navigateToView, objectData?.clusterId, objectData?.clusterName]
   );
 
   const columns = useMemo<GridColumnDefinition<EventDisplay>[]>(() => {
@@ -253,6 +310,7 @@ const EventsTab: React.FC<EventsTabProps> = ({ objectData, isActive }) => {
         (item) => item.objectName || '-',
         {
           onClick: openRelatedObject,
+          onAltClick: navigateToRelatedObject,
           isInteractive: (item) => Boolean(item.objectKind && item.objectName),
         }
       ),
@@ -283,7 +341,7 @@ const EventsTab: React.FC<EventsTabProps> = ({ objectData, isActive }) => {
     applyColumnSizing(base, sizing);
 
     return base;
-  }, [openRelatedObject]);
+  }, [openRelatedObject, navigateToRelatedObject]);
 
   const { sortedData, sortConfig, handleSort } = useTableSort(events, 'ageTimestamp', 'desc', {
     columns,

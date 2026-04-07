@@ -5,7 +5,7 @@
  * Handles rendering and interactions for the cluster feature.
  */
 
-import { DeleteResource } from '@wailsjs/go/backend/App';
+import { DeleteResourceByGVK } from '@wailsjs/go/backend/App';
 import { errorHandler } from '@utils/errorHandler';
 import { getDisplayKind } from '@/utils/kindAliasMap';
 import { getPermissionKey, useUserPermissions } from '@/core/capabilities';
@@ -26,7 +26,12 @@ import GridTable, {
   GRIDTABLE_VIRTUALIZATION_DEFAULT,
 } from '@shared/components/tables/GridTable';
 import { buildClusterScopedKey } from '@shared/components/tables/GridTable.utils';
+import {
+  formatBuiltinApiVersion,
+  resolveBuiltinGroupVersion,
+} from '@shared/constants/builtinGroupVersions';
 import { buildObjectActionItems } from '@shared/hooks/useObjectActions';
+import { useFavToggle } from '@ui/favorites/FavToggle';
 
 // Define the data structure for Persistent Volumes
 interface StorageData {
@@ -72,6 +77,7 @@ const StorageViewGrid: React.FC<StorageViewProps> = React.memo(
         openWithObject({
           kind: 'PersistentVolume',
           name: pv.name,
+          ...resolveBuiltinGroupVersion('PersistentVolume'),
           clusterId: pv.clusterId ?? undefined,
           clusterName: pv.clusterName ?? undefined,
         });
@@ -100,6 +106,7 @@ const StorageViewGrid: React.FC<StorageViewProps> = React.memo(
           kind: 'PersistentVolumeClaim',
           namespace: target.namespace,
           name: target.name,
+          ...resolveBuiltinGroupVersion('PersistentVolumeClaim'),
           clusterId: pv.clusterId ?? undefined,
           clusterName: pv.clusterName ?? undefined,
         });
@@ -160,6 +167,7 @@ const StorageViewGrid: React.FC<StorageViewProps> = React.memo(
               openWithObject({
                 kind: 'StorageClass',
                 name: pv.storageClass,
+                ...resolveBuiltinGroupVersion('StorageClass'),
                 clusterId: pv.clusterId ?? undefined,
                 clusterName: pv.clusterName ?? undefined,
               });
@@ -233,6 +241,7 @@ const StorageViewGrid: React.FC<StorageViewProps> = React.memo(
       filters: persistedFilters,
       setFilters: setPersistedFilters,
       resetState: resetPersistedState,
+      hydrated,
     } = useGridTablePersistence<StorageData>({
       viewId: 'cluster-storage',
       clusterIdentity: selectedClusterId,
@@ -250,13 +259,51 @@ const StorageViewGrid: React.FC<StorageViewProps> = React.memo(
       onChange: setPersistedSort,
     });
 
+    const availableKinds = useMemo(
+      () => [...new Set(data.map((r) => r.kind).filter(Boolean) as string[])].sort(),
+      [data]
+    );
+
+    const { item: favToggle, modal: favModal } = useFavToggle({
+      filters: persistedFilters,
+      sortColumn: sortConfig?.key ?? null,
+      sortDirection: sortConfig?.direction ?? 'asc',
+      columnVisibility: columnVisibility ?? {},
+      setFilters: setPersistedFilters,
+      setSortConfig: setPersistedSort,
+      setColumnVisibility,
+      hydrated,
+      availableKinds,
+    });
+
     // Handle delete confirmation
     const handleDeleteConfirm = useCallback(async () => {
       if (!deleteConfirm.resource) return;
 
       try {
-        const clusterId = deleteConfirm.resource.clusterId ?? selectedClusterId ?? '';
-        await DeleteResource(clusterId, 'PersistentVolume', '', deleteConfirm.resource.name);
+        // Multi-cluster rule (AGENTS.md): every backend command must
+        // carry a resolved clusterId.
+        const clusterId = deleteConfirm.resource.clusterId ?? selectedClusterId ?? null;
+        if (!clusterId) {
+          throw new Error(
+            `Cannot delete PersistentVolume/${deleteConfirm.resource.name}: clusterId is missing`
+          );
+        }
+        // PersistentVolume is core/v1 and always resolves via the lookup
+        // table.
+        const apiVersion = formatBuiltinApiVersion('PersistentVolume');
+        if (!apiVersion) {
+          throw new Error(
+            `Cannot delete PersistentVolume/${deleteConfirm.resource.name}: lookup table missing entry`
+          );
+        }
+        await DeleteResourceByGVK(
+          clusterId,
+          apiVersion,
+          'PersistentVolume',
+          '',
+          deleteConfirm.resource.name
+        );
         setDeleteConfirm({ show: false, resource: null });
       } catch (error) {
         errorHandler.handle(error, {
@@ -297,7 +344,7 @@ const StorageViewGrid: React.FC<StorageViewProps> = React.memo(
     );
 
     const emptyMessage = useMemo(
-      () => resolveEmptyStateMessage(error, 'No data available'),
+      () => resolveEmptyStateMessage(error, 'No cluster-scoped storage objects found'),
       [error]
     );
 
@@ -329,6 +376,7 @@ const StorageViewGrid: React.FC<StorageViewProps> = React.memo(
               onReset: resetPersistedState,
               options: {
                 showKindDropdown: true,
+                preActions: [favToggle],
               },
             }}
             virtualization={GRIDTABLE_VIRTUALIZATION_DEFAULT}
@@ -350,6 +398,7 @@ const StorageViewGrid: React.FC<StorageViewProps> = React.memo(
           onConfirm={handleDeleteConfirm}
           onCancel={() => setDeleteConfirm({ show: false, resource: null })}
         />
+        {favModal}
       </>
     );
   }

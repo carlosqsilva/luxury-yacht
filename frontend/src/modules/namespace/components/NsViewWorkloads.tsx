@@ -21,11 +21,16 @@ import React, { useCallback, useMemo, useState } from 'react';
 import ConfirmationModal from '@shared/components/modals/ConfirmationModal';
 import ResourceLoadingBoundary from '@shared/components/ResourceLoadingBoundary';
 import ScaleModal from '@shared/components/modals/ScaleModal';
+import RollbackModal from '@shared/components/modals/RollbackModal';
 import { PortForwardModal, PortForwardTarget } from '@modules/port-forward';
 import type { ContextMenuItem } from '@shared/components/ContextMenu';
 import type { GridColumnDefinition } from '@shared/components/tables/GridTable.types';
 import GridTable from '@shared/components/tables/GridTable';
 import { buildClusterScopedKey } from '@shared/components/tables/GridTable.utils';
+import {
+  formatBuiltinApiVersion,
+  resolveBuiltinGroupVersion,
+} from '@shared/constants/builtinGroupVersions';
 import type { PodMetricsInfo } from '@/core/refresh/types';
 import { ALL_NAMESPACES_SCOPE } from '@modules/namespace/constants';
 import useWorkloadTableColumns from '@modules/namespace/components/useWorkloadTableColumns';
@@ -38,7 +43,7 @@ import {
 } from '@modules/namespace/components/NsViewWorkloads.helpers';
 import {
   RestartWorkload,
-  DeleteResource,
+  DeleteResourceByGVK,
   ScaleWorkload,
   TriggerCronJob,
   SuspendCronJob,
@@ -49,6 +54,7 @@ import {
   normalizeKind,
   RESTARTABLE_KINDS,
 } from '@shared/hooks/useObjectActions';
+import { useFavToggle } from '@ui/favorites/FavToggle';
 
 interface WorkloadsViewProps {
   namespace: string;
@@ -109,12 +115,16 @@ const WorkloadsViewGrid: React.FC<WorkloadsViewProps> = React.memo(
 
     const [portForwardTarget, setPortForwardTarget] = useState<PortForwardTarget | null>(null);
 
+    // Rollback target: tracks which workload the rollback modal is open for.
+    const [rollbackTarget, setRollbackTarget] = useState<WorkloadData | null>(null);
+
     const handleWorkloadClick = useCallback(
       (workload: WorkloadData) => {
         openWithObject({
           kind: workload.kind,
           name: workload.name,
           namespace: workload.namespace,
+          ...resolveBuiltinGroupVersion(workload.kind),
           clusterId: workload.clusterId ?? undefined,
           clusterName: workload.clusterName ?? undefined,
         });
@@ -156,6 +166,7 @@ const WorkloadsViewGrid: React.FC<WorkloadsViewProps> = React.memo(
       filters: persistedFilters,
       setFilters: setPersistedFilters,
       resetState: resetPersistedState,
+      hydrated,
     } = useNamespaceGridTablePersistence<WorkloadData>({
       viewId: 'namespace-workloads',
       namespace,
@@ -174,6 +185,28 @@ const WorkloadsViewGrid: React.FC<WorkloadsViewProps> = React.memo(
       columns: tableColumns,
       controlledSort: persistedSort,
       onChange: onSortChange,
+    });
+
+    const availableKinds = useMemo(
+      () => [...new Set(data.map((r) => r.kind).filter(Boolean) as string[])].sort(),
+      [data]
+    );
+    const availableFilterNamespaces = useMemo(
+      () => [...new Set(data.map((r) => r.namespace).filter(Boolean))].sort(),
+      [data]
+    );
+
+    const { item: favToggle, modal: favModal } = useFavToggle({
+      filters: persistedFilters,
+      sortColumn: workloadSortConfig?.key ?? null,
+      sortDirection: workloadSortConfig?.direction ?? 'asc',
+      columnVisibility: columnVisibility ?? {},
+      setFilters: setPersistedFilters,
+      setSortConfig: onSortChange,
+      setColumnVisibility,
+      hydrated,
+      availableKinds,
+      availableFilterNamespaces,
     });
 
     const canRestart = useCallback(
@@ -207,12 +240,12 @@ const WorkloadsViewGrid: React.FC<WorkloadsViewProps> = React.memo(
       }
 
       try {
-        await RestartWorkload(
-          workload.clusterId ?? '',
-          workload.namespace,
-          workload.name,
-          workload.kind
-        );
+        // Multi-cluster rule (AGENTS.md): every backend command must
+        // carry a resolved clusterId.
+        if (!workload.clusterId) {
+          throw new Error(`Cannot restart ${workload.kind}/${workload.name}: clusterId is missing`);
+        }
+        await RestartWorkload(workload.clusterId, workload.namespace, workload.name, workload.kind);
       } catch (err) {
         errorHandler.handle(err, {
           action: 'restart',
@@ -233,8 +266,23 @@ const WorkloadsViewGrid: React.FC<WorkloadsViewProps> = React.memo(
       }
 
       try {
-        await DeleteResource(
-          workload.clusterId ?? '',
+        // Multi-cluster rule (AGENTS.md): every backend command must
+        // carry a resolved clusterId.
+        if (!workload.clusterId) {
+          throw new Error(`Cannot delete ${workload.kind}/${workload.name}: clusterId is missing`);
+        }
+        // Built-in workloads (Deployment/StatefulSet/DaemonSet/Job/CronJob)
+        // resolve via the lookup table. A miss means a non-built-in kind
+        // slipped in — fail loud.
+        const apiVersion = formatBuiltinApiVersion(workload.kind);
+        if (!apiVersion) {
+          throw new Error(
+            `Cannot delete ${workload.kind}/${workload.name}: not a known built-in kind`
+          );
+        }
+        await DeleteResourceByGVK(
+          workload.clusterId,
+          apiVersion,
           workload.kind,
           workload.namespace,
           workload.name
@@ -255,7 +303,12 @@ const WorkloadsViewGrid: React.FC<WorkloadsViewProps> = React.memo(
       const cronjob = triggerConfirm.cronjob;
 
       try {
-        await TriggerCronJob(cronjob.clusterId ?? '', cronjob.namespace, cronjob.name);
+        // Multi-cluster rule (AGENTS.md): every backend command must
+        // carry a resolved clusterId.
+        if (!cronjob.clusterId) {
+          throw new Error(`Cannot trigger CronJob/${cronjob.name}: clusterId is missing`);
+        }
+        await TriggerCronJob(cronjob.clusterId, cronjob.namespace, cronjob.name);
       } catch (err) {
         errorHandler.handle(err, {
           action: 'trigger',
@@ -270,12 +323,14 @@ const WorkloadsViewGrid: React.FC<WorkloadsViewProps> = React.memo(
     const handleSuspendToggle = useCallback(async (workload: WorkloadData) => {
       const isSuspended = workload.status === 'Suspended';
       try {
-        await SuspendCronJob(
-          workload.clusterId ?? '',
-          workload.namespace,
-          workload.name,
-          !isSuspended
-        );
+        // Multi-cluster rule (AGENTS.md): every backend command must
+        // carry a resolved clusterId.
+        if (!workload.clusterId) {
+          throw new Error(
+            `Cannot ${isSuspended ? 'resume' : 'suspend'} ${workload.kind}/${workload.name}: clusterId is missing`
+          );
+        }
+        await SuspendCronJob(workload.clusterId, workload.namespace, workload.name, !isSuspended);
       } catch (err) {
         errorHandler.handle(err, {
           action: isSuspended ? 'resume' : 'suspend',
@@ -317,8 +372,15 @@ const WorkloadsViewGrid: React.FC<WorkloadsViewProps> = React.memo(
       setScaleLoading(true);
       setScaleError(null);
       try {
+        // Multi-cluster rule (AGENTS.md): every backend command must
+        // carry a resolved clusterId.
+        if (!scaleState.workload.clusterId) {
+          throw new Error(
+            `Cannot scale ${scaleState.workload.kind}/${scaleState.workload.name}: clusterId is missing`
+          );
+        }
         await ScaleWorkload(
-          scaleState.workload.clusterId ?? '',
+          scaleState.workload.clusterId,
           scaleState.workload.namespace,
           scaleState.workload.name,
           scaleState.workload.kind,
@@ -382,23 +444,37 @@ const WorkloadsViewGrid: React.FC<WorkloadsViewProps> = React.memo(
             onScale: () => openScaleModal(row),
             onDelete: () => setDeleteConfirm({ show: true, workload: row }),
             onPortForward: () => {
+              // Multi-cluster rule (AGENTS.md): port-forward is a backend
+              // command and must carry a resolved clusterId.
+              if (!row.clusterId) {
+                errorHandler.handle(
+                  new Error(
+                    `Cannot open port-forward for ${row.kind}/${row.name}: clusterId is missing`
+                  ),
+                  { action: 'portForward', kind: row.kind, name: row.name }
+                );
+                return;
+              }
               setPortForwardTarget({
                 kind: row.kind,
                 name: row.name,
                 namespace: row.namespace,
-                clusterId: row.clusterId ?? '',
+                clusterId: row.clusterId,
                 clusterName: row.clusterName ?? '',
                 ports: [],
               });
             },
             onTrigger: () => setTriggerConfirm({ show: true, cronjob: row }),
             onSuspendToggle: () => handleSuspendToggle(row),
+            onRollback: () => setRollbackTarget(row),
           },
           permissions: {
             restart: restartStatus,
             scale: scaleStatus,
             delete: deleteStatus,
             portForward: portForwardStatus,
+            // Rollback uses patch permission, same as restart.
+            rollback: restartStatus,
           },
         });
       },
@@ -406,8 +482,12 @@ const WorkloadsViewGrid: React.FC<WorkloadsViewProps> = React.memo(
     );
 
     const emptyMessage = useMemo(
-      () => resolveEmptyStateMessage(undefined, 'No data available'),
-      []
+      () =>
+        resolveEmptyStateMessage(
+          undefined,
+          `No workloads found ${namespace === ALL_NAMESPACES_SCOPE ? 'in any namespaces' : 'in this namespace'}`
+        ),
+      [namespace]
     );
 
     const boundaryLoading = Boolean(loading) || !(Boolean(loaded) || sortedWorkloads.length > 0);
@@ -452,6 +532,7 @@ const WorkloadsViewGrid: React.FC<WorkloadsViewProps> = React.memo(
               options: {
                 showNamespaceDropdown: showNamespaceFilter,
                 showKindDropdown: true,
+                preActions: [favToggle],
               },
             }}
             virtualization={{ enabled: true, threshold: 40, overscan: 8, estimateRowHeight: 44 }}
@@ -514,6 +595,22 @@ const WorkloadsViewGrid: React.FC<WorkloadsViewProps> = React.memo(
         />
 
         <PortForwardModal target={portForwardTarget} onClose={() => setPortForwardTarget(null)} />
+
+        {/* Rollback modal: opens when a rollback action is triggered from the context menu.
+            Only mounted when rollbackTarget has a resolved clusterId — the modal's
+            confirm button issues a backend command, and per the multi-cluster
+            rule (AGENTS.md) every command must carry a cluster identity. */}
+        {rollbackTarget !== null && rollbackTarget.clusterId && (
+          <RollbackModal
+            isOpen={true}
+            onClose={() => setRollbackTarget(null)}
+            clusterId={rollbackTarget.clusterId}
+            namespace={rollbackTarget.namespace}
+            name={rollbackTarget.name}
+            kind={rollbackTarget.kind}
+          />
+        )}
+        {favModal}
       </>
     );
   }

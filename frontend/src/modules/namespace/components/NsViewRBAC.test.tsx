@@ -11,13 +11,36 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 
 import NsViewRBAC, { type RBACData } from '@modules/namespace/components/NsViewRBAC';
 
-const { gridTablePropsRef, confirmationPropsRef, openWithObjectMock, deleteResourceMock } =
+const { gridTablePropsRef, confirmationPropsRef, openWithObjectMock, deleteResourceByGVKMock } =
   vi.hoisted(() => ({
     gridTablePropsRef: { current: null as any },
     confirmationPropsRef: { current: null as any },
     openWithObjectMock: vi.fn(),
-    deleteResourceMock: vi.fn().mockResolvedValue(undefined),
+    deleteResourceByGVKMock: vi.fn().mockResolvedValue(undefined),
   }));
+
+vi.mock('@core/contexts/FavoritesContext', () => ({
+  useFavorites: () => ({
+    favorites: [],
+
+    addFavorite: vi.fn(),
+    updateFavorite: vi.fn(),
+    deleteFavorite: vi.fn(),
+    reorderFavorites: vi.fn(),
+  }),
+  FavoritesProvider: ({ children }: { children: React.ReactNode }) => children,
+}));
+
+vi.mock('@ui/favorites/FavToggle', () => ({
+  useFavToggle: () => ({
+    type: 'toggle',
+    id: 'favorite',
+    icon: null,
+    active: false,
+    onClick: () => {},
+    title: 'Save as favorite',
+  }),
+}));
 
 vi.mock('@shared/components/tables/GridTable', async () => {
   const actual = await vi.importActual<typeof import('@shared/components/tables/GridTable')>(
@@ -58,7 +81,7 @@ vi.mock('@shared/components/modals/ConfirmationModal', () => ({
 }));
 
 vi.mock('@wailsjs/go/backend/App', () => ({
-  DeleteResource: (...args: unknown[]) => deleteResourceMock(...args),
+  DeleteResourceByGVK: (...args: unknown[]) => deleteResourceByGVKMock(...args),
 }));
 
 vi.mock('@/hooks/useTableSort', () => ({
@@ -77,7 +100,7 @@ vi.mock('@modules/namespace/hooks/useNamespaceGridTablePersistence', () => ({
     setColumnWidths: vi.fn(),
     columnVisibility: null,
     setColumnVisibility: vi.fn(),
-    filters: { search: '', kinds: [], namespaces: [] },
+    filters: { search: '', kinds: [], namespaces: [], caseSensitive: false },
     setFilters: vi.fn(),
     isNamespaceScoped: true,
     resetState: vi.fn(),
@@ -122,7 +145,8 @@ describe('NsViewRBAC', () => {
     gridTablePropsRef.current = null;
     confirmationPropsRef.current = null;
     openWithObjectMock.mockReset();
-    deleteResourceMock.mockReset();
+    deleteResourceByGVKMock.mockReset();
+    deleteResourceByGVKMock.mockResolvedValue(undefined);
   });
 
   afterEach(() => {
@@ -197,6 +221,13 @@ describe('NsViewRBAC', () => {
       await confirmationPropsRef.current?.onConfirm?.();
     });
 
-    expect(deleteResourceMock).toHaveBeenCalledWith('alpha:ctx', 'Role', 'team-a', 'view');
+    // Role is rbac.authorization.k8s.io/v1, resolved through formatBuiltinApiVersion.
+    expect(deleteResourceByGVKMock).toHaveBeenCalledWith(
+      'alpha:ctx',
+      'rbac.authorization.k8s.io/v1',
+      'Role',
+      'team-a',
+      'view'
+    );
   });
 });

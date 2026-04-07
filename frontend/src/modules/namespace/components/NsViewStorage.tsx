@@ -10,6 +10,7 @@ import { getDisplayKind } from '@/utils/kindAliasMap';
 import { resolveEmptyStateMessage } from '@/utils/emptyState';
 import { useNamespaceGridTablePersistence } from '@modules/namespace/hooks/useNamespaceGridTablePersistence';
 import { useNavigateToView } from '@shared/hooks/useNavigateToView';
+import { useObjectLink } from '@shared/hooks/useObjectLink';
 import { useObjectPanel } from '@modules/object-panel/hooks/useObjectPanel';
 import { useShortNames } from '@/hooks/useShortNames';
 import { useTableSort } from '@/hooks/useTableSort';
@@ -23,11 +24,16 @@ import GridTable, {
   GRIDTABLE_VIRTUALIZATION_DEFAULT,
 } from '@shared/components/tables/GridTable';
 import { buildClusterScopedKey } from '@shared/components/tables/GridTable.utils';
+import {
+  formatBuiltinApiVersion,
+  resolveBuiltinGroupVersion,
+} from '@shared/constants/builtinGroupVersions';
 import { ALL_NAMESPACES_SCOPE } from '@modules/namespace/constants';
-import { DeleteResource } from '@wailsjs/go/backend/App';
+import { DeleteResourceByGVK } from '@wailsjs/go/backend/App';
 import { errorHandler } from '@utils/errorHandler';
 import { getPermissionKey, useUserPermissions } from '@/core/capabilities';
 import { buildObjectActionItems } from '@shared/hooks/useObjectActions';
+import { useFavToggle } from '@ui/favorites/FavToggle';
 
 // Data interface for storage resources (PVCs, VolumeAttachments, etc.)
 export interface StorageData {
@@ -59,9 +65,9 @@ const StorageViewGrid: React.FC<StorageViewProps> = React.memo(
   ({ namespace, data, loading = false, loaded = false, showNamespaceColumn = false }) => {
     const { openWithObject } = useObjectPanel();
     const { navigateToView } = useNavigateToView();
+    const objectLink = useObjectLink();
     const useShortResourceNames = useShortNames();
     const permissionMap = useUserPermissions();
-
     const [deleteConfirm, setDeleteConfirm] = useState<{
       show: boolean;
       resource: StorageData | null;
@@ -69,10 +75,12 @@ const StorageViewGrid: React.FC<StorageViewProps> = React.memo(
 
     const handleResourceClick = useCallback(
       (resource: StorageData) => {
+        const resolvedKind = resource.kind || resource.kindAlias;
         openWithObject({
-          kind: resource.kind || resource.kindAlias,
+          kind: resolvedKind,
           name: resource.name,
           namespace: resource.namespace,
+          ...resolveBuiltinGroupVersion(resolvedKind),
           clusterId: resource.clusterId ?? undefined,
           clusterName: resource.clusterName ?? undefined,
         });
@@ -146,17 +154,16 @@ const StorageViewGrid: React.FC<StorageViewProps> = React.memo(
           'Storage Class',
           (resource) => resource.storageClass || 'default',
           {
-            onClick: (resource) => {
-              if (!resource.storageClass) {
-                return;
-              }
-              openWithObject({
-                kind: 'StorageClass',
-                name: resource.storageClass,
-                clusterId: resource.clusterId ?? undefined,
-                clusterName: resource.clusterName ?? undefined,
-              });
-            },
+            ...objectLink((resource) =>
+              resource.storageClass
+                ? {
+                    kind: 'StorageClass',
+                    name: resource.storageClass,
+                    clusterId: resource.clusterId ?? undefined,
+                    clusterName: resource.clusterName ?? undefined,
+                  }
+                : undefined
+            ),
             isInteractive: (resource) => Boolean(resource.storageClass),
             getClassName: (resource) =>
               resource.storageClass ? 'storage-class-link' : 'default-class',
@@ -187,7 +194,7 @@ const StorageViewGrid: React.FC<StorageViewProps> = React.memo(
     }, [
       handleResourceClick,
       navigateToView,
-      openWithObject,
+      objectLink,
       showNamespaceColumn,
       useShortResourceNames,
     ]);
@@ -204,6 +211,7 @@ const StorageViewGrid: React.FC<StorageViewProps> = React.memo(
       filters: persistedFilters,
       setFilters: setPersistedFilters,
       resetState: resetPersistedState,
+      hydrated,
     } = useNamespaceGridTablePersistence<StorageData>({
       viewId: 'namespace-storage',
       namespace,
@@ -220,22 +228,60 @@ const StorageViewGrid: React.FC<StorageViewProps> = React.memo(
       onChange: onSortChange,
     });
 
+    const availableKinds = useMemo(
+      () => [...new Set(data.map((r) => r.kind).filter(Boolean) as string[])].sort(),
+      [data]
+    );
+    const availableFilterNamespaces = useMemo(
+      () => [...new Set(data.map((r) => r.namespace).filter(Boolean))].sort(),
+      [data]
+    );
+
+    const { item: favToggle, modal: favModal } = useFavToggle({
+      filters: persistedFilters,
+      sortColumn: sortConfig?.key ?? null,
+      sortDirection: sortConfig?.direction ?? 'asc',
+      columnVisibility: columnVisibility ?? {},
+      setFilters: setPersistedFilters,
+      setSortConfig: onSortChange,
+      setColumnVisibility,
+      hydrated,
+      availableKinds,
+      availableFilterNamespaces,
+    });
+
     const handleDeleteConfirm = useCallback(async () => {
       if (!deleteConfirm.resource) return;
+      const resource = deleteConfirm.resource;
 
       try {
-        await DeleteResource(
-          deleteConfirm.resource.clusterId ?? '',
-          deleteConfirm.resource.kind,
-          deleteConfirm.resource.namespace,
-          deleteConfirm.resource.name
+        // Multi-cluster rule (AGENTS.md): every backend command must
+        // carry a resolved clusterId.
+        if (!resource.clusterId) {
+          throw new Error(`Cannot delete ${resource.kind}/${resource.name}: clusterId is missing`);
+        }
+        // Built-in PVC resolves via the lookup table. A miss here means a
+        // non-built-in kind slipped into this view — fail loud rather than
+        // fall back to the retired kind-only resolver.
+        const apiVersion = formatBuiltinApiVersion(resource.kind);
+        if (!apiVersion) {
+          throw new Error(
+            `Cannot delete ${resource.kind}/${resource.name}: not a known built-in kind`
+          );
+        }
+        await DeleteResourceByGVK(
+          resource.clusterId,
+          apiVersion,
+          resource.kind,
+          resource.namespace,
+          resource.name
         );
         setDeleteConfirm({ show: false, resource: null });
       } catch (error) {
         errorHandler.handle(error, {
           action: 'delete',
-          kind: deleteConfirm.resource.kind,
-          name: deleteConfirm.resource.name,
+          kind: resource.kind,
+          name: resource.name,
         });
         setDeleteConfirm({ show: false, resource: null });
       }
@@ -270,8 +316,12 @@ const StorageViewGrid: React.FC<StorageViewProps> = React.memo(
     );
 
     const emptyMessage = useMemo(
-      () => resolveEmptyStateMessage(undefined, 'No data available'),
-      []
+      () =>
+        resolveEmptyStateMessage(
+          undefined,
+          `No storage objects found ${namespace === ALL_NAMESPACES_SCOPE ? 'in any namespaces' : 'in this namespace'}`
+        ),
+      [namespace]
     );
 
     return (
@@ -303,6 +353,7 @@ const StorageViewGrid: React.FC<StorageViewProps> = React.memo(
               options: {
                 showKindDropdown: true,
                 showNamespaceDropdown: showNamespaceFilter,
+                preActions: [favToggle],
               },
             }}
             virtualization={GRIDTABLE_VIRTUALIZATION_DEFAULT}
@@ -324,6 +375,7 @@ const StorageViewGrid: React.FC<StorageViewProps> = React.memo(
           onConfirm={handleDeleteConfirm}
           onCancel={() => setDeleteConfirm({ show: false, resource: null })}
         />
+        {favModal}
       </>
     );
   }

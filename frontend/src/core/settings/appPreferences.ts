@@ -20,6 +20,7 @@ import { eventBus } from '@/core/events';
 
 export type ThemePreference = 'light' | 'dark' | 'system';
 export type GridTablePersistenceMode = 'namespaced' | 'shared';
+export type ObjectPanelPosition = 'right' | 'bottom' | 'floating';
 
 interface AppPreferences {
   theme: ThemePreference;
@@ -29,6 +30,13 @@ interface AppPreferences {
   metricsRefreshIntervalMs: number;
   gridTablePersistenceMode: GridTablePersistenceMode;
   suppressNetworkErrorNotifications: boolean;
+  defaultObjectPanelPosition: ObjectPanelPosition;
+  objectPanelDockedRightWidth: number;
+  objectPanelDockedBottomHeight: number;
+  objectPanelFloatingWidth: number;
+  objectPanelFloatingHeight: number;
+  objectPanelFloatingX: number;
+  objectPanelFloatingY: number;
   paletteHueLight: number;
   paletteSaturationLight: number;
   paletteBrightnessLight: number;
@@ -49,6 +57,13 @@ interface AppSettingsPayload {
   metricsRefreshIntervalMs?: number;
   gridTablePersistenceMode?: string;
   suppressNetworkErrorNotifications?: boolean;
+  defaultObjectPanelPosition?: string;
+  objectPanelDockedRightWidth?: number;
+  objectPanelDockedBottomHeight?: number;
+  objectPanelFloatingWidth?: number;
+  objectPanelFloatingHeight?: number;
+  objectPanelFloatingX?: number;
+  objectPanelFloatingY?: number;
   // Migration: old single-value fields.
   paletteHue?: number;
   paletteSaturation?: number;
@@ -86,6 +101,15 @@ const DEFAULT_PREFERENCES: AppPreferences = {
   accentColorDark: '',
   linkColorLight: '',
   linkColorDark: '',
+
+  // make sure these match the defaults in backend/app_settings.go
+  defaultObjectPanelPosition: 'right',
+  objectPanelDockedRightWidth: 600,
+  objectPanelDockedBottomHeight: 400,
+  objectPanelFloatingWidth: 500,
+  objectPanelFloatingHeight: 400,
+  objectPanelFloatingX: 100,
+  objectPanelFloatingY: 100,
 };
 
 let preferenceCache: AppPreferences = { ...DEFAULT_PREFERENCES };
@@ -103,6 +127,13 @@ const normalizeGridTableMode = (value: string | undefined): GridTablePersistence
     return value;
   }
   return DEFAULT_PREFERENCES.gridTablePersistenceMode;
+};
+
+const normalizeObjectPanelPosition = (value: string | undefined): ObjectPanelPosition => {
+  if (value === 'right' || value === 'bottom' || value === 'floating') {
+    return value;
+  }
+  return DEFAULT_PREFERENCES.defaultObjectPanelPosition;
 };
 
 const normalizeMetricsIntervalMs = (value?: number): number => {
@@ -203,6 +234,18 @@ const persistGridTableMode = async (mode: GridTablePersistenceMode): Promise<voi
   await setter(mode);
 };
 
+const persistObjectPanelPosition = async (position: ObjectPanelPosition): Promise<void> => {
+  const runtimeApp = (window as any)?.go?.backend?.App;
+  if (!runtimeApp) {
+    return;
+  }
+  const setter = runtimeApp?.SetDefaultObjectPanelPosition;
+  if (typeof setter !== 'function') {
+    throw new Error('SetDefaultObjectPanelPosition is not available');
+  }
+  await setter(position);
+};
+
 const fetchAppSettings = async (): Promise<AppSettingsPayload | null> => {
   try {
     const settings = (await GetAppSettings()) as AppSettingsPayload | null;
@@ -234,6 +277,27 @@ export const hydrateAppPreferences = async (options?: {
     suppressNetworkErrorNotifications:
       backendSettings?.suppressNetworkErrorNotifications ??
       DEFAULT_PREFERENCES.suppressNetworkErrorNotifications,
+    defaultObjectPanelPosition: normalizeObjectPanelPosition(
+      backendSettings?.defaultObjectPanelPosition
+    ),
+    // Panel layout: backend stores 0 when unset (Go zero value), so treat
+    // 0 as "use default" for all fields. This means a user who explicitly
+    // sets a position to 0 will see it revert to the default on restart,
+    // which is acceptable since the default is close to 0 anyway.
+    objectPanelDockedRightWidth:
+      backendSettings?.objectPanelDockedRightWidth ||
+      DEFAULT_PREFERENCES.objectPanelDockedRightWidth,
+    objectPanelDockedBottomHeight:
+      backendSettings?.objectPanelDockedBottomHeight ||
+      DEFAULT_PREFERENCES.objectPanelDockedBottomHeight,
+    objectPanelFloatingWidth:
+      backendSettings?.objectPanelFloatingWidth || DEFAULT_PREFERENCES.objectPanelFloatingWidth,
+    objectPanelFloatingHeight:
+      backendSettings?.objectPanelFloatingHeight || DEFAULT_PREFERENCES.objectPanelFloatingHeight,
+    objectPanelFloatingX:
+      backendSettings?.objectPanelFloatingX || DEFAULT_PREFERENCES.objectPanelFloatingX,
+    objectPanelFloatingY:
+      backendSettings?.objectPanelFloatingY || DEFAULT_PREFERENCES.objectPanelFloatingY,
     paletteHueLight: backendSettings?.paletteHueLight ?? DEFAULT_PREFERENCES.paletteHueLight,
     paletteSaturationLight:
       backendSettings?.paletteSaturationLight ?? DEFAULT_PREFERENCES.paletteSaturationLight,
@@ -291,6 +355,27 @@ export const setSuppressNetworkErrorNotifications = (suppress: boolean): void =>
     console.error('Failed to persist suppress network error notifications preference:', error);
   });
 };
+export const getDefaultObjectPanelPosition = (): ObjectPanelPosition => {
+  return preferenceCache.defaultObjectPanelPosition;
+};
+
+export interface ObjectPanelLayoutDefaults {
+  dockedRightWidth: number;
+  dockedBottomHeight: number;
+  floatingWidth: number;
+  floatingHeight: number;
+  floatingX: number;
+  floatingY: number;
+}
+
+export const getObjectPanelLayoutDefaults = (): ObjectPanelLayoutDefaults => ({
+  dockedRightWidth: preferenceCache.objectPanelDockedRightWidth,
+  dockedBottomHeight: preferenceCache.objectPanelDockedBottomHeight,
+  floatingWidth: preferenceCache.objectPanelFloatingWidth,
+  floatingHeight: preferenceCache.objectPanelFloatingHeight,
+  floatingX: preferenceCache.objectPanelFloatingX,
+  floatingY: preferenceCache.objectPanelFloatingY,
+});
 
 // Returns palette tint values for the specified theme.
 export const getPaletteTint = (
@@ -397,6 +482,49 @@ export const setGridTablePersistenceMode = (mode: GridTablePersistenceMode): voi
   updatePreferenceCache({ gridTablePersistenceMode: normalized });
   void persistGridTableMode(normalized).catch((error) => {
     console.error('Failed to persist grid table persistence mode:', error);
+  });
+};
+
+export const setDefaultObjectPanelPosition = (position: ObjectPanelPosition): void => {
+  const normalized = normalizeObjectPanelPosition(position);
+  hydrated = true;
+  updatePreferenceCache({ defaultObjectPanelPosition: normalized });
+  void persistObjectPanelPosition(normalized).catch((error) => {
+    console.error('Failed to persist default object panel position:', error);
+  });
+};
+
+const persistObjectPanelLayout = async (layout: ObjectPanelLayoutDefaults): Promise<void> => {
+  const runtimeApp = (window as any)?.go?.backend?.App;
+  if (!runtimeApp) {
+    return;
+  }
+  const setter = runtimeApp?.SetObjectPanelLayout;
+  if (typeof setter !== 'function') {
+    throw new Error('SetObjectPanelLayout is not available');
+  }
+  await setter(
+    layout.dockedRightWidth,
+    layout.dockedBottomHeight,
+    layout.floatingWidth,
+    layout.floatingHeight,
+    layout.floatingX,
+    layout.floatingY
+  );
+};
+
+export const setObjectPanelLayoutDefaults = (layout: ObjectPanelLayoutDefaults): void => {
+  hydrated = true;
+  updatePreferenceCache({
+    objectPanelDockedRightWidth: layout.dockedRightWidth,
+    objectPanelDockedBottomHeight: layout.dockedBottomHeight,
+    objectPanelFloatingWidth: layout.floatingWidth,
+    objectPanelFloatingHeight: layout.floatingHeight,
+    objectPanelFloatingX: layout.floatingX,
+    objectPanelFloatingY: layout.floatingY,
+  });
+  void persistObjectPanelLayout(layout).catch((error) => {
+    console.error('Failed to persist object panel layout defaults:', error);
   });
 };
 

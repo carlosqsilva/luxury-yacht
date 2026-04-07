@@ -24,10 +24,15 @@ import GridTable, {
   GRIDTABLE_VIRTUALIZATION_DEFAULT,
 } from '@shared/components/tables/GridTable';
 import { buildClusterScopedKey } from '@shared/components/tables/GridTable.utils';
+import {
+  formatBuiltinApiVersion,
+  resolveBuiltinGroupVersion,
+} from '@shared/constants/builtinGroupVersions';
 import { ALL_NAMESPACES_SCOPE } from '@modules/namespace/constants';
-import { DeleteResource } from '@wailsjs/go/backend/App';
+import { DeleteResourceByGVK } from '@wailsjs/go/backend/App';
 import { errorHandler } from '@utils/errorHandler';
 import { buildObjectActionItems } from '@shared/hooks/useObjectActions';
+import { useFavToggle } from '@ui/favorites/FavToggle';
 
 // Data interface for configuration resources (ConfigMaps, Secrets)
 export interface ConfigData {
@@ -59,7 +64,6 @@ const ConfigViewGrid: React.FC<ConfigViewProps> = React.memo(
     const { navigateToView } = useNavigateToView();
     const useShortResourceNames = useShortNames();
     const permissionMap = useUserPermissions();
-
     const [deleteConfirm, setDeleteConfirm] = useState<{
       show: boolean;
       resource: ConfigData | null;
@@ -67,10 +71,12 @@ const ConfigViewGrid: React.FC<ConfigViewProps> = React.memo(
 
     const handleResourceClick = useCallback(
       (resource: ConfigData) => {
+        const resolvedKind = resource.kind || resource.kindAlias;
         openWithObject({
-          kind: resource.kind || resource.kindAlias,
+          kind: resolvedKind,
           name: resource.name,
           namespace: resource.namespace,
+          ...resolveBuiltinGroupVersion(resolvedKind),
           clusterId: resource.clusterId ?? undefined,
           clusterName: resource.clusterName ?? undefined,
         });
@@ -163,6 +169,7 @@ const ConfigViewGrid: React.FC<ConfigViewProps> = React.memo(
       filters: persistedFilters,
       setFilters: setPersistedFilters,
       resetState: resetPersistedState,
+      hydrated,
     } = useNamespaceGridTablePersistence<ConfigData>({
       viewId: 'namespace-config',
       namespace,
@@ -179,22 +186,62 @@ const ConfigViewGrid: React.FC<ConfigViewProps> = React.memo(
       onChange: onSortChange,
     });
 
+    const availableKinds = useMemo(
+      () => [...new Set(data.map((r) => r.kind).filter(Boolean) as string[])].sort(),
+      [data]
+    );
+    const availableFilterNamespaces = useMemo(
+      () => [...new Set(data.map((r) => r.namespace).filter(Boolean))].sort(),
+      [data]
+    );
+
+    const { item: favToggle, modal: favModal } = useFavToggle({
+      filters: persistedFilters,
+      sortColumn: sortConfig?.key ?? null,
+      sortDirection: sortConfig?.direction ?? 'asc',
+      columnVisibility: columnVisibility ?? {},
+      setFilters: setPersistedFilters,
+      setSortConfig: onSortChange,
+      setColumnVisibility,
+      hydrated,
+      availableKinds,
+      availableFilterNamespaces,
+    });
+
     const handleDeleteConfirm = useCallback(async () => {
       if (!deleteConfirm.resource) return;
+      const resource = deleteConfirm.resource;
 
       try {
-        await DeleteResource(
-          deleteConfirm.resource.clusterId ?? '',
-          deleteConfirm.resource.kind,
-          deleteConfirm.resource.namespace,
-          deleteConfirm.resource.name
+        // Multi-cluster rule (AGENTS.md): every backend command must
+        // carry a resolved clusterId. Fail loud here rather than passing
+        // an empty string to the Wails layer.
+        if (!resource.clusterId) {
+          throw new Error(`Cannot delete ${resource.kind}/${resource.name}: clusterId is missing`);
+        }
+        // Built-in ConfigMap/Secret resolve via the lookup table. Any miss
+        // here would mean a non-built-in kind slipped into this view — we
+        // want to fail loud rather than fall back to the retired kind-only
+        // resolver.
+        const apiVersion = formatBuiltinApiVersion(resource.kind);
+        if (!apiVersion) {
+          throw new Error(
+            `Cannot delete ${resource.kind}/${resource.name}: not a known built-in kind`
+          );
+        }
+        await DeleteResourceByGVK(
+          resource.clusterId,
+          apiVersion,
+          resource.kind,
+          resource.namespace,
+          resource.name
         );
         setDeleteConfirm({ show: false, resource: null });
       } catch (error) {
         errorHandler.handle(error, {
           action: 'delete',
-          kind: deleteConfirm.resource.kind,
-          name: deleteConfirm.resource.name,
+          kind: resource.kind,
+          name: resource.name,
         });
         setDeleteConfirm({ show: false, resource: null });
       }
@@ -229,8 +276,12 @@ const ConfigViewGrid: React.FC<ConfigViewProps> = React.memo(
     );
 
     const emptyMessage = useMemo(
-      () => resolveEmptyStateMessage(undefined, 'No data available'),
-      []
+      () =>
+        resolveEmptyStateMessage(
+          undefined,
+          `No config objects found ${namespace === ALL_NAMESPACES_SCOPE ? 'in any namespaces' : 'in this namespace'}`
+        ),
+      [namespace]
     );
 
     return (
@@ -262,6 +313,7 @@ const ConfigViewGrid: React.FC<ConfigViewProps> = React.memo(
               options: {
                 showKindDropdown: true,
                 showNamespaceDropdown: showNamespaceFilter,
+                preActions: [favToggle],
               },
             }}
             virtualization={GRIDTABLE_VIRTUALIZATION_DEFAULT}
@@ -283,6 +335,7 @@ const ConfigViewGrid: React.FC<ConfigViewProps> = React.memo(
           onConfirm={handleDeleteConfirm}
           onCancel={() => setDeleteConfirm({ show: false, resource: null })}
         />
+        {favModal}
       </>
     );
   }

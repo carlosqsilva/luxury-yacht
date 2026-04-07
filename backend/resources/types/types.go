@@ -36,6 +36,13 @@ type AppSettings struct {
 	RefreshBackgroundClustersEnabled  bool     `json:"refreshBackgroundClustersEnabled"`  // Refresh inactive clusters in the background
 	MetricsRefreshIntervalMs          int      `json:"metricsRefreshIntervalMs"`          // Metrics refresh interval (ms)
 	GridTablePersistenceMode          string   `json:"gridTablePersistenceMode"`          // "shared" or "namespaced"
+	DefaultObjectPanelPosition        string   `json:"defaultObjectPanelPosition"`        // "right", "bottom", or "floating"
+	ObjectPanelDockedRightWidth       int      `json:"objectPanelDockedRightWidth"`       // Default width when docked right (px)
+	ObjectPanelDockedBottomHeight     int      `json:"objectPanelDockedBottomHeight"`     // Default height when docked bottom (px)
+	ObjectPanelFloatingWidth          int      `json:"objectPanelFloatingWidth"`          // Default floating width (px)
+	ObjectPanelFloatingHeight         int      `json:"objectPanelFloatingHeight"`         // Default floating height (px)
+	ObjectPanelFloatingX              int      `json:"objectPanelFloatingX"`              // Default floating X position (px)
+	ObjectPanelFloatingY              int      `json:"objectPanelFloatingY"`              // Default floating Y position (px)
 	PaletteHueLight                   int      `json:"paletteHueLight"`                   // Hue for gray palette tint in light theme (0-360)
 	PaletteSaturationLight            int      `json:"paletteSaturationLight"`            // Saturation intensity for gray palette tint in light theme (0-100)
 	PaletteBrightnessLight            int      `json:"paletteBrightnessLight"`            // Brightness offset for gray palette in light theme (-50 to +50)
@@ -311,6 +318,14 @@ type PodSimpleInfo struct {
 	MemUsage   string `json:"memUsage"`   // Current memory usage from metrics
 	OwnerKind  string `json:"ownerKind"`  // Kind of the owner (Deployment, StatefulSet, etc)
 	OwnerName  string `json:"ownerName"`  // Name of the owner resource
+	// OwnerAPIVersion is the wire-form apiVersion of the owner (e.g.
+	// "apps/v1", "argoproj.io/v1alpha1", "kubevirt.io/v1"). Threaded from
+	// pod.OwnerReferences[*].APIVersion (or hardcoded apps/v1 for the
+	// ReplicaSet→Deployment collapse) so the frontend can open
+	// CRD-as-Pod-owner targets in the object panel with a fully-qualified
+	// GVK. Required for Argo Rollouts, KubeVirt VMI, Tekton TaskRun,
+	// Spark SparkApplication, etc.
+	OwnerAPIVersion string `json:"ownerApiVersion,omitempty"`
 }
 
 // NsRBACInfo represents basic RBAC resource information (Roles, RoleBindings, ServiceAccounts)
@@ -441,11 +456,18 @@ type HelmRevision struct {
 	Description string `json:"description,omitempty"`
 }
 
-// HelmResource represents a Kubernetes resource managed by a Helm release
+// HelmResource represents a Kubernetes resource managed by a Helm release.
+//
+// APIVersion carries the manifest's apiVersion verbatim (e.g. "apps/v1",
+// "v1", "documentdb.services.k8s.aws/v1alpha1") so the frontend can open
+// the target in the object panel with a fully-qualified GVK. Required for
+// CRDs that share a Kind across operator groups — without it the strict
+// object-YAML path hard-fails on Helm-managed custom resources.
 type HelmResource struct {
-	Kind      string `json:"kind"`
-	Name      string `json:"name"`
-	Namespace string `json:"namespace"`
+	Kind       string `json:"kind"`
+	APIVersion string `json:"apiVersion,omitempty"`
+	Name       string `json:"name"`
+	Namespace  string `json:"namespace"`
 }
 
 // PodDetailInfoContainer represents detailed container information within a pod
@@ -489,6 +511,10 @@ type PodDetailInfo struct {
 	// Ownership information
 	OwnerKind string `json:"ownerKind"`
 	OwnerName string `json:"ownerName"`
+	// OwnerAPIVersion carries the wire-form apiVersion of the controlling
+	// owner so the panel can open CRD-as-Pod-owner targets correctly. See
+	//  and PodSimpleInfo.OwnerAPIVersion.
+	OwnerAPIVersion string `json:"ownerApiVersion,omitempty"`
 
 	// Additional details for object panel
 	Node            string                   `json:"node"`

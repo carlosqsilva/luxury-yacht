@@ -10,6 +10,29 @@ import { act } from 'react';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import ClusterViewCRDs from '@modules/cluster/components/ClusterViewCRDs';
 
+vi.mock('@core/contexts/FavoritesContext', () => ({
+  useFavorites: () => ({
+    favorites: [],
+
+    addFavorite: vi.fn(),
+    updateFavorite: vi.fn(),
+    deleteFavorite: vi.fn(),
+    reorderFavorites: vi.fn(),
+  }),
+  FavoritesProvider: ({ children }: { children: React.ReactNode }) => children,
+}));
+
+vi.mock('@ui/favorites/FavToggle', () => ({
+  useFavToggle: () => ({
+    type: 'toggle',
+    id: 'favorite',
+    icon: null,
+    active: false,
+    onClick: () => {},
+    title: 'Save as favorite',
+  }),
+}));
+
 const gridTablePropsRef: { current: any } = { current: null };
 
 vi.mock('@shared/components/tables/GridTable', async () => {
@@ -60,7 +83,7 @@ vi.mock('@shared/components/tables/persistence/useGridTablePersistence', () => (
     setColumnWidths: vi.fn(),
     columnVisibility: null,
     setColumnVisibility: vi.fn(),
-    filters: { search: '', kinds: [], namespaces: [] },
+    filters: { search: '', kinds: [], namespaces: [], caseSensitive: false },
     setFilters: setFiltersMock,
     resetState: vi.fn(),
     hydrated: true,
@@ -73,7 +96,7 @@ vi.mock('@/hooks/useShortNames', () => ({
 }));
 
 vi.mock('@wailsjs/go/backend/App', () => ({
-  DeleteResource: vi.fn(),
+  DeleteResourceByGVK: vi.fn(),
 }));
 
 vi.mock('@/core/capabilities', () => ({
@@ -120,8 +143,105 @@ describe('ClusterViewCRDs', () => {
     const props = gridTablePropsRef.current;
     expect(props).toBeTruthy();
     expect(props.sortConfig).toEqual({ key: 'name', direction: 'asc' });
-    expect(props.filters?.value).toEqual({ search: '', kinds: [], namespaces: [] });
+    expect(props.filters?.value).toEqual({
+      search: '',
+      kinds: [],
+      namespaces: [],
+      caseSensitive: false,
+    });
     expect(props.columnVisibility).toBeFalsy();
     expect(props.columnWidths).toBeFalsy();
+  });
+
+  // Version column rendering. The Version column shows the storage
+  // version (the version etcd persists) with a `(+N)` suffix when the
+  // CRD also serves additional versions. See
+
+  describe('Version column', () => {
+    const findVersionColumn = (props: any) =>
+      props.columns.find((col: any) => col.key === 'version');
+
+    it('renders bare storage version when there are no extra served versions', async () => {
+      const singleVersion = {
+        ...baseCRD,
+        storageVersion: 'v1',
+        extraServedVersionCount: 0,
+      };
+
+      await act(async () => {
+        root.render(<ClusterViewCRDs data={[singleVersion]} loaded={true} />);
+        await Promise.resolve();
+      });
+
+      const props = gridTablePropsRef.current;
+      const versionCol = findVersionColumn(props);
+      expect(versionCol).toBeTruthy();
+
+      // The render fn returns a React element wrapping the text. Inspect
+      // its rendered children rather than calling a stringifier.
+      const rendered = versionCol.render(singleVersion);
+      const text = JSON.stringify(rendered);
+      expect(text).toContain('v1');
+      expect(text).not.toContain('+');
+    });
+
+    it('renders storage version with (+N) suffix for multi-version CRDs', async () => {
+      const multiVersion = {
+        ...baseCRD,
+        name: 'dbinstances.rds.services.k8s.aws',
+        group: 'rds.services.k8s.aws',
+        storageVersion: 'v1',
+        extraServedVersionCount: 2,
+      };
+
+      await act(async () => {
+        root.render(<ClusterViewCRDs data={[multiVersion]} loaded={true} />);
+        await Promise.resolve();
+      });
+
+      const props = gridTablePropsRef.current;
+      const versionCol = findVersionColumn(props);
+      const rendered = versionCol.render(multiVersion);
+      const text = JSON.stringify(rendered);
+      expect(text).toContain('v1 (+2)');
+    });
+
+    it('renders dash when storageVersion is missing (defensive)', async () => {
+      // CRDs in transient/malformed states might not carry a storage
+      // version. The cell should not crash or display "undefined".
+      const noVersion = { ...baseCRD };
+
+      await act(async () => {
+        root.render(<ClusterViewCRDs data={[noVersion]} loaded={true} />);
+        await Promise.resolve();
+      });
+
+      const props = gridTablePropsRef.current;
+      const versionCol = findVersionColumn(props);
+      const rendered = versionCol.render(noVersion);
+      const text = JSON.stringify(rendered);
+      expect(text).toContain('-');
+    });
+
+    it('sortValue is the bare storage version (not the rendered cell text)', async () => {
+      // Sort comparator should cluster CRDs by storage version regardless
+      // of how many extra served versions they have. A `v1 (+2)` row and
+      // a `v1` row should sort identically.
+      const multiVersion = {
+        ...baseCRD,
+        storageVersion: 'v1',
+        extraServedVersionCount: 2,
+      };
+
+      await act(async () => {
+        root.render(<ClusterViewCRDs data={[multiVersion]} loaded={true} />);
+        await Promise.resolve();
+      });
+
+      const props = gridTablePropsRef.current;
+      const versionCol = findVersionColumn(props);
+      expect(versionCol.sortValue).toBeDefined();
+      expect(versionCol.sortValue(multiVersion)).toBe('v1');
+    });
   });
 });

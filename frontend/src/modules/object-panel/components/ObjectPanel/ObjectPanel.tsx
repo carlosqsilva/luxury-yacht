@@ -8,14 +8,16 @@
 
 import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react';
 import ConfirmationModal from '@shared/components/modals/ConfirmationModal';
+import RollbackModal from '@shared/components/modals/RollbackModal';
 import type { DetailsTabProps } from '@modules/object-panel/components/ObjectPanel/Details/DetailsTab';
 import { types } from '@wailsjs/go/models';
 import { TriggerCronJob, SuspendCronJob } from '@wailsjs/go/backend/App';
 import { DockablePanel, useDockablePanelContext } from '@ui/dockable';
+import { getDefaultObjectPanelPosition } from '@core/settings/appPreferences';
 import { errorHandler } from '@utils/errorHandler';
 import { CurrentObjectPanelContext } from '@modules/object-panel/hooks/useObjectPanel';
 import { useObjectPanelState } from '@/core/contexts/ObjectPanelStateContext';
-import { evaluateNamespacePermissions } from '@/core/capabilities';
+import { queryNamespacePermissions } from '@/core/capabilities';
 import {
   clearRequestedObjectPanelTab,
   getRequestedObjectPanelTab,
@@ -36,7 +38,6 @@ import { ObjectPanelContent } from '@modules/object-panel/components/ObjectPanel
 import {
   CLUSTER_SCOPE,
   RESOURCE_CAPABILITIES,
-  WORKLOAD_KIND_API_NAMES,
 } from '@modules/object-panel/components/ObjectPanel/constants';
 import type {
   PanelAction,
@@ -133,6 +134,7 @@ const INITIAL_PANEL_STATE: PanelState = {
   showScaleInput: false,
   showRestartConfirm: false,
   showDeleteConfirm: false,
+  showRollbackModal: false,
   resourceDeleted: false,
   deletedResourceName: '',
 };
@@ -153,6 +155,8 @@ function panelReducer(state: PanelState, action: PanelAction): PanelState {
       return { ...state, showRestartConfirm: action.payload };
     case 'SHOW_DELETE_CONFIRM':
       return { ...state, showDeleteConfirm: action.payload };
+    case 'SHOW_ROLLBACK_MODAL':
+      return { ...state, showRollbackModal: action.payload };
     case 'SET_RESOURCE_DELETED':
       return {
         ...state,
@@ -183,7 +187,7 @@ function ObjectPanel({ panelId, objectRef }: ObjectPanelProps) {
   const objectData = objectRef;
   const { closePanel } = useObjectPanelState();
   const { tabGroups, getPreferredOpenGroupKey } = useDockablePanelContext();
-  const openTargetGroupKey = getPreferredOpenGroupKey('right');
+  const openTargetGroupKey = getPreferredOpenGroupKey(getDefaultObjectPanelPosition());
   const openTargetPosition: DockPosition =
     openTargetGroupKey === 'right' || openTargetGroupKey === 'bottom'
       ? openTargetGroupKey
@@ -211,12 +215,10 @@ function ObjectPanel({ panelId, objectRef }: ObjectPanelProps) {
   // Use reducer for state management
   const [state, dispatch] = useReducer(panelReducer, INITIAL_PANEL_STATE);
 
-  const { objectKind, detailScope, helmScope, isHelmRelease, isEvent } = getObjectPanelKind(
-    objectData,
-    {
+  const { objectKind, detailScope, eventsScope, logScope, helmScope, isHelmRelease, isEvent } =
+    getObjectPanelKind(objectData, {
       clusterScope: CLUSTER_SCOPE,
-    }
-  );
+    });
 
   const lastEvaluatedNamespaceRef = useRef<string | null>(null);
   useEffect(() => {
@@ -231,7 +233,7 @@ function ObjectPanel({ panelId, objectRef }: ObjectPanelProps) {
     }
 
     lastEvaluatedNamespaceRef.current = normalized;
-    evaluateNamespacePermissions(namespace, { clusterId: objectData?.clusterId ?? null });
+    queryNamespacePermissions(namespace, objectData?.clusterId ?? null);
   }, [objectData?.clusterId, objectData?.namespace]);
 
   const featureSupport = useObjectPanelFeatureSupport(objectKind, RESOURCE_CAPABILITIES);
@@ -241,7 +243,6 @@ function ObjectPanel({ panelId, objectRef }: ObjectPanelProps) {
     objectKind,
     detailScope,
     featureSupport,
-    workloadKindApiNames: WORKLOAD_KIND_API_NAMES,
   });
 
   // Only poll when this tab is active in its group (Step 8: active-tab-only polling).
@@ -329,6 +330,8 @@ function ObjectPanel({ panelId, objectRef }: ObjectPanelProps) {
     hideRestartConfirm: closeRestartConfirm,
     showDeleteConfirm: openDeleteConfirm,
     hideDeleteConfirm: closeDeleteConfirm,
+    showRollbackModal: openRollbackModal,
+    hideRollbackModal: closeRollbackModal,
   } = useObjectPanelActions({
     objectData,
     objectKind,
@@ -336,7 +339,6 @@ function ObjectPanel({ panelId, objectRef }: ObjectPanelProps) {
     dispatch,
     close,
     fetchResourceDetails,
-    workloadKindApiNames: WORKLOAD_KIND_API_NAMES,
   });
 
   // CronJob trigger handler
@@ -344,7 +346,12 @@ function ObjectPanel({ panelId, objectRef }: ObjectPanelProps) {
     if (!objectData?.name || !objectData?.namespace) return;
     dispatch({ type: 'SET_ACTION_LOADING', payload: true });
     try {
-      await TriggerCronJob(objectData.clusterId ?? '', objectData.namespace, objectData.name);
+      // Multi-cluster rule (AGENTS.md): every backend command must
+      // carry a resolved clusterId.
+      if (!objectData.clusterId) {
+        throw new Error(`Cannot trigger CronJob/${objectData.name}: clusterId is missing`);
+      }
+      await TriggerCronJob(objectData.clusterId, objectData.namespace, objectData.name);
     } catch (err) {
       errorHandler.handle(err, { action: 'trigger', kind: 'CronJob', name: objectData.name });
     } finally {
@@ -359,8 +366,15 @@ function ObjectPanel({ panelId, objectRef }: ObjectPanelProps) {
     const isSuspended = cronJobDetails?.suspend ?? false;
     dispatch({ type: 'SET_ACTION_LOADING', payload: true });
     try {
+      // Multi-cluster rule (AGENTS.md): every backend command must
+      // carry a resolved clusterId.
+      if (!objectData.clusterId) {
+        throw new Error(
+          `Cannot ${isSuspended ? 'resume' : 'suspend'} CronJob/${objectData.name}: clusterId is missing`
+        );
+      }
       await SuspendCronJob(
-        objectData.clusterId ?? '',
+        objectData.clusterId,
         objectData.namespace,
         objectData.name,
         !isSuspended
@@ -563,6 +577,7 @@ function ObjectPanel({ panelId, objectRef }: ObjectPanelProps) {
         scaleReplicas: state.scaleReplicas,
         showScaleInput: state.showScaleInput,
         onRestartClick: openRestartConfirm,
+        onRollbackClick: openRollbackModal,
         onDeleteClick: openDeleteConfirm,
         onScaleClick: (replicas?: number) => {
           if (replicas !== undefined) {
@@ -703,10 +718,12 @@ function ObjectPanel({ panelId, objectRef }: ObjectPanelProps) {
         <ObjectPanelContent
           activeTab={state.activeTab}
           detailTabProps={detailTabProps}
-          isPanelOpen={isOpen}
+          isPanelOpen={isOpen && isActiveTab}
           capabilities={capabilities}
           capabilityReasons={capabilityReasons}
           detailScope={detailScope}
+          eventsScope={eventsScope}
+          logScope={logScope}
           helmScope={helmScope}
           objectData={objectData}
           objectKind={objectKind}
@@ -740,6 +757,25 @@ function ObjectPanel({ panelId, objectRef }: ObjectPanelProps) {
         onConfirm={() => handleAction('delete', 'showDeleteConfirm')}
         onCancel={closeDeleteConfirm}
       />
+
+      {/* Rollback Modal — opens the revision history picker for rollbackable workloads.
+          Only mounted when objectData has a resolved clusterId + kind + name + namespace —
+          the modal's confirm button issues a backend command and per the multi-cluster
+          rule (AGENTS.md) every command must carry a cluster identity. */}
+      {state.showRollbackModal &&
+        objectData?.clusterId &&
+        objectData.kind &&
+        objectData.name &&
+        objectData.namespace && (
+          <RollbackModal
+            isOpen={true}
+            onClose={closeRollbackModal}
+            clusterId={objectData.clusterId}
+            namespace={objectData.namespace}
+            name={objectData.name}
+            kind={objectData.kind}
+          />
+        )}
     </CurrentObjectPanelContext.Provider>
   );
 }

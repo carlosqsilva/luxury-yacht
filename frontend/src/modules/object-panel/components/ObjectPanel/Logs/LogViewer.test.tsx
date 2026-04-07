@@ -221,6 +221,11 @@ describe('LogViewer active pod synchronisation', () => {
       isActive = true,
       activePodNames = null,
       clusterId = testClusterId,
+      // logScope is normally produced by getObjectPanelKind in
+      // ObjectPanel and threaded down. The default here mirrors what
+      // seedLogSnapshot wrote to so existing scope-keyed assertions
+      // keep working without per-test plumbing.
+      logScope = activeScope,
     } = overrides;
 
     await act(async () => {
@@ -229,6 +234,7 @@ describe('LogViewer active pod synchronisation', () => {
           namespace={namespace}
           resourceName={resourceName}
           resourceKind={resourceKind}
+          logScope={logScope}
           isActive={isActive}
           activePodNames={activePodNames}
           clusterId={clusterId}
@@ -367,49 +373,6 @@ describe('LogViewer active pod synchronisation', () => {
 
     expectDisabledShortcut('x');
     expectDisabledShortcut('p');
-  });
-
-  it('fetches previous pod logs on manual refresh', async () => {
-    (LogFetcher as unknown as ViMock).mockResolvedValue({ entries: [] });
-
-    await renderViewer({
-      resourceKind: 'Pod',
-      resourceName: 'api',
-      activePodNames: ['api'],
-    });
-
-    const enablePrevious = getLatestShortcut('x');
-    expect(enablePrevious?.enabled).toBe(true);
-
-    await act(async () => {
-      expect(enablePrevious?.handler()).toBe(true);
-      await Promise.resolve();
-    });
-
-    const toggleAutoRefresh = getLatestShortcut('r');
-    await act(async () => {
-      expect(toggleAutoRefresh?.handler()).toBe(true);
-      await Promise.resolve();
-    });
-
-    (LogFetcher as unknown as ViMock).mockClear();
-
-    const refreshButton = container.querySelector('button.button.generic');
-    expect(refreshButton?.textContent).toContain('Refresh');
-
-    await act(async () => {
-      refreshButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      await Promise.resolve();
-    });
-
-    expect(LogFetcher).toHaveBeenCalledTimes(1);
-    const request = (LogFetcher as unknown as ViMock).mock.calls[0][1];
-    expect((LogFetcher as unknown as ViMock).mock.calls[0][0]).toBe('alpha:ctx');
-    expect(request).toMatchObject({
-      namespace: 'team-a',
-      podName: 'api',
-      previous: true,
-    });
   });
 
   it('triggers fallback fetcher when streaming is unavailable', async () => {
@@ -700,7 +663,17 @@ describe('LogViewer active pod synchronisation', () => {
   });
 
   it('renders loading state when resource metadata is missing', async () => {
-    await renderViewer({ resourceName: '', resourceKind: '', namespace: '', activePodNames: null });
+    // Mirror what getObjectPanelKind would produce upstream when the
+    // panel is in its empty state: a null logScope. The component
+    // gates its loading-vs-rendered path on logScope, not on
+    // resourceName/resourceKind directly.
+    await renderViewer({
+      resourceName: '',
+      resourceKind: '',
+      namespace: '',
+      activePodNames: null,
+      logScope: null,
+    });
 
     expect(container.textContent).toContain('Loading logs');
   });

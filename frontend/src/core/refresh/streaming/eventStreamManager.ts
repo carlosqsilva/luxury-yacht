@@ -7,6 +7,7 @@
 
 import { ensureRefreshBaseURL } from '../client';
 import type { SnapshotStats } from '../client';
+import { parseClusterScope } from '../clusterScope';
 import { setScopedDomainState, resetScopedDomainState } from '../store';
 import type {
   ClusterEventEntry,
@@ -31,6 +32,8 @@ interface StreamEventPayload {
     clusterName?: string;
     kind?: string;
     name?: string;
+    uid?: string;
+    resourceVersion?: string;
     namespace?: string;
     type?: string;
     objectNamespace?: string;
@@ -235,9 +238,22 @@ class EventStreamConnection {
   }
 }
 
-// Include cluster identity in the dedupe key so multi-cluster streams don't collapse events.
-const sortKey = (entry: ClusterEventEntry | NamespaceEventSummary) =>
-  `${entry.clusterId || ''}|${entry.namespace || ''}|${entry.kind || ''}|${entry.name || ''}|${entry.reason || ''}|${entry.message || ''}`;
+// Use the Kubernetes Event object name as the primary identity so updates to the
+// same event replace prior rows instead of rendering as churn. Cluster and
+// namespace scope are included for multi-cluster isolation.
+const eventIdentityKey = (entry: ClusterEventEntry | NamespaceEventSummary) => {
+  const clusterId = entry.clusterId || '';
+  const namespace = entry.objectNamespace || entry.namespace || '';
+  const uid = entry.uid || '';
+  if (uid) {
+    return `${clusterId}|${namespace}|${uid}`;
+  }
+  const name = entry.name || '';
+  if (name) {
+    return `${clusterId}|${namespace}|${name}`;
+  }
+  return `${clusterId}|${namespace}|${entry.object || ''}|${entry.source || ''}|${entry.reason || ''}|${entry.type || ''}`;
+};
 
 export class EventStreamManager {
   private clusterConnection: EventStreamConnection | null = null;
@@ -423,11 +439,19 @@ export class EventStreamManager {
     if (!payload.reset && events.length === 0 && !errorMessage) {
       return;
     }
+    // Fallback cluster identity for events that arrive without a
+    // per-event clusterId. parseClusterScope extracts the cluster
+    // prefix from the subscription scope — the multi-cluster rule
+    // requires every ClusterEventEntry / NamespaceEventSummary to
+    // carry a clusterId, and this fallback preserves that contract.
+    const fallbackClusterId = parseClusterScope(scope).clusterId;
     if (domain === CLUSTER_DOMAIN) {
-      const incoming = events.map(transformClusterEvent);
-      const { items, total, truncated } = payload.reset
-        ? mergeEvents([], incoming, MAX_CLUSTER_EVENTS)
-        : mergeEvents(this.clusterEvents, incoming, MAX_CLUSTER_EVENTS);
+      const incoming = events.map((event) => transformClusterEvent(event, fallbackClusterId));
+      const { items, total, truncated } = mergeEvents(
+        payload.reset ? this.clusterEvents : this.clusterEvents,
+        incoming,
+        MAX_CLUSTER_EVENTS
+      );
       const resolvedTotal =
         payloadTotal !== undefined ? Math.max(payloadTotal, items.length) : total;
       const resolvedTruncated = payloadTruncated !== undefined ? payloadTruncated : truncated;
@@ -438,11 +462,9 @@ export class EventStreamManager {
     }
 
     if (domain === NAMESPACE_DOMAIN) {
-      const incoming = events.map(transformNamespaceEvent);
+      const incoming = events.map((event) => transformNamespaceEvent(event, fallbackClusterId));
       const existing = this.namespaceEvents.get(scope) ?? [];
-      const { items, total, truncated } = payload.reset
-        ? mergeEvents([], incoming, MAX_NAMESPACE_EVENTS)
-        : mergeEvents(existing, incoming, MAX_NAMESPACE_EVENTS);
+      const { items, total, truncated } = mergeEvents(existing, incoming, MAX_NAMESPACE_EVENTS);
       const resolvedTotal =
         payloadTotal !== undefined ? Math.max(payloadTotal, items.length) : total;
       const resolvedTruncated = payloadTruncated !== undefined ? payloadTruncated : truncated;
@@ -497,9 +519,14 @@ export class EventStreamManager {
   }
 
   markConnected(domain: string, scope: string): void {
+    // parseClusterScope extracts the cluster prefix; snapshot payloads
+    // must carry a resolved clusterId per the multi-cluster rule
+    // (AGENTS.md) and the ClusterMeta type contract.
+    const clusterId = parseClusterScope(scope).clusterId;
     if (domain === CLUSTER_DOMAIN) {
       const generatedAt = Date.now();
       const payload: ClusterEventsSnapshotPayload = {
+        clusterId,
         events: this.clusterEvents,
       };
       const stats = this.buildStats(
@@ -526,6 +553,7 @@ export class EventStreamManager {
       const generatedAt = Date.now();
       const events = this.namespaceEvents.get(scope) ?? [];
       const payload: NamespaceEventsSnapshotPayload = {
+        clusterId,
         events,
       };
       const meta = this.namespaceEventMeta.get(scope) ?? { total: events.length, truncated: false };
@@ -656,7 +684,10 @@ export class EventStreamManager {
     truncated: boolean
   ): void {
     const activeScope = this.clusterScope ?? CLUSTER_SCOPE;
+    // Snapshot payloads carry a resolved clusterId per the multi-cluster
+    // rule; extract it from the active scope prefix.
     const payload: ClusterEventsSnapshotPayload = {
+      clusterId: parseClusterScope(activeScope).clusterId,
       events: this.clusterEvents,
     };
     const stats = this.buildStats(this.clusterEvents.length, totalItems, truncated, 'events');
@@ -686,7 +717,10 @@ export class EventStreamManager {
     truncated: boolean
   ): void {
     const events = this.namespaceEvents.get(scope) ?? [];
+    // Snapshot payloads carry a resolved clusterId per the multi-cluster
+    // rule; extract it from the scope prefix.
     const payload: NamespaceEventsSnapshotPayload = {
+      clusterId: parseClusterScope(scope).clusterId,
       events,
     };
     const stats = this.buildStats(events.length, totalItems, truncated, 'events');
@@ -774,16 +808,21 @@ function queueMicrotaskSafe(callback: () => void): void {
 
 type StreamEventItem = NonNullable<StreamEventPayload['events']>[number];
 
-function transformClusterEvent(event: StreamEventItem): ClusterEventEntry {
+function transformClusterEvent(
+  event: StreamEventItem,
+  fallbackClusterId: string
+): ClusterEventEntry {
   const timestamp = deriveEventTimestamp(event);
   const objectKind = event?.kind || 'Event';
   return {
     kind: 'Event',
     kindAlias: objectKind,
     // Preserve cluster metadata for multi-cluster filtering and object navigation.
-    clusterId: event?.clusterId,
+    clusterId: event?.clusterId ?? fallbackClusterId,
     clusterName: event?.clusterName,
     name: event?.name || '',
+    uid: event?.uid || '',
+    resourceVersion: event?.resourceVersion || '',
     namespace: event?.namespace || '',
     objectNamespace: event?.objectNamespace ?? '',
     type: event?.type || '-',
@@ -796,16 +835,21 @@ function transformClusterEvent(event: StreamEventItem): ClusterEventEntry {
   };
 }
 
-function transformNamespaceEvent(event: StreamEventItem): NamespaceEventSummary {
+function transformNamespaceEvent(
+  event: StreamEventItem,
+  fallbackClusterId: string
+): NamespaceEventSummary {
   const timestamp = deriveEventTimestamp(event);
   const objectKind = event?.kind || 'Event';
   return {
     kind: 'Event',
     kindAlias: objectKind,
     // Preserve cluster metadata for multi-cluster filtering and object navigation.
-    clusterId: event?.clusterId,
+    clusterId: event?.clusterId ?? fallbackClusterId,
     clusterName: event?.clusterName,
     name: event?.name || '',
+    uid: event?.uid || '',
+    resourceVersion: event?.resourceVersion || '',
     namespace: event?.namespace || '',
     objectNamespace: event?.objectNamespace ?? '',
     type: event?.type || '-',
@@ -824,25 +868,36 @@ function mergeEvents<T extends ClusterEventEntry | NamespaceEventSummary>(
   maxSize: number
 ): { items: T[]; total: number; truncated: boolean } {
   const map = new Map<string, T>();
-  let total = 0;
-  let truncated = false;
 
   const merged = [...incoming, ...existing];
   for (const item of merged) {
-    const key = sortKey(item);
+    const key = eventIdentityKey(item);
     if (map.has(key)) {
       continue;
     }
-    total++;
-    if (map.size < maxSize) {
-      map.set(key, item);
-    } else {
-      truncated = true;
-    }
+    map.set(key, item);
   }
 
+  const sorted = Array.from(map.values()).sort((a, b) => {
+    const aTimestamp = a.ageTimestamp ?? 0;
+    const bTimestamp = b.ageTimestamp ?? 0;
+    if (aTimestamp !== bTimestamp) {
+      return bTimestamp - aTimestamp;
+    }
+
+    const resourceVersionOrder = compareResourceVersion(b.resourceVersion, a.resourceVersion);
+    if (resourceVersionOrder !== 0) {
+      return resourceVersionOrder;
+    }
+
+    return eventIdentityKey(a).localeCompare(eventIdentityKey(b));
+  });
+
+  const total = sorted.length;
+  const truncated = total > maxSize;
+
   return {
-    items: Array.from(map.values()),
+    items: truncated ? sorted.slice(0, maxSize) : sorted,
     total,
     truncated,
   };
@@ -950,6 +1005,37 @@ function deriveFromExistingAge(age: string | undefined): number {
     return Date.now() - ageMs;
   }
   return Date.now();
+}
+
+function compareResourceVersion(left: string | undefined, right: string | undefined): number {
+  const leftValue = parseResourceVersion(left);
+  const rightValue = parseResourceVersion(right);
+  if (leftValue !== null && rightValue !== null) {
+    if (leftValue === rightValue) {
+      return 0;
+    }
+    return leftValue > rightValue ? 1 : -1;
+  }
+
+  const normalizedLeft = (left ?? '').trim();
+  const normalizedRight = (right ?? '').trim();
+  if (!normalizedLeft && !normalizedRight) {
+    return 0;
+  }
+  return normalizedLeft.localeCompare(normalizedRight, undefined, { numeric: true });
+}
+
+function parseResourceVersion(value: string | undefined): bigint | null {
+  const normalized = (value ?? '').trim();
+  if (!normalized || !/^[0-9]+$/.test(normalized)) {
+    return null;
+  }
+
+  try {
+    return BigInt(normalized);
+  } catch {
+    return null;
+  }
 }
 
 export const eventStreamManager = new EventStreamManager();

@@ -202,6 +202,90 @@ export namespace backend {
 	        this.protocol = source["protocol"];
 	    }
 	}
+	export class FavoriteTableState {
+	    sortColumn: string;
+	    sortDirection: string;
+	    columnVisibility: Record<string, boolean>;
+	
+	    static createFrom(source: any = {}) {
+	        return new FavoriteTableState(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.sortColumn = source["sortColumn"];
+	        this.sortDirection = source["sortDirection"];
+	        this.columnVisibility = source["columnVisibility"];
+	    }
+	}
+	export class FavoriteFilters {
+	    search: string;
+	    kinds: string[];
+	    namespaces: string[];
+	    caseSensitive: boolean;
+	    includeMetadata: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new FavoriteFilters(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.search = source["search"];
+	        this.kinds = source["kinds"];
+	        this.namespaces = source["namespaces"];
+	        this.caseSensitive = source["caseSensitive"];
+	        this.includeMetadata = source["includeMetadata"];
+	    }
+	}
+	export class Favorite {
+	    id: string;
+	    name: string;
+	    clusterSelection: string;
+	    viewType: string;
+	    view: string;
+	    namespace: string;
+	    filters?: FavoriteFilters;
+	    tableState?: FavoriteTableState;
+	    order: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new Favorite(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.clusterSelection = source["clusterSelection"];
+	        this.viewType = source["viewType"];
+	        this.view = source["view"];
+	        this.namespace = source["namespace"];
+	        this.filters = this.convertValues(source["filters"], FavoriteFilters);
+	        this.tableState = this.convertValues(source["tableState"], FavoriteTableState);
+	        this.order = source["order"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
+	
 	export class LogEntry {
 	    timestamp: string;
 	    level: string;
@@ -308,6 +392,26 @@ export namespace backend {
 	        this.startedAt = source["startedAt"];
 	    }
 	}
+	export class RevisionEntry {
+	    revision: number;
+	    createdAt: string;
+	    changeCause: string;
+	    current: boolean;
+	    podTemplate: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new RevisionEntry(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.revision = source["revision"];
+	        this.createdAt = source["createdAt"];
+	        this.changeCause = source["changeCause"];
+	        this.current = source["current"];
+	        this.podTemplate = source["podTemplate"];
+	    }
+	}
 	export class SelectionDiagnostics {
 	    activeQueueDepth: number;
 	    maxQueueDepth: number;
@@ -397,6 +501,8 @@ export namespace capabilities {
 	export class CheckRequest {
 	    id: string;
 	    clusterId?: string;
+	    group?: string;
+	    version?: string;
 	    verb: string;
 	    resourceKind: string;
 	    namespace?: string;
@@ -411,6 +517,8 @@ export namespace capabilities {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
 	        this.clusterId = source["clusterId"];
+	        this.group = source["group"];
+	        this.version = source["version"];
 	        this.verb = source["verb"];
 	        this.resourceKind = source["resourceKind"];
 	        this.namespace = source["namespace"];
@@ -421,6 +529,8 @@ export namespace capabilities {
 	export class CheckResult {
 	    id: string;
 	    clusterId?: string;
+	    group?: string;
+	    version?: string;
 	    verb: string;
 	    resourceKind: string;
 	    namespace?: string;
@@ -439,6 +549,8 @@ export namespace capabilities {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
 	        this.clusterId = source["clusterId"];
+	        this.group = source["group"];
+	        this.version = source["version"];
 	        this.verb = source["verb"];
 	        this.resourceKind = source["resourceKind"];
 	        this.namespace = source["namespace"];
@@ -449,6 +561,128 @@ export namespace capabilities {
 	        this.evaluationError = source["evaluationError"];
 	        this.error = source["error"];
 	    }
+	}
+	export class NamespaceDiagnostics {
+	    key: string;
+	    clusterId: string;
+	    namespace?: string;
+	    method: string;
+	    ssrrIncomplete: boolean;
+	    ssrrRuleCount: number;
+	    ssarFallbackCount: number;
+	    checkCount: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new NamespaceDiagnostics(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.key = source["key"];
+	        this.clusterId = source["clusterId"];
+	        this.namespace = source["namespace"];
+	        this.method = source["method"];
+	        this.ssrrIncomplete = source["ssrrIncomplete"];
+	        this.ssrrRuleCount = source["ssrrRuleCount"];
+	        this.ssarFallbackCount = source["ssarFallbackCount"];
+	        this.checkCount = source["checkCount"];
+	    }
+	}
+	export class PermissionQuery {
+	    id: string;
+	    clusterId: string;
+	    group?: string;
+	    version?: string;
+	    resourceKind: string;
+	    verb: string;
+	    namespace?: string;
+	    subresource?: string;
+	    name?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new PermissionQuery(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.clusterId = source["clusterId"];
+	        this.group = source["group"];
+	        this.version = source["version"];
+	        this.resourceKind = source["resourceKind"];
+	        this.verb = source["verb"];
+	        this.namespace = source["namespace"];
+	        this.subresource = source["subresource"];
+	        this.name = source["name"];
+	    }
+	}
+	export class PermissionResult {
+	    id: string;
+	    clusterId: string;
+	    group?: string;
+	    version?: string;
+	    resourceKind: string;
+	    verb: string;
+	    namespace?: string;
+	    subresource?: string;
+	    name?: string;
+	    allowed: boolean;
+	    source: string;
+	    reason?: string;
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new PermissionResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.clusterId = source["clusterId"];
+	        this.group = source["group"];
+	        this.version = source["version"];
+	        this.resourceKind = source["resourceKind"];
+	        this.verb = source["verb"];
+	        this.namespace = source["namespace"];
+	        this.subresource = source["subresource"];
+	        this.name = source["name"];
+	        this.allowed = source["allowed"];
+	        this.source = source["source"];
+	        this.reason = source["reason"];
+	        this.error = source["error"];
+	    }
+	}
+	export class QueryPermissionsResponse {
+	    results: PermissionResult[];
+	    diagnostics: NamespaceDiagnostics[];
+	
+	    static createFrom(source: any = {}) {
+	        return new QueryPermissionsResponse(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.results = this.convertValues(source["results"], PermissionResult);
+	        this.diagnostics = this.convertValues(source["diagnostics"], NamespaceDiagnostics);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 
 }
@@ -511,6 +745,13 @@ export namespace types {
 	    refreshBackgroundClustersEnabled: boolean;
 	    metricsRefreshIntervalMs: number;
 	    gridTablePersistenceMode: string;
+	    defaultObjectPanelPosition: string;
+	    objectPanelDockedRightWidth: number;
+	    objectPanelDockedBottomHeight: number;
+	    objectPanelFloatingWidth: number;
+	    objectPanelFloatingHeight: number;
+	    objectPanelFloatingX: number;
+	    objectPanelFloatingY: number;
 	    paletteHueLight: number;
 	    paletteSaturationLight: number;
 	    paletteBrightnessLight: number;
@@ -537,6 +778,13 @@ export namespace types {
 	        this.refreshBackgroundClustersEnabled = source["refreshBackgroundClustersEnabled"];
 	        this.metricsRefreshIntervalMs = source["metricsRefreshIntervalMs"];
 	        this.gridTablePersistenceMode = source["gridTablePersistenceMode"];
+	        this.defaultObjectPanelPosition = source["defaultObjectPanelPosition"];
+	        this.objectPanelDockedRightWidth = source["objectPanelDockedRightWidth"];
+	        this.objectPanelDockedBottomHeight = source["objectPanelDockedBottomHeight"];
+	        this.objectPanelFloatingWidth = source["objectPanelFloatingWidth"];
+	        this.objectPanelFloatingHeight = source["objectPanelFloatingHeight"];
+	        this.objectPanelFloatingX = source["objectPanelFloatingX"];
+	        this.objectPanelFloatingY = source["objectPanelFloatingY"];
 	        this.paletteHueLight = source["paletteHueLight"];
 	        this.paletteSaturationLight = source["paletteSaturationLight"];
 	        this.paletteBrightnessLight = source["paletteBrightnessLight"];
@@ -883,6 +1131,7 @@ export namespace types {
 	    memUsage: string;
 	    ownerKind: string;
 	    ownerName: string;
+	    ownerApiVersion?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new PodSimpleInfo(source);
@@ -905,6 +1154,7 @@ export namespace types {
 	        this.memUsage = source["memUsage"];
 	        this.ownerKind = source["ownerKind"];
 	        this.ownerName = source["ownerName"];
+	        this.ownerApiVersion = source["ownerApiVersion"];
 	    }
 	}
 	export class PodDetailInfoContainer {
@@ -1617,6 +1867,7 @@ export namespace types {
 	
 	export class HelmResource {
 	    kind: string;
+	    apiVersion?: string;
 	    name: string;
 	    namespace: string;
 	
@@ -1627,6 +1878,7 @@ export namespace types {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.kind = source["kind"];
+	        this.apiVersion = source["apiVersion"];
 	        this.name = source["name"];
 	        this.namespace = source["namespace"];
 	    }
@@ -3030,6 +3282,7 @@ export namespace types {
 	    memUsage: string;
 	    ownerKind: string;
 	    ownerName: string;
+	    ownerApiVersion?: string;
 	    node: string;
 	    nodeIP?: string;
 	    podIP?: string;
@@ -3074,6 +3327,7 @@ export namespace types {
 	        this.memUsage = source["memUsage"];
 	        this.ownerKind = source["ownerKind"];
 	        this.ownerName = source["ownerName"];
+	        this.ownerApiVersion = source["ownerApiVersion"];
 	        this.node = source["node"];
 	        this.nodeIP = source["nodeIP"];
 	        this.podIP = source["podIP"];

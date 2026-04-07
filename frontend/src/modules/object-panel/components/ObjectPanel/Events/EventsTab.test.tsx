@@ -19,8 +19,29 @@ vi.mock('@modules/object-panel/hooks/useObjectPanel', () => ({
   }),
 }));
 
+vi.mock('@shared/hooks/useNavigateToView', () => ({
+  useNavigateToView: () => ({ navigateToView: vi.fn() }),
+}));
+
 vi.mock('@/core/refresh/clusterScope', () => ({
   buildClusterScope: (_clusterId: string | undefined, scope: string) => `scoped:${scope}`,
+  // Minimal stub matching the real signature. Tests that care about the
+  // GVK form assert on the scope string they get back; the legacy
+  // kind-only tests are agnostic.
+  buildObjectScope: (args: {
+    namespace: string;
+    group?: string | null;
+    version?: string | null;
+    kind: string;
+    name: string;
+  }) => {
+    const version = (args.version ?? '').trim();
+    if (!version) {
+      return `${args.namespace}:${args.kind}:${args.name}`;
+    }
+    const group = (args.group ?? '').trim();
+    return `${args.namespace}:${group}/${version}:${args.kind}:${args.name}`;
+  },
 }));
 
 const hoistedSnapshot = vi.hoisted(() => ({
@@ -72,6 +93,7 @@ const EVENT_CLUSTER_NAME = 'Event Cluster';
 /** Build a minimal ObjectEventSummary for testing. */
 function makeEvent(overrides: Partial<ObjectEventSummary> = {}): ObjectEventSummary {
   return {
+    clusterId: PARENT_CLUSTER_ID,
     kind: 'Event',
     eventType: 'Normal',
     reason: 'Created',
@@ -134,7 +156,13 @@ describe('EventsTab', () => {
     hoistedSnapshot.status = 'ready';
 
     act(() => {
-      root.render(<EventsTab objectData={parentObjectData} isActive={true} />);
+      root.render(
+        <EventsTab
+          objectData={parentObjectData}
+          isActive={true}
+          eventsScope="parent-cluster|default:Deployment:my-deploy"
+        />
+      );
     });
 
     const row = container.querySelector('[data-testid="row-0"]') as HTMLButtonElement;
@@ -153,7 +181,13 @@ describe('EventsTab', () => {
     hoistedSnapshot.status = 'ready';
 
     act(() => {
-      root.render(<EventsTab objectData={parentObjectData} isActive={true} />);
+      root.render(
+        <EventsTab
+          objectData={parentObjectData}
+          isActive={true}
+          eventsScope="parent-cluster|default:Deployment:my-deploy"
+        />
+      );
     });
 
     expect(refreshWatcherState.onRefresh).toBeTruthy();
@@ -185,7 +219,13 @@ describe('EventsTab', () => {
     hoistedSnapshot.status = 'ready';
 
     act(() => {
-      root.render(<EventsTab objectData={parentObjectData} isActive={true} />);
+      root.render(
+        <EventsTab
+          objectData={parentObjectData}
+          isActive={true}
+          eventsScope="parent-cluster|default:Deployment:my-deploy"
+        />
+      );
     });
 
     const row = container.querySelector('[data-testid="row-0"]') as HTMLButtonElement;
@@ -197,5 +237,80 @@ describe('EventsTab', () => {
     const call = mockOpenWithObject.mock.calls[0][0];
     expect(call.clusterId).toBe(PARENT_CLUSTER_ID);
     expect(call.clusterName).toBe(PARENT_CLUSTER_NAME);
+  });
+
+  it('threads the event involvedObject GVK to openWithObject so colliding kinds are disambiguated', () => {
+    // Two different CRDs both define the kind "DBInstance". Without
+    // group/version on the openWithObject reference, the panel cannot
+    // tell them apart and the backend's legacy kind-only resolver picks
+    // whichever one came first in discovery — which is exactly the
+    // kind-only-objects bug.
+    hoistedSnapshot.data = {
+      events: [
+        makeEvent({
+          involvedObjectKind: 'DBInstance',
+          involvedObjectName: 'orders-db',
+          involvedObjectNamespace: 'team-a',
+          involvedObjectApiVersion: 'documentdb.services.k8s.aws/v1alpha1',
+          clusterId: EVENT_CLUSTER_ID,
+        }),
+      ],
+    };
+    hoistedSnapshot.status = 'ready';
+
+    act(() => {
+      root.render(
+        <EventsTab
+          objectData={parentObjectData}
+          isActive={true}
+          eventsScope="parent-cluster|default:Deployment:my-deploy"
+        />
+      );
+    });
+
+    const row = container.querySelector('[data-testid="row-0"]') as HTMLButtonElement;
+    expect(row).toBeTruthy();
+
+    act(() => row.click());
+
+    expect(mockOpenWithObject).toHaveBeenCalledTimes(1);
+    const call = mockOpenWithObject.mock.calls[0][0];
+    expect(call.kind).toBe('DBInstance');
+    expect(call.name).toBe('orders-db');
+    expect(call.namespace).toBe('team-a');
+    expect(call.group).toBe('documentdb.services.k8s.aws');
+    expect(call.version).toBe('v1alpha1');
+  });
+
+  it('parses core/v1 involvedObject apiVersion into an empty group + v1 version', () => {
+    hoistedSnapshot.data = {
+      events: [
+        makeEvent({
+          involvedObjectKind: 'Pod',
+          involvedObjectName: 'web-0',
+          involvedObjectNamespace: 'default',
+          involvedObjectApiVersion: 'v1',
+        }),
+      ],
+    };
+    hoistedSnapshot.status = 'ready';
+
+    act(() => {
+      root.render(
+        <EventsTab
+          objectData={parentObjectData}
+          isActive={true}
+          eventsScope="parent-cluster|default:Deployment:my-deploy"
+        />
+      );
+    });
+
+    const row = container.querySelector('[data-testid="row-0"]') as HTMLButtonElement;
+    act(() => row.click());
+
+    expect(mockOpenWithObject).toHaveBeenCalledTimes(1);
+    const call = mockOpenWithObject.mock.calls[0][0];
+    expect(call.group).toBe('');
+    expect(call.version).toBe('v1');
   });
 });

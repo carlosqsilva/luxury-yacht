@@ -19,6 +19,7 @@ import {
 } from '@shared/components/tables/columnFactories';
 import { useTableSort } from '@hooks/useTableSort';
 import { useNavigateToView } from '@shared/hooks/useNavigateToView';
+import { useObjectLink } from '@shared/hooks/useObjectLink';
 import { useObjectPanel } from '@modules/object-panel/hooks/useObjectPanel';
 import { getPodStatusSeverity } from '@utils/podStatusSeverity';
 import ResourceLoadingBoundary from '@shared/components/ResourceLoadingBoundary';
@@ -29,6 +30,7 @@ import { useViewState } from '@core/contexts/ViewStateContext';
 import { useNamespace } from '@modules/namespace/contexts/NamespaceContext';
 import '../shared.css';
 import { buildObjectActionItems } from '@shared/hooks/useObjectActions';
+import { resolveBuiltinGroupVersion } from '@shared/constants/builtinGroupVersions';
 
 interface PodsTabProps {
   pods: PodSnapshotEntry[];
@@ -58,6 +60,7 @@ const workloadNameFromOwner = (pod: PodSnapshotEntry) =>
 export const PodsTab: React.FC<PodsTabProps> = ({ pods, metrics, loading, error, isActive }) => {
   const { openWithObject, objectData } = useObjectPanel();
   const { navigateToView } = useNavigateToView();
+  const objectLink = useObjectLink();
   const viewState = useViewState();
   const namespaceContext = useNamespace();
 
@@ -105,6 +108,7 @@ export const PodsTab: React.FC<PodsTabProps> = ({ pods, metrics, loading, error,
             kind: 'Pod',
             name: pod.name,
             namespace: pod.namespace,
+            ...resolveBuiltinGroupVersion('Pod'),
             ...getPodClusterMeta(pod),
           }),
         onAltClick: (pod) =>
@@ -123,6 +127,7 @@ export const PodsTab: React.FC<PodsTabProps> = ({ pods, metrics, loading, error,
             kind: 'Pod',
             name: pod.name,
             namespace: pod.namespace,
+            ...resolveBuiltinGroupVersion('Pod'),
             ...getPodClusterMeta(pod),
           }),
         onAltClick: (pod) =>
@@ -151,27 +156,29 @@ export const PodsTab: React.FC<PodsTabProps> = ({ pods, metrics, loading, error,
         getClassName: (pod) => getRestartsClassName(pod),
       }),
       createTextColumn<PodSnapshotEntry>('owner', 'Owner', (pod) => workloadNameFromOwner(pod), {
-        onClick: (pod) =>
+        ...objectLink((pod) =>
           pod.ownerKind && pod.ownerName
-            ? openWithObject({
+            ? {
                 kind: pod.ownerKind,
                 name: pod.ownerName,
                 namespace: pod.namespace,
                 ...getPodClusterMeta(pod),
-              })
-            : undefined,
+              }
+            : undefined
+        ),
         isInteractive: (pod) => Boolean(pod.ownerKind && pod.ownerName),
         getClassName: (pod) => (pod.ownerKind && pod.ownerName ? 'object-panel-link' : undefined),
       }),
       createTextColumn<PodSnapshotEntry>('node', 'Node', (pod) => pod.node || '—', {
-        onClick: (pod) =>
+        ...objectLink((pod) =>
           pod.node
-            ? openWithObject({
+            ? {
                 kind: 'Node',
                 name: pod.node,
                 ...getPodClusterMeta(pod),
-              })
-            : undefined,
+              }
+            : undefined
+        ),
         isInteractive: (pod) => Boolean(pod.node),
         getClassName: (pod) => (pod.node ? 'object-panel-link' : undefined),
       }),
@@ -228,6 +235,7 @@ export const PodsTab: React.FC<PodsTabProps> = ({ pods, metrics, loading, error,
     metrics?.stale,
     metricsLastUpdated,
     navigateToView,
+    objectLink,
     getPodClusterMeta,
     openWithObject,
   ]);
@@ -245,7 +253,12 @@ export const PodsTab: React.FC<PodsTabProps> = ({ pods, metrics, loading, error,
   } = useGridTablePersistence<PodSnapshotEntry>({
     viewId: 'object-panel-pods',
     // Use the panel-scoped cluster ID, not the global sidebar selection.
+    // Multi-cluster rule (AGENTS.md): persistence is keyed per cluster
+    // so column widths/sort don't bleed between clusters. Disable
+    // persistence when clusterId is missing rather than falling through
+    // to a global storage bucket.
     clusterIdentity: objectData?.clusterId ?? '',
+    enabled: Boolean(objectData?.clusterId),
     namespace: null,
     isNamespaceScoped: false,
     columns,
@@ -295,6 +308,7 @@ export const PodsTab: React.FC<PodsTabProps> = ({ pods, metrics, loading, error,
                 kind: 'Pod',
                 name: pod.name,
                 namespace: pod.namespace,
+                ...resolveBuiltinGroupVersion('Pod'),
                 ...getPodClusterMeta(pod),
               })
             }
@@ -314,6 +328,7 @@ export const PodsTab: React.FC<PodsTabProps> = ({ pods, metrics, loading, error,
                       kind: 'Pod',
                       name: pod.name,
                       namespace: pod.namespace,
+                      ...resolveBuiltinGroupVersion('Pod'),
                       ...getPodClusterMeta(pod),
                     }),
                 },
