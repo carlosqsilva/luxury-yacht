@@ -86,12 +86,20 @@ export function DeleteTheme(arg1) {
   return window['go']['backend']['App']['DeleteTheme'](arg1);
 }
 
+export function DiscoverNodeLogs(arg1, arg2) {
+  return window['go']['backend']['App']['DiscoverNodeLogs'](arg1, arg2);
+}
+
 export function DrainNode(arg1, arg2, arg3) {
   return window['go']['backend']['App']['DrainNode'](arg1, arg2, arg3);
 }
 
 export function EvaluateCapabilities(arg1) {
   return window['go']['backend']['App']['EvaluateCapabilities'](arg1);
+}
+
+export function FetchNodeLogs(arg1, arg2, arg3) {
+  return window['go']['backend']['App']['FetchNodeLogs'](arg1, arg2, arg3);
 }
 
 export function ForceDeleteNode(arg1, arg2) {
@@ -212,6 +220,10 @@ export function GetKubeconfigs() {
 
 export function GetLimitRange(arg1, arg2, arg3) {
   return window['go']['backend']['App']['GetLimitRange'](arg1, arg2, arg3);
+}
+
+export function GetLogScopeContainers(arg1, arg2) {
+  return window['go']['backend']['App']['GetLogScopeContainers'](arg1, arg2);
 }
 
 export function GetLogs() {
@@ -468,6 +480,26 @@ export function SetKubeconfigSearchPaths(arg1) {
 
 export function SetLinkColor(arg1, arg2) {
   return window['go']['backend']['App']['SetLinkColor'](arg1, arg2);
+}
+
+export function SetLogAPITimestampFormat(arg1) {
+  return window['go']['backend']['App']['SetLogAPITimestampFormat'](arg1);
+}
+
+export function SetLogAPITimestampUseLocalTimeZone(arg1) {
+  return window['go']['backend']['App']['SetLogAPITimestampUseLocalTimeZone'](arg1);
+}
+
+export function SetLogBufferMaxSize(arg1) {
+  return window['go']['backend']['App']['SetLogBufferMaxSize'](arg1);
+}
+
+export function SetLogTargetGlobalLimit(arg1) {
+  return window['go']['backend']['App']['SetLogTargetGlobalLimit'](arg1);
+}
+
+export function SetLogTargetPerScopeLimit(arg1) {
+  return window['go']['backend']['App']['SetLogTargetPerScopeLimit'](arg1);
 }
 
 export function SetLogsPanelVisible(arg1) {

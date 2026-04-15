@@ -35,6 +35,11 @@ type AppSettings struct {
 	AutoRefreshEnabled                bool     `json:"autoRefreshEnabled"`                // Enable automatic refresh cycles
 	RefreshBackgroundClustersEnabled  bool     `json:"refreshBackgroundClustersEnabled"`  // Refresh inactive clusters in the background
 	MetricsRefreshIntervalMs          int      `json:"metricsRefreshIntervalMs"`          // Metrics refresh interval (ms)
+	LogBufferMaxSize                  int      `json:"logBufferMaxSize"`                  // Max log entries kept in memory per Logs tab (100-10000)
+	LogTargetPerScopeLimit            int      `json:"logTargetPerScopeLimit"`            // Max pod/container log targets per Logs tab (1-1000)
+	LogTargetGlobalLimit              int      `json:"logTargetGlobalLimit"`              // Max pod/container log targets across all log tabs (1-1000)
+	LogAPITimestampFormat             string   `json:"logApiTimestampFormat"`             // Day.js format for the Kubernetes API timestamp shown in pod logs
+	LogAPITimestampUseLocalTimeZone   bool     `json:"logApiTimestampUseLocalTimeZone"`   // Render the Kubernetes API timestamp in the user's local timezone instead of UTC
 	GridTablePersistenceMode          string   `json:"gridTablePersistenceMode"`          // "shared" or "namespaced"
 	DefaultObjectPanelPosition        string   `json:"defaultObjectPanelPosition"`        // "right", "bottom", or "floating"
 	ObjectPanelDockedRightWidth       int      `json:"objectPanelDockedRightWidth"`       // Default width when docked right (px)
@@ -86,29 +91,72 @@ type Theme struct {
 
 // PodLogEntry represents a single log line with metadata
 type PodLogEntry struct {
-	Timestamp string `json:"timestamp"` // RFC3339Nano format
-	Pod       string `json:"pod"`
-	Container string `json:"container"`
-	Line      string `json:"line"`
-	IsInit    bool   `json:"isInit"` // Whether this is from an init container
+	Timestamp   string `json:"timestamp"` // RFC3339Nano format
+	Pod         string `json:"pod"`
+	Container   string `json:"container"`
+	Line        string `json:"line"`
+	IsInit      bool   `json:"isInit"`                // Whether this is from an init container
+	IsEphemeral bool   `json:"isEphemeral,omitempty"` // Whether this is from an ephemeral/debug container
 }
 
 // LogFetchRequest represents parameters for fetching logs
 type LogFetchRequest struct {
-	Namespace    string `json:"namespace"`
-	WorkloadName string `json:"workloadName,omitempty"`
-	WorkloadKind string `json:"workloadKind,omitempty"` // deployment, daemonset, etc.
-	PodName      string `json:"podName,omitempty"`
-	Container    string `json:"container,omitempty"` // empty means all containers
-	Previous     bool   `json:"previous"`
-	TailLines    int    `json:"tailLines"`
-	SinceSeconds int64  `json:"sinceSeconds,omitempty"`
+	Scope            string   `json:"scope,omitempty"`
+	Namespace        string   `json:"namespace"`
+	WorkloadName     string   `json:"workloadName,omitempty"`
+	WorkloadKind     string   `json:"workloadKind,omitempty"` // deployment, daemonset, etc.
+	PodName          string   `json:"podName,omitempty"`
+	PodFilter        string   `json:"podFilter,omitempty"`
+	PodInclude       string   `json:"podInclude,omitempty"`
+	PodExclude       string   `json:"podExclude,omitempty"`
+	SelectedFilters  []string `json:"selectedFilters,omitempty"`
+	Container        string   `json:"container,omitempty"` // empty means all containers
+	IncludeInit      *bool    `json:"includeInit,omitempty"`
+	IncludeEphemeral *bool    `json:"includeEphemeral,omitempty"`
+	ContainerState   string   `json:"containerState,omitempty"`
+	Include          string   `json:"include,omitempty"`
+	Exclude          string   `json:"exclude,omitempty"`
+	Previous         bool     `json:"previous"`
+	TailLines        int      `json:"tailLines"`
+	SinceSeconds     int64    `json:"sinceSeconds,omitempty"`
 }
 
 // LogFetchResponse represents the response from LogFetcher
 type LogFetchResponse struct {
-	Entries []PodLogEntry `json:"entries"`
-	Error   string        `json:"error,omitempty"`
+	Entries  []PodLogEntry `json:"entries"`
+	Warnings []string      `json:"warnings,omitempty"`
+	Error    string        `json:"error,omitempty"`
+}
+
+// NodeLogSource represents a discovered node log source that can be fetched directly.
+type NodeLogSource struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+	Kind  string `json:"kind"`
+	Path  string `json:"path"`
+}
+
+// NodeLogDiscoveryResponse describes whether node logs are usable and which sources are available.
+type NodeLogDiscoveryResponse struct {
+	Supported bool            `json:"supported"`
+	Sources   []NodeLogSource `json:"sources,omitempty"`
+	Reason    string          `json:"reason,omitempty"`
+}
+
+// NodeLogFetchRequest selects a discovered node log source to fetch.
+type NodeLogFetchRequest struct {
+	SourcePath string `json:"sourcePath"`
+	SinceTime  string `json:"sinceTime,omitempty"`
+	TailBytes  int    `json:"tailBytes,omitempty"`
+}
+
+// NodeLogFetchResponse contains raw node log content for a selected source.
+type NodeLogFetchResponse struct {
+	Content    string        `json:"content,omitempty"`
+	Source     NodeLogSource `json:"source"`
+	Error      string        `json:"error,omitempty"`
+	SourcePath string        `json:"sourcePath,omitempty"`
+	Truncated  bool          `json:"truncated,omitempty"`
 }
 
 // ShellSessionRequest describes the namespace/pod/container to exec into.

@@ -87,8 +87,13 @@ const mockNamespaceState: { selectedNamespace: string | null } = {
 };
 
 vi.mock('@ui/dockable', () => ({
-  DockablePanel: ({ children }: { children: React.ReactNode }) =>
-    React.createElement(React.Fragment, null, children),
+  DockablePanel: ({
+    children,
+    panelRef,
+  }: {
+    children: React.ReactNode;
+    panelRef?: React.Ref<HTMLDivElement>;
+  }) => React.createElement('div', { ref: panelRef }, children),
 }));
 
 const domainStateMap: Record<string, DomainSnapshotState<any>> = {};
@@ -206,11 +211,13 @@ const flushAsync = async () => {
 
 const renderDiagnosticsPanel = async (
   DiagnosticsPanelComponent: React.ComponentType<any>,
-  props: Partial<{ isOpen: boolean; onClose: () => void }> = {}
+  props: Partial<{ isOpen: boolean; onClose: () => void }> = {},
+  options: { keyboardDisabled?: boolean } = {}
 ) => {
   const host = document.createElement('div');
   document.body.appendChild(host);
   const root = ReactDOM.createRoot(host);
+  const keyboardDisabled = options.keyboardDisabled ?? true;
   let currentProps = {
     isOpen: true,
     onClose: () => undefined,
@@ -220,7 +227,7 @@ const renderDiagnosticsPanel = async (
   await act(async () => {
     root.render(
       React.createElement(KeyboardProvider, {
-        disabled: true,
+        disabled: keyboardDisabled,
         children: React.createElement(DiagnosticsPanelComponent, currentProps),
       })
     );
@@ -234,7 +241,7 @@ const renderDiagnosticsPanel = async (
       await act(async () => {
         root.render(
           React.createElement(KeyboardProvider, {
-            disabled: true,
+            disabled: keyboardDisabled,
             children: React.createElement(DiagnosticsPanelComponent, currentProps),
           })
         );
@@ -766,6 +773,7 @@ describe('DiagnosticsPanel component', () => {
           activeSessions: 2,
           totalMessages: 12,
           droppedMessages: 1,
+          skippedTargets: 0,
           errorCount: 0,
           lastConnect: now - 6000,
           lastEvent: now - 3000,
@@ -775,6 +783,7 @@ describe('DiagnosticsPanel component', () => {
           activeSessions: 1,
           totalMessages: 15,
           droppedMessages: 0,
+          skippedTargets: 0,
           errorCount: 0,
           lastConnect: now - 4000,
           lastEvent: now - 1500,
@@ -784,6 +793,7 @@ describe('DiagnosticsPanel component', () => {
           activeSessions: 3,
           totalMessages: 20,
           droppedMessages: 4,
+          skippedTargets: 0,
           errorCount: 1,
           lastConnect: now - 7000,
           lastEvent: now - 2000,
@@ -794,9 +804,11 @@ describe('DiagnosticsPanel component', () => {
           activeSessions: 1,
           totalMessages: 9,
           droppedMessages: 2,
+          skippedTargets: 5,
           errorCount: 0,
           lastConnect: now - 8000,
           lastEvent: now - 1000,
+          lastSkipReason: 'per-scope target cap',
         },
       ],
     };
@@ -897,8 +909,9 @@ describe('DiagnosticsPanel component', () => {
     expect(logPrimary?.textContent).toContain('Scopes: 2');
     expect(logPrimary?.textContent).toContain('Sessions: 1');
     expect(logPrimary?.textContent).toContain('Delivered: 9');
+    expect(logPrimary?.textContent).toContain('Skipped Targets: 5');
 
-    const tabButtons = rendered.container.querySelectorAll<HTMLButtonElement>('.tab-item');
+    const tabButtons = rendered.container.querySelectorAll<HTMLElement>('[role="tab"]');
     await act(async () => {
       tabButtons[1].click();
       await Promise.resolve();
@@ -954,6 +967,7 @@ describe('DiagnosticsPanel component', () => {
           activeSessions: 1,
           totalMessages: 5,
           droppedMessages: 1,
+          skippedTargets: 0,
           errorCount: 0,
           lastConnect: now - 4000,
           lastEvent: now - 1500,
@@ -1031,6 +1045,7 @@ describe('DiagnosticsPanel component', () => {
           activeSessions: 1,
           totalMessages: 5,
           droppedMessages: 0,
+          skippedTargets: 0,
           errorCount: 0,
           lastConnect: now - 1000,
           lastEvent: now - 500,
@@ -1040,6 +1055,7 @@ describe('DiagnosticsPanel component', () => {
           activeSessions: 2,
           totalMessages: 10,
           droppedMessages: 1,
+          skippedTargets: 0,
           errorCount: 0,
           lastConnect: now - 1200,
           lastEvent: now - 700,
@@ -1053,7 +1069,7 @@ describe('DiagnosticsPanel component', () => {
     await flushAsync();
     await flushAsync();
 
-    const tabButtons = rendered.container.querySelectorAll<HTMLButtonElement>('.tab-item');
+    const tabButtons = rendered.container.querySelectorAll<HTMLElement>('[role="tab"]');
     await act(async () => {
       tabButtons[1].click();
       await Promise.resolve();
@@ -1270,7 +1286,7 @@ describe('DiagnosticsPanel component', () => {
       await Promise.resolve();
     });
 
-    const tabButtons = rendered.container.querySelectorAll<HTMLButtonElement>('.tab-item');
+    const tabButtons = rendered.container.querySelectorAll<HTMLElement>('[role="tab"]');
     await act(async () => {
       // Skip the new streams tab to reach capability checks.
       tabButtons[2].click();
@@ -1339,6 +1355,62 @@ describe('DiagnosticsPanel component', () => {
     expect(Array.from(allRows).some((row) => row.textContent?.includes('Cluster RBAC'))).toBe(true);
     expect(Array.from(allRows).some((row) => row.textContent?.includes('kube-system'))).toBe(true);
 
+    await rendered.unmount();
+  });
+
+  test('each tab carries data-diagnostics-focusable="true" for the focus walker', async () => {
+    // The focus walker at DiagnosticsPanel.tsx:~2067 queries
+    // '[data-diagnostics-focusable="true"]' to drive Escape/Arrow navigation.
+    // If extraProps stops being forwarded through the shared Tabs component,
+    // the attribute silently disappears and keyboard nav breaks. This test
+    // guards that regression.
+    const { DiagnosticsPanel } = await import('./DiagnosticsPanel');
+    const rendered = await renderDiagnosticsPanel(DiagnosticsPanel, { isOpen: true });
+    await flushAsync();
+
+    const focusableEls = rendered.container.querySelectorAll('[data-diagnostics-focusable="true"]');
+    // Expect exactly four focusable tab elements (one per tab descriptor).
+    expect(focusableEls.length).toBe(4);
+    // Each should also carry role="tab" — confirming they are the tab divs.
+    for (const el of Array.from(focusableEls)) {
+      expect(el.getAttribute('role')).toBe('tab');
+    }
+
+    await rendered.unmount();
+  });
+
+  test('tabs into the first diagnostics tab when the panel is open', async () => {
+    const { DiagnosticsPanel } = await import('./DiagnosticsPanel');
+    const rendered = await renderDiagnosticsPanel(
+      DiagnosticsPanel,
+      { isOpen: true },
+      { keyboardDisabled: false }
+    );
+    await flushAsync();
+
+    const outsideButton = document.createElement('button');
+    document.body.appendChild(outsideButton);
+    outsideButton.focus();
+    expect(document.activeElement).toBe(outsideButton);
+
+    await act(async () => {
+      outsideButton.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Tab',
+          bubbles: true,
+          cancelable: true,
+        })
+      );
+      await Promise.resolve();
+    });
+
+    const focusableEls = rendered.container.querySelectorAll<HTMLElement>(
+      '[data-diagnostics-focusable="true"]'
+    );
+    expect(focusableEls.length).toBeGreaterThan(0);
+    expect(document.activeElement).toBe(focusableEls[0]);
+
+    outsideButton.remove();
     await rendered.unmount();
   });
 });

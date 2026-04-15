@@ -31,10 +31,12 @@ describe('useObjectPanelTabs', () => {
   let root: ReactDOM.Root;
   const resultRef: { current: ReturnType<typeof useObjectPanelTabs> | null } = { current: null };
   const dispatchMock = vi.fn();
+  const setActiveTabMock = vi.fn();
   const closeMock = vi.fn();
 
   const baseCapabilities: ComputedCapabilities = {
     hasLogs: true,
+    hasNodeLogs: false,
     hasShell: false,
     hasManifest: false,
     hasValues: false,
@@ -61,6 +63,7 @@ describe('useObjectPanelTabs', () => {
       isHelmRelease: false,
       isEvent: false,
       isOpen: true,
+      setActiveTab: setActiveTabMock,
       dispatch: dispatchMock as React.Dispatch<PanelAction>,
       close: closeMock,
       currentTab: 'details' as ViewType,
@@ -90,6 +93,7 @@ describe('useObjectPanelTabs', () => {
     root = ReactDOM.createRoot(container);
     resultRef.current = null;
     dispatchMock.mockClear();
+    setActiveTabMock.mockClear();
     closeMock.mockClear();
     hoistedShortcuts.useShortcut.mockClear();
     hoistedShortcuts.useShortcuts.mockClear();
@@ -150,6 +154,21 @@ describe('useObjectPanelTabs', () => {
   it('adds the Maintenance tab for node objects', async () => {
     const { availableTabs } = await renderHook({
       objectData: { kind: 'Node', name: 'node-1' },
+      capabilities: { ...baseCapabilities, hasLogs: false },
+    });
+    expect(availableTabs.map((tab) => tab.label)).toEqual([
+      'Details',
+      'Pods',
+      'Events',
+      'YAML',
+      'Maintenance',
+    ]);
+  });
+
+  it('uses the Logs tab for node objects rather than a separate node logs tab', async () => {
+    const { availableTabs } = await renderHook({
+      objectData: { kind: 'Node', name: 'node-1' },
+      capabilities: { ...baseCapabilities, hasLogs: true, hasNodeLogs: false },
     });
     expect(availableTabs.map((tab) => tab.label)).toEqual([
       'Details',
@@ -166,7 +185,7 @@ describe('useObjectPanelTabs', () => {
       currentTab: 'logs',
       capabilities: { ...baseCapabilities, hasLogs: false },
     });
-    expect(dispatchMock).toHaveBeenCalledWith({ type: 'SET_ACTIVE_TAB', payload: 'details' });
+    expect(setActiveTabMock).toHaveBeenCalledWith('details');
   });
 
   it('registers position-based shortcut keys matching visible tab order', async () => {
@@ -246,7 +265,7 @@ describe('useObjectPanelTabs', () => {
       | undefined;
     expect(tabShortcuts?.[0]?.enabled).toBe(false);
     expect(tabShortcuts?.[0]?.handler()).toBe(false);
-    expect(dispatchMock).not.toHaveBeenCalled();
+    expect(setActiveTabMock).not.toHaveBeenCalled();
   });
 
   it('fires tab change shortcuts matching visible tab positions', async () => {
@@ -258,14 +277,14 @@ describe('useObjectPanelTabs', () => {
 
     // Key '1' → Details (first visible tab).
     expect(tabShortcuts?.[0]?.handler()).toBe(true);
-    expect(dispatchMock).toHaveBeenCalledWith({ type: 'SET_ACTIVE_TAB', payload: 'details' });
+    expect(setActiveTabMock).toHaveBeenCalledWith('details');
 
     // Key '3' → Logs (third visible tab for Deployment: Details, Pods, Logs).
     expect(tabShortcuts?.[2]?.handler()).toBe(true);
-    expect(dispatchMock).toHaveBeenCalledWith({ type: 'SET_ACTIVE_TAB', payload: 'logs' });
+    expect(setActiveTabMock).toHaveBeenCalledWith('logs');
 
     // Key '4' → Events (fourth visible tab).
     expect(tabShortcuts?.[3]?.handler()).toBe(true);
-    expect(dispatchMock).toHaveBeenCalledWith({ type: 'SET_ACTIVE_TAB', payload: 'events' });
+    expect(setActiveTabMock).toHaveBeenCalledWith('events');
   });
 });

@@ -648,6 +648,7 @@ export interface ObjectLogEntry {
   container: string;
   line: string;
   isInit: boolean;
+  isEphemeral?: boolean;
   /** Monotonically increasing sequence ID assigned by the frontend for stable rendering keys. */
   _seq?: number;
 }
@@ -754,10 +755,12 @@ export interface TelemetryStreamStatus {
   activeSessions: number;
   totalMessages: number;
   droppedMessages: number;
+  skippedTargets: number;
   errorCount: number;
   lastConnect: number;
   lastEvent: number;
   lastError?: string;
+  lastSkipReason?: string;
 }
 
 export interface TelemetrySummary {

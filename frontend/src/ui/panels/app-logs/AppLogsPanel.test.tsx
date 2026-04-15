@@ -9,26 +9,25 @@ import ReactDOM from 'react-dom/client';
 import { act } from 'react';
 import { afterEach, afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const panelStateMock = vi.hoisted(() => ({
-  isOpen: true,
-  setOpen: vi.fn(),
-}));
-
 const getLogsMock = vi.hoisted(() => vi.fn());
 const clearLogsMock = vi.hoisted(() => vi.fn());
 const setLogsPanelVisibleMock = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 const useShortcutMock = vi.hoisted(() => vi.fn());
-const useKeyboardNavigationScopeMock = vi.hoisted(() => vi.fn());
+const useKeyboardSurfaceMock = vi.hoisted(() => vi.fn());
 const errorHandlerMock = vi.hoisted(() => ({ handle: vi.fn() }));
 const dropdownInstances = vi.hoisted(() => [] as Array<any>);
 
+// AppLogsPanel no longer calls useDockablePanelState — its open/close
+// state is now driven by props from AppLayout (which reads from
+// ModalStateContext). DockablePanel itself is mocked here as a
+// transparent container so the tests can inspect the rendered children
+// directly without exercising the dockable layout system.
 vi.mock('@ui/dockable', () => ({
-  DockablePanel: ({ children }: any) => (
-    <div data-testid="dockable-panel">
+  DockablePanel: ({ children, panelRef }: any) => (
+    <div data-testid="dockable-panel" ref={panelRef}>
       <div data-testid="body">{children}</div>
     </div>
   ),
-  useDockablePanelState: () => panelStateMock,
 }));
 
 vi.mock('@shared/components/dropdowns/Dropdown', () => ({
@@ -45,7 +44,7 @@ vi.mock('@shared/components/LoadingSpinner', () => ({
 vi.mock('@ui/shortcuts', () => ({
   useShortcut: useShortcutMock,
   useSearchShortcutTarget: () => undefined,
-  useKeyboardNavigationScope: (...args: unknown[]) => useKeyboardNavigationScopeMock(...args),
+  useKeyboardSurface: (...args: unknown[]) => useKeyboardSurfaceMock(...(args as [unknown])),
 }));
 
 vi.mock('@wailsjs/go/backend/App', () => ({
@@ -60,22 +59,24 @@ vi.mock('@utils/errorHandler', () => ({
 
 import AppLogsPanel from './AppLogsPanel';
 
-const renderPanel = async () => {
+const renderPanel = async (initialIsOpen = true) => {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = ReactDOM.createRoot(container);
+  const onCloseMock = vi.fn();
 
   await act(async () => {
-    root.render(<AppLogsPanel />);
+    root.render(<AppLogsPanel isOpen={initialIsOpen} onClose={onCloseMock} />);
     await Promise.resolve();
   });
 
   return {
     container,
     root,
-    rerender: async () => {
+    onCloseMock,
+    rerender: async (nextIsOpen = true) => {
       await act(async () => {
-        root.render(<AppLogsPanel />);
+        root.render(<AppLogsPanel isOpen={nextIsOpen} onClose={onCloseMock} />);
         await Promise.resolve();
       });
     },
@@ -101,10 +102,8 @@ const setInputValue = (input: HTMLInputElement, value: string) => {
 };
 
 beforeEach(() => {
-  panelStateMock.isOpen = true;
-  panelStateMock.setOpen.mockClear();
   useShortcutMock.mockClear();
-  useKeyboardNavigationScopeMock.mockClear();
+  useKeyboardSurfaceMock.mockClear();
   getLogsMock.mockReset();
   clearLogsMock.mockReset();
   setLogsPanelVisibleMock.mockReset();
@@ -133,12 +132,10 @@ describe('AppLogsPanel', () => {
     vi.useFakeTimers();
     getLogsMock.mockResolvedValue([]);
 
-    panelStateMock.isOpen = true;
-    const { rerender, cleanup } = await renderPanel();
+    const { rerender, cleanup } = await renderPanel(true);
     expect(setLogsPanelVisibleMock).toHaveBeenLastCalledWith(true);
 
-    panelStateMock.isOpen = false;
-    await rerender();
+    await rerender(false);
     expect(setLogsPanelVisibleMock).toHaveBeenLastCalledWith(false);
 
     cleanup();
@@ -264,6 +261,50 @@ describe('AppLogsPanel', () => {
     const remainingEntries = container.querySelectorAll('.log-entry');
     expect(remainingEntries.length).toBe(0);
     expect(emptyMessage?.textContent ?? '').toContain('No logs match the selected filter');
+
+    cleanup();
+  });
+
+  it('routes reverse tab from the log body back to the filter controls', async () => {
+    vi.useFakeTimers();
+    getLogsMock.mockResolvedValue([
+      { timestamp: '2024-01-01T00:00:00.000Z', level: 'info', message: 'Ready', source: 'core' },
+    ]);
+
+    const { container, cleanup } = await renderPanel();
+
+    await flushInitialLoad();
+
+    const surfaceCall =
+      useKeyboardSurfaceMock.mock.calls[useKeyboardSurfaceMock.mock.calls.length - 1];
+    expect(surfaceCall).toBeTruthy();
+    const surfaceConfig = surfaceCall?.[0] as {
+      captureWhenActive?: boolean;
+      active?: boolean;
+      onKeyDown?: (event: KeyboardEvent) => boolean | void;
+    };
+
+    expect(surfaceConfig.active).toBe(true);
+    expect(surfaceConfig.captureWhenActive).toBe(true);
+
+    const logsContainer = container.querySelector<HTMLDivElement>('.app-logs-container');
+    const textFilterInput = container.querySelector<HTMLInputElement>('.app-logs-text-filter');
+    expect(logsContainer).not.toBeNull();
+    expect(textFilterInput).not.toBeNull();
+
+    act(() => {
+      logsContainer!.focus();
+    });
+    expect(document.activeElement).toBe(logsContainer);
+
+    const handled = surfaceConfig.onKeyDown?.({
+      key: 'Tab',
+      shiftKey: true,
+      target: logsContainer,
+    } as KeyboardEvent);
+
+    expect(handled).toBe(true);
+    expect(document.activeElement).toBe(textFilterInput);
 
     cleanup();
   });

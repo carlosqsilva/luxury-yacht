@@ -5,7 +5,14 @@
  * Handles rendering and interactions for the shared components.
  */
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type HTMLAttributes,
+} from 'react';
 import './DiagnosticsPanel.css';
 import { DockablePanel } from '@ui/dockable';
 import { useRefreshState, useRefreshScopedDomainEntries, type DomainSnapshotState } from '../store';
@@ -20,7 +27,7 @@ import type {
 } from '../types';
 import { refreshManager } from '../RefreshManager';
 import { resourceStreamManager } from '../streaming/resourceStreamManager';
-import { useShortcut, useKeyboardNavigationScope } from '@ui/shortcuts';
+import { useShortcut, useKeyboardSurface } from '@ui/shortcuts';
 import { KeyboardScopePriority } from '@ui/shortcuts/priorities';
 import {
   fetchSelectionDiagnostics,
@@ -34,7 +41,7 @@ import {
   useCapabilityDiagnostics,
   useUserPermissions,
 } from '@/core/capabilities';
-import { useTabStyles } from '@shared/components/tabs/Tabs';
+import { Tabs, type TabDescriptor } from '@shared/components/tabs';
 import { useViewState } from '@/core/contexts/ViewStateContext';
 import { useNamespace } from '@/modules/namespace/contexts/NamespaceContext';
 
@@ -110,6 +117,36 @@ const STREAM_MODE_BY_NAME: Record<string, 'streaming' | 'watch'> = {
 };
 
 const PERMISSION_ERROR_HINTS = ['forbidden', 'permission', 'unauthorized', 'access denied', 'rbac'];
+
+type DiagnosticsTabId =
+  | 'refresh-domains'
+  | 'streams'
+  | 'capability-checks'
+  | 'effective-permissions';
+
+// Applied to every diagnostics tab via extraProps. The panel's custom focus
+// walker (querySelectorAll below) locates tabs through this marker — if it
+// ever stops being forwarded, keyboard navigation silently breaks.
+// The cast is needed because TypeScript's HTMLAttributes type doesn't include
+// an index signature for data-* attributes.
+const DIAGNOSTICS_FOCUSABLE_PROPS = {
+  'data-diagnostics-focusable': 'true',
+} as HTMLAttributes<HTMLElement>;
+
+const DIAGNOSTICS_TAB_DESCRIPTORS: TabDescriptor[] = [
+  { id: 'refresh-domains', label: 'Refresh Domains', extraProps: DIAGNOSTICS_FOCUSABLE_PROPS },
+  { id: 'streams', label: 'Streams', extraProps: DIAGNOSTICS_FOCUSABLE_PROPS },
+  {
+    id: 'capability-checks',
+    label: 'Capabilities Checks',
+    extraProps: DIAGNOSTICS_FOCUSABLE_PROPS,
+  },
+  {
+    id: 'effective-permissions',
+    label: 'Effective Permissions',
+    extraProps: DIAGNOSTICS_FOCUSABLE_PROPS,
+  },
+];
 
 // Diagnostics helpers for scope, error, and health labels.
 type ScopeEntry = { label: 'Active' | 'Background'; clusterName: string };
@@ -193,10 +230,7 @@ const formatHealthLabel = (status: HealthStatus, reason: string): string =>
   reason ? `${status} (${reason})` : status;
 
 export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isOpen }) => {
-  useTabStyles();
-  const [activeTab, setActiveTab] = useState<
-    'refresh-domains' | 'streams' | 'capability-checks' | 'effective-permissions'
-  >('refresh-domains');
+  const [activeTab, setActiveTab] = useState<DiagnosticsTabId>('refresh-domains');
   const refreshState = useRefreshState();
   // Scoped domains — read all scope entries for diagnostics.
   const objectMaintenanceScopeEntries = useRefreshScopedDomainEntries('object-maintenance');
@@ -1924,6 +1958,7 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
 
     const delivered = logStreamTelemetry?.totalMessages ?? 0;
     const dropped = logStreamTelemetry?.droppedMessages ?? 0;
+    const skippedTargets = logStreamTelemetry?.skippedTargets ?? 0;
     const activeSessions = logStreamTelemetry?.activeSessions ?? 0;
     const lastConnectInfo = formatLastUpdated(
       logStreamTelemetry?.lastConnect && logStreamTelemetry.lastConnect > 0
@@ -1941,6 +1976,9 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
       summaryParts.push(`Sessions: ${activeSessions}`);
       summaryParts.push(`Delivered: ${delivered}`);
       summaryParts.push(`Dropped: ${dropped}`);
+      if (skippedTargets > 0) {
+        summaryParts.push(`Skipped Targets: ${skippedTargets}`);
+      }
     }
 
     const secondaryParts: string[] = [`Updated: ${lastUpdatedInfo.display}`];
@@ -1960,10 +1998,13 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
     if (logStreamTelemetry?.lastError) {
       titleParts.push(logStreamTelemetry.lastError);
     }
+    if (logStreamTelemetry?.lastSkipReason) {
+      titleParts.push(logStreamTelemetry.lastSkipReason);
+    }
     if (lastConnectInfo.tooltip) {
       titleParts.push(`Connected ${lastConnectInfo.tooltip}`);
     }
-    if (className !== 'diagnostics-summary-error' && dropped > 0) {
+    if (className !== 'diagnostics-summary-error' && (dropped > 0 || skippedTargets > 0)) {
       className = 'diagnostics-summary-warning';
     }
 
@@ -1987,7 +2028,6 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
     description: 'Close diagnostics panel',
     category: 'Diagnostics',
     enabled: isOpen,
-    view: 'global',
     priority: isOpen ? 35 : 0,
   });
 
@@ -2097,39 +2137,37 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
     return items.findIndex((el) => el === active || el.contains(active));
   }, [focusables]);
 
-  useKeyboardNavigationScope({
-    ref: panelRef,
+  useKeyboardSurface({
+    kind: 'panel',
+    rootRef: panelRef,
+    active: isOpen,
+    captureWhenActive: true,
     priority: KeyboardScopePriority.DIAGNOSTICS_PANEL,
-    disabled: !isOpen,
-    allowNativeSelector: '.diagnostics-content *',
-    onNavigate: ({ direction }) => {
+    onKeyDown: (event) => {
+      if (event.key !== 'Tab') {
+        return false;
+      }
+
+      const direction = event.shiftKey ? 'backward' : 'forward';
+      const target = event.target as HTMLElement | null;
+      if (target && target.closest('.diagnostics-content')) {
+        return false;
+      }
+
       const items = focusables();
       if (items.length === 0) {
-        return 'bubble';
+        return false;
       }
-      const current = findActiveIndex();
+
+      const current = target && panelRef.current?.contains(target) ? findActiveIndex() : -1;
       if (current === -1) {
-        return direction === 'forward'
-          ? focusFirst()
-            ? 'handled'
-            : 'bubble'
-          : focusLast()
-            ? 'handled'
-            : 'bubble';
+        return direction === 'forward' ? focusFirst() : focusLast();
       }
       const next = direction === 'forward' ? current + 1 : current - 1;
       if (next < 0 || next >= items.length) {
-        return 'bubble';
+        return false;
       }
-      focusAt(next);
-      return 'handled';
-    },
-    onEnter: ({ direction }) => {
-      if (direction === 'forward') {
-        focusFirst();
-      } else {
-        focusLast();
-      }
+      return focusAt(next);
     },
   });
 
@@ -2146,40 +2184,14 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
       contentClassName="diagnostics-content"
       className="diagnostics-panel"
     >
-      <div className="tab-strip diagnostics-tabs">
-        <button
-          className={`tab-item${activeTab === 'refresh-domains' ? ' tab-item--active' : ''}`}
-          onClick={() => setActiveTab('refresh-domains')}
-          data-diagnostics-focusable="true"
-          tabIndex={-1}
-        >
-          REFRESH DOMAINS
-        </button>
-        <button
-          className={`tab-item${activeTab === 'streams' ? ' tab-item--active' : ''}`}
-          onClick={() => setActiveTab('streams')}
-          data-diagnostics-focusable="true"
-          tabIndex={-1}
-        >
-          STREAMS
-        </button>
-        <button
-          className={`tab-item${activeTab === 'capability-checks' ? ' tab-item--active' : ''}`}
-          onClick={() => setActiveTab('capability-checks')}
-          data-diagnostics-focusable="true"
-          tabIndex={-1}
-        >
-          CAPABILITIES CHECKS
-        </button>
-        <button
-          className={`tab-item${activeTab === 'effective-permissions' ? ' tab-item--active' : ''}`}
-          onClick={() => setActiveTab('effective-permissions')}
-          data-diagnostics-focusable="true"
-          tabIndex={-1}
-        >
-          EFFECTIVE PERMISSIONS
-        </button>
-      </div>
+      <Tabs
+        aria-label="Diagnostics Panel Tabs"
+        tabs={DIAGNOSTICS_TAB_DESCRIPTORS}
+        activeId={activeTab}
+        onActivate={(id) => setActiveTab(id as DiagnosticsTabId)}
+        textTransform="uppercase"
+        disableRovingTabIndex
+      />
       <div className="diagnostics-scroll-area">
         {activeTab === 'refresh-domains'
           ? refreshDomainsContent

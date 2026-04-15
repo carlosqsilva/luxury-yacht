@@ -13,8 +13,8 @@
   right: 0;
   bottom: 0;
   background-color: var(--modal-overlay-bg);
-  backdrop-filter: blur(4px);
-  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(var(--modal-bg-blur));
+  -webkit-backdrop-filter: blur(var(--modal-bg-blur));
   display: flex;
   align-items: center;
   justify-content: center;
@@ -111,6 +111,21 @@
 
 /* Focus state for keyboard navigation */
 .modal-close:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.modal-container
+  :is(
+    button,
+    a[href],
+    input,
+    select,
+    textarea,
+    summary,
+    [role="button"],
+    [tabindex]:not([tabindex="-1"])
+  ):focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: 2px;
 }

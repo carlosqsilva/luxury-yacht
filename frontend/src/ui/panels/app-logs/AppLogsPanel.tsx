@@ -9,9 +9,9 @@ import { useState, useEffect, useCallback, useRef, useMemo, useLayoutEffect } fr
 import { GetLogs, ClearLogs, SetLogsPanelVisible } from '@wailsjs/go/backend/App';
 import { errorHandler } from '@utils/errorHandler';
 import LoadingSpinner from '@shared/components/LoadingSpinner';
-import { useShortcut, useKeyboardNavigationScope } from '@ui/shortcuts';
+import { useShortcut, useKeyboardSurface } from '@ui/shortcuts';
 import { KeyboardScopePriority, KeyboardShortcutPriority } from '@ui/shortcuts/priorities';
-import { DockablePanel, useDockablePanelState } from '@ui/dockable';
+import { DockablePanel } from '@ui/dockable';
 import { Dropdown } from '@shared/components/dropdowns/Dropdown';
 import './AppLogsPanel.css';
 
@@ -36,13 +36,12 @@ const LOG_LEVEL_OPTIONS = [
 const ALL_LEVEL_VALUES = LOG_LEVEL_BASE_OPTIONS.map((option) => option.value);
 const DEFAULT_LOG_LEVELS = ['info', 'warn', 'error'];
 
-export function useAppLogsPanel() {
-  const panelState = useDockablePanelState('app-logs');
-  return panelState;
+interface AppLogsPanelProps {
+  isOpen: boolean;
+  onClose: () => void;
 }
 
-function AppLogsPanel() {
-  const panelState = useAppLogsPanel();
+function AppLogsPanel({ isOpen, onClose }: AppLogsPanelProps) {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [isAutoScroll, setIsAutoScroll] = useState(true);
   const [isLoading, setIsLoading] = useState(false);
@@ -64,10 +63,10 @@ function AppLogsPanel() {
 
   // Keep backend log-stream visibility aligned with this panel's open state.
   useEffect(() => {
-    SetLogsPanelVisible(panelState.isOpen).catch((error) => {
+    SetLogsPanelVisible(isOpen).catch((error) => {
       errorHandler.handle(error, { action: 'setLogsPanelVisible' });
     });
-  }, [panelState.isOpen]);
+  }, [isOpen]);
 
   // Update ref when state changes
   useEffect(() => {
@@ -327,7 +326,7 @@ function AppLogsPanel() {
 
   // Load logs when panel becomes visible
   useEffect(() => {
-    if (!panelState.isOpen) {
+    if (!isOpen) {
       return;
     }
 
@@ -350,23 +349,22 @@ function AppLogsPanel() {
       clearTimeout(loadTimer);
       runtime?.EventsOff?.('log-added');
     };
-  }, [panelState.isOpen, loadLogs]);
+  }, [isOpen, loadLogs]);
 
   // ESC key to close panel
   useShortcut({
     key: 'Escape',
     handler: () => {
-      if (panelState.isOpen) {
-        panelState.setOpen(false);
+      if (isOpen) {
+        onClose();
         return true;
       }
       return false;
     },
     description: 'Close app logs panel',
     category: 'App Logs',
-    enabled: panelState.isOpen,
-    view: 'global',
-    priority: panelState.isOpen ? KeyboardShortcutPriority.APP_LOGS_ESCAPE : 0,
+    enabled: isOpen,
+    priority: isOpen ? KeyboardShortcutPriority.APP_LOGS_ESCAPE : 0,
   });
 
   const getLevelClass = (level: string) => {
@@ -415,7 +413,7 @@ function AppLogsPanel() {
   useShortcut({
     key: 's',
     handler: () => {
-      if (panelState.isOpen) {
+      if (isOpen) {
         setIsAutoScroll((prev) => !prev);
         return true;
       }
@@ -423,16 +421,15 @@ function AppLogsPanel() {
     },
     description: 'Toggle auto-scroll',
     category: 'Logs Panel',
-    enabled: panelState.isOpen, // Only show in help when logs panel is open
-    view: 'global',
-    priority: panelState.isOpen ? KeyboardShortcutPriority.APP_LOGS_ACTION : 0,
+    enabled: isOpen, // Only show in help when logs panel is open
+    priority: isOpen ? KeyboardShortcutPriority.APP_LOGS_ACTION : 0,
   });
 
   useShortcut({
     key: 'c',
     modifiers: { shift: true },
     handler: () => {
-      if (panelState.isOpen) {
+      if (isOpen) {
         handleClearLogs();
         return true;
       }
@@ -440,9 +437,8 @@ function AppLogsPanel() {
     },
     description: 'Clear logs',
     category: 'Logs Panel',
-    enabled: panelState.isOpen, // Only show in help when logs panel is open
-    view: 'global',
-    priority: panelState.isOpen ? KeyboardShortcutPriority.APP_LOGS_ACTION : 0,
+    enabled: isOpen, // Only show in help when logs panel is open
+    priority: isOpen ? KeyboardShortcutPriority.APP_LOGS_ACTION : 0,
   });
 
   const focusFirstControl = useCallback(() => {
@@ -469,30 +465,31 @@ function AppLogsPanel() {
     return false;
   }, []);
 
-  useKeyboardNavigationScope({
-    ref: panelScopeRef,
+  useKeyboardSurface({
+    kind: 'panel',
+    rootRef: panelScopeRef,
+    active: isOpen,
+    captureWhenActive: true,
     priority: KeyboardScopePriority.APP_LOGS_PANEL,
-    disabled: !panelState.isOpen,
-    allowNativeSelector: '.app-logs-panel-controls *',
-    onNavigate: ({ direction, event }) => {
+    onKeyDown: (event) => {
+      if (event.key !== 'Tab') {
+        return false;
+      }
+
+      const direction = event.shiftKey ? 'backward' : 'forward';
       const target = event.target as HTMLElement | null;
+
       if (target && panelScopeRef.current?.contains(target)) {
         if (logsContainerRef.current?.contains(target)) {
-          return direction === 'forward' ? 'bubble' : focusFirstControl() ? 'handled' : 'bubble';
+          return direction === 'forward' ? false : focusFirstControl();
         }
-        return 'native';
+        return false;
       }
+
       if (direction === 'forward') {
-        return focusFirstControl() ? 'handled' : 'bubble';
+        return focusFirstControl();
       }
-      return focusLastControl() ? 'handled' : 'bubble';
-    },
-    onEnter: ({ direction }) => {
-      if (direction === 'forward') {
-        focusFirstControl();
-      } else {
-        focusLastControl();
-      }
+      return focusLastControl();
     },
   });
 
@@ -501,11 +498,11 @@ function AppLogsPanel() {
       panelRef={panelScopeRef}
       panelId="app-logs"
       title="Application Logs"
-      isOpen={panelState.isOpen}
+      isOpen={isOpen}
       defaultPosition="bottom"
       allowMaximize
       maximizeTargetSelector=".content-body"
-      onClose={() => panelState.setOpen(false)}
+      onClose={onClose}
       contentClassName="app-logs-panel-content"
     >
       {/* Panel-specific controls toolbar (moved from header for tab support) */}

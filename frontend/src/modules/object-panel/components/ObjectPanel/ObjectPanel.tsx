@@ -24,7 +24,6 @@ import {
   subscribeObjectPanelTabRequests,
 } from '@modules/object-panel/objectPanelTabRequests';
 import './ObjectPanel.css';
-import '@shared/components/tabs/Tabs/Tabs.css';
 import { getObjectPanelKind } from '@modules/object-panel/components/ObjectPanel/hooks/getObjectPanelKind';
 import { useObjectPanelFeatureSupport } from '@modules/object-panel/components/ObjectPanel/hooks/useObjectPanelFeatureSupport';
 import { useObjectPanelCapabilities } from '@modules/object-panel/components/ObjectPanel/hooks/useObjectPanelCapabilities';
@@ -45,8 +44,6 @@ import type {
   ViewType,
 } from '@modules/object-panel/components/ObjectPanel/types';
 import type { KubernetesObjectReference } from '@/types/view-state';
-import { useKeyboardNavigationScope } from '@ui/shortcuts';
-import { KeyboardScopePriority } from '@ui/shortcuts/priorities';
 import { refreshOrchestrator } from '@/core/refresh/orchestrator';
 import { getGroupForPanel, getGroupTabs } from '@ui/dockable/tabGroupState';
 import type { DockPosition } from '@ui/dockable';
@@ -126,8 +123,12 @@ const EMPTY_DETAILS: DetailsSnapshotProps = {
 // ============================================================================
 // REDUCER
 // ============================================================================
+// activeTab is intentionally NOT in this reducer — it lives in
+// ObjectPanelStateContext so it survives unmount/remount caused by
+// cluster switching. The reducer's local state is reset on remount,
+// which is the right behavior for modal flags but the wrong behavior
+// for "which tab was the user looking at."
 const INITIAL_PANEL_STATE: PanelState = {
-  activeTab: 'details',
   actionLoading: false,
   actionError: null,
   scaleReplicas: 1,
@@ -141,8 +142,6 @@ const INITIAL_PANEL_STATE: PanelState = {
 
 function panelReducer(state: PanelState, action: PanelAction): PanelState {
   switch (action.type) {
-    case 'SET_ACTIVE_TAB':
-      return { ...state, activeTab: action.payload };
     case 'SET_ACTION_LOADING':
       return { ...state, actionLoading: action.payload };
     case 'SET_ACTION_ERROR':
@@ -185,7 +184,7 @@ interface ObjectPanelProps {
 // ============================================================================
 function ObjectPanel({ panelId, objectRef }: ObjectPanelProps) {
   const objectData = objectRef;
-  const { closePanel } = useObjectPanelState();
+  const { closePanel, getObjectPanelActiveTab, setObjectPanelActiveTab } = useObjectPanelState();
   const { tabGroups, getPreferredOpenGroupKey } = useDockablePanelContext();
   const openTargetGroupKey = getPreferredOpenGroupKey(getDefaultObjectPanelPosition());
   const openTargetPosition: DockPosition =
@@ -212,8 +211,14 @@ function ObjectPanel({ panelId, objectRef }: ObjectPanelProps) {
     .toLowerCase()
     .replace(/[^a-z0-9]/g, '');
 
-  // Use reducer for state management
+  // Use reducer for transient panel state (modal flags, action loading,
+  // delete confirmation, etc.). The active sub-tab is intentionally NOT
+  // in this reducer — it lives in ObjectPanelStateContext so it survives
+  // unmount/remount caused by cluster switching. The reducer's local
+  // state is reset on remount, which is the right behavior for modal
+  // flags but the wrong behavior for "which tab was the user looking at."
   const [state, dispatch] = useReducer(panelReducer, INITIAL_PANEL_STATE);
+  const activeTab: ViewType = getObjectPanelActiveTab(panelId) ?? 'details';
 
   const { objectKind, detailScope, eventsScope, logScope, helmScope, isHelmRelease, isEvent } =
     getObjectPanelKind(objectData, {
@@ -238,12 +243,13 @@ function ObjectPanel({ panelId, objectRef }: ObjectPanelProps) {
 
   const featureSupport = useObjectPanelFeatureSupport(objectKind, RESOURCE_CAPABILITIES);
 
-  const { capabilities, capabilityReasons } = useObjectPanelCapabilities({
-    objectData,
-    objectKind,
-    detailScope,
-    featureSupport,
-  });
+  const { capabilities, capabilityReasons, nodeLogsState, nodeLogSources } =
+    useObjectPanelCapabilities({
+      objectData,
+      objectKind,
+      detailScope,
+      featureSupport,
+    });
 
   // Only poll when this tab is active in its group (Step 8: active-tab-only polling).
   const { detailPayload, detailsLoading, detailsError, fetchResourceDetails } =
@@ -302,6 +308,14 @@ function ObjectPanel({ panelId, objectRef }: ObjectPanelProps) {
     }
   }, [detailScope, isNotFoundError, objectData?.name, state.resourceDeleted]);
 
+  // Wrap setObjectPanelActiveTab into a panelId-bound callback so the hook
+  // doesn't have to know about panel identity. The wrapper is stable
+  // across renders.
+  const setActiveTab = useCallback(
+    (tab: ViewType) => setObjectPanelActiveTab(panelId, tab),
+    [panelId, setObjectPanelActiveTab]
+  );
+
   // Get available tabs based on capabilities
   const { availableTabs } = useObjectPanelTabs({
     capabilities,
@@ -309,16 +323,17 @@ function ObjectPanel({ panelId, objectRef }: ObjectPanelProps) {
     isHelmRelease,
     isEvent,
     isOpen,
+    setActiveTab,
     dispatch,
     close,
-    currentTab: state.activeTab,
+    currentTab: activeTab,
   });
 
   const podsState = useObjectPanelPods({
     objectData,
     objectKind,
     isOpen,
-    activeTab: state.activeTab,
+    activeTab,
   });
 
   const {
@@ -393,9 +408,9 @@ function ObjectPanel({ panelId, objectRef }: ObjectPanelProps) {
 
   const handleTabSelect = useCallback(
     (tab: ViewType) => {
-      dispatch({ type: 'SET_ACTIVE_TAB', payload: tab });
+      setObjectPanelActiveTab(panelId, tab);
     },
-    [dispatch]
+    [panelId, setObjectPanelActiveTab]
   );
 
   const applyRequestedTab = useCallback(
@@ -407,12 +422,12 @@ function ObjectPanel({ panelId, objectRef }: ObjectPanelProps) {
       if (!isAvailable) {
         return;
       }
-      if (state.activeTab !== requestedTab) {
-        dispatch({ type: 'SET_ACTIVE_TAB', payload: requestedTab });
+      if (activeTab !== requestedTab) {
+        setObjectPanelActiveTab(panelId, requestedTab);
       }
       clearRequestedObjectPanelTab(panelId);
     },
-    [availableTabs, panelId, state.activeTab]
+    [availableTabs, panelId, activeTab, setObjectPanelActiveTab]
   );
 
   useEffect(() => {
@@ -559,7 +574,7 @@ function ObjectPanel({ panelId, objectRef }: ObjectPanelProps) {
     ? {
         ...detailsProps,
         objectData,
-        isActive: isOpen && state.activeTab === 'details',
+        isActive: isOpen && activeTab === 'details',
         detailsLoading,
         detailsError,
         resourceDeleted: state.resourceDeleted,
@@ -608,79 +623,6 @@ function ObjectPanel({ panelId, objectRef }: ObjectPanelProps) {
 
   const panelScopeRef = useRef<HTMLDivElement>(null);
 
-  const getFocusableElements = useCallback(() => {
-    if (!panelScopeRef.current) {
-      return [];
-    }
-    const nodes = Array.from(
-      panelScopeRef.current.querySelectorAll<HTMLElement>('[data-object-panel-focusable="true"]')
-    );
-    return nodes.filter((node) => !node.hasAttribute('disabled'));
-  }, []);
-
-  const focusElementAt = useCallback(
-    (index: number) => {
-      const items = getFocusableElements();
-      if (index < 0 || index >= items.length) {
-        return false;
-      }
-      items[index].focus();
-      return true;
-    },
-    [getFocusableElements]
-  );
-
-  const focusFirstControl = useCallback(() => focusElementAt(0), [focusElementAt]);
-  const focusLastControl = useCallback(() => {
-    const items = getFocusableElements();
-    return focusElementAt(items.length - 1);
-  }, [focusElementAt, getFocusableElements]);
-
-  const findFocusedIndex = useCallback(() => {
-    const active = document.activeElement as HTMLElement | null;
-    if (!active) {
-      return -1;
-    }
-    const items = getFocusableElements();
-    return items.findIndex((item) => item === active || item.contains(active));
-  }, [getFocusableElements]);
-
-  useKeyboardNavigationScope({
-    ref: panelScopeRef,
-    priority: KeyboardScopePriority.OBJECT_PANEL,
-    disabled: !isActiveTab,
-    allowNativeSelector: '.object-panel-body *',
-    onNavigate: ({ direction }) => {
-      const items = getFocusableElements();
-      if (items.length === 0) {
-        return 'bubble';
-      }
-      const currentIndex = findFocusedIndex();
-      if (currentIndex === -1) {
-        return direction === 'forward'
-          ? focusFirstControl()
-            ? 'handled'
-            : 'bubble'
-          : focusLastControl()
-            ? 'handled'
-            : 'bubble';
-      }
-      const nextIndex = direction === 'forward' ? currentIndex + 1 : currentIndex - 1;
-      if (nextIndex < 0 || nextIndex >= items.length) {
-        return 'bubble';
-      }
-      focusElementAt(nextIndex);
-      return 'handled';
-    },
-    onEnter: ({ direction }) => {
-      if (direction === 'forward') {
-        focusFirstControl();
-      } else {
-        focusLastControl();
-      }
-    },
-  });
-
   // Memoize the per-instance context value so child components get the correct objectData.
   const currentObjectPanelValue = useMemo(() => ({ objectData, panelId }), [objectData, panelId]);
 
@@ -709,18 +651,16 @@ function ObjectPanel({ panelId, objectRef }: ObjectPanelProps) {
           />
         </div>
 
-        <ObjectPanelTabs
-          tabs={availableTabs}
-          activeTab={state.activeTab}
-          onSelect={handleTabSelect}
-        />
+        <ObjectPanelTabs tabs={availableTabs} activeTab={activeTab} onSelect={handleTabSelect} />
 
         <ObjectPanelContent
-          activeTab={state.activeTab}
+          activeTab={activeTab}
           detailTabProps={detailTabProps}
           isPanelOpen={isOpen && isActiveTab}
           capabilities={capabilities}
           capabilityReasons={capabilityReasons}
+          nodeLogsState={nodeLogsState}
+          nodeLogSources={nodeLogSources}
           detailScope={detailScope}
           eventsScope={eventsScope}
           logScope={logScope}
@@ -732,6 +672,7 @@ function ObjectPanel({ panelId, objectRef }: ObjectPanelProps) {
           onClosePanel={close}
           onRefreshDetails={fetchResourceDetails}
           podsState={podsState}
+          panelId={panelId}
         />
       </DockablePanel>
 

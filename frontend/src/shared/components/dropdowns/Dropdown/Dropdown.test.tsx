@@ -10,24 +10,6 @@ import ReactDOM from 'react-dom/client';
 import { act } from 'react';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const shortcutRegistry = vi.hoisted(() => ({
-  entries: [] as Array<{ key: string; handler: () => boolean | void; enabled?: boolean }>,
-}));
-
-vi.mock('@ui/shortcuts', async () => {
-  const actual = await vi.importActual<typeof import('@ui/shortcuts')>('@ui/shortcuts');
-  return {
-    ...actual,
-    useShortcuts: (
-      shortcuts: Array<{ key: string; handler: () => boolean | void; enabled?: boolean }>,
-      config?: unknown
-    ) => {
-      shortcutRegistry.entries = shortcuts;
-      return actual.useShortcuts(shortcuts, config as any);
-    },
-  };
-});
-
 import Dropdown from './Dropdown';
 import type { DropdownOption } from './types';
 import { KeyboardProvider } from '@ui/shortcuts';
@@ -63,7 +45,6 @@ describe('Dropdown', () => {
     container = document.createElement('div');
     document.body.appendChild(container);
     root = ReactDOM.createRoot(container);
-    shortcutRegistry.entries = [];
   });
 
   afterEach(() => {
@@ -220,6 +201,45 @@ describe('Dropdown', () => {
     expect(handleChange).toHaveBeenCalledWith('beta');
   });
 
+  it('supports keyboard navigation while the search input has focus', async () => {
+    await mount(
+      <Dropdown options={OPTIONS} value="" onChange={vi.fn()} searchable placeholder="Searchable" />
+    );
+
+    click(container.querySelector('.dropdown-trigger'));
+
+    const searchInput = container.querySelector<HTMLInputElement>('.search-input');
+    expect(searchInput).not.toBeNull();
+    searchInput?.focus();
+
+    await pressKey(searchInput, 'ArrowDown');
+    expect(container.querySelector('.dropdown-option.highlighted')?.textContent).toContain('Alpha');
+
+    await pressKey(searchInput, 'ArrowDown');
+    expect(container.querySelector('.dropdown-option.highlighted')?.textContent).toContain('Beta');
+  });
+
+  it('closes on Tab without preventing the browser focus move', async () => {
+    await mount(
+      <Dropdown options={OPTIONS} value="" onChange={vi.fn()} searchable placeholder="Searchable" />
+    );
+
+    click(container.querySelector('.dropdown-trigger'));
+
+    const searchInput = container.querySelector<HTMLInputElement>('.search-input');
+    expect(searchInput).not.toBeNull();
+    searchInput?.focus();
+
+    const event = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+    await act(async () => {
+      searchInput?.dispatchEvent(event);
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector('.dropdown-menu')).toBeNull();
+    expect(event.defaultPrevented).toBe(false);
+  });
+
   it('invokes onOpen and onClose callbacks', async () => {
     const onOpen = vi.fn();
     const onClose = vi.fn();
@@ -291,6 +311,50 @@ describe('Dropdown', () => {
     expect(container.querySelector('.dropdown-value')?.textContent).toBe(
       'Selected: postgres|mongo'
     );
+  });
+
+  it('supports select all and select none bulk actions for visible multi-select options', async () => {
+    const onChange = vi.fn<(value: string[]) => void>();
+
+    const Harness = () => {
+      const [value, setValue] = useState<string[]>(['postgres']);
+      return (
+        <Dropdown
+          options={[
+            { value: 'group-databases', label: 'Databases', group: 'header' },
+            { value: 'postgres', label: 'Postgres' },
+            { value: 'redis', label: 'Redis', disabled: true },
+            { value: 'mongo', label: 'Mongo' },
+            { value: 'sqlite', label: 'SQLite' },
+          ]}
+          value={value}
+          multiple
+          showBulkActions
+          onChange={(next) => {
+            const nextValue = Array.isArray(next) ? next : [];
+            onChange(nextValue);
+            setValue(nextValue);
+          }}
+        />
+      );
+    };
+
+    await mount(<Harness />);
+
+    click(container.querySelector('.dropdown-trigger'));
+
+    const bulkButtons = container.querySelectorAll<HTMLButtonElement>('.dropdown-bulk-action');
+    expect(bulkButtons).toHaveLength(2);
+    expect(bulkButtons[0]?.textContent).toBe('Select all');
+    expect(bulkButtons[1]?.textContent).toBe('Select none');
+
+    click(bulkButtons[0]);
+    expect(onChange).toHaveBeenCalledWith(['postgres', 'mongo', 'sqlite']);
+
+    const selectNoneButton =
+      container.querySelectorAll<HTMLButtonElement>('.dropdown-bulk-action')[1];
+    click(selectNoneButton);
+    expect(onChange).toHaveBeenCalledWith([]);
   });
 
   it('adjusts menu position when space below trigger is limited', async () => {
@@ -376,67 +440,5 @@ describe('Dropdown', () => {
     expect(hidden?.value).toBe('beta');
     const trigger = container.querySelector('.dropdown-trigger');
     expect(trigger?.getAttribute('aria-controls')).toBe('example-id-menu');
-  });
-
-  it('invokes shortcut handlers registered through useShortcuts', async () => {
-    const handleChange = vi.fn();
-    await mount(
-      <Dropdown options={OPTIONS} value="" onChange={handleChange} searchable clearable />
-    );
-
-    const trigger = container.querySelector('.dropdown-trigger');
-    click(trigger);
-    expect(shortcutRegistry.entries).not.toHaveLength(0);
-
-    const getShortcut = (key: string) =>
-      shortcutRegistry.entries.find((entry) => entry.key === key)?.handler;
-
-    await act(async () => {
-      expect(getShortcut('ArrowDown')?.()).toBe(true);
-      await Promise.resolve();
-    });
-
-    await act(async () => {
-      expect(getShortcut('ArrowUp')?.()).toBe(true);
-      await Promise.resolve();
-    });
-
-    const searchInput = container.querySelector<HTMLInputElement>('.search-input');
-    await act(async () => {
-      searchInput?.focus();
-      await Promise.resolve();
-    });
-    const spaceWhileTyping = getShortcut(' ');
-    await act(async () => {
-      const result = spaceWhileTyping?.();
-      expect(result).toBe(false);
-      await Promise.resolve();
-    });
-
-    await act(async () => {
-      searchInput?.blur();
-      await Promise.resolve();
-    });
-    await act(async () => {
-      getShortcut(' ')?.();
-      await Promise.resolve();
-    });
-    expect(handleChange).toHaveBeenCalledWith(expect.any(String));
-
-    await act(async () => {
-      expect(getShortcut('Home')?.()).toBe(true);
-      await Promise.resolve();
-    });
-
-    await act(async () => {
-      expect(getShortcut('End')?.()).toBe(true);
-      await Promise.resolve();
-    });
-
-    await act(async () => {
-      expect(getShortcut('Escape')?.()).toBe(true);
-      await Promise.resolve();
-    });
-    expect(container.querySelector('.dropdown-menu')).toBeNull();
   });
 });
