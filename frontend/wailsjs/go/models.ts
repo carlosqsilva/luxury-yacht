@@ -305,11 +305,13 @@ export namespace backend {
 	    }
 	}
 	export class ObjectYAMLMutationRequest {
+	    baseYAML: string;
 	    yaml: string;
 	    kind: string;
 	    apiVersion: string;
 	    namespace: string;
 	    name: string;
+	    uid: string;
 	    resourceVersion: string;
 	
 	    static createFrom(source: any = {}) {
@@ -318,11 +320,13 @@ export namespace backend {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.baseYAML = source["baseYAML"];
 	        this.yaml = source["yaml"];
 	        this.kind = source["kind"];
 	        this.apiVersion = source["apiVersion"];
 	        this.namespace = source["namespace"];
 	        this.name = source["name"];
+	        this.uid = source["uid"];
 	        this.resourceVersion = source["resourceVersion"];
 	    }
 	}
@@ -338,9 +342,51 @@ export namespace backend {
 	        this.resourceVersion = source["resourceVersion"];
 	    }
 	}
+	export class ObjectYAMLReloadMergeRequest {
+	    baseYAML: string;
+	    draftYAML: string;
+	    kind: string;
+	    apiVersion: string;
+	    namespace: string;
+	    name: string;
+	    uid: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ObjectYAMLReloadMergeRequest(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.baseYAML = source["baseYAML"];
+	        this.draftYAML = source["draftYAML"];
+	        this.kind = source["kind"];
+	        this.apiVersion = source["apiVersion"];
+	        this.namespace = source["namespace"];
+	        this.name = source["name"];
+	        this.uid = source["uid"];
+	    }
+	}
+	export class ObjectYAMLReloadMergeResponse {
+	    mergedYAML: string;
+	    currentYAML: string;
+	    resourceVersion: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ObjectYAMLReloadMergeResponse(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.mergedYAML = source["mergedYAML"];
+	        this.currentYAML = source["currentYAML"];
+	        this.resourceVersion = source["resourceVersion"];
+	    }
+	}
 	export class PortForwardRequest {
 	    namespace: string;
 	    targetKind: string;
+	    targetGroup: string;
+	    targetVersion: string;
 	    targetName: string;
 	    containerPort: number;
 	    localPort: number;
@@ -353,6 +399,8 @@ export namespace backend {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.namespace = source["namespace"];
 	        this.targetKind = source["targetKind"];
+	        this.targetGroup = source["targetGroup"];
+	        this.targetVersion = source["targetVersion"];
 	        this.targetName = source["targetName"];
 	        this.containerPort = source["containerPort"];
 	        this.localPort = source["localPort"];
@@ -367,6 +415,8 @@ export namespace backend {
 	    containerPort: number;
 	    localPort: number;
 	    targetKind: string;
+	    targetGroup: string;
+	    targetVersion: string;
 	    targetName: string;
 	    status: string;
 	    statusReason?: string;
@@ -386,6 +436,8 @@ export namespace backend {
 	        this.containerPort = source["containerPort"];
 	        this.localPort = source["localPort"];
 	        this.targetKind = source["targetKind"];
+	        this.targetGroup = source["targetGroup"];
+	        this.targetVersion = source["targetVersion"];
 	        this.targetName = source["targetName"];
 	        this.status = source["status"];
 	        this.statusReason = source["statusReason"];
@@ -683,6 +735,47 @@ export namespace capabilities {
 		    }
 		    return a;
 		}
+	}
+
+}
+
+export namespace objectcatalog {
+	
+	export class Summary {
+	    clusterId: string;
+	    clusterName: string;
+	    kind: string;
+	    group: string;
+	    version: string;
+	    resource: string;
+	    namespace?: string;
+	    name: string;
+	    uid: string;
+	    resourceVersion: string;
+	    creationTimestamp: string;
+	    scope: string;
+	    labelsDigest?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new Summary(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.clusterId = source["clusterId"];
+	        this.clusterName = source["clusterName"];
+	        this.kind = source["kind"];
+	        this.group = source["group"];
+	        this.version = source["version"];
+	        this.resource = source["resource"];
+	        this.namespace = source["namespace"];
+	        this.name = source["name"];
+	        this.uid = source["uid"];
+	        this.resourceVersion = source["resourceVersion"];
+	        this.creationTimestamp = source["creationTimestamp"];
+	        this.scope = source["scope"];
+	        this.labelsDigest = source["labelsDigest"];
+	    }
 	}
 
 }
