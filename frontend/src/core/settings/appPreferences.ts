@@ -5,22 +5,22 @@
  */
 
 import {
-  GetAppSettings,
   SetTheme,
   SetUseShortResourceNames,
-  GetThemes,
   SaveTheme,
   DeleteTheme,
   ReorderThemes,
   ApplyTheme,
   MatchThemeForCluster,
   SetLogBufferMaxSize as SetLogBufferMaxSizeBackend,
+  SetMaxTableRows as SetMaxTableRowsBackend,
   SetLogAPITimestampFormat as SetLogAPITimestampFormatBackend,
   SetLogAPITimestampUseLocalTimeZone as SetLogAPITimestampUseLocalTimeZoneBackend,
   SetLogTargetGlobalLimit as SetLogTargetGlobalLimitBackend,
   SetLogTargetPerScopeLimit as SetLogTargetPerScopeLimitBackend,
 } from '@wailsjs/go/backend/App';
 import { types } from '@wailsjs/go/models';
+import { readAppSettings, readThemes, requestAppState } from '@/core/app-state-access';
 import { eventBus } from '@/core/events';
 import {
   DEFAULT_LOG_API_TIMESTAMP_FORMAT,
@@ -38,6 +38,7 @@ interface AppPreferences {
   autoRefreshEnabled: boolean;
   refreshBackgroundClustersEnabled: boolean;
   metricsRefreshIntervalMs: number;
+  maxTableRows: number;
   logBufferMaxSize: number;
   logApiTimestampFormat: string;
   logApiTimestampUseLocalTimeZone: boolean;
@@ -70,6 +71,7 @@ interface AppSettingsPayload {
   autoRefreshEnabled?: boolean;
   refreshBackgroundClustersEnabled?: boolean;
   metricsRefreshIntervalMs?: number;
+  maxTableRows?: number;
   logBufferMaxSize?: number;
   logApiTimestampFormat?: string;
   logApiTimestampUseLocalTimeZone?: boolean;
@@ -109,6 +111,9 @@ const DEFAULT_METRICS_REFRESH_INTERVAL_MS = 5000;
 export const LOG_BUFFER_MIN_SIZE = 100;
 export const LOG_BUFFER_MAX_SIZE = 10000;
 export const LOG_BUFFER_DEFAULT_SIZE = 1000;
+export const MAX_TABLE_ROWS_MIN = 100;
+export const MAX_TABLE_ROWS_MAX = 10000;
+export const MAX_TABLE_ROWS_DEFAULT = 1000;
 export const LOG_TARGET_PER_SCOPE_MIN = 1;
 export const LOG_TARGET_PER_SCOPE_MAX = 1000;
 export const LOG_TARGET_PER_SCOPE_DEFAULT = 100;
@@ -124,6 +129,7 @@ const DEFAULT_PREFERENCES: AppPreferences = {
   metricsRefreshIntervalMs: DEFAULT_METRICS_REFRESH_INTERVAL_MS,
   gridTablePersistenceMode: 'shared',
   suppressNetworkErrorNotifications: false,
+  maxTableRows: MAX_TABLE_ROWS_DEFAULT,
   logBufferMaxSize: LOG_BUFFER_DEFAULT_SIZE,
   logApiTimestampFormat: DEFAULT_LOG_API_TIMESTAMP_FORMAT,
   logApiTimestampUseLocalTimeZone: false,
@@ -181,6 +187,16 @@ const normalizeMetricsIntervalMs = (value?: number): number => {
   return Math.floor(value);
 };
 
+const normalizeMaxTableRows = (value?: number): number => {
+  if (value == null || Number.isNaN(value) || value <= 0) {
+    return MAX_TABLE_ROWS_DEFAULT;
+  }
+  const floored = Math.floor(value);
+  if (floored < MAX_TABLE_ROWS_MIN) return MAX_TABLE_ROWS_MIN;
+  if (floored > MAX_TABLE_ROWS_MAX) return MAX_TABLE_ROWS_MAX;
+  return floored;
+};
+
 // Clamp to [LOG_BUFFER_MIN_SIZE, LOG_BUFFER_MAX_SIZE]. A zero/undefined
 // value from an old settings file (before this preference existed) maps
 // to the default, not to zero — otherwise an upgrade would wipe every
@@ -230,6 +246,9 @@ const emitPreferenceChanges = (previous: AppPreferences, next: AppPreferences): 
   }
   if (previous.metricsRefreshIntervalMs !== next.metricsRefreshIntervalMs) {
     eventBus.emit('settings:metrics-interval', next.metricsRefreshIntervalMs);
+  }
+  if (previous.maxTableRows !== next.maxTableRows) {
+    eventBus.emit('settings:max-table-rows', next.maxTableRows);
   }
   if (previous.logBufferMaxSize !== next.logBufferMaxSize) {
     eventBus.emit('settings:log-buffer-size', next.logBufferMaxSize);
@@ -338,7 +357,10 @@ const persistObjectPanelPosition = async (position: ObjectPanelPosition): Promis
 
 const fetchAppSettings = async (): Promise<AppSettingsPayload | null> => {
   try {
-    const settings = (await GetAppSettings()) as AppSettingsPayload | null;
+    const settings = (await requestAppState({
+      resource: 'app-settings',
+      read: () => readAppSettings(),
+    })) as AppSettingsPayload | null;
     return settings ?? null;
   } catch {
     return null;
@@ -363,6 +385,7 @@ export const hydrateAppPreferences = async (options?: {
       backendSettings?.refreshBackgroundClustersEnabled ??
       DEFAULT_PREFERENCES.refreshBackgroundClustersEnabled,
     metricsRefreshIntervalMs: normalizeMetricsIntervalMs(backendSettings?.metricsRefreshIntervalMs),
+    maxTableRows: normalizeMaxTableRows(backendSettings?.maxTableRows),
     logBufferMaxSize: normalizeLogBufferMaxSize(backendSettings?.logBufferMaxSize),
     logApiTimestampFormat: normalizeLogApiTimestampFormat(backendSettings?.logApiTimestampFormat),
     logApiTimestampUseLocalTimeZone:
@@ -437,6 +460,10 @@ export const getBackgroundRefreshEnabled = (): boolean => {
 
 export const getMetricsRefreshIntervalMs = (): number => {
   return preferenceCache.metricsRefreshIntervalMs;
+};
+
+export const getMaxTableRows = (): number => {
+  return preferenceCache.maxTableRows;
 };
 
 export const getLogBufferMaxSize = (): number => {
@@ -606,6 +633,14 @@ const persistLogBufferMaxSize = async (size: number): Promise<void> => {
   await SetLogBufferMaxSizeBackend(size);
 };
 
+const persistMaxTableRows = async (size: number): Promise<void> => {
+  const runtimeApp = (window as any)?.go?.backend?.App;
+  if (!runtimeApp) {
+    return;
+  }
+  await SetMaxTableRowsBackend(size);
+};
+
 const persistLogApiTimestampFormat = async (format: string): Promise<void> => {
   const runtimeApp = (window as any)?.go?.backend?.App;
   if (!runtimeApp) {
@@ -644,6 +679,15 @@ export const setLogBufferMaxSize = (size: number): void => {
   updatePreferenceCache({ logBufferMaxSize: normalized });
   void persistLogBufferMaxSize(normalized).catch((error) => {
     console.error('Failed to persist log buffer max size:', error);
+  });
+};
+
+export const setMaxTableRows = (size: number): void => {
+  const normalized = normalizeMaxTableRows(size);
+  hydrated = true;
+  updatePreferenceCache({ maxTableRows: normalized });
+  void persistMaxTableRows(normalized).catch((error) => {
+    console.error('Failed to persist max table rows:', error);
   });
 };
 
@@ -776,7 +820,10 @@ export const setPaletteTint = (
 
 // Fetches all saved themes from the backend.
 export const getThemes = async (): Promise<types.Theme[]> => {
-  const result = await GetThemes();
+  const result = await requestAppState({
+    resource: 'themes',
+    read: () => readThemes(),
+  });
   return result || [];
 };
 
