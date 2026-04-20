@@ -1646,7 +1646,6 @@ function Settings({ onClose }: SettingsProps) {
           </div>
         </div>
         <div className="settings-subsection">
-<<<<<<< HEAD
           <h4>Notifications</h4>
           <div className="settings-items">
             <div className="setting-item">
@@ -1656,10 +1655,13 @@ function Settings({ onClose }: SettingsProps) {
                   id="suppress-network-errors"
                   checked={suppressNetworkErrorNotifications}
                   onChange={(e) => handleSuppressNetworkErrorNotificationsToggle(e.target.checked)}
-                />
+                  />
                 Hide network connection error notifications
               </label>
-=======
+            </div>
+          </div>
+        </div>
+        <div className="settings-subsection">
           <h4>Tables</h4>
           <div className="settings-items">
             <div className="setting-item setting-item-inline">
@@ -1684,7 +1686,6 @@ function Settings({ onClose }: SettingsProps) {
                 content="Max number of rows in a data table. Larger values will show more data, but app performance may be impacted."
                 variant="dark"
               />
->>>>>>> main
             </div>
           </div>
         </div>
