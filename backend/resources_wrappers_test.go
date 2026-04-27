@@ -316,7 +316,7 @@ func TestNetworkWrappersHappyPath(t *testing.T) {
 	if _, err := app.GetService(clusterID, "default", "web"); err != nil {
 		t.Fatalf("expected service wrapper to succeed: %v", err)
 	}
-	if _, err := app.GetEndpointSlice(clusterID, "default", "web"); err != nil {
+	if _, err := app.GetEndpointSlice(clusterID, "default", "web-slice"); err != nil {
 		t.Fatalf("expected endpoint slice wrapper to succeed: %v", err)
 	}
 	if _, err := app.GetIngress(clusterID, "default", "web"); err != nil {
@@ -519,8 +519,8 @@ func TestWrapperGuardPathsRequireClient(t *testing.T) {
 		}
 	}
 
-	resp := app.LogFetcher(clusterID, LogFetchRequest{Namespace: "ns", PodName: "pod"})
+	resp := app.FetchContainerLogs(clusterID, ContainerLogsFetchRequest{Namespace: "ns", PodName: "pod"})
 	if resp.Error == "" {
-		t.Fatalf("expected error for LogFetcher without client")
+		t.Fatalf("expected error for FetchContainerLogs without client")
 	}
 }

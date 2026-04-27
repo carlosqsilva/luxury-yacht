@@ -20,19 +20,21 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
 	metricsclient "k8s.io/metrics/pkg/client/clientset/versioned"
+	gatewayinformers "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions"
 
 	"github.com/luxury-yacht/app/backend/internal/config"
 	"github.com/luxury-yacht/app/backend/objectcatalog"
 	"github.com/luxury-yacht/app/backend/refresh"
+	"github.com/luxury-yacht/app/backend/refresh/containerlogsstream"
 	"github.com/luxury-yacht/app/backend/refresh/domain"
 	"github.com/luxury-yacht/app/backend/refresh/eventstream"
 	"github.com/luxury-yacht/app/backend/refresh/informer"
-	"github.com/luxury-yacht/app/backend/refresh/logstream"
 	"github.com/luxury-yacht/app/backend/refresh/metrics"
 	"github.com/luxury-yacht/app/backend/refresh/permissions"
 	"github.com/luxury-yacht/app/backend/refresh/resourcestream"
 	"github.com/luxury-yacht/app/backend/refresh/snapshot"
 	"github.com/luxury-yacht/app/backend/refresh/telemetry"
+	"github.com/luxury-yacht/app/backend/resources/common"
 )
 
 // PermissionIssue captures domains that could not be registered due to missing permissions or transient errors.
@@ -44,22 +46,24 @@ type PermissionIssue struct {
 
 // Config contains the dependencies required to initialise the refresh manager.
 type Config struct {
-	KubernetesClient        kubernetes.Interface                    // Kubernetes client for API interactions.
-	MetricsClient           *metricsclient.Clientset                // Metrics client for collecting cluster metrics.
-	RestConfig              *rest.Config                            // REST configuration for Kubernetes client.
-	ResyncInterval          time.Duration                           // Interval for resyncing informers.
-	MetricsInterval         time.Duration                           // Interval for collecting metrics.
-	APIExtensionsClient     apiextensionsclientset.Interface        // Client for API extensions.
-	DynamicClient           dynamic.Interface                       // Dynamic client for interacting with Kubernetes resources.
-	HelmFactory             snapshot.HelmActionFactory              // Factory for creating Helm actions.
-	ObjectDetailsProvider   snapshot.ObjectDetailProvider           // Provider for detailed object information.
-	Logger                  logstream.Logger                        // Logger for recording refresh operations.
-	ObjectCatalogEnabled    func() bool                             // Function to check if the object catalog is enabled.
-	ObjectCatalogService    func() *objectcatalog.Service           // Function to get the object catalog service.
-	ObjectCatalogNamespaces func() []snapshot.CatalogNamespaceGroup // Function to get the object catalog namespaces.
-	LogTargetLimiter        *logstream.GlobalTargetLimiter          // Shared global limiter for log stream targets.
-	ClusterID               string                                  // stable identifier for cluster-scoped keys
-	ClusterName             string                                  // display name for cluster in payloads
+	KubernetesClient           kubernetes.Interface                     // Kubernetes client for API interactions.
+	MetricsClient              *metricsclient.Clientset                 // Metrics client for collecting cluster metrics.
+	RestConfig                 *rest.Config                             // REST configuration for Kubernetes client.
+	ResyncInterval             time.Duration                            // Interval for resyncing informers.
+	MetricsInterval            time.Duration                            // Interval for collecting metrics.
+	APIExtensionsClient        apiextensionsclientset.Interface         // Client for API extensions.
+	GatewayInformerFactory     gatewayinformers.SharedInformerFactory   // Informers for Gateway API resources.
+	GatewayAPIPresence         common.GatewayAPIPresence                // Installed Gateway API kind set.
+	DynamicClient              dynamic.Interface                        // Dynamic client for interacting with Kubernetes resources.
+	HelmFactory                snapshot.HelmActionFactory               // Factory for creating Helm actions.
+	ObjectDetailsProvider      snapshot.ObjectDetailProvider            // Provider for detailed object information.
+	Logger                     containerlogsstream.Logger               // Logger for recording refresh operations.
+	ObjectCatalogEnabled       func() bool                              // Function to check if the object catalog is enabled.
+	ObjectCatalogService       func() *objectcatalog.Service            // Function to get the object catalog service.
+	ObjectCatalogNamespaces    func() []snapshot.CatalogNamespaceGroup  // Function to get the object catalog namespaces.
+	ContainerLogsTargetLimiter *containerlogsstream.GlobalTargetLimiter // Shared global limiter for container logs stream targets.
+	ClusterID                  string                                   // stable identifier for cluster-scoped keys
+	ClusterName                string                                   // display name for cluster in payloads
 }
 
 // Subsystem bundles the refresh manager and supporting services.
@@ -99,7 +103,8 @@ func NewSubsystem(cfg Config) (*refresh.Manager, http.Handler, *telemetry.Record
 func NewSubsystemWithServices(cfg Config) (*Subsystem, error) {
 	registry := domain.New()
 	runtimePerms := permissions.NewChecker(cfg.KubernetesClient, cfg.ClusterID, 0)
-	informerFactory := informer.New(cfg.KubernetesClient, cfg.APIExtensionsClient, cfg.ResyncInterval, runtimePerms)
+	informerFactory := informer.New(cfg.KubernetesClient, cfg.APIExtensionsClient, cfg.ResyncInterval, runtimePerms).
+		WithGatewayFactory(cfg.GatewayInformerFactory, cfg.GatewayAPIPresence)
 	var permissionIssues []PermissionIssue
 
 	// appendIssue adds a permission issue to the list if any errors are present.

@@ -40,8 +40,10 @@
   pointer-events: none;
 }
 
-.command-palette.hide-cursor .command-palette-item:hover:not(.selected) {
+.command-palette.hide-cursor .command-palette-item:hover:not(.selected),
+.command-palette:not(.mouse-selection-armed) .command-palette-item:hover:not(.selected) {
   background-color: transparent;
+  border-left-color: transparent;
 }
 
 .command-palette-header {
@@ -67,27 +69,10 @@
 
 .command-palette-results {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
   padding: 0.5rem 0;
-}
-
-/* Custom scrollbar for results */
-.command-palette-results::-webkit-scrollbar {
-  width: 8px;
-}
-
-.command-palette-results::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.command-palette-results::-webkit-scrollbar-thumb {
-  background-color: var(--color-border);
-  border-radius: 4px;
-}
-
-.command-palette-results::-webkit-scrollbar-thumb:hover {
-  background-color: var(--color-text-secondary);
 }
 
 .command-palette-empty {
@@ -136,7 +121,7 @@
   border-left: 3px solid transparent;
 }
 
-.command-palette-item:hover {
+.command-palette.mouse-selection-armed .command-palette-item:hover:not(.selected) {
   background-color: var(--color-bg-secondary);
   border-left-color: var(--color-border);
 }

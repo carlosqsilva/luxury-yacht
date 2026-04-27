@@ -32,10 +32,9 @@ describe('useObjectPanelTabs', () => {
   const resultRef: { current: ReturnType<typeof useObjectPanelTabs> | null } = { current: null };
   const dispatchMock = vi.fn();
   const setActiveTabMock = vi.fn();
-  const closeMock = vi.fn();
 
   const baseCapabilities: ComputedCapabilities = {
-    hasLogs: true,
+    hasObjPanelLogs: true,
     hasNodeLogs: false,
     hasShell: false,
     hasManifest: false,
@@ -65,7 +64,6 @@ describe('useObjectPanelTabs', () => {
       isOpen: true,
       setActiveTab: setActiveTabMock,
       dispatch: dispatchMock as React.Dispatch<PanelAction>,
-      close: closeMock,
       currentTab: 'details' as ViewType,
       ...props,
     } satisfies Parameters<typeof useObjectPanelTabs>[0];
@@ -94,7 +92,6 @@ describe('useObjectPanelTabs', () => {
     resultRef.current = null;
     dispatchMock.mockClear();
     setActiveTabMock.mockClear();
-    closeMock.mockClear();
     hoistedShortcuts.useShortcut.mockClear();
     hoistedShortcuts.useShortcuts.mockClear();
   });
@@ -154,7 +151,7 @@ describe('useObjectPanelTabs', () => {
   it('adds the Maintenance tab for node objects', async () => {
     const { availableTabs } = await renderHook({
       objectData: { kind: 'Node', name: 'node-1' },
-      capabilities: { ...baseCapabilities, hasLogs: false },
+      capabilities: { ...baseCapabilities, hasObjPanelLogs: false },
     });
     expect(availableTabs.map((tab) => tab.label)).toEqual([
       'Details',
@@ -168,7 +165,7 @@ describe('useObjectPanelTabs', () => {
   it('uses the Logs tab for node objects rather than a separate node logs tab', async () => {
     const { availableTabs } = await renderHook({
       objectData: { kind: 'Node', name: 'node-1' },
-      capabilities: { ...baseCapabilities, hasLogs: true, hasNodeLogs: false },
+      capabilities: { ...baseCapabilities, hasObjPanelLogs: true, hasNodeLogs: false },
     });
     expect(availableTabs.map((tab) => tab.label)).toEqual([
       'Details',
@@ -183,7 +180,7 @@ describe('useObjectPanelTabs', () => {
   it('falls back to details when the active tab becomes unavailable', async () => {
     await renderHook({
       currentTab: 'logs',
-      capabilities: { ...baseCapabilities, hasLogs: false },
+      capabilities: { ...baseCapabilities, hasObjPanelLogs: false },
     });
     expect(setActiveTabMock).toHaveBeenCalledWith('details');
   });
@@ -191,11 +188,8 @@ describe('useObjectPanelTabs', () => {
   it('registers position-based shortcut keys matching visible tab order', async () => {
     await renderHook();
 
-    // Escape still registered via useShortcut (singular).
-    const escapeKeys = hoistedShortcuts.useShortcut.mock.calls.map(
-      ([config]) => (config as { key: string }).key
-    );
-    expect(escapeKeys).toContain('Escape');
+    // Escape closes the dockable object tab, not the inner Details/YAML/etc. tabs.
+    expect(hoistedShortcuts.useShortcut).not.toHaveBeenCalled();
 
     // Tab shortcuts registered via useShortcuts (plural), keyed by position.
     // Deployment tabs: Details, Pods, Logs, Events, YAML → keys 1–5.
@@ -234,7 +228,7 @@ describe('useObjectPanelTabs', () => {
   it('omits shortcuts for hidden tabs instead of disabling them', async () => {
     // Without logs capability: Details, Pods, Events, YAML → 4 shortcuts, no gap.
     const { availableTabs } = await renderHook({
-      capabilities: { ...baseCapabilities, hasLogs: false },
+      capabilities: { ...baseCapabilities, hasObjPanelLogs: false },
     });
 
     expect(availableTabs.map((tab) => tab.label)).toEqual(['Details', 'Pods', 'Events', 'YAML']);
@@ -245,16 +239,6 @@ describe('useObjectPanelTabs', () => {
     expect(tabShortcuts).toHaveLength(4);
     // Key '2' now maps to Pods (second visible tab), not to a disabled Logs shortcut.
     expect(tabShortcuts?.[1]?.description).toBe('Switch to Pods tab');
-  });
-
-  it('invokes close handler when escape shortcut fires while open', async () => {
-    await renderHook();
-    const escapeShortcut = hoistedShortcuts.useShortcut.mock.calls.find(
-      ([config]) => (config as { key: string }).key === 'Escape'
-    )?.[0] as { handler: () => boolean };
-
-    expect(escapeShortcut.handler()).toBe(true);
-    expect(closeMock).toHaveBeenCalledTimes(1);
   });
 
   it('ignores tab shortcuts when the panel is closed', async () => {

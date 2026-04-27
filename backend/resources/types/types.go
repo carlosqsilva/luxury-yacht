@@ -29,38 +29,38 @@ type WindowSettings struct {
 
 // AppSettings represents the application settings
 type AppSettings struct {
-	Theme                             string   `json:"theme"`                             // "light", "dark", or "system"
-	SelectedKubeconfigs               []string `json:"selectedKubeconfigs"`               // Multi-cluster selections in "path:context" form
-	UseShortResourceNames             bool     `json:"useShortResourceNames"`             // Use short names like "po" for pods in badges/headers
-	AutoRefreshEnabled                bool     `json:"autoRefreshEnabled"`                // Enable automatic refresh cycles
-	RefreshBackgroundClustersEnabled  bool     `json:"refreshBackgroundClustersEnabled"`  // Refresh inactive clusters in the background
-	MetricsRefreshIntervalMs          int      `json:"metricsRefreshIntervalMs"`          // Metrics refresh interval (ms)
-	MaxTableRows                      int      `json:"maxTableRows"`                      // Max rows shown in a data table (100-10000)
-	LogBufferMaxSize                  int      `json:"logBufferMaxSize"`                  // Max log entries kept in memory per Logs tab (100-10000)
-	LogTargetPerScopeLimit            int      `json:"logTargetPerScopeLimit"`            // Max pod/container log targets per Logs tab (1-1000)
-	LogTargetGlobalLimit              int      `json:"logTargetGlobalLimit"`              // Max pod/container log targets across all log tabs (1-1000)
-	LogAPITimestampFormat             string   `json:"logApiTimestampFormat"`             // Day.js format for the Kubernetes API timestamp shown in pod logs
-	LogAPITimestampUseLocalTimeZone   bool     `json:"logApiTimestampUseLocalTimeZone"`   // Render the Kubernetes API timestamp in the user's local timezone instead of UTC
-	GridTablePersistenceMode          string   `json:"gridTablePersistenceMode"`          // "shared" or "namespaced"
-	DefaultObjectPanelPosition        string   `json:"defaultObjectPanelPosition"`        // "right", "bottom", or "floating"
-	ObjectPanelDockedRightWidth       int      `json:"objectPanelDockedRightWidth"`       // Default width when docked right (px)
-	ObjectPanelDockedBottomHeight     int      `json:"objectPanelDockedBottomHeight"`     // Default height when docked bottom (px)
-	ObjectPanelFloatingWidth          int      `json:"objectPanelFloatingWidth"`          // Default floating width (px)
-	ObjectPanelFloatingHeight         int      `json:"objectPanelFloatingHeight"`         // Default floating height (px)
-	ObjectPanelFloatingX              int      `json:"objectPanelFloatingX"`              // Default floating X position (px)
-	ObjectPanelFloatingY              int      `json:"objectPanelFloatingY"`              // Default floating Y position (px)
-	PaletteHueLight                   int      `json:"paletteHueLight"`                   // Hue for gray palette tint in light theme (0-360)
-	PaletteSaturationLight            int      `json:"paletteSaturationLight"`            // Saturation intensity for gray palette tint in light theme (0-100)
-	PaletteBrightnessLight            int      `json:"paletteBrightnessLight"`            // Brightness offset for gray palette in light theme (-50 to +50)
-	PaletteHueDark                    int      `json:"paletteHueDark"`                    // Hue for gray palette tint in dark theme (0-360)
-	PaletteSaturationDark             int      `json:"paletteSaturationDark"`             // Saturation intensity for gray palette tint in dark theme (0-100)
-	PaletteBrightnessDark             int      `json:"paletteBrightnessDark"`             // Brightness offset for gray palette in dark theme (-50 to +50)
-	AccentColorLight                  string   `json:"accentColorLight"`                  // Custom accent hex for light theme (empty = default)
-	AccentColorDark                   string   `json:"accentColorDark"`                   // Custom accent hex for dark theme (empty = default)
-	LinkColorLight                    string   `json:"linkColorLight"`                    // Custom link hex for light theme (empty = default)
-	LinkColorDark                     string   `json:"linkColorDark"`                     // Custom link hex for dark theme (empty = default)
-	Themes                            []Theme  `json:"themes"`                            // Saved theme library
-	SuppressNetworkErrorNotifications bool     `json:"suppressNetworkErrorNotifications"` // Hide network error notifications
+	Theme                                    string   `json:"theme"`                                    // "light", "dark", or "system"
+	SelectedKubeconfigs                      []string `json:"selectedKubeconfigs"`                      // Multi-cluster selections in "path:context" form
+	UseShortResourceNames                    bool     `json:"useShortResourceNames"`                    // Use short names like "po" for pods in badges/headers
+	AutoRefreshEnabled                       bool     `json:"autoRefreshEnabled"`                       // Enable automatic refresh cycles
+	RefreshBackgroundClustersEnabled         bool     `json:"refreshBackgroundClustersEnabled"`         // Refresh inactive clusters in the background
+	MetricsRefreshIntervalMs                 int      `json:"metricsRefreshIntervalMs"`                 // Metrics refresh interval (ms)
+	MaxTableRows                             int      `json:"maxTableRows"`                             // Max rows shown in a data table (100-10000)
+	ObjPanelLogsBufferMaxSize                int      `json:"objPanelLogsBufferMaxSize"`                // Max container log entries kept in memory per Object Panel Logs Tab (100-10000)
+	ObjPanelLogsTargetPerScopeLimit          int      `json:"objPanelLogsTargetPerScopeLimit"`          // Max pod/container Object Panel Logs Tab targets per Logs tab (1-1000)
+	ObjPanelLogsTargetGlobalLimit            int      `json:"objPanelLogsTargetGlobalLimit"`            // Max pod/container Object Panel Logs Tab targets across all log tabs (1-1000)
+	ObjPanelLogsAPITimestampFormat           string   `json:"objPanelLogsApiTimestampFormat"`           // Day.js format for the Kubernetes API timestamp shown in container logs
+	ObjPanelLogsAPITimestampUseLocalTimeZone bool     `json:"objPanelLogsApiTimestampUseLocalTimeZone"` // Render the Kubernetes API timestamp in the user's local timezone instead of UTC
+	GridTablePersistenceMode                 string   `json:"gridTablePersistenceMode"`                 // "shared" or "namespaced"
+	DefaultObjectPanelPosition               string   `json:"defaultObjectPanelPosition"`               // "right", "bottom", or "floating"
+	ObjectPanelDockedRightWidth              int      `json:"objectPanelDockedRightWidth"`              // Default width when docked right (px)
+	ObjectPanelDockedBottomHeight            int      `json:"objectPanelDockedBottomHeight"`            // Default height when docked bottom (px)
+	ObjectPanelFloatingWidth                 int      `json:"objectPanelFloatingWidth"`                 // Default floating width (px)
+	ObjectPanelFloatingHeight                int      `json:"objectPanelFloatingHeight"`                // Default floating height (px)
+	ObjectPanelFloatingX                     int      `json:"objectPanelFloatingX"`                     // Default floating X position (px)
+	ObjectPanelFloatingY                     int      `json:"objectPanelFloatingY"`                     // Default floating Y position (px)
+	PaletteHueLight                          int      `json:"paletteHueLight"`                          // Hue for gray palette tint in light theme (0-360)
+	PaletteSaturationLight                   int      `json:"paletteSaturationLight"`                   // Saturation intensity for gray palette tint in light theme (0-100)
+	PaletteBrightnessLight                   int      `json:"paletteBrightnessLight"`                   // Brightness offset for gray palette in light theme (-50 to +50)
+	PaletteHueDark                           int      `json:"paletteHueDark"`                           // Hue for gray palette tint in dark theme (0-360)
+	PaletteSaturationDark                    int      `json:"paletteSaturationDark"`                    // Saturation intensity for gray palette tint in dark theme (0-100)
+	PaletteBrightnessDark                    int      `json:"paletteBrightnessDark"`                    // Brightness offset for gray palette in dark theme (-50 to +50)
+	AccentColorLight                         string   `json:"accentColorLight"`                         // Custom accent hex for light theme (empty = default)
+	AccentColorDark                          string   `json:"accentColorDark"`                          // Custom accent hex for dark theme (empty = default)
+	LinkColorLight                           string   `json:"linkColorLight"`                           // Custom link hex for light theme (empty = default)
+	LinkColorDark                            string   `json:"linkColorDark"`                            // Custom link hex for dark theme (empty = default)
+	Themes                                   []Theme  `json:"themes"`                                   // Saved theme library
+	SuppressNetworkErrorNotifications        bool     `json:"suppressNetworkErrorNotifications"`        // Hide network error notifications
 }
 
 // ThemeInfo represents theme information to send to frontend
@@ -90,8 +90,8 @@ type Theme struct {
 	LinkColorDark  string `json:"linkColorDark,omitempty"`  // Hex "#rrggbb" or empty for default
 }
 
-// PodLogEntry represents a single log line with metadata
-type PodLogEntry struct {
+// ContainerLogsEntry represents a single log line with metadata
+type ContainerLogsEntry struct {
 	Timestamp   string `json:"timestamp"` // RFC3339Nano format
 	Pod         string `json:"pod"`
 	Container   string `json:"container"`
@@ -100,8 +100,8 @@ type PodLogEntry struct {
 	IsEphemeral bool   `json:"isEphemeral,omitempty"` // Whether this is from an ephemeral/debug container
 }
 
-// LogFetchRequest represents parameters for fetching logs
-type LogFetchRequest struct {
+// ContainerLogsFetchRequest represents parameters for fetching logs
+type ContainerLogsFetchRequest struct {
 	Scope            string   `json:"scope,omitempty"`
 	Namespace        string   `json:"namespace"`
 	WorkloadName     string   `json:"workloadName,omitempty"`
@@ -122,11 +122,11 @@ type LogFetchRequest struct {
 	SinceSeconds     int64    `json:"sinceSeconds,omitempty"`
 }
 
-// LogFetchResponse represents the response from LogFetcher
-type LogFetchResponse struct {
-	Entries  []PodLogEntry `json:"entries"`
-	Warnings []string      `json:"warnings,omitempty"`
-	Error    string        `json:"error,omitempty"`
+// ContainerLogsFetchResponse represents the response from FetchContainerLogs
+type ContainerLogsFetchResponse struct {
+	Entries  []ContainerLogsEntry `json:"entries"`
+	Warnings []string             `json:"warnings,omitempty"`
+	Error    string               `json:"error,omitempty"`
 }
 
 // NodeLogSource represents a discovered node log source that can be fetched directly.
@@ -652,27 +652,22 @@ type ServicePortDetails struct {
 	NodePort   int32  `json:"nodePort,omitempty"`
 }
 
+// EndpointSliceDetails describes a single EndpointSlice resource. Address,
+// port, and address-type fields are flattened directly because each Object
+// Panel renders one EndpointSlice; aggregation across slices for a Service
+// uses a different model.
 type EndpointSliceDetails struct {
-	Kind          string                 `json:"kind"`
-	Name          string                 `json:"name"`
-	Namespace     string                 `json:"namespace"`
-	Age           string                 `json:"age"`
-	Details       string                 `json:"details"`
-	Slices        []EndpointSliceSummary `json:"slices,omitempty"`
-	TotalReady    int                    `json:"totalReady"`
-	TotalNotReady int                    `json:"totalNotReady"`
-	TotalPorts    int                    `json:"totalPorts"`
-	Labels        map[string]string      `json:"labels,omitempty"`
-	Annotations   map[string]string      `json:"annotations,omitempty"`
-}
-
-type EndpointSliceSummary struct {
+	Kind              string                 `json:"kind"`
 	Name              string                 `json:"name"`
-	AddressType       string                 `json:"addressType"`
+	Namespace         string                 `json:"namespace"`
 	Age               string                 `json:"age"`
+	Details           string                 `json:"details"`
+	AddressType       string                 `json:"addressType"`
 	ReadyAddresses    []EndpointSliceAddress `json:"readyAddresses,omitempty"`
 	NotReadyAddresses []EndpointSliceAddress `json:"notReadyAddresses,omitempty"`
 	Ports             []EndpointSlicePort    `json:"ports,omitempty"`
+	Labels            map[string]string      `json:"labels,omitempty"`
+	Annotations       map[string]string      `json:"annotations,omitempty"`
 }
 
 type EndpointSliceAddress struct {
@@ -724,6 +719,155 @@ type IngressBackendDetails struct {
 type IngressTLSDetails struct {
 	Hosts      []string `json:"hosts"`
 	SecretName string   `json:"secretName,omitempty"`
+}
+
+// ObjectRef carries the cluster ID + GVK + namespace/name required to open
+// an object without ambiguous kind-only resolution.
+type ObjectRef struct {
+	ClusterID string `json:"clusterId"`
+	Group     string `json:"group"`
+	Version   string `json:"version"`
+	Kind      string `json:"kind"`
+	Namespace string `json:"namespace,omitempty"`
+	Name      string `json:"name"`
+}
+
+// DisplayRef preserves unresolved cross-references that cannot be opened safely
+// because the source object did not provide a full GVK.
+type DisplayRef struct {
+	ClusterID string `json:"clusterId"`
+	Group     string `json:"group,omitempty"`
+	Kind      string `json:"kind"`
+	Namespace string `json:"namespace,omitempty"`
+	Name      string `json:"name"`
+}
+
+type RefOrDisplay struct {
+	Ref     *ObjectRef  `json:"ref,omitempty"`
+	Display *DisplayRef `json:"display,omitempty"`
+}
+
+type ConditionState struct {
+	Type               string `json:"type,omitempty"`
+	Status             string `json:"status"`
+	Reason             string `json:"reason,omitempty"`
+	Message            string `json:"message,omitempty"`
+	LastTransitionTime string `json:"lastTransitionTime,omitempty"`
+}
+
+type ConditionsSummary struct {
+	Accepted   *ConditionState `json:"accepted,omitempty"`
+	Programmed *ConditionState `json:"programmed,omitempty"`
+	Ready      *ConditionState `json:"ready,omitempty"`
+	Resolved   *ConditionState `json:"resolvedRefs,omitempty"`
+}
+
+type GatewayClassDetails struct {
+	Kind        string            `json:"kind"`
+	Name        string            `json:"name"`
+	Controller  string            `json:"controller"`
+	Age         string            `json:"age"`
+	Details     string            `json:"details"`
+	Conditions  []ConditionState  `json:"conditions,omitempty"`
+	Summary     ConditionsSummary `json:"summary"`
+	Parameters  *RefOrDisplay     `json:"parameters,omitempty"`
+	UsedBy      []ObjectRef       `json:"usedBy,omitempty"`
+	Labels      map[string]string `json:"labels,omitempty"`
+	Annotations map[string]string `json:"annotations,omitempty"`
+}
+
+type GatewayDetails struct {
+	Kind            string                   `json:"kind"`
+	Name            string                   `json:"name"`
+	Namespace       string                   `json:"namespace"`
+	Age             string                   `json:"age"`
+	Details         string                   `json:"details"`
+	GatewayClassRef ObjectRef                `json:"gatewayClassRef"`
+	Addresses       []string                 `json:"addresses,omitempty"`
+	Listeners       []GatewayListenerDetails `json:"listeners,omitempty"`
+	Conditions      []ConditionState         `json:"conditions,omitempty"`
+	Summary         ConditionsSummary        `json:"summary"`
+	Labels          map[string]string        `json:"labels,omitempty"`
+	Annotations     map[string]string        `json:"annotations,omitempty"`
+}
+
+type GatewayListenerDetails struct {
+	Name           string           `json:"name"`
+	Hostname       string           `json:"hostname,omitempty"`
+	Port           int32            `json:"port"`
+	Protocol       string           `json:"protocol"`
+	AttachedRoutes int32            `json:"attachedRoutes"`
+	Conditions     []ConditionState `json:"conditions,omitempty"`
+}
+
+type RouteDetails struct {
+	Kind        string             `json:"kind"`
+	Name        string             `json:"name"`
+	Namespace   string             `json:"namespace"`
+	Age         string             `json:"age"`
+	Details     string             `json:"details"`
+	Hostnames   []string           `json:"hostnames,omitempty"`
+	ParentRefs  []RefOrDisplay     `json:"parentRefs,omitempty"`
+	BackendRefs []RefOrDisplay     `json:"backendRefs,omitempty"`
+	Rules       []RouteRuleDetails `json:"rules,omitempty"`
+	Conditions  []ConditionState   `json:"conditions,omitempty"`
+	Summary     ConditionsSummary  `json:"summary"`
+	Labels      map[string]string  `json:"labels,omitempty"`
+	Annotations map[string]string  `json:"annotations,omitempty"`
+}
+
+type RouteRuleDetails struct {
+	Matches     []string       `json:"matches,omitempty"`
+	BackendRefs []RefOrDisplay `json:"backendRefs,omitempty"`
+}
+
+type HTTPRouteDetails = RouteDetails
+type GRPCRouteDetails = RouteDetails
+type TLSRouteDetails = RouteDetails
+
+type ListenerSetDetails struct {
+	Kind        string                   `json:"kind"`
+	Name        string                   `json:"name"`
+	Namespace   string                   `json:"namespace"`
+	Age         string                   `json:"age"`
+	Details     string                   `json:"details"`
+	ParentRef   RefOrDisplay             `json:"parentRef"`
+	Listeners   []GatewayListenerDetails `json:"listeners,omitempty"`
+	Conditions  []ConditionState         `json:"conditions,omitempty"`
+	Summary     ConditionsSummary        `json:"summary"`
+	Labels      map[string]string        `json:"labels,omitempty"`
+	Annotations map[string]string        `json:"annotations,omitempty"`
+}
+
+type ReferenceGrantDetails struct {
+	Kind        string                   `json:"kind"`
+	Name        string                   `json:"name"`
+	Namespace   string                   `json:"namespace"`
+	Age         string                   `json:"age"`
+	Details     string                   `json:"details"`
+	From        []ReferenceGrantFromInfo `json:"from,omitempty"`
+	To          []RefOrDisplay           `json:"to,omitempty"`
+	Labels      map[string]string        `json:"labels,omitempty"`
+	Annotations map[string]string        `json:"annotations,omitempty"`
+}
+
+type ReferenceGrantFromInfo struct {
+	Group     string `json:"group"`
+	Kind      string `json:"kind"`
+	Namespace string `json:"namespace"`
+}
+
+type BackendTLSPolicyDetails struct {
+	Kind        string            `json:"kind"`
+	Name        string            `json:"name"`
+	Namespace   string            `json:"namespace"`
+	Age         string            `json:"age"`
+	Details     string            `json:"details"`
+	TargetRefs  []RefOrDisplay    `json:"targetRefs,omitempty"`
+	Conditions  []ConditionState  `json:"conditions,omitempty"`
+	Summary     ConditionsSummary `json:"summary"`
+	Labels      map[string]string `json:"labels,omitempty"`
+	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
 type IngressClassDetails struct {

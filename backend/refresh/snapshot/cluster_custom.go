@@ -14,10 +14,11 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 
+	"github.com/luxury-yacht/app/backend/internal/logsources"
 	"github.com/luxury-yacht/app/backend/internal/parallel"
 	"github.com/luxury-yacht/app/backend/refresh"
+	"github.com/luxury-yacht/app/backend/refresh/containerlogsstream"
 	"github.com/luxury-yacht/app/backend/refresh/domain"
-	"github.com/luxury-yacht/app/backend/refresh/logstream"
 )
 
 const (
@@ -29,7 +30,7 @@ const (
 type ClusterCustomBuilder struct {
 	dynamic   dynamic.Interface
 	crdLister apiextensionslisters.CustomResourceDefinitionLister
-	logger    logstream.Logger
+	logger    containerlogsstream.Logger
 }
 
 // ClusterCustomSummary captures key cluster custom resource fields.
@@ -67,7 +68,7 @@ func RegisterClusterCustomDomain(
 	reg *domain.Registry,
 	apiextFactory apiextensionsinformers.SharedInformerFactory,
 	dynamicClient dynamic.Interface,
-	logger logstream.Logger,
+	logger containerlogsstream.Logger,
 ) error {
 	if apiextFactory == nil {
 		return fmt.Errorf("apiextensions informer factory is nil")
@@ -105,7 +106,7 @@ func (b *ClusterCustomBuilder) Build(ctx context.Context, scope string) (*refres
 
 	clusterCRDs := make([]*apiextensionsv1.CustomResourceDefinition, 0, len(crds))
 	for _, crd := range crds {
-		if crd != nil && crd.Spec.Scope == apiextensionsv1.ClusterScoped {
+		if crd != nil && crd.Spec.Scope == apiextensionsv1.ClusterScoped && !IsFirstClassCustomResourceDefinition(crd) {
 			clusterCRDs = append(clusterCRDs, crd)
 		}
 	}
@@ -171,7 +172,7 @@ func (b *ClusterCustomBuilder) Build(ctx context.Context, scope string) (*refres
 					return nil
 				}
 				if b.logger != nil {
-					b.logger.Warn(fmt.Sprintf("cluster-custom: list %s failed: %v", gvr.String(), err), "Refresh")
+					b.logger.Warn(fmt.Sprintf("cluster-custom: list %s failed: %v", gvr.String(), err), logsources.Refresh)
 				}
 				mu.Lock()
 				if firstErr == nil {
