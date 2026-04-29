@@ -11,7 +11,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -28,14 +27,6 @@ import (
 
 var containerLogsStreamFunc = func(pods corev1client.PodInterface, ctx context.Context, podName string, opts *corev1.PodLogOptions) (io.ReadCloser, error) {
 	return pods.GetLogs(podName, opts).Stream(ctx)
-}
-
-// ansiEscapeRe matches ANSI color/style escape sequences (e.g. \x1b[32m, \x1b[38;5;3m).
-var ansiEscapeRe = regexp.MustCompile(`\x1b\[[\d;]*m`)
-
-// stripAnsi removes ANSI escape sequences from a log line.
-func stripAnsi(s string) string {
-	return ansiEscapeRe.ReplaceAllString(s, "")
 }
 
 // FetchContainerLogs aggregates logs from pods or workloads based on the provided request.
@@ -469,9 +460,9 @@ func (s *Service) fetchContainerLogs(namespace, podName, containerName string, i
 		var timestamp, logLine string
 		if spaceIndex := strings.Index(line, " "); spaceIndex > 0 && spaceIndex < 31 {
 			timestamp = line[:spaceIndex]
-			logLine = stripAnsi(line[spaceIndex+1:])
+			logLine = line[spaceIndex+1:]
 		} else {
-			logLine = stripAnsi(line)
+			logLine = line
 		}
 		if !lineFilter.Matches(logLine) {
 			continue
