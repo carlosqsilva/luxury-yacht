@@ -5,38 +5,30 @@
  * Handles rendering and interactions for the cluster feature.
  */
 
-import { DeleteResourceByGVK } from '@wailsjs/go/backend/App';
-import { errorHandler } from '@utils/errorHandler';
 import { getDisplayKind } from '@/utils/kindAliasMap';
-import { getPermissionKey, useUserPermissions } from '@/core/capabilities';
 import { resolveEmptyStateMessage } from '@/utils/emptyState';
-import { useGridTablePersistence } from '@shared/components/tables/persistence/useGridTablePersistence';
 import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
 import { useNavigateToView } from '@shared/hooks/useNavigateToView';
 import { useObjectPanel } from '@modules/object-panel/hooks/useObjectPanel';
 import { useShortNames } from '@/hooks/useShortNames';
-import { useTableSort } from '@/hooks/useTableSort';
 import * as cf from '@shared/components/tables/columnFactories';
-import ConfirmationModal from '@shared/components/modals/ConfirmationModal';
-import React, { useMemo, useState, useCallback } from 'react';
-import ResourceLoadingBoundary from '@shared/components/ResourceLoadingBoundary';
+import React, { useMemo, useCallback } from 'react';
+import ResourceGridTableView from '@shared/components/tables/ResourceGridTableView';
 import type { ContextMenuItem } from '@shared/components/ContextMenu';
-import GridTable, {
-  type GridColumnDefinition,
-  GRIDTABLE_VIRTUALIZATION_DEFAULT,
-} from '@shared/components/tables/GridTable';
-import { useKindFilterOptions } from '@shared/components/tables/hooks/useKindFilterOptions';
-import { formatBuiltinApiVersion } from '@shared/constants/builtinGroupVersions';
-import { buildObjectActionItems } from '@shared/hooks/useObjectActions';
-import { useFavToggle } from '@ui/favorites/FavToggle';
-import { buildCanonicalObjectRowKey, buildObjectReference } from '@shared/utils/objectIdentity';
+import { type GridColumnDefinition } from '@shared/components/tables/GridTable';
+import { useObjectActionController } from '@shared/hooks/useObjectActionController';
+import { useClusterResourceGridTable } from '@shared/hooks/useResourceGridTable';
+import {
+  buildRequiredCanonicalObjectRowKey,
+  buildRequiredObjectReference,
+} from '@shared/utils/objectIdentity';
 
 // Define the data structure for RBAC resources
 interface RBACData {
   kind: string;
   kindAlias?: string;
   name: string;
-  clusterId?: string;
+  clusterId: string;
   clusterName?: string;
   age?: string;
 }
@@ -60,34 +52,35 @@ const RBACViewGrid: React.FC<RBACViewProps> = React.memo(
     const { navigateToView } = useNavigateToView();
     const { selectedClusterId } = useKubeconfig();
     const useShortResourceNames = useShortNames();
-    const permissionMap = useUserPermissions();
-    const [deleteConfirm, setDeleteConfirm] = useState<{
-      show: boolean;
-      resource: RBACData | null;
-    }>({ show: false, resource: null });
 
     const handleResourceClick = useCallback(
       (resource: RBACData) => {
         openWithObject(
-          buildObjectReference({
-            kind: resource.kind,
-            name: resource.name,
-            clusterId: resource.clusterId ?? undefined,
-            clusterName: resource.clusterName ?? undefined,
-          })
+          buildRequiredObjectReference(
+            {
+              kind: resource.kind,
+              name: resource.name,
+              clusterId: resource.clusterId ?? undefined,
+              clusterName: resource.clusterName ?? undefined,
+            },
+            { fallbackClusterId: selectedClusterId }
+          )
         );
       },
-      [openWithObject]
+      [openWithObject, selectedClusterId]
     );
 
     const keyExtractor = useCallback(
       (resource: RBACData) =>
-        buildCanonicalObjectRowKey({
-          kind: resource.kind,
-          name: resource.name,
-          clusterId: resource.clusterId,
-        }),
-      []
+        buildRequiredCanonicalObjectRowKey(
+          {
+            kind: resource.kind,
+            name: resource.name,
+            clusterId: resource.clusterId,
+          },
+          { fallbackClusterId: selectedClusterId }
+        ),
+      [selectedClusterId]
     );
 
     // Define columns for RBAC resources
@@ -101,12 +94,15 @@ const RBACViewGrid: React.FC<RBACViewProps> = React.memo(
           onClick: handleResourceClick,
           onAltClick: (resource) =>
             navigateToView(
-              buildObjectReference({
-                kind: resource.kind,
-                name: resource.name,
-                clusterId: resource.clusterId,
-                clusterName: resource.clusterName,
-              })
+              buildRequiredObjectReference(
+                {
+                  kind: resource.kind,
+                  name: resource.name,
+                  clusterId: resource.clusterId,
+                  clusterName: resource.clusterName,
+                },
+                { fallbackClusterId: selectedClusterId }
+              )
             ),
         }),
         cf.createTextColumn<RBACData>('name', 'Name', (resource) => resource.name, {
@@ -114,12 +110,15 @@ const RBACViewGrid: React.FC<RBACViewProps> = React.memo(
           onClick: handleResourceClick,
           onAltClick: (resource) =>
             navigateToView(
-              buildObjectReference({
-                kind: resource.kind,
-                name: resource.name,
-                clusterId: resource.clusterId,
-                clusterName: resource.clusterName,
-              })
+              buildRequiredObjectReference(
+                {
+                  kind: resource.kind,
+                  name: resource.name,
+                  clusterId: resource.clusterId,
+                  clusterName: resource.clusterName,
+                },
+                { fallbackClusterId: selectedClusterId }
+              )
             ),
           getClassName: () => 'object-panel-link',
         }),
@@ -134,111 +133,40 @@ const RBACViewGrid: React.FC<RBACViewProps> = React.memo(
       cf.applyColumnSizing(baseColumns, sizing);
 
       return baseColumns;
-    }, [handleResourceClick, navigateToView, useShortResourceNames]);
+    }, [handleResourceClick, navigateToView, selectedClusterId, useShortResourceNames]);
 
-    // Set up grid table persistence
-    const {
-      sortConfig: persistedSort,
-      setSortConfig: setPersistedSort,
-      columnWidths,
-      setColumnWidths,
-      columnVisibility,
-      setColumnVisibility,
-      filters: persistedFilters,
-      setFilters: setPersistedFilters,
-      resetState: resetPersistedState,
-      hydrated,
-    } = useGridTablePersistence<RBACData>({
+    const { gridTableProps, favModal } = useClusterResourceGridTable<RBACData>({
       viewId: 'cluster-rbac',
-      clusterIdentity: selectedClusterId,
-      namespace: null,
-      isNamespaceScoped: false,
       columns,
       data,
       keyExtractor,
-      filterOptions: { isNamespaceScoped: false },
+      availableKinds: kindOptions,
+      showKindDropdown: true,
+      diagnosticsLabel: 'Cluster RBAC',
     });
 
-    // Set up table sorting
-    const { sortedData, sortConfig, handleSort } = useTableSort(data, 'name', 'asc', {
-      columns,
-      controlledSort: persistedSort,
-      onChange: setPersistedSort,
+    const objectActions = useObjectActionController({
+      context: 'gridtable',
+      onOpen: (object) => openWithObject(object),
+      onOpenObjectMap: (object) => openWithObject(object, { initialTab: 'map' }),
     });
-
-    const fallbackKinds = useKindFilterOptions(data);
-    const availableKinds = kindOptions && kindOptions.length > 0 ? kindOptions : fallbackKinds;
-
-    const { item: favToggle, modal: favModal } = useFavToggle({
-      filters: persistedFilters,
-      sortColumn: sortConfig?.key ?? null,
-      sortDirection: sortConfig?.direction ?? 'asc',
-      columnVisibility: columnVisibility ?? {},
-      setFilters: setPersistedFilters,
-      setSortConfig: setPersistedSort,
-      setColumnVisibility,
-      hydrated,
-      availableKinds,
-    });
-
-    // Handle delete confirmation
-    const handleDeleteConfirm = useCallback(async () => {
-      if (!deleteConfirm.resource) return;
-      const resource = deleteConfirm.resource;
-
-      try {
-        // Multi-cluster rule (AGENTS.md): every backend command must
-        // carry a resolved clusterId.
-        const clusterId = resource.clusterId ?? selectedClusterId ?? null;
-        if (!clusterId) {
-          throw new Error(`Cannot delete ${resource.kind}/${resource.name}: clusterId is missing`);
-        }
-        // Built-in cluster RBAC kinds (ClusterRole/ClusterRoleBinding) resolve
-        // via the lookup table.
-        const apiVersion = formatBuiltinApiVersion(resource.kind);
-        if (!apiVersion) {
-          throw new Error(
-            `Cannot delete ${resource.kind}/${resource.name}: not a known built-in kind`
-          );
-        }
-        await DeleteResourceByGVK(clusterId, apiVersion, resource.kind, '', resource.name);
-        setDeleteConfirm({ show: false, resource: null });
-      } catch (error) {
-        errorHandler.handle(error, {
-          action: 'delete',
-          kind: deleteConfirm.resource.kind,
-          name: deleteConfirm.resource.name,
-        });
-        setDeleteConfirm({ show: false, resource: null });
-      }
-    }, [deleteConfirm.resource, selectedClusterId]);
 
     // Get context menu items
     const getContextMenuItems = useCallback(
       (resource: RBACData): ContextMenuItem[] => {
-        const deleteStatus =
-          permissionMap.get(
-            getPermissionKey(resource.kind, 'delete', null, null, resource.clusterId)
-          ) ?? null;
-
-        return buildObjectActionItems({
-          object: buildObjectReference({
-            kind: resource.kind,
-            name: resource.name,
-            clusterId: resource.clusterId,
-            clusterName: resource.clusterName,
-          }),
-          context: 'gridtable',
-          handlers: {
-            onOpen: () => handleResourceClick(resource),
-            onDelete: () => setDeleteConfirm({ show: true, resource }),
-          },
-          permissions: {
-            delete: deleteStatus,
-          },
-        });
+        return objectActions.getMenuItems(
+          buildRequiredObjectReference(
+            {
+              kind: resource.kind,
+              name: resource.name,
+              clusterId: resource.clusterId,
+              clusterName: resource.clusterName,
+            },
+            { fallbackClusterId: selectedClusterId }
+          )
+        );
       },
-      [handleResourceClick, permissionMap]
+      [objectActions, selectedClusterId]
     );
 
     // Resolve empty state message
@@ -249,57 +177,25 @@ const RBACViewGrid: React.FC<RBACViewProps> = React.memo(
 
     return (
       <>
-        <ResourceLoadingBoundary
-          loading={loading ?? false}
-          dataLength={sortedData.length}
-          hasLoaded={loaded}
+        <ResourceGridTableView
+          gridTableProps={gridTableProps}
+          boundaryLoading={loading ?? false}
+          loaded={loaded}
           spinnerMessage="Loading RBAC resources..."
-        >
-          <GridTable
-            data={sortedData}
-            columns={columns}
-            diagnosticsLabel="Cluster RBAC"
-            loading={loading}
-            keyExtractor={keyExtractor}
-            onRowClick={handleResourceClick}
-            onSort={handleSort}
-            sortConfig={sortConfig}
-            tableClassName="gridtable-rbac"
-            enableContextMenu={true}
-            getCustomContextMenuItems={getContextMenuItems}
-            useShortNames={useShortResourceNames}
-            emptyMessage={emptyMessage}
-            filters={{
-              enabled: true,
-              value: persistedFilters,
-              onChange: setPersistedFilters,
-              onReset: resetPersistedState,
-              options: {
-                kinds: availableKinds,
-                showKindDropdown: true,
-                preActions: [favToggle],
-              },
-            }}
-            virtualization={GRIDTABLE_VIRTUALIZATION_DEFAULT}
-            columnWidths={columnWidths}
-            onColumnWidthsChange={setColumnWidths}
-            columnVisibility={columnVisibility}
-            onColumnVisibilityChange={setColumnVisibility}
-            allowHorizontalOverflow={true}
-          />
-        </ResourceLoadingBoundary>
-
-        <ConfirmationModal
-          isOpen={deleteConfirm.show}
-          title={`Delete ${deleteConfirm.resource?.kind || 'Resource'}`}
-          message={`Are you sure you want to delete ${deleteConfirm.resource?.kind} "${deleteConfirm.resource?.name}"?\n\nThis action cannot be undone.`}
-          confirmText="Delete"
-          cancelText="Cancel"
-          confirmButtonClass="danger"
-          onConfirm={handleDeleteConfirm}
-          onCancel={() => setDeleteConfirm({ show: false, resource: null })}
+          favModal={favModal}
+          columns={columns}
+          diagnosticsLabel="Cluster RBAC"
+          loading={loading}
+          keyExtractor={keyExtractor}
+          onRowClick={handleResourceClick}
+          tableClassName="gridtable-rbac"
+          enableContextMenu={true}
+          getCustomContextMenuItems={getContextMenuItems}
+          useShortNames={useShortResourceNames}
+          emptyMessage={emptyMessage}
         />
-        {favModal}
+
+        {objectActions.modals}
       </>
     );
   }

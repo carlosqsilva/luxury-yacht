@@ -8,29 +8,23 @@
 import './NsViewCustom.css';
 import { getDisplayKind } from '@/utils/kindAliasMap';
 import { resolveEmptyStateMessage } from '@/utils/emptyState';
-import { useNamespaceGridTablePersistence } from '@modules/namespace/hooks/useNamespaceGridTablePersistence';
 import { useNavigateToView } from '@shared/hooks/useNavigateToView';
 import { useObjectPanel } from '@modules/object-panel/hooks/useObjectPanel';
 import { useShortNames } from '@/hooks/useShortNames';
-import { useTableSort } from '@/hooks/useTableSort';
+import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
 import * as cf from '@shared/components/tables/columnFactories';
-import React, { useMemo, useState, useCallback } from 'react';
-import ConfirmationModal from '@shared/components/modals/ConfirmationModal';
-import ResourceLoadingBoundary from '@shared/components/ResourceLoadingBoundary';
+import React, { useMemo, useCallback } from 'react';
+import ResourceGridTableView from '@shared/components/tables/ResourceGridTableView';
 import type { ContextMenuItem } from '@shared/components/ContextMenu';
-import GridTable, {
-  type GridColumnDefinition,
-  GRIDTABLE_VIRTUALIZATION_DEFAULT,
-} from '@shared/components/tables/GridTable';
+import { type GridColumnDefinition } from '@shared/components/tables/GridTable';
 import { ALL_NAMESPACES_SCOPE } from '@modules/namespace/constants';
-import { DeleteResourceByGVK } from '@wailsjs/go/backend/App';
-import { errorHandler } from '@utils/errorHandler';
-import { getPermissionKey, queryKindPermissions, useUserPermissions } from '@/core/capabilities';
-import { buildObjectActionItems } from '@shared/hooks/useObjectActions';
-import { useFavToggle } from '@ui/favorites/FavToggle';
+import { useObjectActionController } from '@shared/hooks/useObjectActionController';
 import { useNamespaceColumnLink } from '@modules/namespace/components/useNamespaceColumnLink';
-import { useNamespaceFilterOptions } from '@modules/namespace/hooks/useNamespaceFilterOptions';
-import { buildCanonicalObjectRowKey, buildObjectReference } from '@shared/utils/objectIdentity';
+import { useNamespaceResourceGridTable } from '@shared/hooks/useResourceGridTable';
+import {
+  buildRequiredCanonicalObjectRowKey,
+  buildRequiredObjectReference,
+} from '@shared/utils/objectIdentity';
 
 // Data interface for custom resources
 export interface CustomResourceData {
@@ -39,7 +33,7 @@ export interface CustomResourceData {
   name: string;
   namespace: string;
   // Multi-cluster metadata used for per-tab actions and stable row keys.
-  clusterId?: string;
+  clusterId: string;
   clusterName?: string;
   apiGroup?: string;
   apiVersion?: string;
@@ -100,13 +94,9 @@ const CustomViewGrid: React.FC<CustomViewProps> = React.memo(
   }) => {
     const { openWithObject } = useObjectPanel();
     const { navigateToView } = useNavigateToView();
+    const { selectedClusterId } = useKubeconfig();
     const useShortResourceNames = useShortNames();
     const namespaceColumnLink = useNamespaceColumnLink<CustomResourceData>('custom');
-    const permissionMap = useUserPermissions();
-    const [deleteConfirm, setDeleteConfirm] = useState<{
-      show: boolean;
-      resource: CustomResourceData | null;
-    }>({ show: false, resource: null });
 
     const handleResourceClick = useCallback(
       (resource: CustomResourceData) => {
@@ -117,7 +107,7 @@ const CustomViewGrid: React.FC<CustomViewProps> = React.memo(
         // falls back to first-match-wins discovery and opens the wrong
         // resource.
         openWithObject(
-          buildObjectReference(
+          buildRequiredObjectReference(
             {
               kind: resource.kind || resource.kindAlias || 'CustomResource',
               kindAlias: resource.kindAlias,
@@ -125,9 +115,10 @@ const CustomViewGrid: React.FC<CustomViewProps> = React.memo(
               namespace: resource.namespace,
               group: resource.apiGroup,
               version: resource.apiVersion,
-              clusterId: resource.clusterId ?? undefined,
+              clusterId: resource.clusterId,
               clusterName: resource.clusterName ?? undefined,
             },
+            { fallbackClusterId: selectedClusterId },
             {
               age: resource.age,
               labels: resource.labels,
@@ -136,7 +127,7 @@ const CustomViewGrid: React.FC<CustomViewProps> = React.memo(
           )
         );
       },
-      [openWithObject]
+      [openWithObject, selectedClusterId]
     );
 
     // Click handler for the CRD column. Opens the owning
@@ -149,28 +140,41 @@ const CustomViewGrid: React.FC<CustomViewProps> = React.memo(
           return;
         }
         openWithObject(
-          buildObjectReference({
-            kind: 'CustomResourceDefinition',
-            name: resource.crdName,
-            clusterId: resource.clusterId ?? undefined,
-            clusterName: resource.clusterName ?? undefined,
-          })
+          buildRequiredObjectReference(
+            {
+              kind: 'CustomResourceDefinition',
+              name: resource.crdName,
+              clusterId: resource.clusterId,
+              clusterName: resource.clusterName ?? undefined,
+            },
+            { fallbackClusterId: selectedClusterId },
+            {
+              age: resource.age,
+              labels: resource.labels,
+              annotations: resource.annotations,
+              requiresExplicitVersion: true,
+              explicitVersionProvided: Boolean(resource.apiVersion),
+            }
+          )
         );
       },
-      [openWithObject]
+      [openWithObject, selectedClusterId]
     );
 
     const keyExtractor = useCallback(
       (resource: CustomResourceData) =>
-        buildCanonicalObjectRowKey({
-          kind: resource.kind || resource.kindAlias || 'CustomResource',
-          name: resource.name,
-          namespace: resource.namespace,
-          clusterId: resource.clusterId,
-          group: resource.apiGroup,
-          version: resource.apiVersion,
-        }),
-      []
+        buildRequiredCanonicalObjectRowKey(
+          {
+            kind: resource.kind || resource.kindAlias || 'CustomResource',
+            name: resource.name,
+            namespace: resource.namespace,
+            clusterId: resource.clusterId,
+            group: resource.apiGroup,
+            version: resource.apiVersion,
+          },
+          { fallbackClusterId: selectedClusterId }
+        ),
+      [selectedClusterId]
     );
 
     const columns: GridColumnDefinition<CustomResourceData>[] = useMemo(() => {
@@ -183,32 +187,38 @@ const CustomViewGrid: React.FC<CustomViewProps> = React.memo(
           onClick: handleResourceClick,
           onAltClick: (resource) =>
             navigateToView(
-              buildObjectReference({
-                kind: resource.kind || resource.kindAlias || 'CustomResource',
-                kindAlias: resource.kindAlias,
-                name: resource.name,
-                namespace: resource.namespace,
-                clusterId: resource.clusterId,
-                clusterName: resource.clusterName,
-                group: resource.apiGroup,
-                version: resource.apiVersion,
-              })
+              buildRequiredObjectReference(
+                {
+                  kind: resource.kind || resource.kindAlias || 'CustomResource',
+                  kindAlias: resource.kindAlias,
+                  name: resource.name,
+                  namespace: resource.namespace,
+                  clusterId: resource.clusterId,
+                  clusterName: resource.clusterName,
+                  group: resource.apiGroup,
+                  version: resource.apiVersion,
+                },
+                { fallbackClusterId: selectedClusterId }
+              )
             ),
         }),
         cf.createTextColumn<CustomResourceData>('name', 'Name', {
           onClick: handleResourceClick,
           onAltClick: (resource) =>
             navigateToView(
-              buildObjectReference({
-                kind: resource.kind || resource.kindAlias || 'CustomResource',
-                kindAlias: resource.kindAlias,
-                name: resource.name,
-                namespace: resource.namespace,
-                clusterId: resource.clusterId,
-                clusterName: resource.clusterName,
-                group: resource.apiGroup,
-                version: resource.apiVersion,
-              })
+              buildRequiredObjectReference(
+                {
+                  kind: resource.kind || resource.kindAlias || 'CustomResource',
+                  kindAlias: resource.kindAlias,
+                  name: resource.name,
+                  namespace: resource.namespace,
+                  clusterId: resource.clusterId,
+                  clusterName: resource.clusterName,
+                  group: resource.apiGroup,
+                  version: resource.apiVersion,
+                },
+                { fallbackClusterId: selectedClusterId }
+              )
             ),
           getClassName: () => 'object-panel-link',
         }),
@@ -235,12 +245,15 @@ const CustomViewGrid: React.FC<CustomViewProps> = React.memo(
                   return;
                 }
                 navigateToView(
-                  buildObjectReference({
-                    kind: 'CustomResourceDefinition',
-                    name: resource.crdName,
-                    clusterId: resource.clusterId,
-                    clusterName: resource.clusterName,
-                  })
+                  buildRequiredObjectReference(
+                    {
+                      kind: 'CustomResourceDefinition',
+                      name: resource.crdName,
+                      clusterId: resource.clusterId,
+                      clusterName: resource.clusterName,
+                    },
+                    { fallbackClusterId: selectedClusterId }
+                  )
                 );
               },
               isInteractive: (resource) => Boolean(resource.crdName),
@@ -277,6 +290,7 @@ const CustomViewGrid: React.FC<CustomViewProps> = React.memo(
       handleCRDClick,
       namespaceColumnLink,
       navigateToView,
+      selectedClusterId,
       showNamespaceColumn,
       useShortResourceNames,
     ]);
@@ -285,180 +299,55 @@ const CustomViewGrid: React.FC<CustomViewProps> = React.memo(
     const diagnosticsLabel =
       namespace === ALL_NAMESPACES_SCOPE ? 'All Namespaces Custom' : 'Namespace Custom';
 
-    const {
-      sortConfig: persistedSort,
-      onSortChange,
-      columnWidths,
-      setColumnWidths,
-      columnVisibility,
-      setColumnVisibility,
-      filters: persistedFilters,
-      setFilters: setPersistedFilters,
-      resetState: resetPersistedState,
-      hydrated,
-    } = useNamespaceGridTablePersistence<CustomResourceData>({
+    const { gridTableProps, favModal } = useNamespaceResourceGridTable<CustomResourceData>({
       viewId: 'namespace-custom',
       namespace,
-      columns,
       data,
+      columns,
       keyExtractor,
       defaultSort: { key: 'name', direction: 'asc' },
+      availableKinds: kindOptions ?? [],
+      showKindDropdown: true,
+      kindDropdownSearchable: true,
+      kindDropdownBulkActions: true,
+      showNamespaceFilters: showNamespaceFilter,
+      diagnosticsLabel,
       filterOptions: { isNamespaceScoped: namespace !== ALL_NAMESPACES_SCOPE },
     });
 
-    const { sortedData, sortConfig, handleSort } = useTableSort(data, undefined, 'asc', {
-      columns,
-      controlledSort: persistedSort,
-      onChange: onSortChange,
-      diagnosticsLabel,
+    const objectActions = useObjectActionController({
+      context: 'gridtable',
+      queryMissingPermissions: true,
+      onOpen: (object) => openWithObject(object),
     });
-
-    // Derive available kinds and namespaces from the data for the favorites modal dropdowns.
-    const availableKinds = useMemo(() => kindOptions ?? [], [kindOptions]);
-    const fallbackNamespaces = useMemo(
-      () => [...new Set(data.map((r) => r.namespace).filter(Boolean))].sort(),
-      [data]
-    );
-    const availableFilterNamespaces = useNamespaceFilterOptions(namespace, fallbackNamespaces);
-
-    const { item: favToggle, modal: favModal } = useFavToggle({
-      filters: persistedFilters,
-      sortColumn: sortConfig?.key ?? null,
-      sortDirection: sortConfig?.direction ?? 'asc',
-      columnVisibility: columnVisibility ?? {},
-      setFilters: setPersistedFilters,
-      setSortConfig: onSortChange,
-      setColumnVisibility,
-      hydrated,
-      availableKinds,
-      availableFilterNamespaces,
-    });
-
-    const filtersConfig = useMemo(
-      () => ({
-        enabled: true,
-        value: persistedFilters,
-        onChange: setPersistedFilters,
-        onReset: resetPersistedState,
-        options: {
-          kinds: availableKinds,
-          namespaces: availableFilterNamespaces,
-          showKindDropdown: true,
-          kindDropdownSearchable: true,
-          kindDropdownBulkActions: true,
-          showNamespaceDropdown: showNamespaceFilter,
-          namespaceDropdownSearchable: showNamespaceFilter,
-          namespaceDropdownBulkActions: showNamespaceFilter,
-          preActions: [favToggle],
-        },
-      }),
-      [
-        availableFilterNamespaces,
-        availableKinds,
-        favToggle,
-        persistedFilters,
-        resetPersistedState,
-        setPersistedFilters,
-        showNamespaceFilter,
-      ]
-    );
-
-    const handleDeleteConfirm = useCallback(async () => {
-      if (!deleteConfirm.resource) return;
-      const resource = deleteConfirm.resource;
-      const resolvedKind = resource.kind || resource.kindAlias || 'CustomResource';
-
-      try {
-        // Multi-cluster rule (AGENTS.md): every backend command must
-        // carry a resolved clusterId.
-        if (!resource.clusterId) {
-          throw new Error(`Cannot delete ${resolvedKind}/${resource.name}: clusterId is missing`);
-        }
-        // CustomResourceData always carries apiGroup/apiVersion from the
-        // catalog. A missing apiVersion here means the upstream data source
-        // dropped it — fail loud rather than fall back to the retired
-        // kind-only resolver (which is first-match-wins across colliding
-        // CRDs).
-        if (!resource.apiVersion) {
-          throw new Error(
-            `Cannot delete ${resolvedKind}/${resource.name}: apiVersion missing on custom resource row`
-          );
-        }
-        const apiVersion = resource.apiGroup
-          ? `${resource.apiGroup}/${resource.apiVersion}`
-          : resource.apiVersion;
-        await DeleteResourceByGVK(
-          resource.clusterId,
-          apiVersion,
-          resolvedKind,
-          resource.namespace,
-          resource.name
-        );
-        setDeleteConfirm({ show: false, resource: null });
-      } catch (error) {
-        errorHandler.handle(error, {
-          action: 'delete',
-          kind: resource.kind,
-          name: resource.name,
-        });
-        setDeleteConfirm({ show: false, resource: null });
-      }
-    }, [deleteConfirm.resource]);
 
     const getContextMenuItems = useCallback(
       (resource: CustomResourceData): ContextMenuItem[] => {
         const kind = resource.kind || resource.kindAlias || 'CustomResource';
-        const group = resource.apiGroup ?? null;
-        const version = resource.apiVersion ?? null;
-        // Permission lookup carries group/version so two CRDs sharing a
-        // Kind don't share a cache slot. CustomResourceData provides both
-        // fields.
-        const deleteStatus =
-          permissionMap.get(
-            getPermissionKey(
+        return objectActions.getMenuItems(
+          buildRequiredObjectReference(
+            {
               kind,
-              'delete',
-              resource.namespace,
-              null,
-              resource.clusterId,
-              group,
-              version
-            )
-          ) ?? null;
-
-        // Lazy-load permissions for CRD kinds not in the static spec lists.
-        if (!deleteStatus) {
-          queryKindPermissions(
-            kind,
-            resource.namespace,
-            resource.clusterId ?? null,
-            group,
-            version
-          );
-        }
-
-        return buildObjectActionItems({
-          object: buildObjectReference({
-            kind,
-            kindAlias: resource.kindAlias,
-            name: resource.name,
-            namespace: resource.namespace,
-            clusterId: resource.clusterId,
-            clusterName: resource.clusterName,
-            group: resource.apiGroup ?? undefined,
-            version: resource.apiVersion ?? undefined,
-          }),
-          context: 'gridtable',
-          handlers: {
-            onOpen: () => handleResourceClick(resource),
-            onDelete: () => setDeleteConfirm({ show: true, resource }),
-          },
-          permissions: {
-            delete: deleteStatus,
-          },
-        });
+              kindAlias: resource.kindAlias,
+              name: resource.name,
+              namespace: resource.namespace,
+              clusterId: resource.clusterId,
+              clusterName: resource.clusterName,
+              group: resource.apiGroup ?? undefined,
+              version: resource.apiVersion ?? undefined,
+            },
+            { fallbackClusterId: selectedClusterId },
+            {
+              age: resource.age,
+              labels: resource.labels,
+              annotations: resource.annotations,
+              requiresExplicitVersion: true,
+              explicitVersionProvided: Boolean(resource.apiVersion),
+            }
+          )
+        );
       },
-      [handleResourceClick, permissionMap]
+      [objectActions, selectedClusterId]
     );
 
     const emptyMessage = useMemo(
@@ -472,47 +361,25 @@ const CustomViewGrid: React.FC<CustomViewProps> = React.memo(
 
     return (
       <>
-        <ResourceLoadingBoundary
-          loading={loading ?? false}
-          dataLength={sortedData.length}
-          hasLoaded={loaded}
+        <ResourceGridTableView
+          gridTableProps={gridTableProps}
+          boundaryLoading={loading ?? false}
+          loaded={loaded}
           spinnerMessage="Loading custom resources..."
-        >
-          <GridTable
-            data={sortedData}
-            columns={columns}
-            diagnosticsLabel={diagnosticsLabel}
-            loading={loading}
-            keyExtractor={keyExtractor}
-            onRowClick={handleResourceClick}
-            onSort={handleSort}
-            sortConfig={sortConfig}
-            tableClassName="ns-custom-table"
-            enableContextMenu={true}
-            getCustomContextMenuItems={getContextMenuItems}
-            useShortNames={useShortResourceNames}
-            emptyMessage={emptyMessage}
-            filters={filtersConfig}
-            virtualization={GRIDTABLE_VIRTUALIZATION_DEFAULT}
-            columnWidths={columnWidths}
-            onColumnWidthsChange={setColumnWidths}
-            columnVisibility={columnVisibility}
-            onColumnVisibilityChange={setColumnVisibility}
-            allowHorizontalOverflow={true}
-          />
-        </ResourceLoadingBoundary>
-
-        <ConfirmationModal
-          isOpen={deleteConfirm.show}
-          title={`Delete ${deleteConfirm.resource?.kind || deleteConfirm.resource?.kindAlias || 'Resource'}`}
-          message={`Are you sure you want to delete ${(deleteConfirm.resource?.kind || deleteConfirm.resource?.kindAlias || 'resource').toLowerCase()} "${deleteConfirm.resource?.name}"?\n\nThis action cannot be undone.`}
-          confirmText="Delete"
-          cancelText="Cancel"
-          confirmButtonClass="danger"
-          onConfirm={handleDeleteConfirm}
-          onCancel={() => setDeleteConfirm({ show: false, resource: null })}
+          favModal={favModal}
+          columns={columns}
+          diagnosticsLabel={diagnosticsLabel}
+          loading={loading}
+          keyExtractor={keyExtractor}
+          onRowClick={handleResourceClick}
+          tableClassName="ns-custom-table"
+          enableContextMenu={true}
+          getCustomContextMenuItems={getContextMenuItems}
+          useShortNames={useShortResourceNames}
+          emptyMessage={emptyMessage}
         />
-        {favModal}
+
+        {objectActions.modals}
       </>
     );
   }

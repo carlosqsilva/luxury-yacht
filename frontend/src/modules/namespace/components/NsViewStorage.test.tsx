@@ -18,6 +18,10 @@ vi.mock('@modules/namespace/components/useNamespaceColumnLink', () => ({
   }),
 }));
 
+vi.mock('@modules/kubernetes/config/KubeconfigContext', () => ({
+  useKubeconfig: () => ({ selectedKubeconfig: 'path:context', selectedClusterId: 'cluster-a' }),
+}));
+
 import NsViewStorage, { type StorageData } from '@modules/namespace/components/NsViewStorage';
 
 const {
@@ -146,6 +150,7 @@ vi.mock('@shared/components/ResourceLoadingBoundary', () => ({
 vi.mock('@shared/components/icons/MenuIcons', () => ({
   DiffIcon: () => <span>diff</span>,
   OpenIcon: () => <span>open</span>,
+  ObjectMapIcon: () => <span>map</span>,
   DeleteIcon: () => <span>delete</span>,
 }));
 
@@ -247,6 +252,24 @@ describe('NsViewStorage', () => {
         version: 'v1',
       })
     );
+
+    const objectMapItem = menu.find((item: any) => item.label === 'Map');
+    expect(objectMapItem).toBeTruthy();
+
+    act(() => {
+      objectMapItem?.onClick?.();
+    });
+    expect(openWithObjectMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'PersistentVolumeClaim',
+        name: 'pvc-data',
+        namespace: 'team-a',
+        clusterId: 'alpha:ctx',
+        group: '',
+        version: 'v1',
+      }),
+      { initialTab: 'map' }
+    );
   });
 
   it('uses explicit kind metadata instead of deriving kinds from rows', async () => {
@@ -307,6 +330,29 @@ describe('NsViewStorage', () => {
         kind: 'StorageClass',
         name: 'fast-ssd',
         clusterId: 'alpha:ctx',
+      })
+    );
+  });
+
+  it('falls back to the selected cluster for defensive rows without clusterId', async () => {
+    const { clusterId: _clusterId, ...entryWithoutCluster } = baseStorage();
+    const entry = entryWithoutCluster as unknown as StorageData;
+    const props = await renderStorageView([entry]);
+
+    expect(props.keyExtractor(entry)).toBe('cluster-a|/v1/PersistentVolumeClaim/team-a/pvc-data');
+
+    const storageColumn = props.columns.find((column: any) => column.key === 'storageClass');
+    const renderedCell = storageColumn.render(entry);
+
+    act(() => {
+      renderedCell.props.onClick({ stopPropagation: () => {} });
+    });
+
+    expect(openWithObjectMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'StorageClass',
+        name: 'fast-ssd',
+        clusterId: 'cluster-a',
       })
     );
   });

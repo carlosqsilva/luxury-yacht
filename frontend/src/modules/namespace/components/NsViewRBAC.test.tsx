@@ -17,6 +17,10 @@ vi.mock('@modules/namespace/components/useNamespaceColumnLink', () => ({
   }),
 }));
 
+vi.mock('@modules/kubernetes/config/KubeconfigContext', () => ({
+  useKubeconfig: () => ({ selectedKubeconfig: 'path:context', selectedClusterId: 'cluster-a' }),
+}));
+
 import NsViewRBAC, { type RBACData } from '@modules/namespace/components/NsViewRBAC';
 
 const { gridTablePropsRef, confirmationPropsRef, openWithObjectMock, deleteResourceByGVKMock } =
@@ -126,6 +130,7 @@ vi.mock('@shared/components/ResourceLoadingBoundary', () => ({
 vi.mock('@shared/components/icons/MenuIcons', () => ({
   DiffIcon: () => <span>diff</span>,
   OpenIcon: () => <span>open</span>,
+  ObjectMapIcon: () => <span>map</span>,
   DeleteIcon: () => <span>delete</span>,
 }));
 
@@ -237,6 +242,31 @@ describe('NsViewRBAC', () => {
       'Role',
       'team-a',
       'view'
+    );
+  });
+
+  it('opens the Map for ServiceAccount rows', async () => {
+    const entry = baseRBAC({ kind: 'ServiceAccount', name: 'builder' });
+    const props = await renderRBACView([entry]);
+    const objectMapItem = props
+      .getCustomContextMenuItems(entry, 'name')
+      .find((item: any) => item.label === 'Map');
+    expect(objectMapItem).toBeTruthy();
+
+    act(() => {
+      objectMapItem?.onClick?.();
+    });
+
+    expect(openWithObjectMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'ServiceAccount',
+        name: 'builder',
+        namespace: 'team-a',
+        clusterId: 'alpha:ctx',
+        group: '',
+        version: 'v1',
+      }),
+      { initialTab: 'map' }
     );
   });
 });

@@ -5,42 +5,30 @@
  * Handles rendering and interactions for the namespace feature.
  */
 
-import { resolveBuiltinGroupVersion } from '@shared/constants/builtinGroupVersions';
 import { resolveEmptyStateMessage } from '@/utils/emptyState';
 import { getPodStatusSeverity } from '@/utils/podStatusSeverity';
-import { getPermissionKey, useUserPermissions } from '@/core/capabilities';
 import { eventBus } from '@/core/events';
 import { useClusterMetricsAvailability } from '@/core/refresh/hooks/useMetricsAvailability';
 import type { IconBarItem } from '@shared/components/IconBar/IconBar';
-import { useNamespaceGridTablePersistence } from '@modules/namespace/hooks/useNamespaceGridTablePersistence';
 import { useObjectPanel } from '@modules/object-panel/hooks/useObjectPanel';
-import { useTableSort } from '@/hooks/useTableSort';
 import * as cf from '@shared/components/tables/columnFactories';
 import { getMetricsBannerInfo } from '@shared/utils/metricsAvailability';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import ConfirmationModal from '@shared/components/modals/ConfirmationModal';
-import ResourceLoadingBoundary from '@shared/components/ResourceLoadingBoundary';
+import ResourceGridTableView from '@shared/components/tables/ResourceGridTableView';
 import type { ContextMenuItem } from '@shared/components/ContextMenu';
-import GridTable, {
-  type GridColumnDefinition,
-  GRIDTABLE_VIRTUALIZATION_DEFAULT,
-} from '@shared/components/tables/GridTable';
+import { type GridColumnDefinition } from '@shared/components/tables/GridTable';
 import type { PodSnapshotEntry, PodMetricsInfo } from '@/core/refresh/types';
 import { ALL_NAMESPACES_SCOPE } from '@modules/namespace/constants';
 import { getPodsUnhealthyStorageKey } from '@modules/namespace/components/podsFilterSignals';
 import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
-import { DeletePod } from '@wailsjs/go/backend/App';
-import { errorHandler } from '@utils/errorHandler';
-import { PortForwardModal, PortForwardTarget } from '@modules/port-forward';
-import { buildObjectActionItems } from '@shared/hooks/useObjectActions';
+import { useObjectActionController } from '@shared/hooks/useObjectActionController';
 import { useNavigateToView } from '@shared/hooks/useNavigateToView';
-import { useFavToggle } from '@ui/favorites/FavToggle';
 import { useNamespaceColumnLink } from '@modules/namespace/components/useNamespaceColumnLink';
-import { useNamespaceFilterOptions } from '@modules/namespace/hooks/useNamespaceFilterOptions';
+import { useNamespaceResourceGridTable } from '@shared/hooks/useResourceGridTable';
 import {
-  buildCanonicalObjectRowKey,
-  buildObjectReference,
-  buildRelatedObjectReference,
+  buildRequiredCanonicalObjectRowKey,
+  buildRequiredObjectReference,
+  buildRequiredRelatedObjectReference,
 } from '@shared/utils/objectIdentity';
 import { parseCpuToMillicores, parseMemToMB } from '@utils/resourceCalculations';
 
@@ -137,31 +125,69 @@ const NsViewPods: React.FC<PodsViewProps> = React.memo(
     const namespaceColumnLink = useNamespaceColumnLink<PodSnapshotEntry>('pods');
     const clusterMetrics = useClusterMetricsAvailability();
     const effectiveMetrics = metrics ?? clusterMetrics ?? null;
-    const permissionMap = useUserPermissions();
     const { selectedClusterId } = useKubeconfig();
 
     const [showUnhealthyOnly, setShowUnhealthyOnly] = useState(false);
-    const [deleteConfirm, setDeleteConfirm] = useState<{
-      show: boolean;
-      pod: PodSnapshotEntry | null;
-    }>({ show: false, pod: null });
-    const [portForwardTarget, setPortForwardTarget] = useState<PortForwardTarget | null>(null);
 
     // Include cluster metadata so object details stay scoped to the active tab.
     const handlePodOpen = useCallback(
       (pod: PodSnapshotEntry) => {
         openWithObject(
-          buildObjectReference({
-            kind: 'Pod',
-            name: pod.name,
-            namespace: pod.namespace,
-            clusterId: pod.clusterId ?? undefined,
-            clusterName: pod.clusterName ?? undefined,
-          })
+          buildRequiredObjectReference(
+            {
+              kind: 'Pod',
+              name: pod.name,
+              namespace: pod.namespace,
+              clusterId: pod.clusterId,
+              clusterName: pod.clusterName ?? undefined,
+            },
+            { fallbackClusterId: selectedClusterId }
+          )
         );
       },
-      [openWithObject]
+      [openWithObject, selectedClusterId]
     );
+
+    const objectActions = useObjectActionController({
+      context: 'gridtable',
+      onOpen: (object) => {
+        openWithObject(
+          buildRequiredObjectReference(
+            {
+              kind: object.kind,
+              name: object.name,
+              namespace: object.namespace,
+              clusterId: object.clusterId,
+              clusterName: object.clusterName,
+              group: object.group,
+              version: object.version,
+              resource: object.resource,
+              uid: object.uid,
+            },
+            { fallbackClusterId: selectedClusterId }
+          )
+        );
+      },
+      onOpenObjectMap: (object) => {
+        openWithObject(
+          buildRequiredObjectReference(
+            {
+              kind: object.kind,
+              name: object.name,
+              namespace: object.namespace,
+              clusterId: object.clusterId,
+              clusterName: object.clusterName,
+              group: object.group,
+              version: object.version,
+              resource: object.resource,
+              uid: object.uid,
+            },
+            { fallbackClusterId: selectedClusterId }
+          ),
+          { initialTab: 'map' }
+        );
+      },
+    });
 
     const handleOwnerOpen = useCallback(
       (pod: PodSnapshotEntry) => {
@@ -169,16 +195,19 @@ const NsViewPods: React.FC<PodsViewProps> = React.memo(
           return;
         }
         openWithObject(
-          buildRelatedObjectReference({
-            kind: pod.ownerKind,
-            name: pod.ownerName,
-            namespace: pod.namespace,
-            clusterId: pod.clusterId ?? undefined,
-            clusterName: pod.clusterName ?? undefined,
-          })
+          buildRequiredRelatedObjectReference(
+            {
+              kind: pod.ownerKind,
+              name: pod.ownerName,
+              namespace: pod.namespace,
+              clusterId: pod.clusterId,
+              clusterName: pod.clusterName ?? undefined,
+            },
+            { fallbackClusterId: selectedClusterId }
+          )
         );
       },
-      [openWithObject]
+      [openWithObject, selectedClusterId]
     );
 
     const handleNodeOpen = useCallback(
@@ -187,26 +216,32 @@ const NsViewPods: React.FC<PodsViewProps> = React.memo(
           return;
         }
         openWithObject(
-          buildObjectReference({
-            kind: 'Node',
-            name: pod.node,
-            clusterId: pod.clusterId ?? undefined,
-            clusterName: pod.clusterName ?? undefined,
-          })
+          buildRequiredObjectReference(
+            {
+              kind: 'Node',
+              name: pod.node,
+              clusterId: pod.clusterId,
+              clusterName: pod.clusterName ?? undefined,
+            },
+            { fallbackClusterId: selectedClusterId }
+          )
         );
       },
-      [openWithObject]
+      [openWithObject, selectedClusterId]
     );
 
     const keyExtractor = useCallback(
       (pod: PodSnapshotEntry) =>
-        buildCanonicalObjectRowKey({
-          kind: 'Pod',
-          name: pod.name,
-          namespace: pod.namespace,
-          clusterId: pod.clusterId,
-        }),
-      []
+        buildRequiredCanonicalObjectRowKey(
+          {
+            kind: 'Pod',
+            name: pod.name,
+            namespace: pod.namespace,
+            clusterId: pod.clusterId,
+          },
+          { fallbackClusterId: selectedClusterId }
+        ),
+      [selectedClusterId]
     );
 
     const metricsBanner = useMemo(
@@ -249,13 +284,16 @@ const NsViewPods: React.FC<PodsViewProps> = React.memo(
           onClick: handlePodOpen,
           onAltClick: (pod) =>
             navigateToView(
-              buildObjectReference({
-                kind: 'Pod',
-                name: pod.name,
-                namespace: pod.namespace,
-                clusterId: pod.clusterId ?? undefined,
-                clusterName: pod.clusterName ?? undefined,
-              })
+              buildRequiredObjectReference(
+                {
+                  kind: 'Pod',
+                  name: pod.name,
+                  namespace: pod.namespace,
+                  clusterId: pod.clusterId,
+                  clusterName: pod.clusterName ?? undefined,
+                },
+                { fallbackClusterId: selectedClusterId }
+              )
             ),
           sortable: false,
         }),
@@ -263,13 +301,16 @@ const NsViewPods: React.FC<PodsViewProps> = React.memo(
           onClick: handlePodOpen,
           onAltClick: (pod) =>
             navigateToView(
-              buildObjectReference({
-                kind: 'Pod',
-                name: pod.name,
-                namespace: pod.namespace,
-                clusterId: pod.clusterId ?? undefined,
-                clusterName: pod.clusterName ?? undefined,
-              })
+              buildRequiredObjectReference(
+                {
+                  kind: 'Pod',
+                  name: pod.name,
+                  namespace: pod.namespace,
+                  clusterId: pod.clusterId,
+                  clusterName: pod.clusterName ?? undefined,
+                },
+                { fallbackClusterId: selectedClusterId }
+              )
             ),
           getTitle: (pod) => pod.name,
           getClassName: () => 'object-panel-link',
@@ -297,13 +338,16 @@ const NsViewPods: React.FC<PodsViewProps> = React.memo(
             onAltClick: (pod) => {
               if (pod.ownerKind && pod.ownerName) {
                 navigateToView(
-                  buildObjectReference({
-                    kind: pod.ownerKind,
-                    name: pod.ownerName,
-                    namespace: pod.namespace,
-                    clusterId: pod.clusterId ?? undefined,
-                    clusterName: pod.clusterName ?? undefined,
-                  })
+                  buildRequiredRelatedObjectReference(
+                    {
+                      kind: pod.ownerKind,
+                      name: pod.ownerName,
+                      namespace: pod.namespace,
+                      clusterId: pod.clusterId,
+                      clusterName: pod.clusterName ?? undefined,
+                    },
+                    { fallbackClusterId: selectedClusterId }
+                  )
                 );
               }
             },
@@ -319,12 +363,15 @@ const NsViewPods: React.FC<PodsViewProps> = React.memo(
           onAltClick: (pod) => {
             if (pod.node) {
               navigateToView(
-                buildObjectReference({
-                  kind: 'Node',
-                  name: pod.node,
-                  clusterId: pod.clusterId ?? undefined,
-                  clusterName: pod.clusterName ?? undefined,
-                })
+                buildRequiredObjectReference(
+                  {
+                    kind: 'Node',
+                    name: pod.node,
+                    clusterId: pod.clusterId,
+                    clusterName: pod.clusterName ?? undefined,
+                  },
+                  { fallbackClusterId: selectedClusterId }
+                )
               );
             }
           },
@@ -413,89 +460,13 @@ const NsViewPods: React.FC<PodsViewProps> = React.memo(
       handlePodOpen,
       namespaceColumnLink,
       navigateToView,
+      selectedClusterId,
       showNamespaceColumn,
     ]);
 
     const showNamespaceFilter = namespace === ALL_NAMESPACES_SCOPE;
 
-    const {
-      sortConfig: persistedSort,
-      onSortChange,
-      columnWidths,
-      setColumnWidths,
-      columnVisibility,
-      setColumnVisibility,
-      filters: persistedFilters,
-      setFilters: setPersistedFilters,
-      resetState: resetPersistedState,
-      hydrated,
-    } = useNamespaceGridTablePersistence<PodSnapshotEntry>({
-      viewId: 'namespace-pods',
-      namespace,
-      columns,
-      data,
-      keyExtractor,
-      defaultSort: { key: 'name', direction: 'asc' },
-      filterOptions: { isNamespaceScoped: namespace !== ALL_NAMESPACES_SCOPE },
-    });
-
-    const { sortedData, sortConfig, handleSort } = useTableSort(data, undefined, 'asc', {
-      columns,
-      controlledSort: persistedSort,
-      onChange: onSortChange,
-      diagnosticsLabel:
-        namespace === ALL_NAMESPACES_SCOPE ? 'All Namespaces Pods' : 'Namespace Pods',
-      rowIdentity: keyExtractor,
-    });
-
-    const fallbackNamespaces = useMemo(
-      () => [...new Set(data.map((r) => r.namespace).filter(Boolean))].sort(),
-      [data]
-    );
-    const availableFilterNamespaces = useNamespaceFilterOptions(namespace, fallbackNamespaces);
-
-    const { item: favToggle, modal: favModal } = useFavToggle({
-      filters: persistedFilters,
-      sortColumn: sortConfig?.key ?? null,
-      sortDirection: sortConfig?.direction ?? 'asc',
-      columnVisibility: columnVisibility ?? {},
-      setFilters: setPersistedFilters,
-      setSortConfig: onSortChange,
-      setColumnVisibility,
-      hydrated,
-      availableFilterNamespaces,
-    });
-
-    const handleDeleteConfirm = useCallback(async () => {
-      if (!deleteConfirm.pod) {
-        return;
-      }
-      const pod = deleteConfirm.pod;
-
-      try {
-        // Multi-cluster rule (AGENTS.md): every backend command must
-        // carry a resolved clusterId.
-        if (!pod.clusterId) {
-          throw new Error(`Cannot delete Pod/${pod.name}: clusterId is missing`);
-        }
-        await DeletePod(pod.clusterId, pod.namespace, pod.name);
-        setDeleteConfirm({ show: false, pod: null });
-      } catch (err) {
-        errorHandler.handle(err, {
-          action: 'delete',
-          kind: 'Pod',
-          name: pod.name,
-        });
-        setDeleteConfirm({ show: false, pod: null });
-      }
-    }, [deleteConfirm.pod]);
-
-    const unhealthyPods = useMemo(
-      () => sortedData.filter((pod) => isPodUnhealthy(pod)),
-      [sortedData]
-    );
-    const unhealthyCount = unhealthyPods.length;
-    const displayedPods = showUnhealthyOnly ? unhealthyPods : sortedData;
+    const unhealthyCount = useMemo(() => data.filter((pod) => isPodUnhealthy(pod)).length, [data]);
 
     const handleToggleUnhealthy = useCallback(() => {
       setShowUnhealthyOnly((prev) => !prev);
@@ -508,7 +479,7 @@ const NsViewPods: React.FC<PodsViewProps> = React.memo(
 
       const title = showUnhealthyOnly
         ? 'Show all pods'
-        : `Show unhealthy pods (${unhealthyCount}/${sortedData.length})`;
+        : `Show unhealthy pods (${unhealthyCount}/${data.length})`;
 
       return {
         type: 'toggle',
@@ -519,7 +490,36 @@ const NsViewPods: React.FC<PodsViewProps> = React.memo(
         title,
         ariaLabel: title,
       };
-    }, [handleToggleUnhealthy, showUnhealthyOnly, sortedData.length, unhealthyCount]);
+    }, [data.length, handleToggleUnhealthy, showUnhealthyOnly, unhealthyCount]);
+
+    const transformSortedPods = useCallback(
+      (sortedPods: PodSnapshotEntry[]) =>
+        showUnhealthyOnly ? sortedPods.filter((pod) => isPodUnhealthy(pod)) : sortedPods,
+      [showUnhealthyOnly]
+    );
+
+    const getTrailingFilterActions = useCallback(
+      () => (unhealthyToggle ? [unhealthyToggle] : []),
+      [unhealthyToggle]
+    );
+
+    const { gridTableProps, favModal } = useNamespaceResourceGridTable<PodSnapshotEntry>({
+      viewId: 'namespace-pods',
+      namespace,
+      data,
+      columns,
+      keyExtractor,
+      defaultSort: { key: 'name', direction: 'asc' },
+      diagnosticsLabel:
+        namespace === ALL_NAMESPACES_SCOPE ? 'All Namespaces Pods' : 'Namespace Pods',
+      rowIdentity: keyExtractor,
+      showKindDropdown: false,
+      showNamespaceFilters: showNamespaceFilter,
+      getTrailingFilterActions,
+      transformSortedData: transformSortedPods,
+      filterOptions: { isNamespaceScoped: namespace !== ALL_NAMESPACES_SCOPE },
+    });
+    const displayedPods = gridTableProps.data;
 
     useEffect(() => {
       if (typeof window === 'undefined' || !selectedClusterId) {
@@ -567,17 +567,8 @@ const NsViewPods: React.FC<PodsViewProps> = React.memo(
 
     const getContextMenuItems = useCallback(
       (pod: PodSnapshotEntry): ContextMenuItem[] => {
-        const deleteStatus =
-          permissionMap.get(
-            getPermissionKey('Pod', 'delete', pod.namespace, null, pod.clusterId)
-          ) ?? null;
-        const portForwardStatus =
-          permissionMap.get(
-            getPermissionKey('Pod', 'create', pod.namespace, 'portforward', pod.clusterId)
-          ) ?? null;
-
-        return buildObjectActionItems({
-          object: buildObjectReference(
+        return objectActions.getMenuItems(
+          buildRequiredObjectReference(
             {
               kind: 'Pod',
               name: pod.name,
@@ -585,44 +576,14 @@ const NsViewPods: React.FC<PodsViewProps> = React.memo(
               clusterId: pod.clusterId,
               clusterName: pod.clusterName,
             },
+            { fallbackClusterId: selectedClusterId },
             {
               portForwardAvailable: pod.portForwardAvailable,
             }
-          ),
-          context: 'gridtable',
-          handlers: {
-            onOpen: () => handlePodOpen(pod),
-            onPortForward: () => {
-              // Multi-cluster rule (AGENTS.md): port-forward is a backend
-              // command and must carry a resolved clusterId.
-              if (!pod.clusterId) {
-                errorHandler.handle(
-                  new Error(`Cannot open port-forward for Pod/${pod.name}: clusterId is missing`),
-                  { action: 'portForward', kind: 'Pod', name: pod.name }
-                );
-                return;
-              }
-              const targetGVK = resolveBuiltinGroupVersion('Pod');
-              setPortForwardTarget({
-                kind: 'Pod',
-                group: targetGVK.group ?? '',
-                version: targetGVK.version ?? 'v1',
-                name: pod.name,
-                namespace: pod.namespace,
-                clusterId: pod.clusterId,
-                clusterName: pod.clusterName ?? '',
-                ports: [],
-              });
-            },
-            onDelete: () => setDeleteConfirm({ show: true, pod }),
-          },
-          permissions: {
-            delete: deleteStatus,
-            portForward: portForwardStatus,
-          },
-        });
+          )
+        );
       },
-      [handlePodOpen, permissionMap]
+      [objectActions, selectedClusterId]
     );
 
     const emptyMessage = useMemo(
@@ -643,67 +604,31 @@ const NsViewPods: React.FC<PodsViewProps> = React.memo(
             {metricsBanner.message}
           </div>
         )}
-        <ResourceLoadingBoundary
-          loading={loading}
-          dataLength={displayedPods.length}
-          hasLoaded={loaded}
+        <ResourceGridTableView
+          gridTableProps={gridTableProps}
+          boundaryLoading={loading}
+          loaded={loaded}
           spinnerMessage="Loading pods..."
-        >
-          <GridTable
-            data={displayedPods}
-            columns={columns}
-            diagnosticsLabel={
-              namespace === ALL_NAMESPACES_SCOPE ? 'All Namespaces Pods' : 'Namespace Pods'
-            }
-            diagnosticsMode="live"
-            loading={loading && displayedPods.length === 0}
-            keyExtractor={keyExtractor}
-            onRowClick={handlePodOpen}
-            onSort={handleSort}
-            sortConfig={sortConfig}
-            tableClassName={`gridtable-pods${showNamespaceColumn ? ' gridtable-pods--namespaced' : ''}`}
-            enableContextMenu
-            getCustomContextMenuItems={getContextMenuItems}
-            filters={{
-              enabled: true,
-              value: persistedFilters,
-              onChange: setPersistedFilters,
-              onReset: resetPersistedState,
-              options: {
-                namespaces: availableFilterNamespaces,
-                showNamespaceDropdown: showNamespaceFilter,
-                namespaceDropdownSearchable: showNamespaceFilter,
-                namespaceDropdownBulkActions: showNamespaceFilter,
-                preActions: [favToggle, unhealthyToggle].filter(Boolean) as IconBarItem[],
-              },
-            }}
-            virtualization={GRIDTABLE_VIRTUALIZATION_DEFAULT}
-            columnWidths={columnWidths}
-            onColumnWidthsChange={setColumnWidths}
-            columnVisibility={columnVisibility}
-            onColumnVisibilityChange={setColumnVisibility}
-            allowHorizontalOverflow={true}
-            emptyMessage={emptyMessage}
-            loadingOverlay={{
-              show: Boolean(loading) && displayedPods.length > 0,
-              message: 'Updating pods…',
-            }}
-          />
-        </ResourceLoadingBoundary>
-
-        <ConfirmationModal
-          isOpen={deleteConfirm.show}
-          title="Delete Pod"
-          message={`Are you sure you want to delete pod "${deleteConfirm.pod?.name}"?\n\nThis action cannot be undone.`}
-          confirmText="Delete"
-          cancelText="Cancel"
-          confirmButtonClass="danger"
-          onConfirm={handleDeleteConfirm}
-          onCancel={() => setDeleteConfirm({ show: false, pod: null })}
+          favModal={favModal}
+          columns={columns}
+          diagnosticsLabel={
+            namespace === ALL_NAMESPACES_SCOPE ? 'All Namespaces Pods' : 'Namespace Pods'
+          }
+          diagnosticsMode="live"
+          loading={loading && displayedPods.length === 0}
+          keyExtractor={keyExtractor}
+          onRowClick={handlePodOpen}
+          tableClassName={`gridtable-pods${showNamespaceColumn ? ' gridtable-pods--namespaced' : ''}`}
+          enableContextMenu
+          getCustomContextMenuItems={getContextMenuItems}
+          emptyMessage={emptyMessage}
+          loadingOverlay={{
+            show: Boolean(loading) && displayedPods.length > 0,
+            message: 'Updating pods…',
+          }}
         />
 
-        <PortForwardModal target={portForwardTarget} onClose={() => setPortForwardTarget(null)} />
-        {favModal}
+        {objectActions.modals}
       </>
     );
   }

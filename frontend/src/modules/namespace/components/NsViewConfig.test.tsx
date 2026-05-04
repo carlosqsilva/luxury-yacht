@@ -18,6 +18,10 @@ vi.mock('@modules/namespace/components/useNamespaceColumnLink', () => ({
   }),
 }));
 
+vi.mock('@modules/kubernetes/config/KubeconfigContext', () => ({
+  useKubeconfig: () => ({ selectedKubeconfig: 'path:context', selectedClusterId: 'cluster-a' }),
+}));
+
 const objectPanelMock = vi.hoisted(() => ({
   openWithObject: vi.fn(),
 }));
@@ -154,6 +158,7 @@ vi.mock('@/core/capabilities', () => ({
 vi.mock('@shared/components/icons/MenuIcons', () => ({
   DiffIcon: () => <span>diff</span>,
   OpenIcon: () => <span>open</span>,
+  ObjectMapIcon: () => <span>map</span>,
   DeleteIcon: () => <span>delete</span>,
 }));
 
@@ -253,6 +258,7 @@ describe('NsViewConfig ConfigViewGrid', () => {
     });
 
     const menuItems = getCustomContextMenuItems(resource, 'name');
+    expect(menuItems.map((item: any) => item.label)).toContain('Map');
     expect(menuItems.map((item: any) => item.label)).toContain('Delete');
     act(() => {
       menuItems[0].onClick();
@@ -264,6 +270,20 @@ describe('NsViewConfig ConfigViewGrid', () => {
         namespace: resource.namespace,
         clusterId: 'alpha:ctx',
       })
+    );
+
+    const objectMapAction = menuItems.find((item: any) => item.label === 'Map');
+    act(() => {
+      objectMapAction.onClick();
+    });
+    expect(objectPanelMock.openWithObject).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: resource.kind,
+        name: resource.name,
+        namespace: resource.namespace,
+        clusterId: 'alpha:ctx',
+      }),
+      { initialTab: 'map' }
     );
 
     const deleteAction = menuItems.find((item: any) => item.label === 'Delete');
@@ -309,6 +329,62 @@ describe('NsViewConfig ConfigViewGrid', () => {
     expect(gridTablePropsRef.current?.filters?.options?.showNamespaceDropdown).toBe(true);
     expect(gridTablePropsRef.current?.filters?.options?.namespaceDropdownSearchable).toBe(true);
     expect(gridTablePropsRef.current?.filters?.options?.namespaceDropdownBulkActions).toBe(true);
+
+    await unmount();
+  });
+
+  it('falls back to the selected cluster when defensive rows omit clusterId', async () => {
+    permissionMapMock.map = new Map([
+      ['ConfigMap:delete:default', { allowed: true, pending: false }],
+    ]);
+    deleteResourceMock.DeleteResourceByGVK.mockResolvedValue(undefined);
+    const { clusterId: _clusterId, ...resourceWithoutCluster } = sampleData[0];
+    const defensiveResource = resourceWithoutCluster as unknown as (typeof sampleData)[number];
+
+    const module = await import('./NsViewConfig');
+    const ConfigView = module.default;
+
+    const { unmount } = await createRoot(
+      <ConfigView
+        namespace="team-a"
+        data={[defensiveResource]}
+        loaded
+        loading={false}
+        showNamespaceColumn
+      />
+    );
+
+    const { getCustomContextMenuItems, keyExtractor } = gridTablePropsRef.current;
+    expect(keyExtractor(defensiveResource)).toBe('cluster-a|/v1/ConfigMap/default/app-config');
+
+    const menuItems = getCustomContextMenuItems(defensiveResource, 'name');
+    const openAction = menuItems.find((item: any) => item.label === 'Open');
+    act(() => {
+      openAction.onClick();
+    });
+    expect(objectPanelMock.openWithObject).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'ConfigMap',
+        name: 'app-config',
+        namespace: 'default',
+        clusterId: 'cluster-a',
+      })
+    );
+
+    const deleteAction = menuItems.find((item: any) => item.label === 'Delete');
+    await act(async () => {
+      deleteAction.onClick();
+    });
+    await act(async () => {
+      modalPropsRef.current.onConfirm();
+    });
+    expect(deleteResourceMock.DeleteResourceByGVK).toHaveBeenCalledWith(
+      'cluster-a',
+      'v1',
+      'ConfigMap',
+      'default',
+      'app-config'
+    );
 
     await unmount();
   });
