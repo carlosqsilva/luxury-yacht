@@ -29,8 +29,10 @@
  *       overall edge-crossing count sharply.
  *
  *   (5) Overloaded logical columns are split into horizontal lanes.
- *       The logical column value is preserved, but neighboring columns
- *       are shifted so lanes do not overlap.
+ *       Lane packing keeps contiguous same-kind groups together unless
+ *       one kind group alone exceeds the lane limit. The logical column
+ *       value is preserved, but neighboring columns are shifted so lanes
+ *       do not overlap.
  *
  * Edges are routed as cubic beziers between source-right and target-
  * left anchors. The same-column rightward-arc fallback is retained for
@@ -40,9 +42,11 @@
  */
 
 import type { ObjectMapEdge, ObjectMapNode } from '@core/refresh/types';
+import { OBJECT_MAP_CARD_STYLE } from './objectMapCardStyle';
+import type { ObjectMapFilteredPath, ObjectMapLayoutEdge } from './objectMapKindFilter';
 
-export const OBJECT_MAP_NODE_WIDTH = 220;
-export const OBJECT_MAP_NODE_HEIGHT = 64;
+export const OBJECT_MAP_NODE_WIDTH = OBJECT_MAP_CARD_STYLE.width;
+export const OBJECT_MAP_NODE_HEIGHT = OBJECT_MAP_CARD_STYLE.height;
 export const OBJECT_MAP_COLUMN_GAP = 100;
 export const OBJECT_MAP_ROW_GAP = 24;
 export const OBJECT_MAP_MAX_NODES_PER_LANE = 24;
@@ -72,6 +76,8 @@ export interface PositionedNode {
   column: number;
   isSeed: boolean;
   ref: ObjectMapNode['ref'];
+  creationTimestamp?: string;
+  status?: ObjectMapNode['status'];
 }
 
 export interface PositionedEdge {
@@ -81,6 +87,7 @@ export interface PositionedEdge {
   type: string;
   label: string;
   tracedBy?: string;
+  filteredPath?: ObjectMapFilteredPath;
   // Cubic bezier path string. Cross-column edges run from source-right
   // to target-left through the gutter; same-column edges arc rightward
   // (defensive fallback for the rare cycle case).
@@ -385,8 +392,52 @@ const orderColumnsByBarycenter = (
   }
 };
 
-const laneCountForColumn = (nodeCount: number): number =>
-  Math.max(1, Math.ceil(nodeCount / OBJECT_MAP_MAX_NODES_PER_LANE));
+const splitColumnIntoKindAwareLanes = (columnNodes: ObjectMapNode[]): ObjectMapNode[][] => {
+  if (columnNodes.length <= OBJECT_MAP_MAX_NODES_PER_LANE) {
+    return [columnNodes];
+  }
+
+  const lanes: ObjectMapNode[][] = [];
+  let currentLane: ObjectMapNode[] = [];
+  let groupStart = 0;
+
+  const pushCurrentLane = () => {
+    if (currentLane.length === 0) return;
+    lanes.push(currentLane);
+    currentLane = [];
+  };
+
+  const appendGroup = (group: ObjectMapNode[]) => {
+    if (group.length > OBJECT_MAP_MAX_NODES_PER_LANE) {
+      pushCurrentLane();
+      for (let index = 0; index < group.length; index += OBJECT_MAP_MAX_NODES_PER_LANE) {
+        lanes.push(group.slice(index, index + OBJECT_MAP_MAX_NODES_PER_LANE));
+      }
+      return;
+    }
+
+    if (
+      currentLane.length > 0 &&
+      currentLane.length + group.length > OBJECT_MAP_MAX_NODES_PER_LANE
+    ) {
+      pushCurrentLane();
+    }
+    currentLane.push(...group);
+  };
+
+  for (let index = 1; index <= columnNodes.length; index += 1) {
+    const previousKind = columnNodes[index - 1]?.ref.kind;
+    const nextKind = columnNodes[index]?.ref.kind;
+    if (index < columnNodes.length && previousKind === nextKind) {
+      continue;
+    }
+    appendGroup(columnNodes.slice(groupStart, index));
+    groupStart = index;
+  }
+
+  pushCurrentLane();
+  return lanes;
+};
 
 const computeColumnStartX = (
   sortedColumns: number[],
@@ -425,7 +476,7 @@ const computeLaneHeight = (laneNodes: ObjectMapNode[]): number => {
 
 export const computeObjectMapLayout = (
   nodes: ObjectMapNode[],
-  edges: ObjectMapEdge[],
+  edges: ObjectMapLayoutEdge[],
   seedId: string
 ): ObjectMapLayout => {
   if (nodes.length === 0) {
@@ -452,20 +503,21 @@ export const computeObjectMapLayout = (
   let maxY = -Infinity;
 
   const sortedColumns = Array.from(columns.keys()).sort((a, b) => a - b);
+  const columnLanes = new Map<number, ObjectMapNode[][]>();
   const laneCounts = new Map<number, number>();
   sortedColumns.forEach((column) => {
-    laneCounts.set(column, laneCountForColumn(columns.get(column)!.length));
+    const lanes = splitColumnIntoKindAwareLanes(columns.get(column)!);
+    columnLanes.set(column, lanes);
+    laneCounts.set(column, lanes.length);
   });
   const columnStartX = computeColumnStartX(sortedColumns, laneCounts, seedColumn);
 
   sortedColumns.forEach((column) => {
-    const columnNodes = columns.get(column)!;
-    const laneCount = laneCounts.get(column) ?? 1;
-    const laneSize = Math.ceil(columnNodes.length / laneCount);
+    const lanes = columnLanes.get(column) ?? [columns.get(column)!];
     const columnX = columnStartX.get(column) ?? column * COLUMN_STRIDE;
 
-    for (let laneIndex = 0; laneIndex < laneCount; laneIndex += 1) {
-      const laneNodes = columnNodes.slice(laneIndex * laneSize, (laneIndex + 1) * laneSize);
+    for (let laneIndex = 0; laneIndex < lanes.length; laneIndex += 1) {
+      const laneNodes = lanes[laneIndex];
       const laneX = columnX + laneIndex * COLUMN_STRIDE;
       const totalHeight = computeLaneHeight(laneNodes);
       let y = -totalHeight / 2;
@@ -487,6 +539,8 @@ export const computeObjectMapLayout = (
           column,
           isSeed: node.id === seedId,
           ref: node.ref,
+          creationTimestamp: node.creationTimestamp,
+          status: node.status,
         });
         minX = Math.min(minX, laneX);
         minY = Math.min(minY, y);
@@ -505,7 +559,7 @@ export const computeObjectMapLayout = (
 
 export const routeObjectMapEdges = (
   nodes: PositionedNode[],
-  edges: ObjectMapEdge[]
+  edges: ObjectMapLayoutEdge[]
 ): PositionedEdge[] => {
   const positioned = new Map(nodes.map((node) => [node.id, node]));
   const positionedEdges: PositionedEdge[] = [];
@@ -530,6 +584,7 @@ export const routeObjectMapEdges = (
         type: edge.type,
         label: edge.label,
         tracedBy: edge.tracedBy,
+        filteredPath: edge.filteredPath,
         d: buildSameColumnPath(anchorX, sourceY, targetY, arcStretch),
         midX,
         midY,
@@ -549,6 +604,7 @@ export const routeObjectMapEdges = (
       type: edge.type,
       label: edge.label,
       tracedBy: edge.tracedBy,
+      filteredPath: edge.filteredPath,
       d: buildCrossColumnPath(sourceX, sourceY, targetX, targetY),
       midX: (sourceX + targetX) / 2,
       midY: (sourceY + targetY) / 2,

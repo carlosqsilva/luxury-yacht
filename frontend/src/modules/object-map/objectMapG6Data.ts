@@ -1,21 +1,29 @@
+/**
+ * frontend/src/modules/object-map/objectMapG6Data.ts
+ *
+ * Converts object-map layout data into G6 nodes, edges, and element states.
+ */
+
 import type { EdgeData, GraphData, NodeData } from '@antv/g6';
 import type { PathArray } from '@antv/g6';
+import type { KindBadgeVisualStyle } from '@shared/utils/kindBadgeColors';
+import { fallbackKindBadgeVisualStyle } from '@shared/utils/kindBadgeColors';
+import { formatAge } from '@/utils/ageFormatter';
+import { getDisplayKind } from '@/utils/kindAliasMap';
 import type { ObjectMapLayout, PositionedEdge, PositionedNode } from './objectMapLayout';
-import { OBJECT_MAP_G6_CARD_NODE, OBJECT_MAP_G6_PATH_EDGE } from './objectMapG6Constants';
+import { OBJECT_MAP_CARD_STYLE } from './objectMapCardStyle';
+import {
+  OBJECT_MAP_G6_CARD_NODE,
+  OBJECT_MAP_G6_PATH_EDGE,
+  type ObjectMapG6CardDetailLevel,
+  type ObjectMapG6EdgeDetailLevel,
+} from './objectMapG6Constants';
 import type { ObjectMapNodeBadgeLookup, ObjectMapSelectionState } from './objectMapRendererTypes';
 
-const NODE_KIND_MAX_CHARS = 26;
-const NODE_NAME_MAX_CHARS = 32;
 const NODE_NAMESPACE_MAX_CHARS = 28;
-const NODE_CARD_RADIUS = 6;
+const NODE_CARD_RADIUS = OBJECT_MAP_CARD_STYLE.borderRadius;
 const NODE_LINE_WIDTH = 1;
 const NODE_SEED_LINE_WIDTH = 2;
-const BADGE_FONT_WEIGHT = 700;
-const BADGE_WIDTH = 28;
-const BADGE_HEIGHT = 14;
-const BADGE_RADIUS = 3;
-const BADGE_OFFSET_X = -24;
-const BADGE_OFFSET_Y = BADGE_HEIGHT - 8;
 
 export interface ObjectMapG6Palette {
   accent: string;
@@ -27,7 +35,14 @@ export interface ObjectMapG6Palette {
   textSecondary: string;
   textTertiary: string;
   textInverse: string;
+  statusHealthy: string;
+  statusRefreshing: string;
+  statusDegraded: string;
+  statusUnhealthy: string;
+  statusInactive: string;
+  edgeOwner: string;
   edgeRoutes: string;
+  edgeSelector: string;
   edgeEndpoint: string;
   edgeVolumeBinding: string;
   edgeStorageClass: string;
@@ -37,6 +52,7 @@ export interface ObjectMapG6Palette {
   edgeGrants: string;
   edgeBinds: string;
   edgeAggregates: string;
+  edgeFilteredPath: string;
   edgeUses: string;
   edgeDefault: string;
   edgeLineWidth: number;
@@ -47,8 +63,9 @@ export interface ObjectMapG6Palette {
   nodeConnectedLineWidth: number;
   nodeSelectedLineWidth: number;
   nodeEdgeHoveredLineWidth: number;
-  nodeDimmedOpacity: number;
-  tooltipWidth: number;
+  nodeDimmedBackgroundOpacity: number;
+  nodeDimmedForegroundOpacity: number;
+  tooltipMaxWidth: number;
   tooltipHeight: number;
   tooltipOffsetY: number;
   tooltipArrowWidth: number;
@@ -57,8 +74,13 @@ export interface ObjectMapG6Palette {
   tooltipSourceY: number;
   tooltipRelationshipY: number;
   tooltipTargetY: number;
-  tooltipLabelMaxChars: number;
+  tooltipRelationshipBottomPadding: number;
   tooltipHorizontalPadding: number;
+  tooltipBadgeGap: number;
+  tooltipBadgeMaxWidth: number;
+  tooltipBadgeMaxFontSize: number;
+  tooltipBadgePaddingX: number;
+  tooltipBadgePaddingY: number;
   tooltipNameFontSize: number;
   tooltipNameFontWeight: number;
   tooltipRelationshipFontSize: number;
@@ -76,14 +98,40 @@ const truncate = (text: string, maxChars: number): string => {
 const formatNamespace = (node: PositionedNode): string =>
   node.ref.namespace?.trim() ? node.ref.namespace : 'cluster-scoped';
 
+const formatNodeAge = (creationTimestamp?: string): string => {
+  if (!creationTimestamp) return '';
+  const age = formatAge(creationTimestamp);
+  return age === '-' ? '' : age;
+};
+
+const objectMapStatusFill = (
+  status: PositionedNode['status'] | undefined,
+  palette: ObjectMapG6Palette
+): string | undefined => {
+  switch (status?.state) {
+    case 'healthy':
+      return palette.statusHealthy;
+    case 'refreshing':
+      return palette.statusRefreshing;
+    case 'degraded':
+      return palette.statusDegraded;
+    case 'unhealthy':
+      return palette.statusUnhealthy;
+    case 'inactive':
+      return palette.statusInactive;
+    default:
+      return undefined;
+  }
+};
+
 export const objectMapG6EdgeStroke = (type: string, palette: ObjectMapG6Palette): string => {
   switch (type.trim().toLowerCase()) {
     case 'owner':
-      return palette.accent;
+      return palette.edgeOwner;
     case 'routes':
       return palette.edgeRoutes;
     case 'selector':
-      return palette.accent;
+      return palette.edgeSelector;
     case 'endpoint':
       return palette.edgeEndpoint;
     case 'volume-binding':
@@ -102,6 +150,8 @@ export const objectMapG6EdgeStroke = (type: string, palette: ObjectMapG6Palette)
       return palette.edgeBinds;
     case 'aggregates':
       return palette.edgeAggregates;
+    case 'filtered-path':
+      return palette.edgeFilteredPath;
     case 'uses':
       return palette.edgeUses;
     default:
@@ -144,6 +194,19 @@ export const parseObjectMapG6Path = (path: string): PathArray => {
   return result;
 };
 
+const objectMapG6SimpleEdgePath = (
+  edge: PositionedEdge,
+  nodeById: Map<string, PositionedNode>
+): PathArray => {
+  const source = nodeById.get(edge.sourceId);
+  const target = nodeById.get(edge.targetId);
+  if (!source || !target) return parseObjectMapG6Path(edge.d);
+  return [
+    ['M', source.x + source.width / 2, source.y + source.height / 2],
+    ['L', target.x + target.width / 2, target.y + target.height / 2],
+  ];
+};
+
 export const objectMapG6NodeState = (
   node: PositionedNode,
   selectionState: ObjectMapSelectionState
@@ -170,84 +233,123 @@ export const toObjectMapG6Data = (
   layout: ObjectMapLayout,
   selectionState: ObjectMapSelectionState,
   badgeForNode: ObjectMapNodeBadgeLookup,
-  palette: ObjectMapG6Palette
-): GraphData => ({
-  nodes: layout.nodes.map<NodeData>((node) => {
-    const badge = badgeForNode(node.id);
-    const kindLabel = truncate(node.ref.kind, NODE_KIND_MAX_CHARS);
-    const nameLabel = truncate(node.ref.name, NODE_NAME_MAX_CHARS);
-    const namespaceLabel = truncate(formatNamespace(node), NODE_NAMESPACE_MAX_CHARS);
+  palette: ObjectMapG6Palette,
+  kindBadgeStyleForKind: (kind: string) => KindBadgeVisualStyle = fallbackKindBadgeVisualStyle,
+  useShortResourceNames = false,
+  cardDetailLevel: ObjectMapG6CardDetailLevel = 'full',
+  edgeDetailLevel: ObjectMapG6EdgeDetailLevel = 'routed'
+): GraphData => {
+  const nodeById = new Map(layout.nodes.map((node) => [node.id, node]));
 
-    return {
-      id: node.id,
-      type: OBJECT_MAP_G6_CARD_NODE,
-      data: {
-        ref: node.ref,
-        badge,
-        kindLabel,
-        nameLabel,
-        namespaceLabel,
-      },
-      states: objectMapG6NodeState(node, selectionState),
-      style: {
-        x: node.x + node.width / 2,
-        y: node.y + node.height / 2,
-        size: [node.width, node.height],
-        radius: NODE_CARD_RADIUS,
-        fill: palette.backgroundSecondary,
-        stroke: node.isSeed ? palette.accent : palette.border,
-        lineWidth: node.isSeed ? NODE_SEED_LINE_WIDTH : NODE_LINE_WIDTH,
-        opacity: palette.fullOpacity,
-        label: false,
-        cardKindText: kindLabel.toUpperCase(),
-        cardNameText: nameLabel,
-        cardNamespaceText: namespaceLabel,
-        cardFontFamily: palette.fontFamily,
-        cardKindFill: palette.accent,
-        cardNameFill: palette.text,
-        cardNamespaceFill: palette.textSecondary,
-        badges: badge
-          ? [
-              {
-                text: badge.expanded ? '\u2212' : `+${badge.hiddenCount}`,
-                placement: 'right-top',
-                offsetX: BADGE_OFFSET_X,
-                offsetY: BADGE_OFFSET_Y,
-                fill: palette.accent,
-                fontWeight: BADGE_FONT_WEIGHT,
-                backgroundWidth: BADGE_WIDTH,
-                backgroundHeight: BADGE_HEIGHT,
-                backgroundFill: palette.accentBg,
-                backgroundStroke: palette.accent,
-                backgroundRadius: BADGE_RADIUS,
-              },
-            ]
-          : undefined,
-      },
-    };
-  }),
-  edges: layout.edges.map<EdgeData>((edge) => ({
-    id: edge.id,
-    source: edge.sourceId,
-    target: edge.targetId,
-    type: OBJECT_MAP_G6_PATH_EDGE,
-    data: {
-      label: edge.label,
-      type: edge.type,
-      tracedBy: edge.tracedBy,
-      midX: edge.midX,
-      midY: edge.midY,
-      path: edge.d,
-    },
-    states: objectMapG6EdgeState(edge, selectionState),
-    style: {
-      objectMapPath: parseObjectMapG6Path(edge.d),
-      stroke: objectMapG6EdgeStroke(edge.type, palette),
-      lineWidth: selectionState.connectedEdgeIds.has(edge.id)
-        ? palette.edgeHighlightedLineWidth
-        : palette.edgeLineWidth,
-      opacity: palette.fullOpacity,
-      lineDash: edge.type.trim().toLowerCase() === 'uses' ? palette.edgeDash : undefined,
-    },
-  })),
-});
+  return {
+    nodes: layout.nodes.map<NodeData>((node) => {
+      const badge = badgeForNode(node.id);
+      const kindLabel = getDisplayKind(node.ref.kind, useShortResourceNames);
+      const namespaceLabel = truncate(formatNamespace(node), NODE_NAMESPACE_MAX_CHARS);
+      const ageLabel = formatNodeAge(node.creationTimestamp);
+      const statusFill = objectMapStatusFill(node.status, palette);
+      const kindBadgeStyle = kindBadgeStyleForKind(node.ref.kind);
+      const states = objectMapG6NodeState(node, selectionState);
+      const isDimmed = states.includes('dimmed');
+
+      return {
+        id: node.id,
+        type: OBJECT_MAP_G6_CARD_NODE,
+        data: {
+          ref: node.ref,
+          badge,
+          kindLabel,
+          nameLabel: node.ref.name,
+          namespaceLabel,
+          ageLabel,
+          status: node.status,
+        },
+        states,
+        style: {
+          x: node.x + node.width / 2,
+          y: node.y + node.height / 2,
+          size: [node.width, node.height],
+          radius: NODE_CARD_RADIUS,
+          fill: palette.backgroundSecondary,
+          stroke: node.isSeed ? palette.accent : palette.border,
+          lineWidth: node.isSeed ? NODE_SEED_LINE_WIDTH : NODE_LINE_WIDTH,
+          opacity: palette.fullOpacity,
+          label: false,
+          cardBackgroundOpacity: isDimmed
+            ? palette.nodeDimmedBackgroundOpacity
+            : palette.fullOpacity,
+          cardForegroundOpacity: isDimmed
+            ? palette.nodeDimmedForegroundOpacity
+            : palette.fullOpacity,
+          cardDetailLevel,
+          cardKindBadgeText: kindLabel.toUpperCase(),
+          cardKindBadgeFill: kindBadgeStyle.backgroundColor,
+          cardKindBadgeTextFill: kindBadgeStyle.color,
+          cardKindBadgeStroke: kindBadgeStyle.borderColor,
+          cardKindBadgeBorderWidth: kindBadgeStyle.borderWidth,
+          cardKindBadgeRadius: kindBadgeStyle.borderRadius,
+          cardKindBadgeFontSize: kindBadgeStyle.fontSize,
+          cardKindBadgeFontWeight: kindBadgeStyle.fontWeight,
+          cardKindBadgeLetterSpacing: kindBadgeStyle.letterSpacing,
+          cardKindBadgePaddingX: kindBadgeStyle.paddingX,
+          cardKindBadgePaddingY: kindBadgeStyle.paddingY,
+          cardCollapseBadgeText: badge
+            ? badge.expanded
+              ? '\u2212'
+              : `+${badge.hiddenCount}`
+            : undefined,
+          cardCollapseBadgeFill: palette.backgroundSecondary,
+          cardCollapseBadgeTextFill: palette.textSecondary,
+          cardCollapseBadgeStroke: palette.textTertiary,
+          cardNameText: node.ref.name,
+          cardNamespaceText: namespaceLabel,
+          cardAgeText: ageLabel,
+          cardStatusText: node.status?.label,
+          cardStatusReason: node.status?.reason,
+          cardStatusFill: statusFill,
+          cardStatusStroke: palette.backgroundSecondary,
+          cardFontFamily: palette.fontFamily,
+          cardNameFill: palette.text,
+          cardNamespaceFill: palette.textSecondary,
+          cardAgeFill: palette.textSecondary,
+        },
+      };
+    }),
+    edges: layout.edges.map<EdgeData>((edge) => {
+      const useSimpleEdge = edgeDetailLevel === 'simple';
+      return {
+        id: edge.id,
+        source: edge.sourceId,
+        target: edge.targetId,
+        type: OBJECT_MAP_G6_PATH_EDGE,
+        data: {
+          label: edge.label,
+          type: edge.type,
+          tracedBy: edge.tracedBy,
+          filteredPath: edge.filteredPath,
+          midX: edge.midX,
+          midY: edge.midY,
+          path: edge.d,
+        },
+        states: objectMapG6EdgeState(edge, selectionState),
+        style: {
+          objectMapEdgeDetailLevel: edgeDetailLevel,
+          objectMapPath: useSimpleEdge
+            ? objectMapG6SimpleEdgePath(edge, nodeById)
+            : parseObjectMapG6Path(edge.d),
+          stroke: objectMapG6EdgeStroke(edge.type, palette),
+          lineWidth: selectionState.connectedEdgeIds.has(edge.id)
+            ? palette.edgeHighlightedLineWidth
+            : palette.edgeLineWidth,
+          opacity: palette.fullOpacity,
+          lineDash:
+            !useSimpleEdge &&
+            (edge.type.trim().toLowerCase() === 'uses' ||
+              edge.type.trim().toLowerCase() === 'filtered-path')
+              ? palette.edgeDash
+              : undefined,
+        },
+      };
+    }),
+  };
+};

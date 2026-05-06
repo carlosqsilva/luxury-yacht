@@ -6,32 +6,59 @@
  * G6 renderer so the heavy graph dependency stays out of the initial bundle.
  */
 
-import React, { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
+import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import './ObjectMap.css';
 import type { ObjectMapReference, ObjectMapSnapshotPayload } from '@core/refresh/types';
-import { isMacPlatform } from '@/utils/platform';
-import ContextMenu from '@shared/components/ContextMenu';
+import { useShortNames } from '@/hooks/useShortNames';
+import ContextMenu, { type ContextMenuItem } from '@shared/components/ContextMenu';
+import Tooltip from '@shared/components/Tooltip';
 import { Dropdown } from '@shared/components/dropdowns/Dropdown';
 import type { DropdownOption } from '@shared/components/dropdowns/Dropdown';
 import { useObjectActionController } from '@shared/hooks/useObjectActionController';
-import { computeObjectMapLayout } from './objectMapLayout';
-import { objectMapEdgeClass, OBJECT_MAP_EDGE_KINDS } from './objectMapEdgeStyle';
-import { computeObjectMapSelectionState } from './objectMapSelection';
+import { OBJECT_MAP_EDGE_FAMILY_LABELS, objectMapEdgeClass } from './objectMapEdgeStyle';
+import type { EdgeKindMeta } from './objectMapEdgeStyle';
 import type { ObjectMapContextMenuRequest } from './objectMapRendererTypes';
 import type { ObjectMapViewportControls } from './objectMapRendererTypes';
 import { useObjectMapModel } from './useObjectMapModel';
 import {
+  createObjectMapDebugId,
+  publishObjectMapDebugSnapshot,
+  removeObjectMapDebugSnapshot,
+  useObjectMapDebugOverlayVisible,
+} from './objectMapDebugStore';
+import {
+  deriveObjectMapVisibleState,
+  pruneObjectMapEnabledEdgeTypes,
+  pruneObjectMapSelectedKinds,
+} from './objectMapVisibleState';
+import { useObjectMapLegendDrag } from './useObjectMapLegendDrag';
+import {
   AutoFitIcon,
+  CloseIcon,
   FitToViewIcon,
   FocusModeIcon,
   LegendIcon,
   RefreshIcon,
   ResetFiltersIcon,
+  ResetZoomIcon,
   ZoomInIcon,
   ZoomOutIcon,
 } from '@shared/components/icons/MenuIcons';
 
 const ObjectMapG6Renderer = React.lazy(() => import('./ObjectMapG6Renderer'));
+
+const objectMapTimingNow = (): number =>
+  typeof performance === 'undefined' ? Date.now() : performance.now();
+
+type ObjectMapMenuState =
+  | { type: 'object'; request: ObjectMapContextMenuRequest }
+  | { type: 'canvas'; position: { x: number; y: number } };
+
+type ObjectMapLegendGroup = {
+  family: EdgeKindMeta['family'];
+  label: string;
+  entries: EdgeKindMeta[];
+};
 
 export interface ObjectMapProps {
   payload: ObjectMapSnapshotPayload;
@@ -42,9 +69,9 @@ export interface ObjectMapProps {
   onRefresh?: () => void;
   // Disables the refresh button while a fetch is in flight.
   isRefreshing?: boolean;
-  // Modifier-click handlers. Cmd-click (mac) / Ctrl-click (other) on
-  // a node fires `onOpenPanel`; Alt-click fires `onNavigateView`. Both
-  // are optional — when omitted the modifier click silently no-ops.
+  // Modifier-click handlers. Cmd-click (mac) / Ctrl-click (other) opens
+  // details, Shift-click opens the map, and Alt-click navigates to the table.
+  // Handlers are optional — when omitted the modifier click silently no-ops.
   onOpenPanel?: (ref: ObjectMapReference) => void;
   onNavigateView?: (ref: ObjectMapReference) => void;
   onOpenObjectMap?: (ref: ObjectMapReference) => void;
@@ -58,180 +85,118 @@ const ObjectMap: React.FC<ObjectMapProps> = ({
   onNavigateView,
   onOpenObjectMap,
 }) => {
+  const modelTimingStartedAt = objectMapTimingNow();
   const model = useObjectMapModel(payload);
+  const modelTimingMs = objectMapTimingNow() - modelTimingStartedAt;
+  const useShortResourceNames = useShortNames();
   const [showLegend, setShowLegend] = useState(true);
   const [focusMode, setFocusMode] = useState(false);
   const [enabledEdgeTypes, setEnabledEdgeTypes] = useState<Set<string> | null>(null);
   const [selectedKinds, setSelectedKinds] = useState<string[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchIndex, setSearchIndex] = useState(0);
-  const [contextMenu, setContextMenu] = useState<ObjectMapContextMenuRequest | null>(null);
+  const [contextMenu, setContextMenu] = useState<ObjectMapMenuState | null>(null);
+  const canvasRef = useRef<HTMLDivElement | null>(null);
+  const debugMapIdRef = useRef(createObjectMapDebugId());
+  const isMapDebugOverlayVisible = useObjectMapDebugOverlayVisible();
+  const { legendPosition, legendPointerHandlers } = useObjectMapLegendDrag(canvasRef);
   const [g6ViewportControls, setG6ViewportControls] = useState<ObjectMapViewportControls | null>(
     null
   );
-  const primaryModifierLabel = useMemo(() => (isMacPlatform() ? 'cmd' : 'ctrl'), []);
 
-  const visibleEdgeTypes = useMemo(() => {
-    const types = new Set<string>();
-    model.layout.edges.forEach((edge) => types.add(edge.type.trim().toLowerCase()));
-    return types;
-  }, [model.layout.edges]);
-
-  const legendEntries = useMemo(
-    () => OBJECT_MAP_EDGE_KINDS.filter((entry) => visibleEdgeTypes.has(entry.type)),
-    [visibleEdgeTypes]
-  );
+  const visibleStateResult = useMemo(() => {
+    const startedAt = objectMapTimingNow();
+    const state = deriveObjectMapVisibleState({
+      layout: model.layout,
+      seedNodeId: model.seedId,
+      activeNodeId: model.activeNodeId,
+      focusMode,
+      selectedKinds,
+      enabledEdgeTypes,
+      searchQuery,
+      useShortResourceNames,
+    });
+    return { state, durationMs: objectMapTimingNow() - startedAt };
+  }, [
+    enabledEdgeTypes,
+    focusMode,
+    model.activeNodeId,
+    model.layout,
+    model.seedId,
+    searchQuery,
+    selectedKinds,
+    useShortResourceNames,
+  ]);
+  const visibleState = visibleStateResult.state;
 
   useEffect(() => {
     setEnabledEdgeTypes((previous) => {
-      if (!previous) return previous;
-      const next = new Set(Array.from(previous).filter((type) => visibleEdgeTypes.has(type)));
-      return next.size === previous.size ? previous : next;
+      return pruneObjectMapEnabledEdgeTypes(previous, visibleState.visibleEdgeTypes);
     });
-  }, [visibleEdgeTypes]);
+  }, [visibleState.visibleEdgeTypes]);
 
   const isEdgeTypeEnabled = useCallback(
     (type: string) => !enabledEdgeTypes || enabledEdgeTypes.has(type),
     [enabledEdgeTypes]
   );
 
-  const edgeFilteredLayout = useMemo(() => {
-    if (!enabledEdgeTypes) return model.layout;
-    return {
-      ...model.layout,
-      edges: model.layout.edges.filter((edge) => enabledEdgeTypes.has(edge.type)),
-    };
-  }, [enabledEdgeTypes, model.layout]);
-
-  const kindOptions = useMemo<DropdownOption[]>(() => {
-    const kinds = Array.from(new Set(model.layout.nodes.map((node) => node.ref.kind))).sort(
-      (a, b) => a.localeCompare(b)
-    );
-    return kinds.map((kind) => ({ value: kind, label: kind }));
-  }, [model.layout.nodes]);
-
   useEffect(() => {
     setSelectedKinds((previous) => {
-      if (previous.length === 0) return previous;
-      const available = new Set(kindOptions.map((option) => option.value));
-      const next = previous.filter((kind) => available.has(kind));
-      return next.length === previous.length ? previous : next;
+      return pruneObjectMapSelectedKinds(previous, visibleState.kindOptions);
     });
-  }, [kindOptions]);
-
-  const selectedKindSet = useMemo(() => new Set(selectedKinds), [selectedKinds]);
-
-  const kindFilteredLayout = useMemo(() => {
-    if (selectedKindSet.size === 0) return edgeFilteredLayout;
-
-    const nodes = edgeFilteredLayout.nodes.filter((node) => selectedKindSet.has(node.ref.kind));
-    const nodeIds = new Set(nodes.map((node) => node.id));
-    const edges = edgeFilteredLayout.edges.filter(
-      (edge) => nodeIds.has(edge.sourceId) && nodeIds.has(edge.targetId)
-    );
-
-    return computeObjectMapLayout(
-      nodes.map((node) => ({
-        id: node.id,
-        depth: Math.abs(node.column),
-        ref: node.ref,
-      })),
-      edges.map((edge) => ({
-        id: edge.id,
-        source: edge.sourceId,
-        target: edge.targetId,
-        type: edge.type,
-        label: edge.label,
-        tracedBy: edge.tracedBy,
-      })),
-      model.activeNodeId ?? nodes[0]?.id ?? ''
-    );
-  }, [edgeFilteredLayout, model.activeNodeId, selectedKindSet]);
-
-  const visibleLayout = useMemo(() => {
-    if (
-      !focusMode ||
-      !model.activeNodeId ||
-      !kindFilteredLayout.nodes.some((node) => node.id === model.activeNodeId)
-    ) {
-      return kindFilteredLayout;
-    }
-
-    const focusSelectionState = computeObjectMapSelectionState(
-      kindFilteredLayout.edges,
-      model.activeNodeId
-    );
-    const visibleNodeIds = new Set<string>([
-      model.activeNodeId,
-      ...focusSelectionState.connectedIds,
-    ]);
-
-    const focusedNodes = kindFilteredLayout.nodes.filter((node) => visibleNodeIds.has(node.id));
-    const focusedEdges = kindFilteredLayout.edges.filter((edge) =>
-      focusSelectionState.connectedEdgeIds.has(edge.id)
-    );
-
-    return computeObjectMapLayout(
-      focusedNodes.map((node) => ({
-        id: node.id,
-        depth: Math.abs(node.column),
-        ref: node.ref,
-      })),
-      focusedEdges.map((edge) => ({
-        id: edge.id,
-        source: edge.sourceId,
-        target: edge.targetId,
-        type: edge.type,
-        label: edge.label,
-        tracedBy: edge.tracedBy,
-      })),
-      model.activeNodeId
-    );
-  }, [focusMode, kindFilteredLayout, model.activeNodeId]);
-
-  const visibleSelectionState = useMemo(
-    () => computeObjectMapSelectionState(visibleLayout.edges, model.activeNodeId),
-    [model.activeNodeId, visibleLayout.edges]
-  );
+  }, [visibleState.kindOptions]);
 
   const toggleEdgeType = useCallback(
     (type: string) => {
       setEnabledEdgeTypes((previous) => {
-        const next = new Set(previous ?? Array.from(visibleEdgeTypes));
+        const next = new Set(previous ?? Array.from(visibleState.visibleEdgeTypes));
         if (next.has(type)) {
           next.delete(type);
         } else {
           next.add(type);
         }
-        return next.size === visibleEdgeTypes.size ? null : next;
+        return next.size === visibleState.visibleEdgeTypes.size ? null : next;
       });
     },
-    [visibleEdgeTypes]
+    [visibleState.visibleEdgeTypes]
   );
-
-  const normalizedSearchQuery = searchQuery.trim().toLowerCase();
-  const searchMatches = useMemo(() => {
-    if (!normalizedSearchQuery) return [];
-    return visibleLayout.nodes.filter((node) => {
-      const namespace = node.ref.namespace ?? '';
-      return `${node.ref.kind} ${namespace} ${node.ref.name}`
-        .toLowerCase()
-        .includes(normalizedSearchQuery);
+  const showAllEdgeTypes = useCallback(() => {
+    setEnabledEdgeTypes(null);
+  }, []);
+  const hideAllEdgeTypes = useCallback(() => {
+    setEnabledEdgeTypes(new Set());
+  }, []);
+  const enabledLegendEntryCount = visibleState.legendEntries.filter((entry) =>
+    isEdgeTypeEnabled(entry.type)
+  ).length;
+  const legendGroups = useMemo<ObjectMapLegendGroup[]>(() => {
+    const groups = new Map<EdgeKindMeta['family'], ObjectMapLegendGroup>();
+    visibleState.legendEntries.forEach((entry) => {
+      const group =
+        groups.get(entry.family) ??
+        ({
+          family: entry.family,
+          label: OBJECT_MAP_EDGE_FAMILY_LABELS[entry.family],
+          entries: [],
+        } satisfies ObjectMapLegendGroup);
+      group.entries.push(entry);
+      groups.set(entry.family, group);
     });
-  }, [normalizedSearchQuery, visibleLayout.nodes]);
+    return Array.from(groups.values());
+  }, [visibleState.legendEntries]);
 
   useEffect(() => {
     setSearchIndex(0);
-  }, [normalizedSearchQuery]);
+  }, [visibleState.normalizedSearchQuery]);
 
   const focusSearchMatch = useCallback(() => {
-    if (searchMatches.length === 0) return;
-    const nextIndex = Math.min(searchIndex, searchMatches.length - 1);
-    const node = searchMatches[nextIndex];
-    setSearchIndex((prev) => (prev + 1) % searchMatches.length);
+    if (visibleState.searchMatches.length === 0) return;
+    const nextIndex = Math.min(searchIndex, visibleState.searchMatches.length - 1);
+    const node = visibleState.searchMatches[nextIndex];
+    setSearchIndex((prev) => (prev + 1) % visibleState.searchMatches.length);
     model.focusNode(node.id);
     g6ViewportControls?.focusNode(node.id);
-  }, [g6ViewportControls, model, searchIndex, searchMatches]);
+  }, [g6ViewportControls, model, searchIndex, visibleState.searchMatches]);
 
   const handleKindsChange = useCallback((value: string | string[]) => {
     setSelectedKinds(Array.isArray(value) ? value : value ? [value] : []);
@@ -252,30 +217,364 @@ const ObjectMap: React.FC<ObjectMapProps> = ({
     return count > 0 ? `Kinds (${count})` : 'Kinds';
   }, []);
 
+  const disableAutoFitForManualViewport = useCallback(() => {
+    model.setAutoFit(false);
+  }, [model]);
+
   const resetMapLayout = useCallback(() => {
     model.resetLayout();
     setFocusMode(false);
   }, [model]);
+  const refreshLabel = isRefreshing ? 'Refreshing' : 'Refresh';
 
   const viewportControlsReady = Boolean(g6ViewportControls);
-  const contextMenuObject = contextMenu?.ref ?? null;
+  const visibleNodeIds = useMemo(
+    () => new Set(visibleState.visibleLayout.nodes.map((node) => node.id)),
+    [visibleState.visibleLayout.nodes]
+  );
+  const selectedViewportNodeId =
+    model.activeNodeId && visibleNodeIds.has(model.activeNodeId) ? model.activeNodeId : null;
+  const seedViewportNodeId = visibleNodeIds.has(model.seedId) ? model.seedId : null;
+  const fallbackViewportNodeId = visibleState.visibleLayout.nodes[0]?.id ?? null;
+  const preserveViewportNodeId =
+    model.autoFit || focusMode
+      ? null
+      : (selectedViewportNodeId ?? seedViewportNodeId ?? fallbackViewportNodeId);
+
+  useEffect(() => {
+    const debugId = debugMapIdRef.current;
+    return () => removeObjectMapDebugSnapshot(debugId);
+  }, []);
+
+  useEffect(() => {
+    const debugId = debugMapIdRef.current;
+    publishObjectMapDebugSnapshot({
+      id: debugId,
+      clusterId: payload.clusterId,
+      clusterName: payload.clusterName,
+      seedRef: payload.seed,
+      seedNodeId: model.seedId,
+      activeNodeId: model.activeNodeId,
+      focusMode,
+      autoFit: model.autoFit,
+      selectedKinds,
+      enabledEdgeTypes: enabledEdgeTypes ? Array.from(enabledEdgeTypes).sort() : null,
+      preserveViewportNodeId,
+      payload: {
+        nodes: payload.nodes.length,
+        edges: payload.edges.length,
+        maxDepth: payload.maxDepth,
+        maxNodes: payload.maxNodes,
+        truncated: payload.truncated,
+        warnings: payload.warnings?.length ?? 0,
+      },
+      layout: {
+        nodes: model.layout.nodes.length,
+        edges: model.layout.edges.length,
+        bounds: model.layout.bounds,
+      },
+      visibleLayout: {
+        nodes: visibleState.visibleLayout.nodes.length,
+        edges: visibleState.visibleLayout.edges.length,
+        bounds: visibleState.visibleLayout.bounds,
+      },
+      search: {
+        query: searchQuery,
+        matches: visibleState.searchMatches.length,
+      },
+      timings: {
+        modelMs: modelTimingMs,
+        visibleStateMs: visibleStateResult.durationMs,
+      },
+      renderer: null,
+      updatedAt: Date.now(),
+    });
+  }, [
+    enabledEdgeTypes,
+    focusMode,
+    model.activeNodeId,
+    model.autoFit,
+    model.layout.bounds,
+    model.layout.edges.length,
+    model.layout.nodes.length,
+    model.seedId,
+    modelTimingMs,
+    payload,
+    preserveViewportNodeId,
+    searchQuery,
+    selectedKinds,
+    visibleStateResult.durationMs,
+    visibleState.searchMatches.length,
+    visibleState.visibleLayout.bounds,
+    visibleState.visibleLayout.edges.length,
+    visibleState.visibleLayout.nodes.length,
+  ]);
+
+  const contextMenuObject = contextMenu?.type === 'object' ? contextMenu.request.ref : null;
   const objectActions = useObjectActionController({
-    context: 'gridtable',
+    context: 'object-map',
     onOpen: onOpenPanel ? (object) => onOpenPanel(object as ObjectMapReference) : undefined,
     onOpenObjectMap: onOpenObjectMap
       ? (object) => onOpenObjectMap(object as ObjectMapReference)
       : undefined,
+    onNavigateView: onNavigateView
+      ? (object) => onNavigateView(object as ObjectMapReference)
+      : undefined,
   });
-  const contextMenuItems = useMemo(
-    () => objectActions.getMenuItems(contextMenuObject),
-    [contextMenuObject, objectActions]
-  );
+  const canvasContextMenuItems = useMemo<ContextMenuItem[]>(() => {
+    const items: ContextMenuItem[] = [
+      {
+        label: 'Zoom out',
+        icon: <ZoomOutIcon />,
+        onClick: g6ViewportControls?.zoomOut,
+        disabled: !viewportControlsReady,
+      },
+      {
+        label: 'Zoom in',
+        icon: <ZoomInIcon />,
+        onClick: g6ViewportControls?.zoomIn,
+        disabled: !viewportControlsReady,
+      },
+      {
+        label: 'Reset zoom',
+        icon: <ResetZoomIcon />,
+        onClick: g6ViewportControls?.resetZoom,
+        disabled: !viewportControlsReady,
+      },
+      { divider: true },
+      {
+        label: 'Fit',
+        icon: <FitToViewIcon />,
+        onClick: g6ViewportControls?.fitToView,
+        disabled: !viewportControlsReady,
+      },
+      {
+        label: model.autoFit ? 'Auto-fit off' : 'Auto-fit on',
+        icon: <AutoFitIcon />,
+        onClick: () => model.setAutoFit((prev) => !prev),
+      },
+      { divider: true },
+      {
+        label: focusMode ? 'Focus off' : 'Focus on',
+        icon: <FocusModeIcon />,
+        onClick: () => setFocusMode((prev) => !prev),
+      },
+      {
+        label: 'Reset layout',
+        icon: <ResetFiltersIcon />,
+        onClick: resetMapLayout,
+        disabled: !model.hasNodePositionOverrides && !focusMode,
+      },
+      { divider: true },
+    ];
+    if (onRefresh) {
+      items.push({
+        label: refreshLabel,
+        icon: <RefreshIcon />,
+        onClick: onRefresh,
+        disabled: isRefreshing,
+      });
+      items.push({ divider: true });
+    }
+    items.push({
+      label: showLegend ? 'Hide legend' : 'Show legend',
+      icon: <LegendIcon />,
+      onClick: () => setShowLegend((prev) => !prev),
+    });
+    return items;
+  }, [
+    focusMode,
+    g6ViewportControls,
+    isRefreshing,
+    model,
+    onRefresh,
+    refreshLabel,
+    resetMapLayout,
+    showLegend,
+    viewportControlsReady,
+  ]);
+  const contextMenuItems = useMemo(() => {
+    if (!contextMenu) return [];
+    return contextMenu.type === 'object'
+      ? objectActions.getMenuItems(contextMenuObject)
+      : canvasContextMenuItems;
+  }, [canvasContextMenuItems, contextMenu, contextMenuObject, objectActions]);
+  const contextMenuPosition =
+    contextMenu?.type === 'object' ? contextMenu.request.position : contextMenu?.position;
   const handleNodeContextMenu = useCallback((request: ObjectMapContextMenuRequest) => {
-    setContextMenu(request);
+    setContextMenu({ type: 'object', request });
+  }, []);
+  const handleCanvasContextMenu = useCallback((request: { position: { x: number; y: number } }) => {
+    setContextMenu({ type: 'canvas', position: request.position });
   }, []);
   const closeContextMenu = useCallback(() => {
     setContextMenu(null);
   }, []);
+
+  const toolbar = (
+    <div
+      className="object-map__toolbar"
+      role="toolbar"
+      aria-label="Object map controls"
+      onPointerDown={(e) => e.stopPropagation()}
+      onPointerUp={(e) => e.stopPropagation()}
+      onClick={(e) => e.stopPropagation()}
+    >
+      <form
+        className="object-map__search"
+        role="search"
+        onSubmit={(event) => {
+          event.preventDefault();
+          focusSearchMatch();
+        }}
+      >
+        <div className="object-map__kind-filter" data-gridtable-filter-role="kind">
+          <Dropdown
+            id="object-map-kind-filter"
+            name="object-map-kind-filter"
+            multiple
+            size="compact"
+            searchable
+            showBulkActions
+            placeholder="All kinds"
+            value={selectedKinds}
+            options={visibleState.kindOptions}
+            disabled={visibleState.kindOptions.length === 0}
+            onChange={handleKindsChange}
+            dropdownClassName="dropdown-filter-menu"
+            ariaLabel="Filter map kinds"
+            renderOption={renderFilterOption}
+            renderValue={renderKindsValue}
+          />
+        </div>
+        <input
+          type="search"
+          className="object-map__search-input"
+          aria-label="Search map objects"
+          placeholder="Search objects"
+          value={searchQuery}
+          onChange={(event) => setSearchQuery(event.target.value)}
+        />
+        {visibleState.normalizedSearchQuery && (
+          <span className="object-map__search-count">
+            {visibleState.searchMatches.length === 0
+              ? '0/0'
+              : `${Math.min(searchIndex + 1, visibleState.searchMatches.length)}/${
+                  visibleState.searchMatches.length
+                }`}
+          </span>
+        )}
+      </form>
+      <button
+        type="button"
+        className="object-map__toolbar-button"
+        onClick={g6ViewportControls?.zoomOut}
+        title="Zoom out"
+        aria-label="Zoom out"
+        disabled={!viewportControlsReady}
+      >
+        <ZoomOutIcon />
+      </button>
+      <button
+        type="button"
+        className="object-map__toolbar-button"
+        onClick={g6ViewportControls?.zoomIn}
+        title="Zoom in"
+        aria-label="Zoom in"
+        disabled={!viewportControlsReady}
+      >
+        <ZoomInIcon />
+      </button>
+      <button
+        type="button"
+        className="object-map__toolbar-button"
+        onClick={g6ViewportControls?.resetZoom}
+        title="Reset zoom to 100%"
+        aria-label="Reset zoom"
+        disabled={!viewportControlsReady}
+      >
+        <ResetZoomIcon />
+      </button>
+      <span className="object-map__toolbar-separator" aria-hidden="true" />
+      <button
+        type="button"
+        className="object-map__toolbar-button"
+        onClick={g6ViewportControls?.fitToView}
+        title="Fit visible objects into the viewport"
+        aria-label="Fit"
+        disabled={!viewportControlsReady}
+      >
+        <FitToViewIcon />
+      </button>
+      <button
+        type="button"
+        className={`object-map__toolbar-button ${
+          model.autoFit ? 'object-map__toolbar-button--active' : ''
+        }`}
+        onClick={() => model.setAutoFit((prev) => !prev)}
+        title={
+          model.autoFit
+            ? 'Auto-fit on - automatically fits visible objects into the viewport'
+            : 'Auto-fit off - pan and zoom changes are retained'
+        }
+        aria-label="Toggle auto-fit"
+        aria-pressed={model.autoFit}
+      >
+        <AutoFitIcon />
+      </button>
+      <span className="object-map__toolbar-separator" aria-hidden="true" />
+      <button
+        type="button"
+        className={`object-map__toolbar-button ${
+          focusMode ? 'object-map__toolbar-button--active' : ''
+        }`}
+        onClick={() => setFocusMode((prev) => !prev)}
+        title={focusMode ? 'Focus mode on' : 'Focus mode off'}
+        aria-label="Toggle focus mode"
+        aria-pressed={focusMode}
+      >
+        <FocusModeIcon />
+      </button>
+      <button
+        type="button"
+        className="object-map__toolbar-button"
+        onClick={resetMapLayout}
+        title="Reset layout"
+        aria-label="Reset layout"
+        disabled={!model.hasNodePositionOverrides && !focusMode}
+      >
+        <ResetFiltersIcon />
+      </button>
+      <span className="object-map__toolbar-separator" aria-hidden="true" />
+      {onRefresh && (
+        <button
+          type="button"
+          className={`object-map__toolbar-button ${
+            isRefreshing ? 'object-map__toolbar-button--refreshing' : ''
+          }`}
+          onClick={onRefresh}
+          title={refreshLabel}
+          aria-label={refreshLabel}
+          aria-busy={isRefreshing}
+          disabled={isRefreshing}
+        >
+          <RefreshIcon />
+        </button>
+      )}
+      <button
+        type="button"
+        className={`object-map__toolbar-button ${
+          showLegend ? 'object-map__toolbar-button--active' : ''
+        }`}
+        onClick={() => setShowLegend((prev) => !prev)}
+        title={showLegend ? 'Hide legend' : 'Show legend'}
+        aria-label="Toggle legend"
+        aria-pressed={showLegend}
+      >
+        <LegendIcon />
+      </button>
+    </div>
+  );
 
   if (model.layout.nodes.length === 0) {
     return (
@@ -287,11 +586,13 @@ const ObjectMap: React.FC<ObjectMapProps> = ({
 
   return (
     <div className="object-map" data-testid="object-map">
-      <div className="object-map__canvas">
+      <div className="object-map__header">{toolbar}</div>
+      <div ref={canvasRef} className="object-map__canvas">
         <Suspense fallback={<div className="object-map__message">Loading map renderer…</div>}>
           <ObjectMapG6Renderer
-            layout={visibleLayout}
-            selectionState={visibleSelectionState}
+            layout={visibleState.visibleLayout}
+            selectionState={visibleState.visibleSelectionState}
+            useShortResourceNames={useShortResourceNames}
             hoverEdge={model.hoverEdge}
             onHoverEdge={model.setHoverEdge}
             onClearHoverEdge={model.clearHoverEdge}
@@ -303,202 +604,124 @@ const ObjectMap: React.FC<ObjectMapProps> = ({
             onNodeDragEnd={model.endNodeDrag}
             onClearSelection={model.clearSelection}
             onOpenPanel={onOpenPanel}
+            onOpenObjectMap={onOpenObjectMap}
             onNavigateView={onNavigateView}
             onNodeContextMenu={handleNodeContextMenu}
+            onCanvasContextMenu={handleCanvasContextMenu}
             autoFit={model.autoFit}
-            preserveViewportNodeId={!model.autoFit && focusMode ? model.activeNodeId : null}
+            preserveViewportNodeId={preserveViewportNodeId}
+            debugMapId={debugMapIdRef.current}
+            showDebugGrid={isMapDebugOverlayVisible}
+            onUserViewportChange={disableAutoFitForManualViewport}
             onViewportControlsChange={setG6ViewportControls}
           />
         </Suspense>
-        <div
-          className="object-map__toolbar"
-          role="toolbar"
-          aria-label="Object map controls"
-          onPointerDown={(e) => e.stopPropagation()}
-          onPointerUp={(e) => e.stopPropagation()}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <form
-            className="object-map__search"
-            role="search"
-            onSubmit={(event) => {
-              event.preventDefault();
-              focusSearchMatch();
-            }}
-          >
-            <div className="object-map__kind-filter" data-gridtable-filter-role="kind">
-              <Dropdown
-                id="object-map-kind-filter"
-                name="object-map-kind-filter"
-                multiple
-                size="compact"
-                searchable
-                showBulkActions
-                placeholder="All kinds"
-                value={selectedKinds}
-                options={kindOptions}
-                disabled={kindOptions.length === 0}
-                onChange={handleKindsChange}
-                dropdownClassName="dropdown-filter-menu"
-                ariaLabel="Filter map kinds"
-                renderOption={renderFilterOption}
-                renderValue={renderKindsValue}
-              />
-            </div>
-            <input
-              type="search"
-              className="object-map__search-input"
-              aria-label="Search map objects"
-              placeholder="Search objects"
-              value={searchQuery}
-              onChange={(event) => setSearchQuery(event.target.value)}
-            />
-            {normalizedSearchQuery && (
-              <span className="object-map__search-count">
-                {searchMatches.length === 0
-                  ? '0/0'
-                  : `${Math.min(searchIndex + 1, searchMatches.length)}/${searchMatches.length}`}
-              </span>
-            )}
-          </form>
-          <button
-            type="button"
-            className="object-map__toolbar-button"
-            onClick={g6ViewportControls?.zoomOut}
-            title="Zoom out"
-            aria-label="Zoom out"
-            disabled={!viewportControlsReady}
-          >
-            <ZoomOutIcon />
-          </button>
-          <button
-            type="button"
-            className="object-map__toolbar-button"
-            onClick={g6ViewportControls?.zoomIn}
-            title="Zoom in"
-            aria-label="Zoom in"
-            disabled={!viewportControlsReady}
-          >
-            <ZoomInIcon />
-          </button>
-          <button
-            type="button"
-            className="object-map__toolbar-button"
-            onClick={g6ViewportControls?.fitToView}
-            title="Fit to view"
-            aria-label="Fit to view"
-            disabled={!viewportControlsReady}
-          >
-            <FitToViewIcon />
-          </button>
-          <button
-            type="button"
-            className={`object-map__toolbar-button ${
-              model.autoFit ? 'object-map__toolbar-button--active' : ''
-            }`}
-            onClick={() => model.setAutoFit((prev) => !prev)}
-            title={
-              model.autoFit
-                ? 'Auto-fit on (viewport recenters when the graph changes)'
-                : 'Auto-fit off (your pan/zoom is preserved across changes)'
-            }
-            aria-label="Toggle auto-fit"
-            aria-pressed={model.autoFit}
-          >
-            <AutoFitIcon />
-          </button>
-          <span className="object-map__toolbar-separator" aria-hidden="true" />
-          <button
-            type="button"
-            className={`object-map__toolbar-button ${
-              focusMode ? 'object-map__toolbar-button--active' : ''
-            }`}
-            onClick={() => setFocusMode((prev) => !prev)}
-            title={focusMode ? 'Focus mode on' : 'Focus mode off'}
-            aria-label="Toggle focus mode"
-            aria-pressed={focusMode}
-          >
-            <FocusModeIcon />
-          </button>
-          <button
-            type="button"
-            className="object-map__toolbar-button"
-            onClick={resetMapLayout}
-            title="Reset layout"
-            aria-label="Reset layout"
-            disabled={!model.hasNodePositionOverrides && !focusMode}
-          >
-            <ResetFiltersIcon />
-          </button>
-          <span className="object-map__toolbar-separator" aria-hidden="true" />
-          {onRefresh && (
-            <button
-              type="button"
-              className="object-map__toolbar-button"
-              onClick={onRefresh}
-              title="Refresh"
-              aria-label="Refresh"
-              disabled={isRefreshing}
-            >
-              <RefreshIcon />
-            </button>
-          )}
-          <button
-            type="button"
-            className={`object-map__toolbar-button ${
-              showLegend ? 'object-map__toolbar-button--active' : ''
-            }`}
-            onClick={() => setShowLegend((prev) => !prev)}
-            title={showLegend ? 'Hide legend' : 'Show legend'}
-            aria-label="Toggle legend"
-            aria-pressed={showLegend}
-          >
-            <LegendIcon />
-          </button>
-        </div>
         {showLegend && (
           <div
             className="object-map__legend"
             role="region"
             aria-label="Object map legend"
-            onPointerDown={(e) => e.stopPropagation()}
-            onPointerUp={(e) => e.stopPropagation()}
+            style={
+              legendPosition
+                ? { left: legendPosition.left, right: 'auto', top: legendPosition.top }
+                : undefined
+            }
+            {...legendPointerHandlers}
             onClick={(e) => e.stopPropagation()}
           >
-            {legendEntries.map((entry) => (
+            <Tooltip
+              content="Close the legend. You can open it again with the Legend button on the toolbar."
+              placement="bottom"
+              hoverDelay={500}
+              showArrow={false}
+            >
               <button
-                key={entry.type}
                 type="button"
-                className={`object-map__legend-row ${
-                  isEdgeTypeEnabled(entry.type) ? '' : 'object-map__legend-row--disabled'
-                }`}
-                onClick={() => toggleEdgeType(entry.type)}
-                aria-pressed={isEdgeTypeEnabled(entry.type)}
+                className="object-map__legend-close"
+                aria-label="Close legend"
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setShowLegend(false);
+                }}
               >
-                <svg className="object-map__legend-swatch" width={26} height={6} aria-hidden="true">
-                  <line x1={0} y1={3} x2={26} y2={3} className={objectMapEdgeClass(entry.type)} />
-                </svg>
-                <span className="object-map__legend-label">{entry.label}</span>
+                <CloseIcon width={10} height={10} />
               </button>
+            </Tooltip>
+            {legendGroups.map((group) => (
+              <div key={group.family} className="object-map__legend-group">
+                <div className="object-map__legend-category">{group.label}</div>
+                {group.entries.map((entry) => (
+                  <button
+                    key={entry.type}
+                    type="button"
+                    className={`object-map__legend-row ${
+                      isEdgeTypeEnabled(entry.type) ? '' : 'object-map__legend-row--disabled'
+                    }`}
+                    onClick={() => toggleEdgeType(entry.type)}
+                    aria-pressed={isEdgeTypeEnabled(entry.type)}
+                  >
+                    <svg
+                      className="object-map__legend-swatch"
+                      width={26}
+                      height={6}
+                      aria-hidden="true"
+                    >
+                      <line
+                        x1={0}
+                        y1={3}
+                        x2={26}
+                        y2={3}
+                        className={objectMapEdgeClass(entry.type)}
+                      />
+                    </svg>
+                    <span className="object-map__legend-label">{entry.label}</span>
+                  </button>
+                ))}
+              </div>
             ))}
-            {legendEntries.length > 0 && (
-              <div className="object-map__legend-separator" aria-hidden="true" />
+            {visibleState.legendEntries.length > 0 && (
+              <div className="object-map__legend-actions">
+                <button
+                  type="button"
+                  className="object-map__legend-action-button"
+                  onClick={showAllEdgeTypes}
+                  disabled={enabledLegendEntryCount === visibleState.legendEntries.length}
+                >
+                  Show all
+                </button>
+                <button
+                  type="button"
+                  className="object-map__legend-action-button"
+                  onClick={hideAllEdgeTypes}
+                  disabled={enabledLegendEntryCount === 0}
+                >
+                  Hide all
+                </button>
+              </div>
             )}
-            <div className="object-map__legend-shortcut">
-              <span className="object-map__legend-key">{primaryModifierLabel}+click</span>
-              <span className="object-map__legend-action">Open View</span>
-            </div>
-            <div className="object-map__legend-shortcut">
-              <span className="object-map__legend-key">alt+click</span>
-              <span className="object-map__legend-action">Open Object</span>
+            <div className="object-map__legend-separator" aria-hidden="true" />
+            <div className="object-map__legend-counts" aria-label="Visible map totals">
+              <span className="object-map__legend-count">
+                <span className="object-map__legend-count-value">
+                  {visibleState.visibleLayout.nodes.length}
+                </span>
+                <span className="object-map__legend-count-label">Objects</span>
+              </span>
+              <span className="object-map__legend-count">
+                <span className="object-map__legend-count-value">
+                  {visibleState.visibleLayout.edges.length}
+                </span>
+                <span className="object-map__legend-count-label">Links</span>
+              </span>
             </div>
           </div>
         )}
       </div>
-      {contextMenu && contextMenuItems.length > 0 && (
+      {contextMenu && contextMenuPosition && contextMenuItems.length > 0 && (
         <ContextMenu
           items={contextMenuItems}
-          position={contextMenu.position}
+          position={contextMenuPosition}
           onClose={closeContextMenu}
         />
       )}

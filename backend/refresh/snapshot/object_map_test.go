@@ -2,7 +2,10 @@ package snapshot
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
@@ -12,11 +15,14 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	storagev1 "k8s.io/api/storage/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 func TestObjectMapBuildsRecursiveCoreRelationships(t *testing.T) {
@@ -38,6 +44,12 @@ func TestObjectMapBuildsRecursiveCoreRelationships(t *testing.T) {
 			t.Fatalf("node identity is incomplete: %#v", node)
 		}
 	}
+	if got := nodeByKindName(t, payload, "Deployment", "web").CreationTimestamp; got != "2024-01-02T03:04:05Z" {
+		t.Fatalf("unexpected creation timestamp for deployment node: %q", got)
+	}
+	if status := nodeByKindName(t, payload, "Deployment", "web").Status; status == nil || status.State != "healthy" || status.Label != "2/2 ready" {
+		t.Fatalf("unexpected deployment status: %#v", status)
+	}
 
 	assertEdge(t, payload, "Deployment", "web", "ReplicaSet", "web-rs", "owner")
 	assertEdge(t, payload, "ReplicaSet", "web-rs", "Pod", "web-pod", "owner")
@@ -58,6 +70,244 @@ func TestObjectMapBuildsRecursiveCoreRelationships(t *testing.T) {
 	}
 }
 
+func TestObjectMapPodStatusRequiresAllContainersReady(t *testing.T) {
+	readyContainer := func(name string) corev1.ContainerStatus {
+		return corev1.ContainerStatus{
+			Name:  name,
+			Ready: true,
+			State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+		}
+	}
+	runningContainer := func(name string) corev1.ContainerStatus {
+		return corev1.ContainerStatus{
+			Name:  name,
+			Ready: false,
+			State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+		}
+	}
+
+	tests := []struct {
+		name      string
+		pod       corev1.Pod
+		wantState string
+		wantLabel string
+	}{
+		{
+			name: "all regular containers ready",
+			pod: corev1.Pod{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{
+					{Name: "app"},
+					{Name: "sidecar"},
+				}},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					ContainerStatuses: []corev1.ContainerStatus{
+						readyContainer("app"),
+						readyContainer("sidecar"),
+					},
+				},
+			},
+			wantState: "healthy",
+			wantLabel: "Running",
+		},
+		{
+			name: "running phase with unready running container",
+			pod: corev1.Pod{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{
+					{Name: "app"},
+					{Name: "sidecar"},
+				}},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					ContainerStatuses: []corev1.ContainerStatus{
+						readyContainer("app"),
+						runningContainer("sidecar"),
+					},
+				},
+			},
+			wantState: "degraded",
+			wantLabel: "1/2 ready",
+		},
+		{
+			name: "running phase with missing container status",
+			pod: corev1.Pod{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{
+					{Name: "app"},
+					{Name: "sidecar"},
+				}},
+				Status: corev1.PodStatus{
+					Phase:             corev1.PodRunning,
+					ContainerStatuses: []corev1.ContainerStatus{readyContainer("app")},
+				},
+			},
+			wantState: "degraded",
+			wantLabel: "1/2 ready",
+		},
+		{
+			name: "running phase with no container statuses",
+			pod: corev1.Pod{
+				Spec:   corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
+				Status: corev1.PodStatus{Phase: corev1.PodRunning},
+			},
+			wantState: "degraded",
+			wantLabel: "0/1 ready",
+		},
+		{
+			name: "startup container creation stays degraded",
+			pod: corev1.Pod{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodPending,
+					ContainerStatuses: []corev1.ContainerStatus{{
+						Name:  "app",
+						State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"}},
+					}},
+				},
+			},
+			wantState: "degraded",
+			wantLabel: "ContainerCreating",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			status := objectMapPodStatus(tt.pod)
+			if status == nil || status.State != tt.wantState || status.Label != tt.wantLabel {
+				t.Fatalf("unexpected pod status: got %#v, want state=%q label=%q", status, tt.wantState, tt.wantLabel)
+			}
+		})
+	}
+}
+
+func TestObjectMapNodeStatusMarksReadyCordonedNodesDegraded(t *testing.T) {
+	readyCondition := corev1.NodeCondition{
+		Type:   corev1.NodeReady,
+		Status: corev1.ConditionTrue,
+		Reason: "KubeletReady",
+	}
+	notReadyCondition := corev1.NodeCondition{
+		Type:   corev1.NodeReady,
+		Status: corev1.ConditionFalse,
+		Reason: "KubeletNotReady",
+	}
+
+	tests := []struct {
+		name      string
+		node      corev1.Node
+		wantState string
+		wantLabel string
+	}{
+		{
+			name: "ready schedulable",
+			node: corev1.Node{Status: corev1.NodeStatus{
+				Conditions: []corev1.NodeCondition{readyCondition},
+			}},
+			wantState: "healthy",
+			wantLabel: "Ready",
+		},
+		{
+			name: "ready unschedulable",
+			node: corev1.Node{
+				Spec: corev1.NodeSpec{Unschedulable: true},
+				Status: corev1.NodeStatus{
+					Conditions: []corev1.NodeCondition{readyCondition},
+				},
+			},
+			wantState: "degraded",
+			wantLabel: "Ready (Cordoned)",
+		},
+		{
+			name: "ready with unschedulable taint",
+			node: corev1.Node{
+				Spec: corev1.NodeSpec{Taints: []corev1.Taint{{
+					Key:    corev1.TaintNodeUnschedulable,
+					Effect: corev1.TaintEffectNoSchedule,
+				}}},
+				Status: corev1.NodeStatus{
+					Conditions: []corev1.NodeCondition{readyCondition},
+				},
+			},
+			wantState: "degraded",
+			wantLabel: "Ready (Cordoned)",
+		},
+		{
+			name: "cordoned not ready remains unhealthy",
+			node: corev1.Node{
+				Spec: corev1.NodeSpec{Unschedulable: true},
+				Status: corev1.NodeStatus{
+					Conditions: []corev1.NodeCondition{notReadyCondition},
+				},
+			},
+			wantState: "unhealthy",
+			wantLabel: "NotReady",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			status := objectMapNodeStatus(tt.node)
+			if status == nil || status.State != tt.wantState || status.Label != tt.wantLabel {
+				t.Fatalf("unexpected node status: got %#v, want state=%q label=%q", status, tt.wantState, tt.wantLabel)
+			}
+		})
+	}
+}
+
+func TestObjectMapServiceStatusOnlyReportsLoadBalancer(t *testing.T) {
+	tests := []struct {
+		name      string
+		service   corev1.Service
+		wantState string
+		wantLabel string
+	}{
+		{
+			name: "load balancer active",
+			service: corev1.Service{
+				Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeLoadBalancer},
+				Status: corev1.ServiceStatus{
+					LoadBalancer: corev1.LoadBalancerStatus{
+						Ingress: []corev1.LoadBalancerIngress{{IP: "192.0.2.10"}},
+					},
+				},
+			},
+			wantState: "healthy",
+			wantLabel: "LoadBalancer active",
+		},
+		{
+			name:      "load balancer pending",
+			service:   corev1.Service{Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeLoadBalancer}},
+			wantState: "degraded",
+			wantLabel: "LoadBalancer pending",
+		},
+		{
+			name: "external name has no status indicator",
+			service: corev1.Service{Spec: corev1.ServiceSpec{
+				Type:         corev1.ServiceTypeExternalName,
+				ExternalName: "example.com",
+			}},
+		},
+		{
+			name:    "cluster ip has no status indicator",
+			service: corev1.Service{Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeClusterIP}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			status := objectMapServiceStatus(tt.service)
+			if tt.wantState == "" {
+				if status != nil {
+					t.Fatalf("expected no service status, got %#v", status)
+				}
+				return
+			}
+			if status == nil || status.State != tt.wantState || status.Label != tt.wantLabel {
+				t.Fatalf("unexpected service status: got %#v, want state=%q label=%q", status, tt.wantState, tt.wantLabel)
+			}
+		})
+	}
+}
+
 func TestObjectMapEnforcesVersionedSeedScope(t *testing.T) {
 	client := fake.NewSimpleClientset(objectMapFixtureObjects()...)
 	builder := &objectMapBuilder{client: client}
@@ -66,6 +316,41 @@ func TestObjectMapEnforcesVersionedSeedScope(t *testing.T) {
 	if _, err := builder.Build(ctx, "default:Deployment:web"); err == nil {
 		t.Fatal("expected legacy kind-only scope to fail")
 	}
+}
+
+func TestObjectMapFailsOnTransientListError(t *testing.T) {
+	client := fake.NewSimpleClientset(objectMapFixtureObjects()...)
+	client.Fake.PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewInternalError(fmt.Errorf("temporary pods failure"))
+	})
+	builder := &objectMapBuilder{client: client}
+	ctx := WithClusterMeta(context.Background(), ClusterMeta{ClusterID: "cluster-a"})
+
+	if _, err := builder.Build(ctx, "default:apps/v1:Deployment:web"); err == nil {
+		t.Fatal("expected transient list error to fail snapshot")
+	} else if !strings.Contains(err.Error(), "pods") {
+		t.Fatalf("expected error to identify failed resource, got %v", err)
+	}
+}
+
+func TestObjectMapSkipsForbiddenListError(t *testing.T) {
+	client := fake.NewSimpleClientset(objectMapFixtureObjects()...)
+	client.Fake.PrependReactor("list", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, "", fmt.Errorf("denied"))
+	})
+	builder := &objectMapBuilder{client: client}
+	ctx := WithClusterMeta(context.Background(), ClusterMeta{ClusterID: "cluster-a"})
+
+	snap, err := builder.Build(ctx, "default:apps/v1:Deployment:web?maxDepth=5&maxNodes=100")
+	if err != nil {
+		t.Fatalf("Build returned error: %v", err)
+	}
+	payload := snap.Payload.(ObjectMapSnapshotPayload)
+	if len(payload.Warnings) == 0 || !strings.Contains(payload.Warnings[0], "secrets") {
+		t.Fatalf("expected warning for skipped secrets, got %#v", payload.Warnings)
+	}
+	assertNode(t, payload, "Deployment", "web")
+	assertMissingNode(t, payload, "Secret", "app-secret")
 }
 
 func TestObjectMapAppliesNodeCap(t *testing.T) {
@@ -401,8 +686,19 @@ func objectMapFixtureObjects() []runtime.Object {
 			Namespace: "default",
 			UID:       types.UID("deploy-uid"),
 			Labels:    map[string]string{"app": "web"},
+			CreationTimestamp: metav1.NewTime(time.Date(
+				2024,
+				time.January,
+				2,
+				3,
+				4,
+				5,
+				0,
+				time.UTC,
+			)),
 		},
 		Spec: appsv1.DeploymentSpec{
+			Replicas: int32Ptr(2),
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
 					ServiceAccountName: "builder",
@@ -412,6 +708,9 @@ func objectMapFixtureObjects() []runtime.Object {
 					},
 				},
 			},
+		},
+		Status: appsv1.DeploymentStatus{
+			ReadyReplicas: 2,
 		},
 	}
 	rs := &appsv1.ReplicaSet{
@@ -722,13 +1021,18 @@ func assertMissingEdge(t *testing.T, payload ObjectMapSnapshotPayload, sourceKin
 
 func nodeIDByKindName(t *testing.T, payload ObjectMapSnapshotPayload, kind, name string) string {
 	t.Helper()
+	return nodeByKindName(t, payload, kind, name).ID
+}
+
+func nodeByKindName(t *testing.T, payload ObjectMapSnapshotPayload, kind, name string) ObjectMapNode {
+	t.Helper()
 	for _, node := range payload.Nodes {
 		if node.Ref.Kind == kind && node.Ref.Name == name {
-			return node.ID
+			return node
 		}
 	}
 	t.Fatalf("missing node %s/%s; nodes=%#v", kind, name, payload.Nodes)
-	return ""
+	return ObjectMapNode{}
 }
 
 func assertNode(t *testing.T, payload ObjectMapSnapshotPayload, kind, name string) {

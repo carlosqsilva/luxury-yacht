@@ -1,17 +1,19 @@
-### Added
-
-- **Object Maps** - Visualize relationships between Kubernetes objects as an interactive graph
-  - New Map tab in the Object Panel for any supported object
-  - New namespace-level Map view that renders all supported objects in the selected namespace, plus directly related cluster-scoped objects
-  - Map actions on object/action menus jump straight to the map view for that object
-  - High-performance renderer with pan, zoom, drag, hover highlighting, node selection, context menus, and filtering
-
 ### Changed
 
-- Large internal cleanup across cluster and namespace views
-  - New shared `useResourceGridTable` and `useGridTableBinding` hooks consolidate filter/sort/persistence wiring that each view used to duplicate
-  - New `useObjectActionController` centralizes object action handling.
+- Object Map improvements
+  - Improved performance on very large maps
+    - Progressively reduce card detail at low zoom levels to save on redraw overhead
+    - Switched to simple straight connections for very large maps instead of computationally expensive curved connections
+  - Added a toolbar icon for Reset Zoom
+  - Added a Map Debug overlay, invoked with `ctrl+alt+m`
+    - When in Map Debug mode, there is an overlay showing the coordinated on the map
+  - Added Object and Link counts to the Legend
+  - Added a close button to the Legend with a tooltip explaining how to reopen it
+  - Added clearer visual feedback for manual map refresh
+- Removed dead CSS and migrated hardcoded colors to tokens in the theme files
 
-# Fixed
+### Fixed
 
-- Tooltip persistence fix to address tooltips that would appear on top of the object panel and were unable to be dismissed
+- The Object Map would sometimes generate incomplete payloads, resulting in missing objects. Imcomplete data should now be rejected before it is passed to the frontend.
+- The Object Map would appear to jump unpredictably when using Focus mode without Auto-Fit. This behavior should be more predictable.
+- Updated vite config to fix error on startup when running in development mode
