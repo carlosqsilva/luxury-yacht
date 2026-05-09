@@ -112,14 +112,14 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup toolchain
-        uses: ./.github/actions/setup-toolchain
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          node-version: ${{ env.NODE_VERSION }}
-          wails-version: ${{ env.WAILS_VERSION }}
-          mage-version: latest
-          install-linux-deps: ${{ matrix.goos == 'linux' }}
+      # - name: Setup toolchain
+      #   uses: ./.github/actions/setup-toolchain
+      #   with:
+      #     go-version: ${{ env.GO_VERSION }}
+      #     node-version: ${{ env.NODE_VERSION }}
+      #     wails-version: ${{ env.WAILS_VERSION }}
+      #     mage-version: latest
+      #     install-linux-deps: ${{ matrix.goos == 'linux' }}
 
       - name: Set up macOS code signing
         if: matrix.goos == 'darwin'
