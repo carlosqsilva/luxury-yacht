@@ -3,32 +3,63 @@ description: Installs NSIS (Windows only)
 
 inputs:
   nsis-version:
-    description: 'The version of NSIS to install'
+    description: "The version of NSIS to install"
     required: true
 
 runs:
   using: composite
   steps:
-    - name: Install NSIS
+    - name: Download and install NSIS
       shell: pwsh
       run: |
-        $installer = Join-Path $env:RUNNER_TEMP "nsis-${{ inputs.nsis-version }}-setup.exe"
-        Invoke-WebRequest "https://downloads.sourceforge.net/project/nsis/NSIS%203/${{ inputs.nsis-version }}/nsis-${{ inputs.nsis-version }}-setup.exe" -OutFile $installer -MaximumRedirection 10
-        $header = [System.IO.File]::ReadAllBytes($installer)[0..1]
-        if ($header[0] -ne 0x4d -or $header[1] -ne 0x5a) {
-            Write-Host "Downloaded NSIS installer is not a valid Windows executable."
-            exit 1
+        $Url = "https://downloads.sourceforge.net/project/nsis/NSIS%203/3.10/nsis-3.10-setup.exe"
+        $Installer = "$env:RUNNER_TEMP\nsis-3.10-setup.exe"
+
+        Invoke-WebRequest `
+          -Uri $Url `
+          -OutFile $Installer `
+          -MaximumRedirection 10 `
+          -UserAgent "Mozilla/5.0 GitHubActions"
+
+        if ((Get-Item $Installer).Length -lt 1MB) {
+          Get-Content $Installer -TotalCount 5
+          throw "Downloaded file is too small; likely got HTML instead of installer"
         }
-        $process = Start-Process $installer -ArgumentList "/S" -Wait -PassThru
-        $exitCode = $process.ExitCode
-          if ($exitCode -eq 0) {
-              Write-Host "Installer ran successfully."
-          } else {
-              Write-Host "Installer failed with exit code $exitCode."
-              exit $exitCode
-          }
-        echo "C:\Program Files (x86)\NSIS\Bin" | Out-File -FilePath "$env:GITHUB_PATH" -Append
-        echo "C:\Program Files (x86)\NSIS" | Out-File -FilePath "$env:GITHUB_PATH" -Append
+
+        Start-Process `
+          -FilePath $Installer `
+          -ArgumentList "/S" `
+          -Wait `
+          -NoNewWindow
+
+        $NsisPath = "${env:ProgramFiles(x86)}\NSIS"
+
+        if (-not (Test-Path "$NsisPath\makensis.exe")) {
+          throw "NSIS installation failed"
+        }
+
+        echo "$NsisPath" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+    # - name: Install NSIS
+    #   shell: pwsh
+    #   run: |
+    #     $installer = Join-Path $env:RUNNER_TEMP "nsis-${{ inputs.nsis-version }}-setup.exe"
+    #     Invoke-WebRequest "https://downloads.sourceforge.net/project/nsis/NSIS%203/${{ inputs.nsis-version }}/nsis-${{ inputs.nsis-version }}-setup.exe" -OutFile $installer -MaximumRedirection 10
+    #     $header = [System.IO.File]::ReadAllBytes($installer)[0..1]
+    #     if ($header[0] -ne 0x4d -or $header[1] -ne 0x5a) {
+    #         Write-Host "Downloaded NSIS installer is not a valid Windows executable."
+    #         exit 1
+    #     }
+    #     $process = Start-Process $installer -ArgumentList "/S" -Wait -PassThru
+    #     $exitCode = $process.ExitCode
+    #       if ($exitCode -eq 0) {
+    #           Write-Host "Installer ran successfully."
+    #       } else {
+    #           Write-Host "Installer failed with exit code $exitCode."
+    #           exit $exitCode
+    #       }
+    #     echo "C:\Program Files (x86)\NSIS\Bin" | Out-File -FilePath "$env:GITHUB_PATH" -Append
+    #     echo "C:\Program Files (x86)\NSIS" | Out-File -FilePath "$env:GITHUB_PATH" -Append
 
     - name: Apply NSIS long string patch
       shell: pwsh
