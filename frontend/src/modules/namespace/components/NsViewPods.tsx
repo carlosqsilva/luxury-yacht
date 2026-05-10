@@ -6,7 +6,6 @@
  */
 
 import { resolveEmptyStateMessage } from '@/utils/emptyState';
-import { getPodStatusSeverity } from '@/utils/podStatusSeverity';
 import { eventBus } from '@/core/events';
 import { useClusterMetricsAvailability } from '@/core/refresh/hooks/useMetricsAvailability';
 import type { IconBarItem } from '@shared/components/IconBar/IconBar';
@@ -19,7 +18,12 @@ import type { ContextMenuItem } from '@shared/components/ContextMenu';
 import { type GridColumnDefinition } from '@shared/components/tables/GridTable';
 import type { PodSnapshotEntry, PodMetricsInfo } from '@/core/refresh/types';
 import { ALL_NAMESPACES_SCOPE } from '@modules/namespace/constants';
-import { getPodsUnhealthyStorageKey } from '@modules/namespace/components/podsFilterSignals';
+import {
+  getPodsUnhealthyStorageKey,
+  parsePodsFilterRequest,
+  type PodsFilterMode,
+  type PodsFilterRequest,
+} from '@modules/namespace/components/podsFilterSignals';
 import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
 import { useObjectActionController } from '@shared/hooks/useObjectActionController';
 import { useNavigateToView } from '@shared/hooks/useNavigateToView';
@@ -30,6 +34,7 @@ import {
   buildRequiredObjectReference,
   buildRequiredRelatedObjectReference,
 } from '@shared/utils/objectIdentity';
+import { backendStatusTextClass } from '@shared/utils/backendStatusPresentation';
 import { parseCpuToMillicores, parseMemToMB } from '@utils/resourceCalculations';
 
 interface PodsViewProps {
@@ -42,7 +47,7 @@ interface PodsViewProps {
   error?: string | null;
 }
 
-const HEALTHY_POD_STATUSES = new Set(['running', 'succeeded', 'completed']);
+const UNHEALTHY_POD_PRESENTATIONS = new Set(['warning', 'error', 'not-ready', 'terminating']);
 
 const UnhealthyPodsIcon: React.FC<{ width?: number; height?: number }> = ({
   width = 16,
@@ -82,29 +87,35 @@ const getReadySortValue = (value?: string | null): number => {
   return counts.ready * 1000000 + counts.total;
 };
 
-// Determine if a pod is unhealthy based on its status, restarts, and ready counts.
+// The backend owns pod health semantics; this filter only reads the presentation token.
 const isPodUnhealthy = (pod: PodSnapshotEntry): boolean => {
-  const restarts = pod.restarts ?? 0;
-  if (restarts > 0) {
-    return true;
+  return UNHEALTHY_POD_PRESENTATIONS.has((pod.statusPresentation || '').trim().toLowerCase());
+};
+
+const isPodRestarted = (pod: PodSnapshotEntry): boolean => (pod.restarts ?? 0) > 0;
+
+const isCompletedPod = (pod: PodSnapshotEntry): boolean => {
+  const status = (pod.status || '').trim().toLowerCase();
+  const statusState = (pod.statusState || '').trim().toLowerCase();
+  return status === 'completed' || statusState === 'succeeded';
+};
+
+const isPodNotReady = (pod: PodSnapshotEntry): boolean => {
+  const counts = parseReadyCounts(pod.ready);
+  return !isCompletedPod(pod) && counts !== null && counts.total > 0 && counts.ready < counts.total;
+};
+
+const matchesPodsFilter = (filter: PodsFilterMode, pod: PodSnapshotEntry): boolean => {
+  switch (filter) {
+    case 'restarts':
+      return isPodRestarted(pod);
+    case 'not-ready':
+      return isPodNotReady(pod);
+    case 'unhealthy':
+      return isPodUnhealthy(pod);
+    default:
+      return false;
   }
-  const normalizedStatus = (pod.status || '').trim().toLowerCase();
-  // Ignore readiness mismatch for succeeded pods (completed cron jobs).
-  const ignoreReadyMismatch = normalizedStatus === 'succeeded';
-  // If the ready count is less than total, consider unhealthy, unless ignoring ready mismatch for "succeeded" pods.
-  const readyCounts = parseReadyCounts(pod.ready);
-  if (
-    !ignoreReadyMismatch &&
-    readyCounts &&
-    readyCounts.total > 0 &&
-    readyCounts.ready < readyCounts.total
-  ) {
-    return true;
-  }
-  if (!normalizedStatus) {
-    return false;
-  }
-  return !HEALTHY_POD_STATUSES.has(normalizedStatus);
 };
 
 /**
@@ -127,7 +138,7 @@ const NsViewPods: React.FC<PodsViewProps> = React.memo(
     const effectiveMetrics = metrics ?? clusterMetrics ?? null;
     const { selectedClusterId } = useKubeconfig();
 
-    const [showUnhealthyOnly, setShowUnhealthyOnly] = useState(false);
+    const [activePodFilter, setActivePodFilter] = useState<PodsFilterMode | null>(null);
 
     // Include cluster metadata so object details stay scoped to the active tab.
     const handlePodOpen = useCallback(
@@ -276,7 +287,7 @@ const NsViewPods: React.FC<PodsViewProps> = React.memo(
     const columns: GridColumnDefinition<PodSnapshotEntry>[] = useMemo(() => {
       // Use the same warning styling as workloads when restarts are non-zero.
       const getRestartsClassName = (pod: PodSnapshotEntry) =>
-        (pod.restarts ?? 0) > 0 ? 'status-badge warning' : undefined;
+        (pod.restarts ?? 0) > 0 ? 'status-text warning' : undefined;
 
       const baseColumns: GridColumnDefinition<PodSnapshotEntry>[] = [
         cf.createKindColumn<PodSnapshotEntry>({
@@ -316,10 +327,7 @@ const NsViewPods: React.FC<PodsViewProps> = React.memo(
           getClassName: () => 'object-panel-link',
         }),
         cf.createTextColumn<PodSnapshotEntry>('status', 'Status', (pod) => pod.status || '—', {
-          getClassName: (pod) => {
-            const severity = getPodStatusSeverity(pod.status);
-            return ['status-badge', severity].join(' ').trim();
-          },
+          getClassName: (pod) => backendStatusTextClass(pod.statusPresentation),
         }),
         cf.createTextColumn<PodSnapshotEntry>('ready', 'Ready', (pod) => pod.ready || '—', {
           className: 'text-right',
@@ -469,15 +477,15 @@ const NsViewPods: React.FC<PodsViewProps> = React.memo(
     const unhealthyCount = useMemo(() => data.filter((pod) => isPodUnhealthy(pod)).length, [data]);
 
     const handleToggleUnhealthy = useCallback(() => {
-      setShowUnhealthyOnly((prev) => !prev);
+      setActivePodFilter((prev) => (prev ? null : 'unhealthy'));
     }, []);
 
     const unhealthyToggle = useMemo<IconBarItem | null>(() => {
-      if (unhealthyCount <= 0) {
+      if (unhealthyCount <= 0 && !activePodFilter) {
         return null;
       }
 
-      const title = showUnhealthyOnly
+      const title = activePodFilter
         ? 'Show all pods'
         : `Show unhealthy pods (${unhealthyCount}/${data.length})`;
 
@@ -485,17 +493,19 @@ const NsViewPods: React.FC<PodsViewProps> = React.memo(
         type: 'toggle',
         id: 'pods-unhealthy-toggle',
         icon: <UnhealthyPodsIcon />,
-        active: showUnhealthyOnly,
+        active: activePodFilter !== null,
         onClick: handleToggleUnhealthy,
         title,
         ariaLabel: title,
       };
-    }, [data.length, handleToggleUnhealthy, showUnhealthyOnly, unhealthyCount]);
+    }, [activePodFilter, data.length, handleToggleUnhealthy, unhealthyCount]);
 
     const transformSortedPods = useCallback(
       (sortedPods: PodSnapshotEntry[]) =>
-        showUnhealthyOnly ? sortedPods.filter((pod) => isPodUnhealthy(pod)) : sortedPods,
-      [showUnhealthyOnly]
+        activePodFilter
+          ? sortedPods.filter((pod) => matchesPodsFilter(activePodFilter, pod))
+          : sortedPods,
+      [activePodFilter]
     );
 
     const getTrailingFilterActions = useCallback(
@@ -528,14 +538,18 @@ const NsViewPods: React.FC<PodsViewProps> = React.memo(
 
       const storageKey = getPodsUnhealthyStorageKey(selectedClusterId);
 
-      const applyPendingFilter = (scope: string | null | undefined, shouldClearStorage = false) => {
-        if (!scope || scope !== namespace) {
+      const applyPendingFilter = (
+        request: PodsFilterRequest | null,
+        shouldClearStorage = false
+      ) => {
+        if (!request || request.scope !== namespace) {
           return;
         }
-        if (unhealthyCount === 0) {
+        const matchingCount = data.filter((pod) => matchesPodsFilter(request.filter, pod)).length;
+        if (matchingCount === 0) {
           return;
         }
-        setShowUnhealthyOnly(true);
+        setActivePodFilter(request.filter);
         if (shouldClearStorage) {
           try {
             window.sessionStorage.removeItem(storageKey);
@@ -547,7 +561,7 @@ const NsViewPods: React.FC<PodsViewProps> = React.memo(
 
       const pendingScope = (() => {
         try {
-          return window.sessionStorage.getItem(storageKey);
+          return parsePodsFilterRequest(window.sessionStorage.getItem(storageKey));
         } catch {
           return null;
         }
@@ -556,14 +570,14 @@ const NsViewPods: React.FC<PodsViewProps> = React.memo(
         applyPendingFilter(pendingScope, true);
       }
 
-      return eventBus.on('pods:show-unhealthy', ({ clusterId, scope }) => {
+      return eventBus.on('pods:show-unhealthy', ({ clusterId, scope, filter = 'unhealthy' }) => {
         // Only apply the filter if the event is for the current cluster.
         if (clusterId !== selectedClusterId) {
           return;
         }
-        applyPendingFilter(scope, true);
+        applyPendingFilter({ scope, filter }, true);
       });
-    }, [namespace, selectedClusterId, unhealthyCount]);
+    }, [data, namespace, selectedClusterId]);
 
     const getContextMenuItems = useCallback(
       (pod: PodSnapshotEntry): ContextMenuItem[] => {

@@ -13,6 +13,8 @@ export function ApplyObjectYaml(arg1:string,arg2:backend.ObjectYAMLMutationReque
 
 export function ApplyTheme(arg1:string):Promise<void>;
 
+export function CancelDrainNodeJob(arg1:string,arg2:string):Promise<void>;
+
 export function ClearAllSSRRCaches():Promise<void>;
 
 export function ClearAppLogs():Promise<void>;
@@ -74,6 +76,8 @@ export function GetAppLogs():Promise<Array<backend.LogEntry>>;
 export function GetAppLogsSince(arg1:number):Promise<Array<backend.LogEntry>>;
 
 export function GetAppSettings():Promise<types.AppSettings>;
+
+export function GetAppearanceModeInfo():Promise<types.AppearanceModeInfo>;
 
 export function GetBackendTLSPolicy(arg1:string,arg2:string,arg3:string):Promise<types.BackendTLSPolicyDetails>;
 
@@ -193,8 +197,6 @@ export function GetTLSRoute(arg1:string,arg2:string,arg3:string):Promise<types.R
 
 export function GetTargetPorts(arg1:string,arg2:string,arg3:string,arg4:string,arg5:string,arg6:string):Promise<Array<backend.ContainerPortInfo>>;
 
-export function GetThemeInfo():Promise<types.ThemeInfo>;
-
 export function GetThemes():Promise<Array<types.Theme>>;
 
 export function GetValidatingWebhookConfiguration(arg1:string,arg2:string):Promise<types.ValidatingWebhookConfigurationDetails>;
@@ -249,6 +251,8 @@ export function SetAccentColor(arg1:string,arg2:string):Promise<void>;
 
 export function SetAppLogsPanelVisible(arg1:boolean):Promise<void>;
 
+export function SetAppearanceMode(arg1:string):Promise<void>;
+
 export function SetAutoRefreshEnabled(arg1:boolean):Promise<void>;
 
 export function SetBackgroundRefreshEnabled(arg1:boolean):Promise<void>;
@@ -301,6 +305,8 @@ export function ShowAbout():Promise<void>;
 
 export function ShowSettings():Promise<void>;
 
+export function StartDrainNode(arg1:string,arg2:string,arg3:types.DrainNodeOptions):Promise<string>;
+
 export function StartPortForward(arg1:string,arg2:backend.PortForwardRequest):Promise<string>;
 
 export function StartShellSession(arg1:string,arg2:types.ShellSessionRequest):Promise<types.ShellSession>;
@@ -334,3 +340,5 @@ export function UpdateMenu():Promise<void>;
 export function ValidateObjectYaml(arg1:string,arg2:backend.ObjectYAMLMutationRequest):Promise<backend.ObjectYAMLMutationResponse>;
 
 export function ValidatePortForwardURL(arg1:string):Promise<boolean|string>;
+
+export function ValidateThemeClusterPattern(arg1:string):Promise<types.ThemeClusterPatternValidationResult>;

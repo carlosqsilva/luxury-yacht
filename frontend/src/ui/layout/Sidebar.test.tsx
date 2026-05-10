@@ -320,6 +320,43 @@ describe('Sidebar', () => {
     document.querySelector = originalQuerySelector;
   });
 
+  it('escapes namespace keys before building the expansion scroll selector', () => {
+    namespaceState.namespaces = [
+      {
+        name: 'quoted',
+        scope: 'default"bad',
+        resourceVersion: '1',
+        hasWorkloads: true,
+        workloadsUnknown: false,
+        details: '',
+      },
+    ];
+    renderSidebar();
+
+    const originalQuerySelector = document.querySelector;
+    const querySelectorSpy = vi.fn(() => null);
+    document.querySelector = querySelectorSpy as unknown as typeof document.querySelector;
+    vi.useFakeTimers();
+
+    const namespaceToggle = Array.from(
+      container!.querySelectorAll<HTMLDivElement>('[data-sidebar-target-kind="namespace-toggle"]')
+    ).find((element) => element.dataset.sidebarTargetNamespace === `${testClusterId}|default"bad`);
+    expect(namespaceToggle).not.toBeUndefined();
+
+    act(() => {
+      namespaceToggle!.click();
+    });
+
+    vi.runAllTimers();
+
+    expect(querySelectorSpy).toHaveBeenCalledWith(
+      '.sidebar-item[data-namespace="cluster-a|default\\"bad"]'
+    );
+
+    vi.useRealTimers();
+    document.querySelector = originalQuerySelector;
+  });
+
   it('toggles namespace expansion without selecting a view', () => {
     renderSidebar();
     const namespaceToggle = container!.querySelector<HTMLDivElement>(
@@ -753,7 +790,7 @@ describe('Sidebar', () => {
     expect(dimmedItem).not.toBeNull();
     expect(dimmedItem!.className).toContain('dimmed');
     const unknownBadge = container!.querySelector(
-      `[data-sidebar-target-namespace="${namespaceKey('unknown')}"] .namespace-status-badge`
+      `[data-sidebar-target-namespace="${namespaceKey('unknown')}"] .status-text.warning`
     );
     expect(unknownBadge?.textContent).toBe('Unknown');
   });

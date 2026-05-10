@@ -29,7 +29,7 @@ type WindowSettings struct {
 
 // AppSettings represents the application settings
 type AppSettings struct {
-	Theme                                    string   `json:"theme"`                                    // "light", "dark", or "system"
+	AppearanceMode                           string   `json:"appearanceMode"`                           // "light", "dark", or "system"
 	SelectedKubeconfigs                      []string `json:"selectedKubeconfigs"`                      // Multi-cluster selections in "path:context" form
 	UseShortResourceNames                    bool     `json:"useShortResourceNames"`                    // Use short names like "po" for pods in badges/headers
 	AutoRefreshEnabled                       bool     `json:"autoRefreshEnabled"`                       // Enable automatic refresh cycles
@@ -49,24 +49,24 @@ type AppSettings struct {
 	ObjectPanelFloatingHeight                int      `json:"objectPanelFloatingHeight"`                // Default floating height (px)
 	ObjectPanelFloatingX                     int      `json:"objectPanelFloatingX"`                     // Default floating X position (px)
 	ObjectPanelFloatingY                     int      `json:"objectPanelFloatingY"`                     // Default floating Y position (px)
-	PaletteHueLight                          int      `json:"paletteHueLight"`                          // Hue for gray palette tint in light theme (0-360)
-	PaletteSaturationLight                   int      `json:"paletteSaturationLight"`                   // Saturation intensity for gray palette tint in light theme (0-100)
-	PaletteBrightnessLight                   int      `json:"paletteBrightnessLight"`                   // Brightness offset for gray palette in light theme (-50 to +50)
-	PaletteHueDark                           int      `json:"paletteHueDark"`                           // Hue for gray palette tint in dark theme (0-360)
-	PaletteSaturationDark                    int      `json:"paletteSaturationDark"`                    // Saturation intensity for gray palette tint in dark theme (0-100)
-	PaletteBrightnessDark                    int      `json:"paletteBrightnessDark"`                    // Brightness offset for gray palette in dark theme (-50 to +50)
-	AccentColorLight                         string   `json:"accentColorLight"`                         // Custom accent hex for light theme (empty = default)
-	AccentColorDark                          string   `json:"accentColorDark"`                          // Custom accent hex for dark theme (empty = default)
-	LinkColorLight                           string   `json:"linkColorLight"`                           // Custom link hex for light theme (empty = default)
-	LinkColorDark                            string   `json:"linkColorDark"`                            // Custom link hex for dark theme (empty = default)
+	PaletteHueLight                          int      `json:"paletteHueLight"`                          // Hue for gray palette tint in light mode (0-360)
+	PaletteSaturationLight                   int      `json:"paletteSaturationLight"`                   // Saturation intensity for gray palette tint in light mode (0-100)
+	PaletteBrightnessLight                   int      `json:"paletteBrightnessLight"`                   // Brightness offset for gray palette in light mode (-50 to +50)
+	PaletteHueDark                           int      `json:"paletteHueDark"`                           // Hue for gray palette tint in dark mode (0-360)
+	PaletteSaturationDark                    int      `json:"paletteSaturationDark"`                    // Saturation intensity for gray palette tint in dark mode (0-100)
+	PaletteBrightnessDark                    int      `json:"paletteBrightnessDark"`                    // Brightness offset for gray palette in dark mode (-50 to +50)
+	AccentColorLight                         string   `json:"accentColorLight"`                         // Custom accent hex for light mode (empty = default)
+	AccentColorDark                          string   `json:"accentColorDark"`                          // Custom accent hex for dark mode (empty = default)
+	LinkColorLight                           string   `json:"linkColorLight"`                           // Custom link hex for light mode (empty = default)
+	LinkColorDark                            string   `json:"linkColorDark"`                            // Custom link hex for dark mode (empty = default)
 	Themes                                   []Theme  `json:"themes"`                                   // Saved theme library
 	SuppressNetworkErrorNotifications        bool     `json:"suppressNetworkErrorNotifications"`        // Hide network error notifications
 }
 
-// ThemeInfo represents theme information to send to frontend
-type ThemeInfo struct {
-	CurrentTheme string `json:"currentTheme"` // "light" or "dark"
-	UserTheme    string `json:"userTheme"`    // "light", "dark", or "system"
+// AppearanceModeInfo represents the appearance mode payload sent to the frontend.
+type AppearanceModeInfo struct {
+	CurrentMode string `json:"currentMode"` // Stored appearance mode: "light", "dark", or "system"
+	UserMode    string `json:"userMode"`    // Stored appearance mode: "light", "dark", or "system"
 }
 
 // Theme represents a saved color theme with optional cluster pattern matching.
@@ -74,7 +74,7 @@ type ThemeInfo struct {
 type Theme struct {
 	ID             string `json:"id"`             // UUID
 	Name           string `json:"name"`           // Display name, e.g. "Danger Red"
-	ClusterPattern string `json:"clusterPattern"` // Glob pattern matched against context name, e.g. "prod*"; empty = no auto-match
+	ClusterPattern string `json:"clusterPattern"` // Glob pattern matched against context name, e.g. "prod*"; empty = "*" catch-all
 
 	PaletteHueLight        int `json:"paletteHueLight"`        // 0-360
 	PaletteSaturationLight int `json:"paletteSaturationLight"` // 0-100
@@ -88,6 +88,13 @@ type Theme struct {
 
 	LinkColorLight string `json:"linkColorLight,omitempty"` // Hex "#rrggbb" or empty for default
 	LinkColorDark  string `json:"linkColorDark,omitempty"`  // Hex "#rrggbb" or empty for default
+}
+
+// ThemeClusterPatternValidationResult reports whether a saved theme cluster
+// pattern can be parsed by the app glob matcher.
+type ThemeClusterPatternValidationResult struct {
+	Valid   bool   `json:"valid"`
+	Message string `json:"message,omitempty"`
 }
 
 // ContainerLogsEntry represents a single log line with metadata
@@ -335,21 +342,24 @@ type ClsIngressClassInfo struct {
 
 // PodSimpleInfo represents basic pod information for list views
 type PodSimpleInfo struct {
-	Kind       string `json:"kind"` // pod
-	Name       string `json:"name"`
-	Namespace  string `json:"namespace"`
-	Status     string `json:"status"`
-	Ready      string `json:"ready"`
-	Restarts   int32  `json:"restarts"` // Total restart count across all containers
-	Age        string `json:"age"`
-	CPURequest string `json:"cpuRequest"` // Aggregated CPU requests
-	CPULimit   string `json:"cpuLimit"`   // Aggregated CPU limits
-	CPUUsage   string `json:"cpuUsage"`   // Current CPU usage from metrics
-	MemRequest string `json:"memRequest"` // Aggregated memory requests
-	MemLimit   string `json:"memLimit"`   // Aggregated memory limits
-	MemUsage   string `json:"memUsage"`   // Current memory usage from metrics
-	OwnerKind  string `json:"ownerKind"`  // Kind of the owner (Deployment, StatefulSet, etc)
-	OwnerName  string `json:"ownerName"`  // Name of the owner resource
+	Kind               string `json:"kind"` // pod
+	Name               string `json:"name"`
+	Namespace          string `json:"namespace"`
+	Status             string `json:"status"`
+	StatusState        string `json:"statusState,omitempty"`
+	StatusPresentation string `json:"statusPresentation,omitempty"`
+	StatusReason       string `json:"statusReason,omitempty"`
+	Ready              string `json:"ready"`
+	Restarts           int32  `json:"restarts"` // Total restart count across all containers
+	Age                string `json:"age"`
+	CPURequest         string `json:"cpuRequest"` // Aggregated CPU requests
+	CPULimit           string `json:"cpuLimit"`   // Aggregated CPU limits
+	CPUUsage           string `json:"cpuUsage"`   // Current CPU usage from metrics
+	MemRequest         string `json:"memRequest"` // Aggregated memory requests
+	MemLimit           string `json:"memLimit"`   // Aggregated memory limits
+	MemUsage           string `json:"memUsage"`   // Current memory usage from metrics
+	OwnerKind          string `json:"ownerKind"`  // Kind of the owner (Deployment, StatefulSet, etc)
+	OwnerName          string `json:"ownerName"`  // Name of the owner resource
 	// OwnerAPIVersion is the wire-form apiVersion of the owner (e.g.
 	// "apps/v1", "argoproj.io/v1alpha1", "kubevirt.io/v1"). Threaded from
 	// pod.OwnerReferences[*].APIVersion (or hardcoded apps/v1 for the
@@ -458,9 +468,12 @@ type HelmReleaseDetails struct {
 	AppVersion string `json:"appVersion"`
 
 	// Status information
-	Status   string `json:"status"`
-	Revision int    `json:"revision"`
-	Updated  string `json:"updated"`
+	Status             string `json:"status"`
+	StatusState        string `json:"statusState,omitempty"`
+	StatusPresentation string `json:"statusPresentation,omitempty"`
+	StatusReason       string `json:"statusReason,omitempty"`
+	Revision           int    `json:"revision"`
+	Updated            string `json:"updated"`
 
 	// Additional details
 	Description string                 `json:"description,omitempty"`
@@ -480,12 +493,15 @@ type HelmReleaseDetails struct {
 
 // HelmRevision represents a single revision in the Helm release history
 type HelmRevision struct {
-	Revision    int    `json:"revision"`
-	Updated     string `json:"updated"`
-	Status      string `json:"status"`
-	Chart       string `json:"chart"`
-	AppVersion  string `json:"appVersion,omitempty"`
-	Description string `json:"description,omitempty"`
+	Revision           int    `json:"revision"`
+	Updated            string `json:"updated"`
+	Status             string `json:"status"`
+	StatusState        string `json:"statusState,omitempty"`
+	StatusPresentation string `json:"statusPresentation,omitempty"`
+	StatusReason       string `json:"statusReason,omitempty"`
+	Chart              string `json:"chart"`
+	AppVersion         string `json:"appVersion,omitempty"`
+	Description        string `json:"description,omitempty"`
 }
 
 // HelmResource represents a Kubernetes resource managed by a Helm release.
@@ -500,6 +516,7 @@ type HelmResource struct {
 	APIVersion string `json:"apiVersion,omitempty"`
 	Name       string `json:"name"`
 	Namespace  string `json:"namespace"`
+	Scope      string `json:"scope,omitempty"`
 }
 
 // PodDetailInfoContainer represents detailed container information within a pod
@@ -527,18 +544,21 @@ type PodDetailInfoContainer struct {
 // PodDetailInfo represents comprehensive pod information for the object panel
 type PodDetailInfo struct {
 	// Basic information (same as PodSimpleInfo)
-	Name       string `json:"name"`
-	Namespace  string `json:"namespace"`
-	Status     string `json:"status"`
-	Ready      string `json:"ready"`
-	Restarts   int32  `json:"restarts"`
-	Age        string `json:"age"`
-	CPURequest string `json:"cpuRequest"`
-	CPULimit   string `json:"cpuLimit"`
-	CPUUsage   string `json:"cpuUsage"`
-	MemRequest string `json:"memRequest"`
-	MemLimit   string `json:"memLimit"`
-	MemUsage   string `json:"memUsage"`
+	Name               string `json:"name"`
+	Namespace          string `json:"namespace"`
+	Status             string `json:"status"`
+	StatusState        string `json:"statusState,omitempty"`
+	StatusPresentation string `json:"statusPresentation,omitempty"`
+	StatusReason       string `json:"statusReason,omitempty"`
+	Ready              string `json:"ready"`
+	Restarts           int32  `json:"restarts"`
+	Age                string `json:"age"`
+	CPURequest         string `json:"cpuRequest"`
+	CPULimit           string `json:"cpuLimit"`
+	CPUUsage           string `json:"cpuUsage"`
+	MemRequest         string `json:"memRequest"`
+	MemLimit           string `json:"memLimit"`
+	MemUsage           string `json:"memUsage"`
 
 	// Ownership information
 	OwnerKind string `json:"ownerKind"`
@@ -609,6 +629,10 @@ type ServiceDetails struct {
 	Namespace              string               `json:"namespace"`
 	Age                    string               `json:"age"`
 	Details                string               `json:"details"`
+	Status                 string               `json:"status"`
+	StatusState            string               `json:"statusState,omitempty"`
+	StatusPresentation     string               `json:"statusPresentation,omitempty"`
+	StatusReason           string               `json:"statusReason,omitempty"`
 	ServiceType            string               `json:"serviceType"`
 	ClusterIP              string               `json:"clusterIP"`
 	ClusterIPs             []string             `json:"clusterIPs,omitempty"`
@@ -1036,15 +1060,19 @@ type ReplicaSetSummary struct {
 // ReplicaSetDetails represents detailed ReplicaSet information for the object panel.
 type ReplicaSetDetails struct {
 	// Basic information
-	Kind            string `json:"kind"`
-	Name            string `json:"name"`
-	Namespace       string `json:"namespace"`
-	Details         string `json:"details"`
-	Replicas        string `json:"replicas"`
-	Ready           string `json:"ready"`
-	Available       int32  `json:"available"`
-	DesiredReplicas int32  `json:"desiredReplicas"`
-	Age             string `json:"age"`
+	Kind               string `json:"kind"`
+	Name               string `json:"name"`
+	Namespace          string `json:"namespace"`
+	Status             string `json:"status,omitempty"`
+	StatusState        string `json:"statusState,omitempty"`
+	StatusPresentation string `json:"statusPresentation,omitempty"`
+	StatusReason       string `json:"statusReason,omitempty"`
+	Details            string `json:"details"`
+	Replicas           string `json:"replicas"`
+	Ready              string `json:"ready"`
+	Available          int32  `json:"available"`
+	DesiredReplicas    int32  `json:"desiredReplicas"`
+	Age                string `json:"age"`
 
 	// Average resource utilization (per pod)
 	CPURequest string `json:"cpuRequest,omitempty"`
@@ -1078,17 +1106,21 @@ type ReplicaSetDetails struct {
 
 type DeploymentDetails struct {
 	// Basic information
-	Kind            string `json:"kind"`
-	Name            string `json:"name"`
-	Namespace       string `json:"namespace"`
-	Details         string `json:"details"`
-	Replicas        string `json:"replicas"`
-	Ready           string `json:"ready"`
-	Updated         string `json:"updated,omitempty"`
-	UpToDate        int32  `json:"upToDate,omitempty"`
-	Available       int32  `json:"available"`
-	DesiredReplicas int32  `json:"desiredReplicas"`
-	Age             string `json:"age"`
+	Kind               string `json:"kind"`
+	Name               string `json:"name"`
+	Namespace          string `json:"namespace"`
+	Status             string `json:"status,omitempty"`
+	StatusState        string `json:"statusState,omitempty"`
+	StatusPresentation string `json:"statusPresentation,omitempty"`
+	StatusReason       string `json:"statusReason,omitempty"`
+	Details            string `json:"details"`
+	Replicas           string `json:"replicas"`
+	Ready              string `json:"ready"`
+	Updated            string `json:"updated,omitempty"`
+	UpToDate           int32  `json:"upToDate,omitempty"`
+	Available          int32  `json:"available"`
+	DesiredReplicas    int32  `json:"desiredReplicas"`
+	Age                string `json:"age"`
 
 	// Average resource utilization (per pod)
 	CPURequest string `json:"cpuRequest,omitempty"`
@@ -1144,16 +1176,20 @@ type DeploymentDetails struct {
 
 type StatefulSetDetails struct {
 	// Basic information
-	Kind            string `json:"kind"`
-	Name            string `json:"name"`
-	Namespace       string `json:"namespace"`
-	Details         string `json:"details"`
-	Replicas        string `json:"replicas"`
-	Ready           string `json:"ready"`
-	UpToDate        int32  `json:"upToDate,omitempty"`
-	Available       int32  `json:"available"`
-	DesiredReplicas int32  `json:"desiredReplicas"`
-	Age             string `json:"age"`
+	Kind               string `json:"kind"`
+	Name               string `json:"name"`
+	Namespace          string `json:"namespace"`
+	Status             string `json:"status,omitempty"`
+	StatusState        string `json:"statusState,omitempty"`
+	StatusPresentation string `json:"statusPresentation,omitempty"`
+	StatusReason       string `json:"statusReason,omitempty"`
+	Details            string `json:"details"`
+	Replicas           string `json:"replicas"`
+	Ready              string `json:"ready"`
+	UpToDate           int32  `json:"upToDate,omitempty"`
+	Available          int32  `json:"available"`
+	DesiredReplicas    int32  `json:"desiredReplicas"`
+	Age                string `json:"age"`
 
 	// Average resource utilization (per pod)
 	CPURequest string `json:"cpuRequest,omitempty"`
@@ -1213,17 +1249,21 @@ type StatefulSetDetails struct {
 
 type DaemonSetDetails struct {
 	// Basic information
-	Kind      string `json:"kind"`
-	Name      string `json:"name"`
-	Namespace string `json:"namespace"`
-	Details   string `json:"details"`
-	Desired   int32  `json:"desired"`
-	Current   int32  `json:"current"`
-	Ready     int32  `json:"ready"`
-	UpToDate  int32  `json:"upToDate,omitempty"`
-	Available int32  `json:"available"`
-	Updated   int32  `json:"updated,omitempty"`
-	Age       string `json:"age"`
+	Kind               string `json:"kind"`
+	Name               string `json:"name"`
+	Namespace          string `json:"namespace"`
+	Status             string `json:"status,omitempty"`
+	StatusState        string `json:"statusState,omitempty"`
+	StatusPresentation string `json:"statusPresentation,omitempty"`
+	StatusReason       string `json:"statusReason,omitempty"`
+	Details            string `json:"details"`
+	Desired            int32  `json:"desired"`
+	Current            int32  `json:"current"`
+	Ready              int32  `json:"ready"`
+	UpToDate           int32  `json:"upToDate,omitempty"`
+	Available          int32  `json:"available"`
+	Updated            int32  `json:"updated,omitempty"`
+	Age                string `json:"age"`
 
 	// Average resource utilization (per pod)
 	CPURequest string `json:"cpuRequest,omitempty"`
@@ -1271,11 +1311,14 @@ type DaemonSetDetails struct {
 
 type JobDetails struct {
 	// Basic information
-	Kind      string `json:"kind"`
-	Name      string `json:"name"`
-	Namespace string `json:"namespace"`
-	Details   string `json:"details"`
-	Age       string `json:"age,omitempty"`
+	Kind               string `json:"kind"`
+	Name               string `json:"name"`
+	Namespace          string `json:"namespace"`
+	StatusState        string `json:"statusState,omitempty"`
+	StatusPresentation string `json:"statusPresentation,omitempty"`
+	StatusReason       string `json:"statusReason,omitempty"`
+	Details            string `json:"details"`
+	Age                string `json:"age,omitempty"`
 
 	// Job status
 	Status         string       `json:"status,omitempty"`
@@ -1313,11 +1356,15 @@ type JobDetails struct {
 
 type CronJobDetails struct {
 	// Basic information
-	Kind      string `json:"kind"`
-	Name      string `json:"name"`
-	Namespace string `json:"namespace"`
-	Details   string `json:"details"`
-	Age       string `json:"age"`
+	Kind               string `json:"kind"`
+	Name               string `json:"name"`
+	Namespace          string `json:"namespace"`
+	Status             string `json:"status,omitempty"`
+	StatusState        string `json:"statusState,omitempty"`
+	StatusPresentation string `json:"statusPresentation,omitempty"`
+	StatusReason       string `json:"statusReason,omitempty"`
+	Details            string `json:"details"`
+	Age                string `json:"age"`
 
 	// Schedule information
 	Schedule              string       `json:"schedule"`
@@ -1363,19 +1410,22 @@ type JobReference struct {
 
 // JobSimpleInfo provides a summary of a Job for list/tab views.
 type JobSimpleInfo struct {
-	Kind            string       `json:"kind"`
-	Name            string       `json:"name"`
-	Namespace       string       `json:"namespace"`
-	Status          string       `json:"status"`
-	Completions     string       `json:"completions"` // e.g. "1/1"
-	Succeeded       int32        `json:"succeeded"`
-	Failed          int32        `json:"failed"`
-	Active          int32        `json:"active"`
-	StartTime       *metav1.Time `json:"startTime,omitempty"`
-	CompletionTime  *metav1.Time `json:"completionTime,omitempty"`
-	Duration        string       `json:"duration,omitempty"`
-	DurationSeconds int64        `json:"durationSeconds,omitempty"`
-	Age             string       `json:"age"`
+	Kind               string       `json:"kind"`
+	Name               string       `json:"name"`
+	Namespace          string       `json:"namespace"`
+	Status             string       `json:"status"`
+	StatusState        string       `json:"statusState,omitempty"`
+	StatusPresentation string       `json:"statusPresentation,omitempty"`
+	StatusReason       string       `json:"statusReason,omitempty"`
+	Completions        string       `json:"completions"` // e.g. "1/1"
+	Succeeded          int32        `json:"succeeded"`
+	Failed             int32        `json:"failed"`
+	Active             int32        `json:"active"`
+	StartTime          *metav1.Time `json:"startTime,omitempty"`
+	CompletionTime     *metav1.Time `json:"completionTime,omitempty"`
+	Duration           string       `json:"duration,omitempty"`
+	DurationSeconds    int64        `json:"durationSeconds,omitempty"`
+	Age                string       `json:"age"`
 }
 type JobTemplateDetails struct {
 	Completions             *int32                   `json:"completions,omitempty"`

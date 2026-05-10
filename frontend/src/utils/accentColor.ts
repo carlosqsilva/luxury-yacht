@@ -3,12 +3,8 @@
  *
  * Generates accent color shade scales from a base hex color using HSL lightness
  * offsets and applies them as CSS custom property overrides on
- * document.documentElement. Persists the chosen hex per theme to localStorage
- * so the FOUC-prevention script in index.html can apply shades before React mounts.
- *
- * IMPORTANT: The hex→HSL→hex conversion and lightness offset tables are
- * duplicated in the inline <script> in frontend/index.html for FOUC prevention.
- * Keep both in sync when changing the formula.
+ * document.documentElement. Startup FOUC prevention uses the precomputed
+ * payload from appearanceBootstrap.ts.
  */
 
 // Lightness offsets for the light accent palette (base maps to 600 shade).
@@ -29,10 +25,6 @@ export const DARK_OFFSETS: Record<string, number> = {
   '--color-accent-dark-300': 15,
   '--color-accent-dark-200': 27,
 };
-
-// localStorage keys for FOUC prevention bridge.
-const LS_KEY_ACCENT_LIGHT = 'app-accent-color-light';
-const LS_KEY_ACCENT_DARK = 'app-accent-color-dark';
 
 /**
  * Parse a #rrggbb hex string to HSL values.
@@ -141,7 +133,7 @@ export function generateAccentShades(
 }
 
 /**
- * Generate the --color-accent-bg override for the given accent hex and theme.
+ * Generate the --color-accent-bg override for the given accent hex and mode.
  * Alpha is 0.1 for light, 0.15 for dark.
  */
 export function generateAccentBg(
@@ -187,13 +179,13 @@ export function applyAccentColor(lightHex: string, darkHex: string): void {
 }
 
 /**
- * Set or remove --color-accent-bg override based on the current theme's accent hex.
- * Called on theme switch and when accent color changes.
+ * Set or remove --color-accent-bg override based on the current mode's accent hex.
+ * Called on mode switch and when accent color changes.
  */
-export function applyAccentBg(hex: string, resolvedTheme: 'light' | 'dark'): void {
+export function applyAccentBg(hex: string, resolvedMode: 'light' | 'dark'): void {
   const root = document.documentElement;
   if (hex) {
-    const { value } = generateAccentBg(hex, resolvedTheme);
+    const { value } = generateAccentBg(hex, resolvedMode);
     root.style.setProperty('--color-accent-bg', value);
   } else {
     root.style.removeProperty('--color-accent-bg');
@@ -212,32 +204,4 @@ export function clearAccentColor(): void {
     root.style.removeProperty(token);
   }
   root.style.removeProperty('--color-accent-bg');
-}
-
-/**
- * Persist accent color hex to localStorage for the FOUC-prevention script.
- */
-export function saveAccentColorToLocalStorage(theme: 'light' | 'dark', color: string): void {
-  try {
-    const key = theme === 'light' ? LS_KEY_ACCENT_LIGHT : LS_KEY_ACCENT_DARK;
-    if (color) {
-      localStorage.setItem(key, color);
-    } else {
-      localStorage.removeItem(key);
-    }
-  } catch {
-    // Silently ignore storage errors (private browsing, quota exceeded, etc.)
-  }
-}
-
-/**
- * Remove all accent color keys from localStorage.
- */
-export function clearAccentColorFromLocalStorage(): void {
-  try {
-    localStorage.removeItem(LS_KEY_ACCENT_LIGHT);
-    localStorage.removeItem(LS_KEY_ACCENT_DARK);
-  } catch {
-    // Silently ignore storage errors
-  }
 }

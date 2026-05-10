@@ -27,11 +27,14 @@ import {
   parseMemToMB,
 } from '@/utils/resourceCalculations';
 import { useObjectActionController } from '@shared/hooks/useObjectActionController';
+import { useNodeMaintenanceActions } from '@shared/hooks/useNodeMaintenanceActions';
 import { useClusterResourceGridTable } from '@shared/hooks/useResourceGridTable';
 import {
   buildRequiredCanonicalObjectRowKey,
   buildRequiredObjectReference,
 } from '@shared/utils/objectIdentity';
+import { backendStatusTextClass } from '@shared/utils/backendStatusPresentation';
+import { DrainIcon } from '@shared/components/icons/MenuIcons';
 
 // Define props for NodesViewGrid component
 interface NodesViewProps {
@@ -65,6 +68,16 @@ const NodesViewGrid: React.FC<NodesViewProps> = React.memo(
       return nodesDomain.data?.metrics ?? null;
     }, [nodesDomain.data?.metrics, nodesDomain.data?.metricsByCluster, selectedClusterId]);
 
+    const watchClusterIds = useMemo(() => {
+      const set = new Set<string>();
+      for (const row of data) {
+        if (row.clusterId) set.add(row.clusterId);
+      }
+      return Array.from(set);
+    }, [data]);
+
+    const nodeMaintenance = useNodeMaintenanceActions({ watchClusterIds });
+
     // Keep node selections pinned to their source cluster for object details.
     const handleNodeClick = useCallback(
       (node: ClusterNodeRow) => {
@@ -89,22 +102,16 @@ const NodesViewGrid: React.FC<NodesViewProps> = React.memo(
         : undefined;
 
       const resolveNodeStatus = (node: ClusterNodeRow) => {
-        const isCordoned =
-          node.unschedulable ||
-          node.taints?.some((t) => t.key === 'node.kubernetes.io/unschedulable') ||
-          false;
-        const baseStatus = node.status ?? 'Unknown';
-        const text = isCordoned && baseStatus === 'Ready' ? 'Ready (Cordoned)' : baseStatus;
-        const statusClass = isCordoned ? 'warning' : baseStatus.replace(/\s+/g, '-').toLowerCase();
+        const text = node.status ?? 'Unknown';
         return {
           text,
-          className: `status-badge ${statusClass}`,
+          className: backendStatusTextClass(node.statusPresentation),
         };
       };
 
       const resolveNodeRestarts = (node: ClusterNodeRow) => {
         const restartCount = node.restarts ?? 0;
-        const className = restartCount > 0 ? 'status-badge warning' : 'status-badge';
+        const className = restartCount > 0 ? 'status-text warning' : 'status-text';
         return {
           text: String(restartCount),
           className,
@@ -159,18 +166,40 @@ const NodesViewGrid: React.FC<NodesViewProps> = React.memo(
           column.sortValue = (row) => (row.version || '').toLowerCase();
           return column;
         })(),
-        (() => {
-          const column = cf.createTextColumn<ClusterNodeRow>(
-            'status',
-            'Status',
-            (row) => resolveNodeStatus(row).text,
-            {
-              getClassName: (row) => resolveNodeStatus(row).className,
-            }
-          );
-          column.sortValue = (row) => resolveNodeStatus(row).text.toLowerCase();
-          return column;
-        })(),
+        {
+          key: 'status',
+          header: 'Status',
+          sortable: true,
+          sortValue: (row: ClusterNodeRow) => resolveNodeStatus(row).text.toLowerCase(),
+          render: (row: ClusterNodeRow) => {
+            const status = resolveNodeStatus(row);
+            const activeDrain = nodeMaintenance.activeDrainFor(row.clusterId, row.name);
+            return (
+              <span className="cluster-nodes-status-cell">
+                <span className={status.className}>{status.text}</span>
+                {activeDrain && (
+                  <button
+                    type="button"
+                    className="cluster-nodes-drain-icon"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      nodeMaintenance.openDrainFor({
+                        clusterId: row.clusterId,
+                        clusterName: row.clusterName ?? undefined,
+                        name: row.name,
+                        unschedulable: row.unschedulable,
+                      });
+                    }}
+                    title="Drain in progress — click to view"
+                    aria-label="Open drain status"
+                  >
+                    <DrainIcon />
+                  </button>
+                )}
+              </span>
+            );
+          },
+        },
         cf.createTextColumn<ClusterNodeRow>('pods', 'Pods', (row) => row.pods || '—'),
         (() => {
           const column = cf.createTextColumn<ClusterNodeRow>(
@@ -251,6 +280,7 @@ const NodesViewGrid: React.FC<NodesViewProps> = React.memo(
       metricsInfo?.lastError,
       metricsInfo?.collectedAt,
       navigateToView,
+      nodeMaintenance,
       selectedClusterId,
       useShortResourceNames,
     ]);
@@ -288,27 +318,60 @@ const NodesViewGrid: React.FC<NodesViewProps> = React.memo(
       filterOptions: { isNamespaceScoped: false },
     });
 
+    // The maintenance hook owns the cordon and drain modals; pass its
+    // handlers through to the controller so right-clicked Node rows route
+    // to the same modals as the object panel actions menu.
+    const perObjectHandlers = useMemo(
+      () => ({
+        onCordon: (object: {
+          clusterId?: string;
+          clusterName?: string;
+          name: string;
+          unschedulable?: boolean;
+        }) =>
+          nodeMaintenance.openCordonFor({
+            clusterId: object.clusterId ?? '',
+            clusterName: object.clusterName,
+            name: object.name,
+            unschedulable: object.unschedulable,
+          }),
+        onDrain: (object: {
+          clusterId?: string;
+          clusterName?: string;
+          name: string;
+          unschedulable?: boolean;
+        }) =>
+          nodeMaintenance.openDrainFor({
+            clusterId: object.clusterId ?? '',
+            clusterName: object.clusterName,
+            name: object.name,
+            unschedulable: object.unschedulable,
+          }),
+      }),
+      [nodeMaintenance]
+    );
+
     const objectActions = useObjectActionController({
       context: 'gridtable',
-      useDefaultHandlers: false,
+      useDefaultHandlers: true,
       onOpen: (object) => openWithObject(object),
       onOpenObjectMap: (object) => openWithObject(object, { initialTab: 'map' }),
+      perObjectHandlers,
     });
 
     // Get context menu items
     const getRowContextMenuItems = useCallback(
       (row: ClusterNodeRow, _columnKey: string): ContextMenuItem[] => {
-        return objectActions.getMenuItems(
-          buildRequiredObjectReference(
-            {
-              kind: 'Node',
-              name: row.name,
-              clusterId: row.clusterId,
-              clusterName: row.clusterName,
-            },
-            { fallbackClusterId: selectedClusterId }
-          )
+        const reference = buildRequiredObjectReference(
+          {
+            kind: 'Node',
+            name: row.name,
+            clusterId: row.clusterId,
+            clusterName: row.clusterName,
+          },
+          { fallbackClusterId: selectedClusterId }
         );
+        return objectActions.getMenuItems({ ...reference, unschedulable: row.unschedulable });
       },
       [objectActions, selectedClusterId]
     );
@@ -333,6 +396,7 @@ const NodesViewGrid: React.FC<NodesViewProps> = React.memo(
           emptyMessage={emptyMessage}
         />
         {objectActions.modals}
+        {nodeMaintenance.modals}
       </>
     );
   }

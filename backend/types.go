@@ -6,8 +6,9 @@ type (
 	KubeconfigInfo                        = types.KubeconfigInfo
 	WindowSettings                        = types.WindowSettings
 	AppSettings                           = types.AppSettings
-	ThemeInfo                             = types.ThemeInfo
+	AppearanceModeInfo                    = types.AppearanceModeInfo
 	Theme                                 = types.Theme
+	ThemeClusterPatternValidationResult   = types.ThemeClusterPatternValidationResult
 	ContainerLogsEntry                    = types.ContainerLogsEntry
 	ContainerLogsFetchRequest             = types.ContainerLogsFetchRequest
 	ContainerLogsFetchResponse            = types.ContainerLogsFetchResponse

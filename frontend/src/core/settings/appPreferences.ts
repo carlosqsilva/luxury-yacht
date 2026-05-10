@@ -5,13 +5,14 @@
  */
 
 import {
-  SetTheme,
+  SetAppearanceMode,
   SetUseShortResourceNames,
   SaveTheme,
   DeleteTheme,
   ReorderThemes,
   ApplyTheme,
   MatchThemeForCluster,
+  ValidateThemeClusterPattern,
   SetObjPanelLogsBufferMaxSize as SetObjPanelLogsBufferMaxSizeBackend,
   SetMaxTableRows as SetMaxTableRowsBackend,
   SetObjPanelLogsAPITimestampFormat as SetObjPanelLogsAPITimestampFormatBackend,
@@ -22,18 +23,19 @@ import {
 import { types } from '@wailsjs/go/models';
 import { readAppSettings, readThemes, requestAppState } from '@/core/app-state-access';
 import { eventBus } from '@/core/events';
+import { saveAppearanceBootstrapToLocalStorage } from '@/utils/appearanceBootstrap';
 import {
   DEFAULT_OBJ_PANEL_LOGS_API_TIMESTAMP_FORMAT,
   getObjPanelLogsApiTimestampFormatValidationError,
   normalizeObjPanelLogsApiTimestampFormat,
 } from '@/utils/objPanelLogsApiTimestampFormat';
 
-export type ThemePreference = 'light' | 'dark' | 'system';
+export type AppearanceMode = 'light' | 'dark' | 'system';
 export type GridTablePersistenceMode = 'namespaced' | 'shared';
 export type ObjectPanelPosition = 'right' | 'bottom' | 'floating';
 
 interface AppPreferences {
-  theme: ThemePreference;
+  appearanceMode: AppearanceMode;
   useShortResourceNames: boolean;
   autoRefreshEnabled: boolean;
   refreshBackgroundClustersEnabled: boolean;
@@ -66,7 +68,7 @@ interface AppPreferences {
 }
 
 interface AppSettingsPayload {
-  theme?: string;
+  appearanceMode?: string;
   useShortResourceNames?: boolean;
   autoRefreshEnabled?: boolean;
   refreshBackgroundClustersEnabled?: boolean;
@@ -90,7 +92,7 @@ interface AppSettingsPayload {
   paletteHue?: number;
   paletteSaturation?: number;
   paletteBrightness?: number;
-  // Per-theme palette fields.
+  // Per-mode palette fields.
   paletteHueLight?: number;
   paletteSaturationLight?: number;
   paletteBrightnessLight?: number;
@@ -121,7 +123,7 @@ export const OBJ_PANEL_LOGS_TARGET_GLOBAL_MAX = 1000;
 export const OBJ_PANEL_LOGS_TARGET_GLOBAL_DEFAULT = 200;
 
 const DEFAULT_PREFERENCES: AppPreferences = {
-  theme: 'system',
+  appearanceMode: 'system',
   useShortResourceNames: false,
   autoRefreshEnabled: true,
   refreshBackgroundClustersEnabled: true,
@@ -158,11 +160,42 @@ const DEFAULT_PREFERENCES: AppPreferences = {
 let preferenceCache: AppPreferences = { ...DEFAULT_PREFERENCES };
 let hydrated = false;
 
-const normalizeTheme = (value: string | undefined): ThemePreference => {
+const APPEARANCE_MODE_STORAGE_KEY = 'app-appearance-mode-preference';
+const OLD_APPEARANCE_MODE_STORAGE_KEY = 'app-theme-preference';
+
+const persistAppearanceModeToLocalStorage = (mode: AppearanceMode): void => {
+  try {
+    localStorage.setItem(APPEARANCE_MODE_STORAGE_KEY, mode);
+    localStorage.removeItem(OLD_APPEARANCE_MODE_STORAGE_KEY);
+  } catch {
+    // Storage can be unavailable in tests, private browsing, or locked-down environments.
+  }
+};
+
+const persistAppearanceBootstrapToLocalStorage = (): void => {
+  saveAppearanceBootstrapToLocalStorage({
+    light: {
+      paletteHue: preferenceCache.paletteHueLight,
+      paletteSaturation: preferenceCache.paletteSaturationLight,
+      paletteBrightness: preferenceCache.paletteBrightnessLight,
+      accentColor: preferenceCache.accentColorLight,
+      linkColor: preferenceCache.linkColorLight,
+    },
+    dark: {
+      paletteHue: preferenceCache.paletteHueDark,
+      paletteSaturation: preferenceCache.paletteSaturationDark,
+      paletteBrightness: preferenceCache.paletteBrightnessDark,
+      accentColor: preferenceCache.accentColorDark,
+      linkColor: preferenceCache.linkColorDark,
+    },
+  });
+};
+
+const normalizeAppearanceMode = (value: string | undefined): AppearanceMode => {
   if (value === 'light' || value === 'dark' || value === 'system') {
     return value;
   }
-  return DEFAULT_PREFERENCES.theme;
+  return DEFAULT_PREFERENCES.appearanceMode;
 };
 
 const normalizeGridTableMode = (value: string | undefined): GridTablePersistenceMode => {
@@ -231,8 +264,8 @@ const normalizeObjPanelLogsTargetGlobalLimit = (value?: number): number => {
 };
 
 const emitPreferenceChanges = (previous: AppPreferences, next: AppPreferences): void => {
-  if (previous.theme !== next.theme) {
-    eventBus.emit('settings:theme', next.theme);
+  if (previous.appearanceMode !== next.appearanceMode) {
+    eventBus.emit('settings:appearance-mode', next.appearanceMode);
   }
   if (previous.useShortResourceNames !== next.useShortResourceNames) {
     eventBus.emit('settings:short-names', next.useShortResourceNames);
@@ -282,14 +315,14 @@ const emitPreferenceChanges = (previous: AppPreferences, next: AppPreferences): 
   if (previous.gridTablePersistenceMode !== next.gridTablePersistenceMode) {
     eventBus.emit('gridtable:persistence-mode', next.gridTablePersistenceMode);
   }
-  // Emit per-theme palette changes separately for light and dark.
+  // Emit per-mode palette changes separately for light and dark.
   if (
     previous.paletteHueLight !== next.paletteHueLight ||
     previous.paletteSaturationLight !== next.paletteSaturationLight ||
     previous.paletteBrightnessLight !== next.paletteBrightnessLight
   ) {
     eventBus.emit('settings:palette-tint', {
-      theme: 'light',
+      mode: 'light',
       hue: next.paletteHueLight,
       saturation: next.paletteSaturationLight,
       brightness: next.paletteBrightnessLight,
@@ -301,23 +334,23 @@ const emitPreferenceChanges = (previous: AppPreferences, next: AppPreferences): 
     previous.paletteBrightnessDark !== next.paletteBrightnessDark
   ) {
     eventBus.emit('settings:palette-tint', {
-      theme: 'dark',
+      mode: 'dark',
       hue: next.paletteHueDark,
       saturation: next.paletteSaturationDark,
       brightness: next.paletteBrightnessDark,
     });
   }
   if (previous.accentColorLight !== next.accentColorLight) {
-    eventBus.emit('settings:accent-color', { theme: 'light', color: next.accentColorLight });
+    eventBus.emit('settings:accent-color', { mode: 'light', color: next.accentColorLight });
   }
   if (previous.accentColorDark !== next.accentColorDark) {
-    eventBus.emit('settings:accent-color', { theme: 'dark', color: next.accentColorDark });
+    eventBus.emit('settings:accent-color', { mode: 'dark', color: next.accentColorDark });
   }
   if (previous.linkColorLight !== next.linkColorLight) {
-    eventBus.emit('settings:link-color', { theme: 'light', color: next.linkColorLight });
+    eventBus.emit('settings:link-color', { mode: 'light', color: next.linkColorLight });
   }
   if (previous.linkColorDark !== next.linkColorDark) {
-    eventBus.emit('settings:link-color', { theme: 'dark', color: next.linkColorDark });
+    eventBus.emit('settings:link-color', { mode: 'dark', color: next.linkColorDark });
   }
 };
 
@@ -387,7 +420,7 @@ export const hydrateAppPreferences = async (options?: {
 
   const backendSettings = await fetchAppSettings();
   const preferences: AppPreferences = {
-    theme: normalizeTheme(backendSettings?.theme),
+    appearanceMode: normalizeAppearanceMode(backendSettings?.appearanceMode),
     useShortResourceNames:
       backendSettings?.useShortResourceNames ?? DEFAULT_PREFERENCES.useShortResourceNames,
     autoRefreshEnabled:
@@ -455,12 +488,14 @@ export const hydrateAppPreferences = async (options?: {
 
   hydrated = true;
   updatePreferenceCache(preferences);
+  persistAppearanceModeToLocalStorage(preferences.appearanceMode);
+  persistAppearanceBootstrapToLocalStorage();
 
   return { ...preferenceCache };
 };
 
-export const getThemePreference = (): ThemePreference => {
-  return preferenceCache.theme;
+export const getAppearanceModePreference = (): AppearanceMode => {
+  return preferenceCache.appearanceMode;
 };
 
 export const getUseShortResourceNames = (): boolean => {
@@ -540,11 +575,11 @@ export const getObjectPanelLayoutDefaults = (): ObjectPanelLayoutDefaults => ({
   floatingY: preferenceCache.objectPanelFloatingY,
 });
 
-// Returns palette tint values for the specified theme.
+// Returns palette tint values for the specified resolved appearance mode.
 export const getPaletteTint = (
-  theme: 'light' | 'dark'
+  mode: 'light' | 'dark'
 ): { hue: number; saturation: number; brightness: number } => {
-  if (theme === 'light') {
+  if (mode === 'light') {
     return {
       hue: preferenceCache.paletteHueLight,
       saturation: preferenceCache.paletteSaturationLight,
@@ -558,19 +593,20 @@ export const getPaletteTint = (
   };
 };
 
-// Returns the custom accent color hex for the specified theme (empty = default).
-export const getAccentColor = (theme: 'light' | 'dark'): string => {
-  return theme === 'light' ? preferenceCache.accentColorLight : preferenceCache.accentColorDark;
+// Returns the custom accent color hex for the specified resolved appearance mode (empty = default).
+export const getAccentColor = (mode: 'light' | 'dark'): string => {
+  return mode === 'light' ? preferenceCache.accentColorLight : preferenceCache.accentColorDark;
 };
 
-// Persist accent color for a specific theme to backend via fire-and-forget.
-export const setAccentColor = (theme: 'light' | 'dark', color: string): void => {
+// Persist accent color for a specific resolved appearance mode to backend via fire-and-forget.
+export const setAccentColor = (mode: 'light' | 'dark', color: string): void => {
   hydrated = true;
-  if (theme === 'light') {
+  if (mode === 'light') {
     updatePreferenceCache({ accentColorLight: color });
   } else {
     updatePreferenceCache({ accentColorDark: color });
   }
+  persistAppearanceBootstrapToLocalStorage();
   const runtimeApp = (window as any)?.go?.backend?.App;
   if (!runtimeApp) {
     return;
@@ -579,24 +615,25 @@ export const setAccentColor = (theme: 'light' | 'dark', color: string): void => 
   if (typeof setter !== 'function') {
     return;
   }
-  void setter(theme, color).catch((error: unknown) => {
+  void setter(mode, color).catch((error: unknown) => {
     console.error('Failed to persist accent color:', error);
   });
 };
 
-// Returns the custom link color hex for the specified theme (empty = default).
-export const getLinkColor = (theme: 'light' | 'dark'): string => {
-  return theme === 'light' ? preferenceCache.linkColorLight : preferenceCache.linkColorDark;
+// Returns the custom link color hex for the specified resolved appearance mode (empty = default).
+export const getLinkColor = (mode: 'light' | 'dark'): string => {
+  return mode === 'light' ? preferenceCache.linkColorLight : preferenceCache.linkColorDark;
 };
 
-// Persist link color for a specific theme to backend via fire-and-forget.
-export const setLinkColor = (theme: 'light' | 'dark', color: string): void => {
+// Persist link color for a specific resolved appearance mode to backend via fire-and-forget.
+export const setLinkColor = (mode: 'light' | 'dark', color: string): void => {
   hydrated = true;
-  if (theme === 'light') {
+  if (mode === 'light') {
     updatePreferenceCache({ linkColorLight: color });
   } else {
     updatePreferenceCache({ linkColorDark: color });
   }
+  persistAppearanceBootstrapToLocalStorage();
   const runtimeApp = (window as any)?.go?.backend?.App;
   if (!runtimeApp) {
     return;
@@ -605,16 +642,17 @@ export const setLinkColor = (theme: 'light' | 'dark', color: string): void => {
   if (typeof setter !== 'function') {
     return;
   }
-  void setter(theme, color).catch((error: unknown) => {
+  void setter(mode, color).catch((error: unknown) => {
     console.error('Failed to persist link color:', error);
   });
 };
 
-export const setThemePreference = async (theme: ThemePreference): Promise<void> => {
-  const normalized = normalizeTheme(theme);
-  await SetTheme(normalized);
+export const setAppearanceModePreference = async (mode: AppearanceMode): Promise<void> => {
+  const normalized = normalizeAppearanceMode(mode);
+  await SetAppearanceMode(normalized);
   hydrated = true;
-  updatePreferenceCache({ theme: normalized });
+  updatePreferenceCache({ appearanceMode: normalized });
+  persistAppearanceModeToLocalStorage(normalized);
 };
 
 export const setUseShortResourceNames = async (useShort: boolean): Promise<void> => {
@@ -802,15 +840,15 @@ export const setObjectPanelLayoutDefaults = (layout: ObjectPanelLayoutDefaults):
   });
 };
 
-// Persist palette tint for a specific theme to backend via fire-and-forget.
+// Persist palette tint for a specific resolved appearance mode to backend via fire-and-forget.
 export const setPaletteTint = (
-  theme: 'light' | 'dark',
+  mode: 'light' | 'dark',
   hue: number,
   saturation: number,
   brightness: number = 0
 ): void => {
   hydrated = true;
-  if (theme === 'light') {
+  if (mode === 'light') {
     updatePreferenceCache({
       paletteHueLight: hue,
       paletteSaturationLight: saturation,
@@ -823,6 +861,7 @@ export const setPaletteTint = (
       paletteBrightnessDark: brightness,
     });
   }
+  persistAppearanceBootstrapToLocalStorage();
   const runtimeApp = (window as any)?.go?.backend?.App;
   if (!runtimeApp) {
     return;
@@ -831,7 +870,7 @@ export const setPaletteTint = (
   if (typeof setter !== 'function') {
     return;
   }
-  void setter(theme, hue, saturation, brightness).catch((error: unknown) => {
+  void setter(mode, hue, saturation, brightness).catch((error: unknown) => {
     console.error('Failed to persist palette tint:', error);
   });
 };
@@ -850,6 +889,12 @@ export const getThemes = async (): Promise<types.Theme[]> => {
 // Persists a new or updated theme to the backend.
 export const saveTheme = async (theme: types.Theme): Promise<void> => {
   await SaveTheme(theme);
+};
+
+export const validateThemeClusterPattern = async (
+  pattern: string
+): Promise<types.ThemeClusterPatternValidationResult> => {
+  return ValidateThemeClusterPattern(pattern);
 };
 
 // Deletes a theme by its ID from the backend.

@@ -14,6 +14,8 @@ interface ConfirmationModalProps {
   isOpen: boolean;
   title: string;
   message: string;
+  /** Optional warning text rendered below the main message in warning style. */
+  warning?: string;
   confirmText?: string;
   cancelText?: string;
   confirmButtonClass?: string;
@@ -24,6 +26,7 @@ interface ConfirmationModalProps {
 const ConfirmationModalContent: React.FC<Omit<ConfirmationModalProps, 'isOpen'>> = ({
   title,
   message,
+  warning,
   confirmText,
   cancelText,
   confirmButtonClass,
@@ -47,13 +50,13 @@ const ConfirmationModalContent: React.FC<Omit<ConfirmationModalProps, 'isOpen'>>
       onClose={onCancel}
       overlayClassName="confirmation-modal-backdrop"
       containerClassName="confirmation-modal"
-      closeOnBackdrop={true}
     >
       <div className="modal-header confirmation-modal-header">
         <h2 id="confirmation-modal-title">{title}</h2>
       </div>
       <div className="confirmation-modal-body">
         <p>{message}</p>
+        {warning && <p className="confirmation-modal-warning">{warning}</p>}
       </div>
       <div className="confirmation-modal-footer">
         <button className="button cancel" onClick={onCancel}>
@@ -71,6 +74,7 @@ function ConfirmationModal({
   isOpen,
   title,
   message,
+  warning,
   confirmText = 'Confirm',
   cancelText = 'Cancel',
   confirmButtonClass = 'danger',
@@ -85,6 +89,7 @@ function ConfirmationModal({
     <ConfirmationModalContent
       title={title}
       message={message}
+      warning={warning}
       confirmText={confirmText}
       cancelText={cancelText}
       confirmButtonClass={confirmButtonClass}

@@ -77,6 +77,18 @@ describe('EventStreamManager', () => {
           namespace: 'default',
           objectUid: 'pod-uid-1',
           objectApiVersion: 'v1',
+          involvedObject: {
+            ref: {
+              clusterId: 'cluster-a',
+              group: '',
+              version: 'v1',
+              kind: 'Pod',
+              resource: 'pods',
+              namespace: 'default',
+              name: 'web',
+              uid: 'pod-uid-1',
+            },
+          },
           type: 'Normal',
           source: 'kubelet',
           reason: 'Started',
@@ -97,6 +109,18 @@ describe('EventStreamManager', () => {
     expect(state.data?.events?.[0].clusterName).toBe('alpha');
     expect(state.data?.events?.[0].objectUid).toBe('pod-uid-1');
     expect(state.data?.events?.[0].objectApiVersion).toBe('v1');
+    expect(state.data?.events?.[0].involvedObject).toEqual({
+      ref: {
+        clusterId: 'cluster-a',
+        group: '',
+        version: 'v1',
+        kind: 'Pod',
+        resource: 'pods',
+        namespace: 'default',
+        name: 'web',
+        uid: 'pod-uid-1',
+      },
+    });
   });
 
   test('applyPayload preserves backend createdAt for initial snapshot events', async () => {
@@ -275,6 +299,18 @@ describe('EventStreamManager', () => {
           namespace: 'default',
           objectUid: 'job-uid-1',
           objectApiVersion: 'batch/v1',
+          involvedObject: {
+            ref: {
+              clusterId: 'cluster-b',
+              group: 'batch',
+              version: 'v1',
+              kind: 'Job',
+              resource: 'jobs',
+              namespace: 'default',
+              name: 'foo',
+              uid: 'job-uid-1',
+            },
+          },
           type: 'Warning',
           source: 'controller',
           reason: 'Backoff',
@@ -295,6 +331,18 @@ describe('EventStreamManager', () => {
     expect(state.data?.events?.[0].objectUid).toBe('job-uid-1');
     expect(state.data?.events?.[0].objectApiVersion).toBe('batch/v1');
     expect(state.data?.events?.[0].clusterName).toBe('bravo');
+    expect(state.data?.events?.[0].involvedObject).toEqual({
+      ref: {
+        clusterId: 'cluster-b',
+        group: 'batch',
+        version: 'v1',
+        kind: 'Job',
+        resource: 'jobs',
+        namespace: 'default',
+        name: 'foo',
+        uid: 'job-uid-1',
+      },
+    });
   });
 
   test('reuses namespace event rows when an unchanged update is applied', async () => {
@@ -374,6 +422,18 @@ describe('EventStreamManager', () => {
     const { EventStreamManager } = await import('./eventStreamManager');
     const manager = new EventStreamManager();
     const createdAt = 1_700_000_001_000;
+    const involvedObject = () => ({
+      ref: {
+        clusterId: 'cluster-b',
+        group: 'batch',
+        version: 'v1',
+        kind: 'Job',
+        resource: 'jobs',
+        namespace: 'default',
+        name: 'foo',
+        uid: 'job-uid',
+      },
+    });
 
     manager.applyPayload('namespace-events', 'namespace:default', {
       domain: 'namespace-events',
@@ -394,6 +454,7 @@ describe('EventStreamManager', () => {
           source: 'controller',
           reason: 'Backoff',
           object: 'Job/foo',
+          involvedObject: involvedObject(),
           message: 'Retrying',
           createdAt,
         },
@@ -425,6 +486,7 @@ describe('EventStreamManager', () => {
           source: 'controller',
           reason: 'Backoff',
           object: 'Job/foo',
+          involvedObject: involvedObject(),
           message: 'Retrying',
           createdAt,
         },
@@ -715,6 +777,53 @@ describe('EventStreamManager', () => {
 
     await vi.advanceTimersByTimeAsync(4000);
     expect(ensureRefreshBaseURLMock).toHaveBeenCalledTimes(4);
+  });
+
+  test('closes failed event streams before scheduling one reconnect', async () => {
+    vi.useFakeTimers();
+    Object.assign(window, {
+      setTimeout: globalThis.setTimeout,
+      clearTimeout: globalThis.clearTimeout,
+    });
+
+    class MockEventSource {
+      static instances: MockEventSource[] = [];
+      listeners: Record<string, (evt?: any) => void> = {};
+      closed = false;
+      constructor(_url: string) {
+        MockEventSource.instances.push(this);
+      }
+      addEventListener(type: string, handler: (evt?: any) => void) {
+        this.listeners[type] = handler;
+      }
+      removeEventListener(type: string): void {
+        delete this.listeners[type];
+      }
+      close(): void {
+        this.closed = true;
+      }
+      emit(type: string, evt?: any) {
+        this.listeners[type]?.(evt);
+      }
+    }
+
+    (globalThis as any).EventSource = MockEventSource as any;
+
+    const { EventStreamManager } = await import('./eventStreamManager');
+    const manager = new EventStreamManager();
+
+    await manager.startCluster();
+    expect(MockEventSource.instances).toHaveLength(1);
+
+    const firstStream = MockEventSource.instances[0]!;
+    firstStream.emit('error');
+    firstStream.emit('error');
+
+    expect(firstStream.closed).toBe(true);
+    expect(firstStream.listeners).toEqual({});
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(MockEventSource.instances).toHaveLength(2);
   });
 
   test('namespace stream retries and clears errors after reconnection', async () => {

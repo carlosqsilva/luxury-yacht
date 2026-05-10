@@ -30,7 +30,10 @@ import { getMetricsBannerInfo } from '@shared/utils/metricsAvailability';
 import { useNamespace } from '@modules/namespace/contexts/NamespaceContext';
 import { ALL_NAMESPACES_SCOPE } from '@modules/namespace/constants';
 import { useViewState } from '@/core/contexts/ViewStateContext';
-import { emitPodsUnhealthySignal } from '@modules/namespace/components/podsFilterSignals';
+import {
+  emitPodsUnhealthySignal,
+  type PodsFilterMode,
+} from '@modules/namespace/components/podsFilterSignals';
 import { BrowserOpenURL } from '@wailsjs/runtime/runtime';
 import { useClusterLifecycle } from '@core/contexts/ClusterLifecycleContext';
 import { backend } from '@wailsjs/go/models';
@@ -76,7 +79,12 @@ const EMPTY_OVERVIEW: ClusterOverviewPayload = {
   succeededPods: 0,
   pendingPods: 0,
   failedPods: 0,
+  readyPods: 0,
+  startingPods: 0,
+  failingPods: 0,
+  terminatingPods: 0,
   restartedPods: 0,
+  notReadyPods: 0,
   totalNamespaces: 0,
   totalDeployments: 0,
   totalStatefulSets: 0,
@@ -366,8 +374,10 @@ const ClusterOverview: React.FC<ClusterOverviewProps> = ({ clusterContext }) => 
     };
   }, [canActivateOverviewRefresh, overviewScope]);
 
+  type PodStatusFilter = 'none' | PodsFilterMode;
+
   const handlePodStatusNavigate = useCallback(
-    (key: string, count: number) => {
+    (filter: PodStatusFilter, count: number) => {
       if (count <= 0) {
         return;
       }
@@ -375,8 +385,8 @@ const ClusterOverview: React.FC<ClusterOverviewProps> = ({ clusterContext }) => 
       setActiveNamespaceTab('pods');
       setSidebarSelection({ type: 'namespace', value: ALL_NAMESPACES_SCOPE });
       navigateToNamespace();
-      if (key !== 'healthy' && selectedClusterId) {
-        emitPodsUnhealthySignal(selectedClusterId, ALL_NAMESPACES_SCOPE);
+      if (filter !== 'none' && selectedClusterId) {
+        emitPodsUnhealthySignal(selectedClusterId, ALL_NAMESPACES_SCOPE, filter);
       }
     },
     [
@@ -389,40 +399,73 @@ const ClusterOverview: React.FC<ClusterOverviewProps> = ({ clusterContext }) => 
   );
 
   const handlePodStatusKeyDown = useCallback(
-    (event: React.KeyboardEvent<HTMLDivElement>, key: string, count: number) => {
+    (event: React.KeyboardEvent<HTMLDivElement>, filter: PodStatusFilter, count: number) => {
       if (count <= 0) {
         return;
       }
       if (event.key === 'Enter' || event.key === ' ') {
         event.preventDefault();
-        handlePodStatusNavigate(key, count);
+        handlePodStatusNavigate(filter, count);
       }
     },
     [handlePodStatusNavigate]
   );
 
-  // "Healthy" groups pods in the Running and Succeeded phases — CronJob-launched
-  // pods end up Succeeded, so counting only Running would understate the count.
-  const healthyPods = displayOverview.runningPods + displayOverview.succeededPods;
-  const podPhaseItems = [
-    { key: 'healthy', label: 'healthy', value: healthyPods, variant: 'healthy' },
-    { key: 'pending', label: 'pending', value: displayOverview.pendingPods, variant: 'pending' },
-    { key: 'failed', label: 'failing', value: displayOverview.failedPods, variant: 'failing' },
+  const podStatusItems = [
+    {
+      key: 'ready',
+      label: 'ready',
+      value: displayOverview.readyPods,
+      variant: 'ready',
+      filter: 'none' as const,
+    },
+    {
+      key: 'starting',
+      label: 'starting',
+      value: displayOverview.startingPods,
+      variant: 'starting',
+      filter: 'unhealthy' as const,
+    },
+    {
+      key: 'failing',
+      label: 'failing',
+      value: displayOverview.failingPods,
+      variant: 'failing',
+      filter: 'unhealthy' as const,
+    },
+    {
+      key: 'terminating',
+      label: 'terminating',
+      value: displayOverview.terminatingPods,
+      variant: 'terminating',
+      filter: 'unhealthy' as const,
+    },
   ];
-  const podRestartedItem = {
-    key: 'restarted',
-    label: 'restarted',
-    value: displayOverview.restartedPods,
-    variant: 'restarted',
-  };
-
+  const podSignalItems = [
+    {
+      key: 'restarted',
+      label: 'restarts',
+      value: displayOverview.restartedPods,
+      variant: 'restarted',
+      filter: 'restarts' as const,
+    },
+    {
+      key: 'not-ready',
+      label: 'not ready',
+      value: displayOverview.notReadyPods,
+      variant: 'not-ready',
+      filter: 'not-ready' as const,
+    },
+  ];
   const renderPodStatusCard = (item: {
     key: string;
     label: string;
     value: number;
     variant: string;
+    filter: PodStatusFilter;
+    clickable?: boolean;
   }) => {
-    const clickable = item.value > 0;
+    const clickable = item.clickable !== false && item.value > 0;
     const itemClass = `pod-status-card pod-status-card--${item.variant}${clickable ? ' pod-status-card--clickable' : ''}`;
     return (
       <div
@@ -430,15 +473,17 @@ const ClusterOverview: React.FC<ClusterOverviewProps> = ({ clusterContext }) => 
         className={itemClass}
         role={clickable ? 'button' : undefined}
         tabIndex={clickable ? 0 : undefined}
-        onClick={clickable ? () => handlePodStatusNavigate(item.key, item.value) : undefined}
+        onClick={clickable ? () => handlePodStatusNavigate(item.filter, item.value) : undefined}
         onKeyDown={
-          clickable ? (event) => handlePodStatusKeyDown(event, item.key, item.value) : undefined
+          clickable ? (event) => handlePodStatusKeyDown(event, item.filter, item.value) : undefined
         }
         aria-disabled={!clickable}
         data-testid={`cluster-pod-status-${item.key}`}
       >
         <span className="pod-status-card__count">{showSkeleton ? DASH : item.value}</span>
-        <span className="pod-status-card__label">{item.label}</span>
+        <span className="pod-status-card__label" title={item.label}>
+          {item.label}
+        </span>
       </div>
     );
   };
@@ -1047,18 +1092,29 @@ const ClusterOverview: React.FC<ClusterOverviewProps> = ({ clusterContext }) => 
           </div>
 
           <div className="pod-status">
-            <div className="metric-header">
-              <h3>Pod Status</h3>
-              <div className="metric-legend__total">
-                <span className="metric-legend__total-value">
-                  {showSkeleton ? DASH : displayOverview.totalPods}
-                </span>
-                <span className="metric-legend__total-label"> total</span>
+            <div className="pod-status-groups">
+              <div className="pod-status-group">
+                <div className="metric-header">
+                  <h3>Pod Status</h3>
+                  <div className="metric-legend__total">
+                    <span className="metric-legend__total-value">
+                      {showSkeleton ? DASH : displayOverview.totalPods}
+                    </span>
+                    <span className="metric-legend__total-label"> total</span>
+                  </div>
+                </div>
+                <div className="pod-status-cards">
+                  {podStatusItems.map((item) => renderPodStatusCard(item))}
+                </div>
               </div>
-            </div>
-            <div className="pod-status-cards">
-              {podPhaseItems.map((item) => renderPodStatusCard(item))}
-              {renderPodStatusCard(podRestartedItem)}
+              <div className="pod-status-group">
+                <div className="metric-header">
+                  <h3>Pod Signals</h3>
+                </div>
+                <div className="pod-status-cards pod-status-cards--signals">
+                  {podSignalItems.map((item) => renderPodStatusCard(item))}
+                </div>
+              </div>
             </div>
           </div>
         </div>

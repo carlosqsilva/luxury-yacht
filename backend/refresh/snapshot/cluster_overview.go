@@ -28,6 +28,7 @@ import (
 	"github.com/luxury-yacht/app/backend/refresh"
 	"github.com/luxury-yacht/app/backend/refresh/domain"
 	"github.com/luxury-yacht/app/backend/refresh/metrics"
+	"github.com/luxury-yacht/app/backend/resourcemodel"
 )
 
 const (
@@ -115,7 +116,12 @@ type ClusterOverviewPayload struct {
 	SucceededPods       int `json:"succeededPods"`
 	PendingPods         int `json:"pendingPods"`
 	FailedPods          int `json:"failedPods"`
+	ReadyPods           int `json:"readyPods"`
+	StartingPods        int `json:"startingPods"`
+	FailingPods         int `json:"failingPods"`
+	TerminatingPods     int `json:"terminatingPods"`
 	RestartedPods       int `json:"restartedPods"`
+	NotReadyPods        int `json:"notReadyPods"`
 
 	TotalNamespaces int `json:"totalNamespaces"`
 
@@ -565,21 +571,12 @@ func buildClusterOverviewSnapshot(
 		overview.TotalContainers += len(pod.Spec.Containers)
 		overview.TotalInitContainers += len(pod.Spec.InitContainers)
 
-		hasRestarts := false
-		for _, status := range pod.Status.ContainerStatuses {
-			if status.RestartCount > 0 {
-				hasRestarts = true
-				break
-			}
+		model := resourcemodel.BuildPodResourceModel("", pod)
+		countPodStatusPresentation(&overview, model.Status.Presentation)
+		if podCountsAsNotReadySignal(pod, model.Facts.Pod) {
+			overview.NotReadyPods++
 		}
-		if !hasRestarts {
-			for _, status := range pod.Status.InitContainerStatuses {
-				if status.RestartCount > 0 {
-					hasRestarts = true
-					break
-				}
-			}
-		}
+		hasRestarts := podHasRestarts(pod)
 
 		for _, container := range pod.Spec.Containers {
 			if cpu := container.Resources.Requests.Cpu(); cpu != nil {
@@ -868,6 +865,48 @@ func buildClusterOverviewReplicaSetDeploymentMap(replicaSets []*appsv1.ReplicaSe
 	return out
 }
 
+func countPodStatusPresentation(overview *ClusterOverviewPayload, presentation string) {
+	if overview == nil {
+		return
+	}
+	switch strings.ToLower(strings.TrimSpace(presentation)) {
+	case "ready":
+		overview.ReadyPods++
+	case "warning":
+		overview.StartingPods++
+	case "error", "not-ready":
+		overview.FailingPods++
+	case "terminating":
+		overview.TerminatingPods++
+	}
+}
+
+func podCountsAsNotReadySignal(pod *corev1.Pod, facts *resourcemodel.PodFacts) bool {
+	if pod == nil || facts == nil || pod.Status.Phase == corev1.PodSucceeded {
+		return false
+	}
+	return facts.TotalContainers > 0 && facts.ReadyContainers < facts.TotalContainers
+}
+
+func podHasRestarts(pod *corev1.Pod) bool {
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.RestartCount > 0 {
+			return true
+		}
+	}
+	for _, status := range pod.Status.InitContainerStatuses {
+		if status.RestartCount > 0 {
+			return true
+		}
+	}
+	for _, status := range pod.Status.EphemeralContainerStatuses {
+		if status.RestartCount > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func clusterOverviewWorkloadKind(pod *corev1.Pod, replicaSetDeployments map[string]string) string {
 	if pod == nil {
 		return ""
@@ -1095,8 +1134,8 @@ func buildRecentEvents(events []*corev1.Event, meta ClusterMeta) []RecentEvent {
 			ClusterName:      meta.ClusterName,
 			EventUID:         string(evt.UID),
 			Reason:           strings.TrimSpace(evt.Reason),
-			Message:          eventMessage(evt),
-			Timestamp:        eventTimestamp(evt).UnixMilli(),
+			Message:          resourcemodel.EventMessage(evt),
+			Timestamp:        resourcemodel.EventTimestamp(evt).UnixMilli(),
 			ObjectKind:       evt.InvolvedObject.Kind,
 			ObjectName:       evt.InvolvedObject.Name,
 			ObjectNamespace:  evt.InvolvedObject.Namespace,

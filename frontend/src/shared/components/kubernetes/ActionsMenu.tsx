@@ -16,6 +16,16 @@ import ConfirmationModal from '@shared/components/modals/ConfirmationModal';
 import '../ContextMenu.css';
 import './ActionsMenu.css';
 
+const clampReplicas = (value: number): number => Math.max(0, Math.min(9999, value));
+
+const parseDesiredReplicas = (value?: string | null): number | null => {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  const segments = trimmed.split('/');
+  const candidate = Number.parseInt(segments[segments.length - 1]?.trim() ?? '', 10);
+  return Number.isFinite(candidate) ? clampReplicas(candidate) : null;
+};
+
 interface ActionsMenuProps {
   object: ObjectActionData | null;
   currentReplicas?: number;
@@ -28,12 +38,14 @@ interface ActionsMenuProps {
   onDelete?: () => void;
   onTrigger?: () => void;
   onSuspendToggle?: () => void;
+  onCordon?: () => void;
+  onDrain?: () => void;
 }
 
 export const ActionsMenu = React.memo<ActionsMenuProps>(
   ({
     object,
-    currentReplicas = 1,
+    currentReplicas,
     actionLoading = false,
     hpaManaged = false,
     onRestart,
@@ -42,6 +54,8 @@ export const ActionsMenu = React.memo<ActionsMenuProps>(
     onDelete,
     onTrigger,
     onSuspendToggle,
+    onCordon,
+    onDrain,
   }) => {
     const { openWithObject } = useObjectPanel();
     const [isOpen, setIsOpen] = useState(false);
@@ -51,6 +65,13 @@ export const ActionsMenu = React.memo<ActionsMenuProps>(
     const [scaleValue, setScaleValue] = useState(0);
     const menuRef = useRef<HTMLDivElement>(null);
     const dropdownRef = useRef<HTMLDivElement>(null);
+
+    const resolvedCurrentReplicas = useMemo(() => {
+      if (typeof currentReplicas === 'number' && Number.isFinite(currentReplicas)) {
+        return clampReplicas(currentReplicas);
+      }
+      return parseDesiredReplicas(object?.ready) ?? 0;
+    }, [currentReplicas, object?.ready]);
 
     // Build handlers that open modals or call callbacks
     const handlers = useMemo(
@@ -70,7 +91,7 @@ export const ActionsMenu = React.memo<ActionsMenuProps>(
         onScale: onScale
           ? () => {
               setIsOpen(false);
-              setScaleValue(currentReplicas);
+              setScaleValue(resolvedCurrentReplicas);
               setShowScaleModal(true);
             }
           : undefined,
@@ -96,8 +117,30 @@ export const ActionsMenu = React.memo<ActionsMenuProps>(
           setIsOpen(false);
           setShowPortForwardModal(true);
         },
+        onCordon: onCordon
+          ? () => {
+              setIsOpen(false);
+              onCordon();
+            }
+          : undefined,
+        onDrain: onDrain
+          ? () => {
+              setIsOpen(false);
+              onDrain();
+            }
+          : undefined,
       }),
-      [onRestart, onRollback, onScale, onDelete, onTrigger, onSuspendToggle, currentReplicas]
+      [
+        onRestart,
+        onRollback,
+        onScale,
+        onDelete,
+        onTrigger,
+        onSuspendToggle,
+        onCordon,
+        onDrain,
+        resolvedCurrentReplicas,
+      ]
     );
 
     // Merge hpaManaged flag into the object data for the actions hook.
