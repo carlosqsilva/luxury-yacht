@@ -5,13 +5,12 @@
  * Composes top-level providers, routes, and layout.
  */
 
-import { useEffect, useCallback } from 'react';
+import { useEffect, useCallback, useRef } from 'react';
 import '@styles/index.css';
 import './App.css';
 import { errorHandler } from '@utils/errorHandler';
 import { KeyboardProvider, GlobalShortcuts } from '@ui/shortcuts';
 import TextContextMenu from '@ui/shortcuts/components/TextContextMenu';
-import { initializeAutoRefresh, initializeMetricsRefreshInterval } from '@/core/refresh';
 import { eventBus } from '@/core/events';
 import { ConnectionStatusProvider, useConnectionStatus } from '@/core/connection/connectionStatus';
 import { initializeUserPermissionsBootstrap } from '@/core/capabilities';
@@ -25,13 +24,10 @@ import {
   matchThemeForCluster,
   applyTheme,
 } from '@/core/settings/appPreferences';
-import {
-  applyTintedPalette,
-  savePaletteTintToLocalStorage,
-  isPaletteActive,
-} from '@utils/paletteTint';
-import { applyAccentColor, applyAccentBg, saveAccentColorToLocalStorage } from '@utils/accentColor';
-import { applyLinkColor, saveLinkColorToLocalStorage } from '@utils/linkColor';
+import { applyTintedPalette, isPaletteActive } from '@utils/paletteTint';
+import { applyAccentColor, applyAccentBg } from '@utils/accentColor';
+import { applyLinkColor } from '@utils/linkColor';
+import { autoApplyClusterTheme } from '@/core/settings/clusterThemeAutoApply';
 
 // Contexts
 import { KubernetesProvider } from '@core/contexts/KubernetesProvider';
@@ -73,20 +69,15 @@ const applyAppearanceOverrides = (mode: 'light' | 'dark') => {
   } else {
     applyTintedPalette(0, 0, 0);
   }
-  savePaletteTintToLocalStorage(mode, tint.hue, tint.saturation, tint.brightness);
 
   const lightAccent = getAccentColor('light');
   const darkAccent = getAccentColor('dark');
   applyAccentColor(lightAccent, darkAccent);
   applyAccentBg(mode === 'light' ? lightAccent : darkAccent, mode);
-  saveAccentColorToLocalStorage('light', lightAccent);
-  saveAccentColorToLocalStorage('dark', darkAccent);
 
   const lightLink = getLinkColor('light');
   const darkLink = getLinkColor('dark');
   applyLinkColor(mode === 'light' ? lightLink : darkLink, mode);
-  saveLinkColorToLocalStorage('light', lightLink);
-  saveLinkColorToLocalStorage('dark', darkLink);
 };
 
 /**
@@ -98,57 +89,19 @@ function AppContent() {
   const { selectedClusterId, selectedClusterName } = useKubeconfig();
   const { isClusterReady } = useClusterLifecycle();
   const selectedClusterReady = selectedClusterId ? isClusterReady(selectedClusterId) : false;
+  const themeApplyRunRef = useRef(0);
 
   // Initialize permissions bootstrap
   useEffect(() => {
     initializeUserPermissionsBootstrap(selectedClusterId, { ready: selectedClusterReady });
   }, [selectedClusterId, selectedClusterReady]);
 
-  // Hydrate persisted preferences before applying refresh settings and palette tint.
+  // main.ts hydrates preferences before first render. This effect only replays
+  // the hydrated appearance values into CSS and keeps them synced on mode changes.
   useEffect(() => {
     let active = true;
 
-    const initializePreferences = async () => {
-      try {
-        await hydrateAppPreferences();
-        if (!active) return;
-
-        // Apply palette tint for the current resolved mode.
-        const currentMode = resolveAppearanceMode();
-        const tint = getPaletteTint(currentMode);
-        if (isPaletteActive(tint.saturation, tint.brightness)) {
-          applyTintedPalette(tint.hue, tint.saturation, tint.brightness);
-          savePaletteTintToLocalStorage(currentMode, tint.hue, tint.saturation, tint.brightness);
-        }
-
-        // Apply accent color overrides for both palettes and accent-bg for the current mode.
-        const lightAccent = getAccentColor('light');
-        const darkAccent = getAccentColor('dark');
-        if (lightAccent || darkAccent) {
-          applyAccentColor(lightAccent, darkAccent);
-          applyAccentBg(currentMode === 'light' ? lightAccent : darkAccent, currentMode);
-        }
-        saveAccentColorToLocalStorage('light', lightAccent);
-        saveAccentColorToLocalStorage('dark', darkAccent);
-
-        // Apply link color override for the current mode; persist both to localStorage
-        // so the FOUC script can apply the correct one on next launch.
-        const lightLink = getLinkColor('light');
-        const darkLink = getLinkColor('dark');
-        const linkForMode = currentMode === 'light' ? lightLink : darkLink;
-        if (linkForMode) {
-          applyLinkColor(linkForMode, currentMode);
-        }
-        saveLinkColorToLocalStorage('light', lightLink);
-        saveLinkColorToLocalStorage('dark', darkLink);
-      } finally {
-        if (active) {
-          initializeMetricsRefreshInterval();
-          initializeAutoRefresh();
-        }
-      }
-    };
-    void initializePreferences();
+    applyAppearanceOverrides(resolveAppearanceMode());
 
     // When the resolved mode changes, apply the palette for the new mode.
     const unsubscribeModeResolved = eventBus.on('settings:appearance-mode-resolved', (newMode) => {
@@ -171,22 +124,18 @@ function AppContent() {
 
   // Auto-apply a matching theme when the active cluster changes.
   useEffect(() => {
+    const runId = ++themeApplyRunRef.current;
     if (!selectedClusterName) return;
 
-    const applyMatchingTheme = async () => {
-      const matched = await matchThemeForCluster(selectedClusterName);
-      if (!matched) return;
-
-      await applyTheme(matched.id);
-
-      // Re-hydrate the preference cache so getPaletteTint/getAccentColor reflect new values.
-      await hydrateAppPreferences({ force: true });
-
-      // Re-apply CSS overrides for the current resolved mode.
-      applyAppearanceOverrides(resolveAppearanceMode());
-    };
-
-    void applyMatchingTheme();
+    void autoApplyClusterTheme({
+      selectedClusterName,
+      isCurrent: () => themeApplyRunRef.current === runId,
+      matchThemeForCluster,
+      applyTheme,
+      hydrateAppPreferences,
+      applyAppearanceOverrides: () => applyAppearanceOverrides(resolveAppearanceMode()),
+      onError: (error) => errorHandler.handle(error, { action: 'autoApplyClusterTheme' }),
+    });
   }, [selectedClusterName]);
 
   // Handle backend errors from Wails runtime

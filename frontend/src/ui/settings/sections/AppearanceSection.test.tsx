@@ -13,12 +13,17 @@ const setInputValue = (input: HTMLInputElement, value: string): void => {
 const appPreferenceMocks = vi.hoisted(() => ({
   getThemes: vi.fn(),
   saveTheme: vi.fn(),
+  validateThemeClusterPattern: vi.fn(),
   getPaletteTint: vi.fn(),
   setPaletteTint: vi.fn(),
   getAccentColor: vi.fn(),
   setAccentColor: vi.fn(),
   getLinkColor: vi.fn(),
   setLinkColor: vi.fn(),
+}));
+
+const errorHandlerMocks = vi.hoisted(() => ({
+  handle: vi.fn(),
 }));
 
 vi.mock('@/core/contexts/AppearanceModeContext', () => ({
@@ -35,6 +40,8 @@ vi.mock('@/core/settings/appPreferences', () => ({
   setLinkColor: (...args: unknown[]) => appPreferenceMocks.setLinkColor(...args),
   getThemes: (...args: unknown[]) => appPreferenceMocks.getThemes(...args),
   saveTheme: (...args: unknown[]) => appPreferenceMocks.saveTheme(...args),
+  validateThemeClusterPattern: (...args: unknown[]) =>
+    appPreferenceMocks.validateThemeClusterPattern(...args),
   deleteTheme: vi.fn(),
   reorderThemes: vi.fn(),
   applyTheme: vi.fn(),
@@ -46,7 +53,6 @@ vi.mock('@/utils/appearanceMode', () => ({
 
 vi.mock('@utils/paletteTint', () => ({
   applyTintedPalette: vi.fn(),
-  savePaletteTintToLocalStorage: vi.fn(),
   isPaletteActive: vi.fn(() => false),
   MAX_SATURATION: 20,
   MAX_BRIGHTNESS_OFFSET: 10,
@@ -55,16 +61,14 @@ vi.mock('@utils/paletteTint', () => ({
 vi.mock('@utils/accentColor', () => ({
   applyAccentColor: vi.fn(),
   applyAccentBg: vi.fn(),
-  saveAccentColorToLocalStorage: vi.fn(),
 }));
 
 vi.mock('@utils/linkColor', () => ({
   applyLinkColor: vi.fn(),
-  saveLinkColorToLocalStorage: vi.fn(),
 }));
 
 vi.mock('@utils/errorHandler', () => ({
-  errorHandler: { handle: vi.fn() },
+  errorHandler: errorHandlerMocks,
 }));
 
 vi.mock('@shared/components/modals/ConfirmationModal', () => ({
@@ -85,6 +89,7 @@ describe('AppearanceSection', () => {
       new types.Theme({ id: 'default', name: 'default', clusterPattern: '' }),
     ]);
     appPreferenceMocks.saveTheme.mockResolvedValue(undefined);
+    appPreferenceMocks.validateThemeClusterPattern.mockResolvedValue({ valid: true });
     appPreferenceMocks.getPaletteTint.mockImplementation((mode: string) =>
       mode === 'light'
         ? { hue: 20, saturation: 0, brightness: 0 }
@@ -208,5 +213,55 @@ describe('AppearanceSection', () => {
     expect(container.textContent).toContain(
       'There are unsaved changes. Would you like to save them as the default theme?'
     );
+  });
+
+  it('shows invalid theme pattern errors inline instead of using the global error handler', async () => {
+    appPreferenceMocks.validateThemeClusterPattern.mockResolvedValueOnce({
+      valid: false,
+      message: 'Invalid cluster pattern: missing closing bracket.',
+    });
+
+    const newThemeButton = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === '+ Save new theme'
+    ) as HTMLButtonElement | undefined;
+    expect(newThemeButton).toBeTruthy();
+
+    await act(async () => {
+      newThemeButton!.click();
+      await Promise.resolve();
+    });
+
+    const nameInput = container.querySelector('.theme-name-input') as HTMLInputElement | null;
+    const patternInput = container.querySelector('.theme-pattern-input') as HTMLInputElement | null;
+    expect(nameInput).toBeTruthy();
+    expect(patternInput).toBeTruthy();
+
+    await act(async () => {
+      setInputValue(nameInput!, 'Prod');
+      setInputValue(patternInput!, 'prod-[');
+    });
+
+    const saveButton = container.querySelector(
+      'button[aria-label="Save new theme"]'
+    ) as HTMLButtonElement | null;
+    expect(saveButton).toBeTruthy();
+
+    await act(async () => {
+      saveButton!.click();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('Invalid cluster pattern: missing closing bracket.');
+    expect(patternInput!.getAttribute('aria-invalid')).toBe('true');
+    expect(appPreferenceMocks.validateThemeClusterPattern).toHaveBeenCalledWith('prod-[');
+    expect(appPreferenceMocks.saveTheme).not.toHaveBeenCalled();
+    expect(errorHandlerMocks.handle).not.toHaveBeenCalled();
+
+    await act(async () => {
+      setInputValue(patternInput!, 'prod-*');
+    });
+
+    expect(container.textContent).not.toContain('Invalid cluster pattern');
+    expect(patternInput!.hasAttribute('aria-invalid')).toBe(false);
   });
 });

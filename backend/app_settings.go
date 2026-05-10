@@ -1135,6 +1135,18 @@ func (a *App) GetThemes() ([]Theme, error) {
 	return settings.Preferences.Themes, nil
 }
 
+// ValidateThemeClusterPattern checks whether a theme cluster pattern can be
+// parsed by the app glob matcher without mutating saved settings.
+func (a *App) ValidateThemeClusterPattern(pattern string) ThemeClusterPatternValidationResult {
+	if err := validateThemeClusterPattern(pattern); err != nil {
+		return ThemeClusterPatternValidationResult{
+			Valid:   false,
+			Message: themeClusterPatternValidationMessage(err),
+		}
+	}
+	return ThemeClusterPatternValidationResult{Valid: true}
+}
+
 // SaveTheme creates or updates a theme in the library. If a theme with the
 // same ID exists it is updated in place; otherwise the theme is appended.
 func (a *App) SaveTheme(theme Theme) error {
@@ -1147,6 +1159,11 @@ func (a *App) SaveTheme(theme Theme) error {
 	}
 	if theme.Name == "" {
 		return fmt.Errorf("theme name is required")
+	}
+	if !themeIsDefault {
+		if err := validateThemeClusterPattern(theme.ClusterPattern); err != nil {
+			return err
+		}
 	}
 
 	a.settingsMu.Lock()
@@ -1320,9 +1337,10 @@ func (a *App) ApplyTheme(id string) error {
 }
 
 // MatchThemeForCluster returns the first saved theme whose ClusterPattern
-// matches the given context name using filepath.Match glob rules (* and ?).
-// An empty ClusterPattern is treated as "*" and matches every context name.
-// Returns nil if no theme matches.
+// matches the given context name using app glob rules: * matches any sequence,
+// ? matches any single character, and character classes such as [a-z] are
+// supported. An empty ClusterPattern is treated as "*" and matches every
+// context name. Returns nil if no theme matches.
 func (a *App) MatchThemeForCluster(contextName string) (*Theme, error) {
 	settings, err := a.loadSettingsFile()
 	if err != nil {
@@ -1330,11 +1348,7 @@ func (a *App) MatchThemeForCluster(contextName string) (*Theme, error) {
 	}
 
 	for _, t := range normalizeThemes(settings.Preferences.Themes, defaultTheme()) {
-		pattern := t.ClusterPattern
-		if pattern == "" {
-			pattern = "*"
-		}
-		matched, err := filepath.Match(pattern, contextName)
+		matched, err := matchThemeClusterPattern(t.ClusterPattern, contextName)
 		if err != nil {
 			// Invalid pattern — skip rather than fail.
 			continue

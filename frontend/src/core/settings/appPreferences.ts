@@ -12,6 +12,7 @@ import {
   ReorderThemes,
   ApplyTheme,
   MatchThemeForCluster,
+  ValidateThemeClusterPattern,
   SetObjPanelLogsBufferMaxSize as SetObjPanelLogsBufferMaxSizeBackend,
   SetMaxTableRows as SetMaxTableRowsBackend,
   SetObjPanelLogsAPITimestampFormat as SetObjPanelLogsAPITimestampFormatBackend,
@@ -22,6 +23,7 @@ import {
 import { types } from '@wailsjs/go/models';
 import { readAppSettings, readThemes, requestAppState } from '@/core/app-state-access';
 import { eventBus } from '@/core/events';
+import { saveAppearanceBootstrapToLocalStorage } from '@/utils/appearanceBootstrap';
 import {
   DEFAULT_OBJ_PANEL_LOGS_API_TIMESTAMP_FORMAT,
   getObjPanelLogsApiTimestampFormatValidationError,
@@ -165,6 +167,25 @@ const persistAppearanceModeToLocalStorage = (mode: AppearanceMode): void => {
   } catch {
     // Storage can be unavailable in tests, private browsing, or locked-down environments.
   }
+};
+
+const persistAppearanceBootstrapToLocalStorage = (): void => {
+  saveAppearanceBootstrapToLocalStorage({
+    light: {
+      paletteHue: preferenceCache.paletteHueLight,
+      paletteSaturation: preferenceCache.paletteSaturationLight,
+      paletteBrightness: preferenceCache.paletteBrightnessLight,
+      accentColor: preferenceCache.accentColorLight,
+      linkColor: preferenceCache.linkColorLight,
+    },
+    dark: {
+      paletteHue: preferenceCache.paletteHueDark,
+      paletteSaturation: preferenceCache.paletteSaturationDark,
+      paletteBrightness: preferenceCache.paletteBrightnessDark,
+      accentColor: preferenceCache.accentColorDark,
+      linkColor: preferenceCache.linkColorDark,
+    },
+  });
 };
 
 const normalizeAppearanceMode = (value: string | undefined): AppearanceMode => {
@@ -462,6 +483,7 @@ export const hydrateAppPreferences = async (options?: {
   hydrated = true;
   updatePreferenceCache(preferences);
   persistAppearanceModeToLocalStorage(preferences.appearanceMode);
+  persistAppearanceBootstrapToLocalStorage();
 
   return { ...preferenceCache };
 };
@@ -567,6 +589,7 @@ export const setAccentColor = (mode: 'light' | 'dark', color: string): void => {
   } else {
     updatePreferenceCache({ accentColorDark: color });
   }
+  persistAppearanceBootstrapToLocalStorage();
   const runtimeApp = (window as any)?.go?.backend?.App;
   if (!runtimeApp) {
     return;
@@ -593,6 +616,7 @@ export const setLinkColor = (mode: 'light' | 'dark', color: string): void => {
   } else {
     updatePreferenceCache({ linkColorDark: color });
   }
+  persistAppearanceBootstrapToLocalStorage();
   const runtimeApp = (window as any)?.go?.backend?.App;
   if (!runtimeApp) {
     return;
@@ -820,6 +844,7 @@ export const setPaletteTint = (
       paletteBrightnessDark: brightness,
     });
   }
+  persistAppearanceBootstrapToLocalStorage();
   const runtimeApp = (window as any)?.go?.backend?.App;
   if (!runtimeApp) {
     return;
@@ -847,6 +872,12 @@ export const getThemes = async (): Promise<types.Theme[]> => {
 // Persists a new or updated theme to the backend.
 export const saveTheme = async (theme: types.Theme): Promise<void> => {
   await SaveTheme(theme);
+};
+
+export const validateThemeClusterPattern = async (
+  pattern: string
+): Promise<types.ThemeClusterPatternValidationResult> => {
+  return ValidateThemeClusterPattern(pattern);
 };
 
 // Deletes a theme by its ID from the backend.

@@ -138,6 +138,29 @@ func TestSaveTheme_Validation(t *testing.T) {
 	err = app.SaveTheme(Theme{ID: "t-1"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "theme name is required")
+
+	// Invalid cluster pattern.
+	err = app.SaveTheme(Theme{ID: "t-1", Name: "Bad Pattern", ClusterPattern: "prod-["})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid cluster pattern")
+	assert.Contains(t, err.Error(), "missing closing bracket")
+}
+
+func TestAppValidateThemeClusterPattern(t *testing.T) {
+	setTestConfigEnv(t)
+	app := newTestAppWithDefaults(t)
+
+	result := app.ValidateThemeClusterPattern("prod-[a-z]*")
+	require.True(t, result.Valid)
+	assert.Empty(t, result.Message)
+
+	result = app.ValidateThemeClusterPattern("prod-[")
+	require.False(t, result.Valid)
+	assert.Equal(t, "Invalid cluster pattern: missing closing bracket.", result.Message)
+
+	result = app.ValidateThemeClusterPattern(`prod-\`)
+	require.False(t, result.Valid)
+	assert.Equal(t, "Invalid cluster pattern: trailing escape.", result.Message)
 }
 
 // TestSaveTheme_DefaultProtectedFields verifies that the default theme can
@@ -389,8 +412,8 @@ func TestMatchThemeForCluster_EmptyPattern(t *testing.T) {
 	assert.Equal(t, "t-catchall", matched.ID)
 }
 
-// TestMatchThemeForCluster_Wildcards tests various glob patterns supported by
-// filepath.Match: star (*), question mark (?), and character classes.
+// TestMatchThemeForCluster_Wildcards tests the app glob patterns supported by
+// saved themes: star (*), question mark (?), and character classes.
 func TestMatchThemeForCluster_Wildcards(t *testing.T) {
 	setTestConfigEnv(t)
 	app := newTestAppWithDefaults(t)
@@ -422,6 +445,7 @@ func TestMatchThemeForCluster_Wildcards(t *testing.T) {
 
 		// No explicit match, so default wins.
 		{"local-cluster", "default", false},
+		{"arn:aws:eks:us-east-1:123456789012:cluster/local", "default", false},
 	}
 
 	for _, tc := range tests {

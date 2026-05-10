@@ -19,6 +19,7 @@ import {
   setLinkColor as persistLinkColor,
   getThemes,
   saveTheme,
+  validateThemeClusterPattern,
   deleteTheme as deleteThemeApi,
   reorderThemes,
   applyTheme as applyThemeApi,
@@ -26,13 +27,12 @@ import {
 import { useAppearanceMode } from '@/core/contexts/AppearanceModeContext';
 import {
   applyTintedPalette,
-  savePaletteTintToLocalStorage,
   isPaletteActive,
   MAX_SATURATION,
   MAX_BRIGHTNESS_OFFSET,
 } from '@utils/paletteTint';
-import { applyAccentColor, applyAccentBg, saveAccentColorToLocalStorage } from '@utils/accentColor';
-import { applyLinkColor, saveLinkColorToLocalStorage } from '@utils/linkColor';
+import { applyAccentColor, applyAccentBg } from '@utils/accentColor';
+import { applyLinkColor } from '@utils/linkColor';
 import ConfirmationModal from '@shared/components/modals/ConfirmationModal';
 import SegmentedButton from '@shared/components/SegmentedButton';
 import { EditIcon, DeleteIcon, CheckIcon, CloseIcon } from '@shared/components/icons/MenuIcons';
@@ -90,6 +90,7 @@ function AppearanceSection() {
   const [dropTargetThemeId, setDropTargetThemeId] = useState<string | null>(null);
   const [deleteConfirmThemeId, setDeleteConfirmThemeId] = useState<string | null>(null);
   const [hasUnsavedDefaultThemeChanges, setHasUnsavedDefaultThemeChanges] = useState(false);
+  const [themePatternError, setThemePatternError] = useState<string | null>(null);
 
   // Load saved themes once on mount.
   useEffect(() => {
@@ -157,7 +158,6 @@ function AppearanceSection() {
       if (palettePersistTimer.current) clearTimeout(palettePersistTimer.current);
       palettePersistTimer.current = setTimeout(() => {
         persistPaletteTint(resolvedMode, hue, saturation, brightness);
-        savePaletteTintToLocalStorage(resolvedMode, hue, saturation, brightness);
       }, 300);
     },
     [resolvedMode]
@@ -210,7 +210,6 @@ function AppearanceSection() {
       if (accentPersistTimer.current) clearTimeout(accentPersistTimer.current);
       accentPersistTimer.current = setTimeout(() => {
         persistAccentColor(resolvedMode, color);
-        saveAccentColorToLocalStorage(resolvedMode, color);
       }, 300);
     },
     [resolvedMode]
@@ -240,7 +239,6 @@ function AppearanceSection() {
     );
     applyAccentBg('', resolvedMode);
     persistAccentColor(resolvedMode, '');
-    saveAccentColorToLocalStorage(resolvedMode, '');
   };
 
   const validHexRe = /^#[0-9a-fA-F]{6}$/;
@@ -271,7 +269,6 @@ function AppearanceSection() {
       if (linkPersistTimer.current) clearTimeout(linkPersistTimer.current);
       linkPersistTimer.current = setTimeout(() => {
         persistLinkColor(resolvedMode, color);
-        saveLinkColorToLocalStorage(resolvedMode, color);
       }, 300);
     },
     [resolvedMode]
@@ -293,7 +290,6 @@ function AppearanceSection() {
     setLinkColorState('');
     applyLinkColor('', resolvedMode);
     persistLinkColor(resolvedMode, '');
-    saveLinkColorToLocalStorage(resolvedMode, '');
   };
 
   const defaultLink = resolvedMode === 'light' ? '#525252' : '#aaaaaa';
@@ -353,7 +349,23 @@ function AppearanceSection() {
     }
   };
 
+  const validateThemePatternDraft = async (pattern: string): Promise<boolean> => {
+    setThemePatternError(null);
+    try {
+      const result = await validateThemeClusterPattern(pattern);
+      if (!result.valid) {
+        setThemePatternError(result.message || 'Invalid cluster pattern.');
+        return false;
+      }
+      return true;
+    } catch (error) {
+      errorHandler.handle(error, { action: 'validateThemeClusterPattern' });
+      return false;
+    }
+  };
+
   const handleSaveCurrentAsTheme = () => {
+    setThemePatternError(null);
     setEditingThemeId('new');
     setThemeDraft({ name: '', clusterPattern: '' });
   };
@@ -362,6 +374,7 @@ function AppearanceSection() {
   // (so palette sliders/colors reflect it) and seeds the row inputs with the
   // theme's current name and pattern. Save / Cancel icons drive commit/revert.
   const handleEnterEditMode = (theme: types.Theme) => {
+    setThemePatternError(null);
     setThemeDraft({ name: theme.name, clusterPattern: theme.clusterPattern });
     if (isDefaultTheme(theme) && hasUnsavedDefaultThemeChanges) {
       setActiveThemeId(theme.id);
@@ -377,13 +390,18 @@ function AppearanceSection() {
     if (!existing) return;
     const trimmedName = themeDraft.name.trim();
     if (!trimmedName) return; // Name is required.
+    const isDefault = existing.id === DEFAULT_THEME_ID;
+    const clusterPattern = isDefault ? '' : themeDraft.clusterPattern.trim();
+
+    if (!isDefault && !(await validateThemePatternDraft(clusterPattern))) {
+      return;
+    }
 
     try {
-      const isDefault = existing.id === DEFAULT_THEME_ID;
       const updated = buildThemeFromCurrentAppearance({
         theme: existing,
         name: isDefault ? existing.name : trimmedName,
-        clusterPattern: isDefault ? '' : themeDraft.clusterPattern.trim(),
+        clusterPattern,
       });
       await saveTheme(updated);
       await reloadThemes();
@@ -400,6 +418,7 @@ function AppearanceSection() {
   const handleCancelActiveTheme = async () => {
     if (!activeThemeId) return;
     await handleApplyTheme(activeThemeId);
+    setThemePatternError(null);
     setActiveThemeId(null);
     if (activeThemeId === DEFAULT_THEME_ID) {
       setHasUnsavedDefaultThemeChanges(false);
@@ -408,13 +427,18 @@ function AppearanceSection() {
 
   const handleThemeSave = async () => {
     if (!themeDraft.name.trim()) return;
+    const clusterPattern = themeDraft.clusterPattern.trim();
+
+    if (!(await validateThemePatternDraft(clusterPattern))) {
+      return;
+    }
 
     try {
       const newTheme = buildThemeFromCurrentAppearance({
         theme: new types.Theme({
           id: crypto.randomUUID(),
           name: themeDraft.name.trim(),
-          clusterPattern: themeDraft.clusterPattern.trim(),
+          clusterPattern,
         }),
       });
       await saveTheme(newTheme);
@@ -425,7 +449,10 @@ function AppearanceSection() {
     }
   };
 
-  const handleThemeEditCancel = () => setEditingThemeId(null);
+  const handleThemeEditCancel = () => {
+    setThemePatternError(null);
+    setEditingThemeId(null);
+  };
 
   const handleDeleteThemeConfirm = async () => {
     if (!deleteConfirmThemeId) return;
@@ -453,19 +480,14 @@ function AppearanceSection() {
       } else {
         applyTintedPalette(0, 0, 0);
       }
-      savePaletteTintToLocalStorage(currentMode, tint.hue, tint.saturation, tint.brightness);
 
       const lightAccent = getAccentColor('light');
       const darkAccent = getAccentColor('dark');
       applyAccentColor(lightAccent, darkAccent);
       applyAccentBg(currentMode === 'light' ? lightAccent : darkAccent, currentMode);
-      saveAccentColorToLocalStorage('light', lightAccent);
-      saveAccentColorToLocalStorage('dark', darkAccent);
 
       const currentLinkColor = getLinkColor(currentMode);
       applyLinkColor(currentLinkColor, currentMode);
-      saveLinkColorToLocalStorage('light', getLinkColor('light'));
-      saveLinkColorToLocalStorage('dark', getLinkColor('dark'));
 
       setPaletteHue(tint.hue);
       setPaletteSaturation(tint.saturation);
@@ -895,11 +917,11 @@ function AppearanceSection() {
             Themes can be automatically applied to clusters whose name matches the pattern.
             <ul className="themes-help-list">
               <li>
-                Patterns support <code>*</code> <code>?</code> and simple regex like{' '}
+                Patterns support wildcards and ranges such as <code>*</code>, <code>?</code>, and{' '}
                 <code>[a-z]</code>
               </li>
-              <li>Themes applied based on first match.</li>
               <li>Empty patterns match any cluster name.</li>
+              <li>Themes are applied based on first match.</li>
               <li>Use the drag handles to change order.</li>
               <li>Default theme always resolves last.</li>
             </ul>
@@ -985,19 +1007,29 @@ function AppearanceSection() {
                           <input
                             className="theme-pattern-input"
                             value={themeDraft.clusterPattern}
-                            onChange={(e) =>
+                            onChange={(e) => {
+                              setThemePatternError(null);
                               setThemeDraft((d) => ({
                                 ...d,
                                 clusterPattern: e.target.value,
-                              }))
-                            }
+                              }));
+                            }}
                             placeholder="Cluster pattern (optional)"
+                            aria-invalid={themePatternError ? 'true' : undefined}
+                            aria-describedby={
+                              themePatternError ? 'theme-pattern-error-active' : undefined
+                            }
                             onKeyDown={(e) => {
                               if (e.key === 'Enter') handleSaveActiveTheme();
                               else if (e.key === 'Escape') handleCancelActiveTheme();
                               else e.stopPropagation();
                             }}
                           />
+                          {themePatternError && (
+                            <div id="theme-pattern-error-active" className="theme-pattern-error">
+                              {themePatternError}
+                            </div>
+                          )}
                         </div>
                       ) : (
                         <div className="theme-summary">
@@ -1080,19 +1112,27 @@ function AppearanceSection() {
                       <input
                         className="theme-pattern-input"
                         value={themeDraft.clusterPattern}
-                        onChange={(e) =>
+                        onChange={(e) => {
+                          setThemePatternError(null);
                           setThemeDraft((d) => ({
                             ...d,
                             clusterPattern: e.target.value,
-                          }))
-                        }
+                          }));
+                        }}
                         placeholder="Cluster pattern (optional)"
+                        aria-invalid={themePatternError ? 'true' : undefined}
+                        aria-describedby={themePatternError ? 'theme-pattern-error-new' : undefined}
                         onKeyDown={(e) => {
                           if (e.key === 'Enter') handleThemeSave();
                           else if (e.key === 'Escape') handleThemeEditCancel();
                           else e.stopPropagation();
                         }}
                       />
+                      {themePatternError && (
+                        <div id="theme-pattern-error-new" className="theme-pattern-error">
+                          {themePatternError}
+                        </div>
+                      )}
                     </div>
                     <button
                       type="button"
