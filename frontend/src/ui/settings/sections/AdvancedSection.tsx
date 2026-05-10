@@ -15,6 +15,8 @@ import {
   MAX_TABLE_ROWS_MAX,
   MAX_TABLE_ROWS_MIN,
   setMaxTableRows,
+  getSuppressNetworkErrorNotifications,
+  setSuppressNetworkErrorNotifications,
 } from '@/core/settings/appPreferences';
 import { clearTintedPalette } from '@utils/paletteTint';
 import { clearAccentColor } from '@utils/accentColor';
@@ -36,6 +38,9 @@ function AdvancedSection() {
   const [persistenceMode, setPersistenceMode] = useState<GridTablePersistenceMode>(() =>
     getGridTablePersistenceMode()
   );
+  const [suppressNetworkErrors, setSuppressNetworkErrors] = useState<boolean>(() =>
+    getSuppressNetworkErrorNotifications()
+  );
   const [isClearStateConfirmOpen, setIsClearStateConfirmOpen] = useState(false);
   const [isResetViewsConfirmOpen, setIsResetViewsConfirmOpen] = useState(false);
 
@@ -47,6 +52,7 @@ function AdvancedSection() {
         if (!cancelled) {
           setMaxTableRowsInput(String(prefs.maxTableRows ?? MAX_TABLE_ROWS_DEFAULT));
           setPersistenceMode(getGridTablePersistenceMode());
+          setSuppressNetworkErrors(prefs.suppressNetworkErrorNotifications ?? false);
         }
       } catch (error) {
         errorHandler.handle(error, { action: 'loadAdvancedSettings' });
@@ -58,6 +64,11 @@ function AdvancedSection() {
   }, []);
 
   const handleRefreshToggle = (enabled: boolean) => setAutoRefresh(enabled);
+
+  const handleSuppressNetworkErrorsToggle = (checked: boolean) => {
+    setSuppressNetworkErrors(checked);
+    setSuppressNetworkErrorNotifications(checked);
+  };
 
   const handlePersistenceModeToggle = (checked: boolean) => {
     const mode: GridTablePersistenceMode = checked ? 'namespaced' : 'shared';
@@ -150,6 +161,26 @@ function AdvancedSection() {
             checked={backgroundRefreshEnabled}
             onChange={setBackgroundRefresh}
             ariaLabel="Background clusters refresh"
+          />
+        </div>
+      </div>
+
+      <div className="settings-subgroup-label">Notifications</div>
+      <hr className="settings-subgroup-divider" />
+
+      <div className="settings-row">
+        <div className="settings-row-label">
+          <div className="settings-row-label-title">Suppress network errors</div>
+          <div className="settings-row-label-help">
+            Hide toast notifications for network connectivity errors. Errors are still logged.
+          </div>
+        </div>
+        <div className="settings-row-control">
+          <ToggleSwitch
+            id="suppress-network-errors"
+            checked={suppressNetworkErrors}
+            onChange={handleSuppressNetworkErrorsToggle}
+            ariaLabel="Suppress network error notifications"
           />
         </div>
       </div>
