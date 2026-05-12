@@ -6,6 +6,8 @@
 
 import {
   SetAppearanceMode,
+  SetDimInactiveNamespaces,
+  SetExclusiveNamespaces,
   SetUseShortResourceNames,
   SaveTheme,
   DeleteTheme,
@@ -19,6 +21,9 @@ import {
   SetObjPanelLogsAPITimestampUseLocalTimeZone as SetObjPanelLogsAPITimestampUseLocalTimeZoneBackend,
   SetObjPanelLogsTargetGlobalLimit as SetObjPanelLogsTargetGlobalLimitBackend,
   SetObjPanelLogsTargetPerScopeLimit as SetObjPanelLogsTargetPerScopeLimitBackend,
+  SetKubernetesClientBurst as SetKubernetesClientBurstBackend,
+  SetKubernetesClientQPS as SetKubernetesClientQPSBackend,
+  SetPermissionSSRRFetchConcurrency as SetPermissionSSRRFetchConcurrencyBackend,
 } from '@wailsjs/go/backend/App';
 import { types } from '@wailsjs/go/models';
 import { readAppSettings, readThemes, requestAppState } from '@/core/app-state-access';
@@ -37,10 +42,15 @@ export type ObjectPanelPosition = 'right' | 'bottom' | 'floating';
 interface AppPreferences {
   appearanceMode: AppearanceMode;
   useShortResourceNames: boolean;
+  dimInactiveNamespaces: boolean;
+  exclusiveNamespaces: boolean;
   autoRefreshEnabled: boolean;
   refreshBackgroundClustersEnabled: boolean;
   metricsRefreshIntervalMs: number;
   maxTableRows: number;
+  kubernetesClientQPS: number;
+  kubernetesClientBurst: number;
+  permissionSSRRFetchConcurrency: number;
   objPanelLogsBufferMaxSize: number;
   objPanelLogsApiTimestampFormat: string;
   objPanelLogsApiTimestampUseLocalTimeZone: boolean;
@@ -70,10 +80,15 @@ interface AppPreferences {
 interface AppSettingsPayload {
   appearanceMode?: string;
   useShortResourceNames?: boolean;
+  dimInactiveNamespaces?: boolean;
+  exclusiveNamespaces?: boolean;
   autoRefreshEnabled?: boolean;
   refreshBackgroundClustersEnabled?: boolean;
   metricsRefreshIntervalMs?: number;
   maxTableRows?: number;
+  kubernetesClientQPS?: number;
+  kubernetesClientBurst?: number;
+  permissionSSRRFetchConcurrency?: number;
   objPanelLogsBufferMaxSize?: number;
   objPanelLogsApiTimestampFormat?: string;
   objPanelLogsApiTimestampUseLocalTimeZone?: boolean;
@@ -115,6 +130,15 @@ export const OBJ_PANEL_LOGS_BUFFER_DEFAULT_SIZE = 1000;
 export const MAX_TABLE_ROWS_MIN = 100;
 export const MAX_TABLE_ROWS_MAX = 10000;
 export const MAX_TABLE_ROWS_DEFAULT = 1000;
+export const KUBERNETES_CLIENT_QPS_MIN = 1;
+export const KUBERNETES_CLIENT_QPS_MAX = 5000;
+export const KUBERNETES_CLIENT_QPS_DEFAULT = 200;
+export const KUBERNETES_CLIENT_BURST_MIN = 1;
+export const KUBERNETES_CLIENT_BURST_MAX = 10000;
+export const KUBERNETES_CLIENT_BURST_DEFAULT = 500;
+export const PERMISSION_SSRR_FETCH_CONCURRENCY_MIN = 1;
+export const PERMISSION_SSRR_FETCH_CONCURRENCY_MAX = 256;
+export const PERMISSION_SSRR_FETCH_CONCURRENCY_DEFAULT = 32;
 export const OBJ_PANEL_LOGS_TARGET_PER_SCOPE_MIN = 1;
 export const OBJ_PANEL_LOGS_TARGET_PER_SCOPE_MAX = 1000;
 export const OBJ_PANEL_LOGS_TARGET_PER_SCOPE_DEFAULT = 100;
@@ -125,12 +149,17 @@ export const OBJ_PANEL_LOGS_TARGET_GLOBAL_DEFAULT = 200;
 const DEFAULT_PREFERENCES: AppPreferences = {
   appearanceMode: 'system',
   useShortResourceNames: false,
+  dimInactiveNamespaces: true,
+  exclusiveNamespaces: true,
   autoRefreshEnabled: true,
   refreshBackgroundClustersEnabled: true,
   metricsRefreshIntervalMs: DEFAULT_METRICS_REFRESH_INTERVAL_MS,
   gridTablePersistenceMode: 'shared',
   suppressNetworkErrorNotifications: false,
   maxTableRows: MAX_TABLE_ROWS_DEFAULT,
+  kubernetesClientQPS: KUBERNETES_CLIENT_QPS_DEFAULT,
+  kubernetesClientBurst: KUBERNETES_CLIENT_BURST_DEFAULT,
+  permissionSSRRFetchConcurrency: PERMISSION_SSRR_FETCH_CONCURRENCY_DEFAULT,
   objPanelLogsBufferMaxSize: OBJ_PANEL_LOGS_BUFFER_DEFAULT_SIZE,
   objPanelLogsApiTimestampFormat: DEFAULT_OBJ_PANEL_LOGS_API_TIMESTAMP_FORMAT,
   objPanelLogsApiTimestampUseLocalTimeZone: false,
@@ -229,6 +258,40 @@ const normalizeMaxTableRows = (value?: number): number => {
   return floored;
 };
 
+const normalizeKubernetesClientQPS = (value?: number): number => {
+  if (value == null || Number.isNaN(value) || value <= 0) {
+    return KUBERNETES_CLIENT_QPS_DEFAULT;
+  }
+  const floored = Math.floor(value);
+  if (floored < KUBERNETES_CLIENT_QPS_MIN) return KUBERNETES_CLIENT_QPS_MIN;
+  if (floored > KUBERNETES_CLIENT_QPS_MAX) return KUBERNETES_CLIENT_QPS_MAX;
+  return floored;
+};
+
+const normalizeKubernetesClientBurst = (value?: number): number => {
+  if (value == null || Number.isNaN(value) || value <= 0) {
+    return KUBERNETES_CLIENT_BURST_DEFAULT;
+  }
+  const floored = Math.floor(value);
+  if (floored < KUBERNETES_CLIENT_BURST_MIN) return KUBERNETES_CLIENT_BURST_MIN;
+  if (floored > KUBERNETES_CLIENT_BURST_MAX) return KUBERNETES_CLIENT_BURST_MAX;
+  return floored;
+};
+
+const normalizePermissionSSRRFetchConcurrency = (value?: number): number => {
+  if (value == null || Number.isNaN(value) || value <= 0) {
+    return PERMISSION_SSRR_FETCH_CONCURRENCY_DEFAULT;
+  }
+  const floored = Math.floor(value);
+  if (floored < PERMISSION_SSRR_FETCH_CONCURRENCY_MIN) {
+    return PERMISSION_SSRR_FETCH_CONCURRENCY_MIN;
+  }
+  if (floored > PERMISSION_SSRR_FETCH_CONCURRENCY_MAX) {
+    return PERMISSION_SSRR_FETCH_CONCURRENCY_MAX;
+  }
+  return floored;
+};
+
 // Clamp to [OBJ_PANEL_LOGS_BUFFER_MIN_SIZE, OBJ_PANEL_LOGS_BUFFER_MAX_SIZE]. A zero/undefined
 // value from an old settings file (before this preference existed) maps
 // to the default, not to zero — otherwise an upgrade would wipe every
@@ -270,6 +333,12 @@ const emitPreferenceChanges = (previous: AppPreferences, next: AppPreferences): 
   if (previous.useShortResourceNames !== next.useShortResourceNames) {
     eventBus.emit('settings:short-names', next.useShortResourceNames);
   }
+  if (previous.dimInactiveNamespaces !== next.dimInactiveNamespaces) {
+    eventBus.emit('settings:dim-inactive-namespaces', next.dimInactiveNamespaces);
+  }
+  if (previous.exclusiveNamespaces !== next.exclusiveNamespaces) {
+    eventBus.emit('settings:exclusive-namespaces', next.exclusiveNamespaces);
+  }
   if (previous.autoRefreshEnabled !== next.autoRefreshEnabled) {
     eventBus.emit('settings:auto-refresh', next.autoRefreshEnabled);
   }
@@ -281,6 +350,18 @@ const emitPreferenceChanges = (previous: AppPreferences, next: AppPreferences): 
   }
   if (previous.maxTableRows !== next.maxTableRows) {
     eventBus.emit('settings:max-table-rows', next.maxTableRows);
+  }
+  if (previous.kubernetesClientQPS !== next.kubernetesClientQPS) {
+    eventBus.emit('settings:kubernetes-client-qps', next.kubernetesClientQPS);
+  }
+  if (previous.kubernetesClientBurst !== next.kubernetesClientBurst) {
+    eventBus.emit('settings:kubernetes-client-burst', next.kubernetesClientBurst);
+  }
+  if (previous.permissionSSRRFetchConcurrency !== next.permissionSSRRFetchConcurrency) {
+    eventBus.emit(
+      'settings:permission-ssrr-fetch-concurrency',
+      next.permissionSSRRFetchConcurrency
+    );
   }
   if (previous.objPanelLogsBufferMaxSize !== next.objPanelLogsBufferMaxSize) {
     eventBus.emit('settings:obj-panel-logs-buffer-size', next.objPanelLogsBufferMaxSize);
@@ -423,6 +504,10 @@ export const hydrateAppPreferences = async (options?: {
     appearanceMode: normalizeAppearanceMode(backendSettings?.appearanceMode),
     useShortResourceNames:
       backendSettings?.useShortResourceNames ?? DEFAULT_PREFERENCES.useShortResourceNames,
+    dimInactiveNamespaces:
+      backendSettings?.dimInactiveNamespaces ?? DEFAULT_PREFERENCES.dimInactiveNamespaces,
+    exclusiveNamespaces:
+      backendSettings?.exclusiveNamespaces ?? DEFAULT_PREFERENCES.exclusiveNamespaces,
     autoRefreshEnabled:
       backendSettings?.autoRefreshEnabled ?? DEFAULT_PREFERENCES.autoRefreshEnabled,
     refreshBackgroundClustersEnabled:
@@ -430,6 +515,11 @@ export const hydrateAppPreferences = async (options?: {
       DEFAULT_PREFERENCES.refreshBackgroundClustersEnabled,
     metricsRefreshIntervalMs: normalizeMetricsIntervalMs(backendSettings?.metricsRefreshIntervalMs),
     maxTableRows: normalizeMaxTableRows(backendSettings?.maxTableRows),
+    kubernetesClientQPS: normalizeKubernetesClientQPS(backendSettings?.kubernetesClientQPS),
+    kubernetesClientBurst: normalizeKubernetesClientBurst(backendSettings?.kubernetesClientBurst),
+    permissionSSRRFetchConcurrency: normalizePermissionSSRRFetchConcurrency(
+      backendSettings?.permissionSSRRFetchConcurrency
+    ),
     objPanelLogsBufferMaxSize: normalizeObjPanelLogsBufferMaxSize(
       backendSettings?.objPanelLogsBufferMaxSize
     ),
@@ -502,6 +592,14 @@ export const getUseShortResourceNames = (): boolean => {
   return preferenceCache.useShortResourceNames;
 };
 
+export const getDimInactiveNamespaces = (): boolean => {
+  return preferenceCache.dimInactiveNamespaces;
+};
+
+export const getExclusiveNamespaces = (): boolean => {
+  return preferenceCache.exclusiveNamespaces;
+};
+
 export const getAutoRefreshEnabled = (): boolean => {
   return preferenceCache.autoRefreshEnabled;
 };
@@ -516,6 +614,18 @@ export const getMetricsRefreshIntervalMs = (): number => {
 
 export const getMaxTableRows = (): number => {
   return preferenceCache.maxTableRows;
+};
+
+export const getKubernetesClientQPS = (): number => {
+  return preferenceCache.kubernetesClientQPS;
+};
+
+export const getKubernetesClientBurst = (): number => {
+  return preferenceCache.kubernetesClientBurst;
+};
+
+export const getPermissionSSRRFetchConcurrency = (): number => {
+  return preferenceCache.permissionSSRRFetchConcurrency;
 };
 
 export const getObjPanelLogsBufferMaxSize = (): number => {
@@ -661,6 +771,18 @@ export const setUseShortResourceNames = async (useShort: boolean): Promise<void>
   updatePreferenceCache({ useShortResourceNames: useShort });
 };
 
+export const setDimInactiveNamespaces = async (enabled: boolean): Promise<void> => {
+  await SetDimInactiveNamespaces(enabled);
+  hydrated = true;
+  updatePreferenceCache({ dimInactiveNamespaces: enabled });
+};
+
+export const setExclusiveNamespaces = async (enabled: boolean): Promise<void> => {
+  await SetExclusiveNamespaces(enabled);
+  hydrated = true;
+  updatePreferenceCache({ exclusiveNamespaces: enabled });
+};
+
 export const setAutoRefreshEnabled = (enabled: boolean): void => {
   hydrated = true;
   updatePreferenceCache({ autoRefreshEnabled: enabled });
@@ -694,6 +816,30 @@ const persistMaxTableRows = async (size: number): Promise<void> => {
     return;
   }
   await SetMaxTableRowsBackend(size);
+};
+
+const persistKubernetesClientQPS = async (qps: number): Promise<void> => {
+  const runtimeApp = (window as any)?.go?.backend?.App;
+  if (!runtimeApp) {
+    return;
+  }
+  await SetKubernetesClientQPSBackend(qps);
+};
+
+const persistKubernetesClientBurst = async (burst: number): Promise<void> => {
+  const runtimeApp = (window as any)?.go?.backend?.App;
+  if (!runtimeApp) {
+    return;
+  }
+  await SetKubernetesClientBurstBackend(burst);
+};
+
+const persistPermissionSSRRFetchConcurrency = async (limit: number): Promise<void> => {
+  const runtimeApp = (window as any)?.go?.backend?.App;
+  if (!runtimeApp) {
+    return;
+  }
+  await SetPermissionSSRRFetchConcurrencyBackend(limit);
 };
 
 const persistObjPanelLogsApiTimestampFormat = async (format: string): Promise<void> => {
@@ -743,6 +889,33 @@ export const setMaxTableRows = (size: number): void => {
   updatePreferenceCache({ maxTableRows: normalized });
   void persistMaxTableRows(normalized).catch((error) => {
     console.error('Failed to persist max table rows:', error);
+  });
+};
+
+export const setKubernetesClientQPS = (qps: number): void => {
+  const normalized = normalizeKubernetesClientQPS(qps);
+  hydrated = true;
+  updatePreferenceCache({ kubernetesClientQPS: normalized });
+  void persistKubernetesClientQPS(normalized).catch((error) => {
+    console.error('Failed to persist Kubernetes client QPS:', error);
+  });
+};
+
+export const setKubernetesClientBurst = (burst: number): void => {
+  const normalized = normalizeKubernetesClientBurst(burst);
+  hydrated = true;
+  updatePreferenceCache({ kubernetesClientBurst: normalized });
+  void persistKubernetesClientBurst(normalized).catch((error) => {
+    console.error('Failed to persist Kubernetes client burst:', error);
+  });
+};
+
+export const setPermissionSSRRFetchConcurrency = (limit: number): void => {
+  const normalized = normalizePermissionSSRRFetchConcurrency(limit);
+  hydrated = true;
+  updatePreferenceCache({ permissionSSRRFetchConcurrency: normalized });
+  void persistPermissionSSRRFetchConcurrency(normalized).catch((error) => {
+    console.error('Failed to persist permission SSRR fetch concurrency:', error);
   });
 };
 

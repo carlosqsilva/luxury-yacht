@@ -34,8 +34,18 @@ import {
 import { applyAccentColor, applyAccentBg } from '@utils/accentColor';
 import { applyLinkColor } from '@utils/linkColor';
 import ConfirmationModal from '@shared/components/modals/ConfirmationModal';
-import SegmentedButton from '@shared/components/SegmentedButton';
-import { EditIcon, DeleteIcon, CheckIcon, CloseIcon } from '@shared/components/icons/MenuIcons';
+import {
+  EditIcon,
+  DeleteIcon,
+  CheckIcon,
+  CloseIcon,
+  PlusIcon,
+} from '@shared/components/icons/SharedIcons';
+import {
+  AppearanceModeIcon,
+  DarkModeIcon,
+  LightModeIcon,
+} from '@shared/components/icons/SettingsIcons';
 
 const DEFAULT_THEME_ID = 'default';
 
@@ -44,6 +54,12 @@ const isDefaultTheme = (theme: types.Theme) => theme.id === DEFAULT_THEME_ID;
 type PaletteSliderStyle = CSSProperties & {
   '--palette-slider-thumb'?: string;
 };
+
+const appearanceModeOptions = [
+  { value: 'system', label: 'System', icon: AppearanceModeIcon },
+  { value: 'light', label: 'Light', icon: LightModeIcon },
+  { value: 'dark', label: 'Dark', icon: DarkModeIcon },
+] as const;
 
 const buildPaletteSliderStyle = (thumbColor: string, background?: string): PaletteSliderStyle => ({
   '--palette-slider-thumb': thumbColor,
@@ -702,23 +718,40 @@ function AppearanceSection() {
       <div className="settings-row">
         <div className="settings-row-label">
           <div className="settings-row-label-title">Mode</div>
-          <div className="settings-row-label-help">Match the system or pick a fixed mode.</div>
+          <div className="settings-row-label-help">
+            Follow the system mode or choose light/dark mode.
+          </div>
         </div>
         <div className="settings-row-control">
-          <SegmentedButton
-            options={[
-              { value: 'system', label: 'System' },
-              { value: 'light', label: 'Light' },
-              { value: 'dark', label: 'Dark' },
-            ]}
-            value={mode}
-            onChange={handleAppearanceModeChange}
-          />
+          <div className="settings-choice-buttons" role="group" aria-label="Appearance mode">
+            {appearanceModeOptions.map((option) => {
+              const Icon = option.icon;
+              const isSelected = mode === option.value;
+              return (
+                <button
+                  key={option.value}
+                  type="button"
+                  className={`settings-choice-button${isSelected ? ' settings-choice-button--active' : ''}`}
+                  aria-pressed={isSelected}
+                  onClick={() => handleAppearanceModeChange(option.value)}
+                >
+                  <Icon width={18} height={18} />
+                  <span>{option.label}</span>
+                </button>
+              );
+            })}
+          </div>
         </div>
       </div>
 
       <div className="settings-subgroup-label">Theme</div>
       <hr className="settings-subgroup-divider" />
+
+      <div className="settings-subgroup-description">
+        Each theme stores data for both light and dark modes. The default theme can be modified but
+        cannot be deleted. Use pattern matching to automatically apply themes based on the cluster
+        name -- for example, a red theme for prod clusters, blue for dev, etc.
+      </div>
 
       <div className="settings-row">
         <div className="settings-row-label">
@@ -920,10 +953,9 @@ function AppearanceSection() {
                 Patterns support wildcards and ranges such as <code>*</code>, <code>?</code>, and{' '}
                 <code>[a-z]</code>
               </li>
-              <li>Empty patterns match any cluster name.</li>
               <li>Themes are applied based on first match.</li>
               <li>Use the drag handles to change order.</li>
-              <li>Default theme always resolves last.</li>
+              <li>Default theme always resolves last, and matches any cluster name.</li>
             </ul>
             {}
           </div>
@@ -938,9 +970,7 @@ function AppearanceSection() {
                   activeThemeId !== DEFAULT_THEME_ID &&
                   defaultTheme && (
                     <div className="themes-unsaved-default" role="status">
-                      <span>
-                        There are unsaved changes. Would you like to save them as the default theme?
-                      </span>
+                      <span>There are unsaved changes. Save as default?</span>
                       <button
                         type="button"
                         className="themes-unsaved-default-action"
@@ -958,7 +988,7 @@ function AppearanceSection() {
                   return (
                     <div
                       key={theme.id}
-                      className={`themes-table-row${isDragging ? ' themes-table-row--dragging' : ''}${isDropTarget ? ' themes-table-row--drop-target' : ''}${activeThemeId && activeThemeId !== theme.id ? ' themes-table-row--dimmed' : ''}`}
+                      className={`setting-item setting-item-surface themes-table-row${isDragging ? ' themes-table-row--dragging' : ''}${isDropTarget ? ' themes-table-row--drop-target' : ''}${activeThemeId && activeThemeId !== theme.id ? ' themes-table-row--dimmed' : ''}`}
                       onDragOver={(e) => {
                         if (!draggingThemeId || isDefault) return;
                         e.preventDefault();
@@ -997,7 +1027,7 @@ function AppearanceSection() {
                             className="theme-name-input"
                             value={themeDraft.name}
                             onChange={(e) => setThemeDraft((d) => ({ ...d, name: e.target.value }))}
-                            placeholder="Theme name"
+                            placeholder="Name"
                             onKeyDown={(e) => {
                               if (e.key === 'Enter') handleSaveActiveTheme();
                               else if (e.key === 'Escape') handleCancelActiveTheme();
@@ -1014,7 +1044,7 @@ function AppearanceSection() {
                                 clusterPattern: e.target.value,
                               }));
                             }}
-                            placeholder="Cluster pattern (optional)"
+                            placeholder="Pattern (optional)"
                             aria-invalid={themePatternError ? 'true' : undefined}
                             aria-describedby={
                               themePatternError ? 'theme-pattern-error-active' : undefined
@@ -1094,14 +1124,14 @@ function AppearanceSection() {
                   );
                 })}
                 {editingThemeId === 'new' ? (
-                  <div className="themes-table-row themes-table-row--new">
+                  <div className="setting-item setting-item-surface themes-table-row themes-table-row--new">
                     <span className="themes-drag-handle themes-drag-handle--placeholder"></span>
                     <div className="theme-fields">
                       <input
                         className="theme-name-input"
                         value={themeDraft.name}
                         onChange={(e) => setThemeDraft((d) => ({ ...d, name: e.target.value }))}
-                        placeholder="Theme name"
+                        placeholder="Name"
                         autoFocus
                         onKeyDown={(e) => {
                           if (e.key === 'Enter') handleThemeSave();
@@ -1119,7 +1149,7 @@ function AppearanceSection() {
                             clusterPattern: e.target.value,
                           }));
                         }}
-                        placeholder="Cluster pattern (optional)"
+                        placeholder="Pattern (optional)"
                         aria-invalid={themePatternError ? 'true' : undefined}
                         aria-describedby={themePatternError ? 'theme-pattern-error-new' : undefined}
                         onKeyDown={(e) => {
@@ -1156,10 +1186,11 @@ function AppearanceSection() {
                 ) : (
                   <button
                     type="button"
-                    className="themes-save-new-row"
+                    className="button generic settings-add-button themes-save-new-row"
                     onClick={handleSaveCurrentAsTheme}
                   >
-                    + Save new theme
+                    <PlusIcon width={12} height={12} ariaHidden />
+                    Save new theme
                   </button>
                 )}
               </div>

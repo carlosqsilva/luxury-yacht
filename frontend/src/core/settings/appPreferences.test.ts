@@ -10,7 +10,11 @@ import {
   getAppearanceModePreference,
   getAutoRefreshEnabled,
   getBackgroundRefreshEnabled,
+  getDimInactiveNamespaces,
+  getExclusiveNamespaces,
   getGridTablePersistenceMode,
+  getKubernetesClientBurst,
+  getKubernetesClientQPS,
   getObjPanelLogsApiTimestampFormat,
   getObjPanelLogsApiTimestampUseLocalTimeZone,
   getObjPanelLogsBufferMaxSize,
@@ -19,8 +23,15 @@ import {
   getObjPanelLogsTargetPerScopeLimit,
   getMetricsRefreshIntervalMs,
   getPaletteTint,
+  getPermissionSSRRFetchConcurrency,
   getUseShortResourceNames,
   hydrateAppPreferences,
+  KUBERNETES_CLIENT_BURST_DEFAULT,
+  KUBERNETES_CLIENT_BURST_MAX,
+  KUBERNETES_CLIENT_BURST_MIN,
+  KUBERNETES_CLIENT_QPS_DEFAULT,
+  KUBERNETES_CLIENT_QPS_MAX,
+  KUBERNETES_CLIENT_QPS_MIN,
   OBJ_PANEL_LOGS_BUFFER_DEFAULT_SIZE,
   OBJ_PANEL_LOGS_BUFFER_MAX_SIZE,
   OBJ_PANEL_LOGS_BUFFER_MIN_SIZE,
@@ -31,12 +42,19 @@ import {
   OBJ_PANEL_LOGS_TARGET_GLOBAL_MAX,
   OBJ_PANEL_LOGS_TARGET_PER_SCOPE_DEFAULT,
   OBJ_PANEL_LOGS_TARGET_PER_SCOPE_MAX,
+  PERMISSION_SSRR_FETCH_CONCURRENCY_DEFAULT,
+  PERMISSION_SSRR_FETCH_CONCURRENCY_MAX,
+  PERMISSION_SSRR_FETCH_CONCURRENCY_MIN,
   resetAppPreferencesCacheForTesting,
   setAccentColor,
   setAppearanceModePreference,
   setAutoRefreshEnabled,
   setBackgroundRefreshEnabled,
+  setDimInactiveNamespaces,
+  setExclusiveNamespaces,
   setGridTablePersistenceMode,
+  setKubernetesClientBurst,
+  setKubernetesClientQPS,
   setObjPanelLogsApiTimestampFormat,
   setObjPanelLogsApiTimestampUseLocalTimeZone,
   setObjPanelLogsBufferMaxSize,
@@ -44,6 +62,7 @@ import {
   setObjPanelLogsTargetGlobalLimit,
   setObjPanelLogsTargetPerScopeLimit,
   setPaletteTint,
+  setPermissionSSRRFetchConcurrency,
   setUseShortResourceNames,
   validateThemeClusterPattern,
 } from './appPreferences';
@@ -51,6 +70,8 @@ import {
 const appMocks = vi.hoisted(() => ({
   GetAppSettings: vi.fn(),
   SetAppearanceMode: vi.fn(),
+  SetDimInactiveNamespaces: vi.fn(),
+  SetExclusiveNamespaces: vi.fn(),
   SetUseShortResourceNames: vi.fn(),
   SetObjPanelLogsAPITimestampFormat: vi.fn(),
   SetObjPanelLogsAPITimestampUseLocalTimeZone: vi.fn(),
@@ -58,12 +79,17 @@ const appMocks = vi.hoisted(() => ({
   SetObjPanelLogsBufferMaxSize: vi.fn(),
   SetObjPanelLogsTargetPerScopeLimit: vi.fn(),
   SetObjPanelLogsTargetGlobalLimit: vi.fn(),
+  SetKubernetesClientQPS: vi.fn(),
+  SetKubernetesClientBurst: vi.fn(),
+  SetPermissionSSRRFetchConcurrency: vi.fn(),
   ValidateThemeClusterPattern: vi.fn(),
 }));
 
 vi.mock('@wailsjs/go/backend/App', () => ({
   GetAppSettings: (...args: unknown[]) => appMocks.GetAppSettings(...args),
   SetAppearanceMode: (...args: unknown[]) => appMocks.SetAppearanceMode(...args),
+  SetDimInactiveNamespaces: (...args: unknown[]) => appMocks.SetDimInactiveNamespaces(...args),
+  SetExclusiveNamespaces: (...args: unknown[]) => appMocks.SetExclusiveNamespaces(...args),
   SetUseShortResourceNames: (...args: unknown[]) => appMocks.SetUseShortResourceNames(...args),
   SetObjPanelLogsAPITimestampFormat: (...args: unknown[]) =>
     appMocks.SetObjPanelLogsAPITimestampFormat(...args),
@@ -76,6 +102,10 @@ vi.mock('@wailsjs/go/backend/App', () => ({
     appMocks.SetObjPanelLogsTargetPerScopeLimit(...args),
   SetObjPanelLogsTargetGlobalLimit: (...args: unknown[]) =>
     appMocks.SetObjPanelLogsTargetGlobalLimit(...args),
+  SetKubernetesClientQPS: (...args: unknown[]) => appMocks.SetKubernetesClientQPS(...args),
+  SetKubernetesClientBurst: (...args: unknown[]) => appMocks.SetKubernetesClientBurst(...args),
+  SetPermissionSSRRFetchConcurrency: (...args: unknown[]) =>
+    appMocks.SetPermissionSSRRFetchConcurrency(...args),
   ValidateThemeClusterPattern: (...args: unknown[]) =>
     appMocks.ValidateThemeClusterPattern(...args),
 }));
@@ -85,6 +115,8 @@ describe('appPreferences', () => {
     resetAppPreferencesCacheForTesting();
     appMocks.GetAppSettings.mockReset();
     appMocks.SetAppearanceMode.mockReset();
+    appMocks.SetDimInactiveNamespaces.mockReset();
+    appMocks.SetExclusiveNamespaces.mockReset();
     appMocks.SetUseShortResourceNames.mockReset();
     appMocks.SetObjPanelLogsAPITimestampFormat.mockReset();
     appMocks.SetObjPanelLogsAPITimestampUseLocalTimeZone.mockReset();
@@ -92,6 +124,9 @@ describe('appPreferences', () => {
     appMocks.SetObjPanelLogsBufferMaxSize.mockReset();
     appMocks.SetObjPanelLogsTargetPerScopeLimit.mockReset();
     appMocks.SetObjPanelLogsTargetGlobalLimit.mockReset();
+    appMocks.SetKubernetesClientQPS.mockReset();
+    appMocks.SetKubernetesClientBurst.mockReset();
+    appMocks.SetPermissionSSRRFetchConcurrency.mockReset();
     appMocks.ValidateThemeClusterPattern.mockReset();
     appMocks.SetObjPanelLogsAPITimestampFormat.mockResolvedValue(undefined);
     appMocks.SetObjPanelLogsAPITimestampUseLocalTimeZone.mockResolvedValue(undefined);
@@ -99,6 +134,9 @@ describe('appPreferences', () => {
     appMocks.SetObjPanelLogsBufferMaxSize.mockResolvedValue(undefined);
     appMocks.SetObjPanelLogsTargetPerScopeLimit.mockResolvedValue(undefined);
     appMocks.SetObjPanelLogsTargetGlobalLimit.mockResolvedValue(undefined);
+    appMocks.SetKubernetesClientQPS.mockResolvedValue(undefined);
+    appMocks.SetKubernetesClientBurst.mockResolvedValue(undefined);
+    appMocks.SetPermissionSSRRFetchConcurrency.mockResolvedValue(undefined);
     (window as any).go = {
       backend: {
         App: {
@@ -111,6 +149,9 @@ describe('appPreferences', () => {
           SetObjPanelLogsBufferMaxSize: vi.fn().mockResolvedValue(undefined),
           SetObjPanelLogsTargetPerScopeLimit: vi.fn().mockResolvedValue(undefined),
           SetObjPanelLogsTargetGlobalLimit: vi.fn().mockResolvedValue(undefined),
+          SetKubernetesClientQPS: vi.fn().mockResolvedValue(undefined),
+          SetKubernetesClientBurst: vi.fn().mockResolvedValue(undefined),
+          SetPermissionSSRRFetchConcurrency: vi.fn().mockResolvedValue(undefined),
           SetPaletteTint: vi.fn().mockResolvedValue(undefined),
           SetAccentColor: vi.fn().mockResolvedValue(undefined),
         },
@@ -139,10 +180,15 @@ describe('appPreferences', () => {
     appMocks.GetAppSettings.mockResolvedValue({
       appearanceMode: 'light',
       useShortResourceNames: true,
+      dimInactiveNamespaces: false,
+      exclusiveNamespaces: false,
       autoRefreshEnabled: false,
       refreshBackgroundClustersEnabled: false,
       metricsRefreshIntervalMs: 7000,
       maxTableRows: 2500,
+      kubernetesClientQPS: 250,
+      kubernetesClientBurst: 500,
+      permissionSSRRFetchConcurrency: 16,
       objPanelLogsApiTimestampFormat: 'HH:mm:ss.SSS',
       objPanelLogsApiTimestampUseLocalTimeZone: true,
       objPanelLogsTargetPerScopeLimit: 144,
@@ -162,10 +208,15 @@ describe('appPreferences', () => {
 
     expect(getAppearanceModePreference()).toBe('light');
     expect(getUseShortResourceNames()).toBe(true);
+    expect(getDimInactiveNamespaces()).toBe(false);
+    expect(getExclusiveNamespaces()).toBe(false);
     expect(getAutoRefreshEnabled()).toBe(false);
     expect(getBackgroundRefreshEnabled()).toBe(false);
     expect(getMetricsRefreshIntervalMs()).toBe(7000);
     expect(getMaxTableRows()).toBe(2500);
+    expect(getKubernetesClientQPS()).toBe(250);
+    expect(getKubernetesClientBurst()).toBe(500);
+    expect(getPermissionSSRRFetchConcurrency()).toBe(16);
     expect(getObjPanelLogsApiTimestampFormat()).toBe('HH:mm:ss.SSS');
     expect(getObjPanelLogsApiTimestampUseLocalTimeZone()).toBe(true);
     expect(getObjPanelLogsTargetPerScopeLimit()).toBe(144);
@@ -188,6 +239,8 @@ describe('appPreferences', () => {
     expect(getPaletteTint('dark')).toEqual({ hue: 0, saturation: 0, brightness: 0 });
     expect(getAccentColor('light')).toBe('');
     expect(getAccentColor('dark')).toBe('');
+    expect(getDimInactiveNamespaces()).toBe(true);
+    expect(getExclusiveNamespaces()).toBe(true);
   });
 
   it('normalizes an invalid persisted Object Panel Logs Tab API timestamp format back to the default', async () => {
@@ -205,6 +258,8 @@ describe('appPreferences', () => {
     appMocks.GetAppSettings.mockResolvedValue({
       appearanceMode: 'system',
       useShortResourceNames: false,
+      dimInactiveNamespaces: true,
+      exclusiveNamespaces: true,
       autoRefreshEnabled: true,
       refreshBackgroundClustersEnabled: true,
       metricsRefreshIntervalMs: 6000,
@@ -215,18 +270,28 @@ describe('appPreferences', () => {
 
     await setAppearanceModePreference('dark');
     await setUseShortResourceNames(true);
+    await setDimInactiveNamespaces(false);
+    await setExclusiveNamespaces(false);
     setObjPanelLogsApiTimestampFormat('HH:mm:ss.SSS');
     setObjPanelLogsApiTimestampUseLocalTimeZone(true);
     setMaxTableRows(2500);
+    setKubernetesClientQPS(250);
+    setKubernetesClientBurst(500);
+    setPermissionSSRRFetchConcurrency(16);
     setAutoRefreshEnabled(false);
     setBackgroundRefreshEnabled(false);
     setGridTablePersistenceMode('namespaced');
 
     expect(appMocks.SetAppearanceMode).toHaveBeenCalledWith('dark');
     expect(appMocks.SetUseShortResourceNames).toHaveBeenCalledWith(true);
+    expect(appMocks.SetDimInactiveNamespaces).toHaveBeenCalledWith(false);
+    expect(appMocks.SetExclusiveNamespaces).toHaveBeenCalledWith(false);
     expect(appMocks.SetObjPanelLogsAPITimestampFormat).toHaveBeenCalledWith('HH:mm:ss.SSS');
     expect(appMocks.SetObjPanelLogsAPITimestampUseLocalTimeZone).toHaveBeenCalledWith(true);
     expect(appMocks.SetMaxTableRows).toHaveBeenCalledWith(2500);
+    expect(appMocks.SetKubernetesClientQPS).toHaveBeenCalledWith(250);
+    expect(appMocks.SetKubernetesClientBurst).toHaveBeenCalledWith(500);
+    expect(appMocks.SetPermissionSSRRFetchConcurrency).toHaveBeenCalledWith(16);
     expect((window as any).go.backend.App.SetAutoRefreshEnabled).toHaveBeenCalledWith(false);
     expect((window as any).go.backend.App.SetBackgroundRefreshEnabled).toHaveBeenCalledWith(false);
     expect((window as any).go.backend.App.SetGridTablePersistenceMode).toHaveBeenCalledWith(
@@ -235,9 +300,14 @@ describe('appPreferences', () => {
 
     expect(getAppearanceModePreference()).toBe('dark');
     expect(getUseShortResourceNames()).toBe(true);
+    expect(getDimInactiveNamespaces()).toBe(false);
+    expect(getExclusiveNamespaces()).toBe(false);
     expect(getObjPanelLogsApiTimestampFormat()).toBe('HH:mm:ss.SSS');
     expect(getObjPanelLogsApiTimestampUseLocalTimeZone()).toBe(true);
     expect(getMaxTableRows()).toBe(2500);
+    expect(getKubernetesClientQPS()).toBe(250);
+    expect(getKubernetesClientBurst()).toBe(500);
+    expect(getPermissionSSRRFetchConcurrency()).toBe(16);
     expect(getAutoRefreshEnabled()).toBe(false);
     expect(getBackgroundRefreshEnabled()).toBe(false);
     expect(getMetricsRefreshIntervalMs()).toBe(6000);
@@ -375,6 +445,79 @@ describe('appPreferences', () => {
 
     setMaxTableRows(999_999);
     expect(getMaxTableRows()).toBe(MAX_TABLE_ROWS_MAX);
+  });
+
+  it('defaults Kubernetes API settings when backend payload is missing the fields', async () => {
+    appMocks.GetAppSettings.mockResolvedValue({ appearanceMode: 'system' });
+    await hydrateAppPreferences({ force: true });
+    expect(getKubernetesClientQPS()).toBe(KUBERNETES_CLIENT_QPS_DEFAULT);
+    expect(getKubernetesClientBurst()).toBe(KUBERNETES_CLIENT_BURST_DEFAULT);
+    expect(getPermissionSSRRFetchConcurrency()).toBe(PERMISSION_SSRR_FETCH_CONCURRENCY_DEFAULT);
+  });
+
+  it('setKubernetesClientQPS round-trips an in-range value through the cache and backend', async () => {
+    appMocks.GetAppSettings.mockResolvedValue({ appearanceMode: 'system' });
+    await hydrateAppPreferences({ force: true });
+
+    setKubernetesClientQPS(250);
+    expect(getKubernetesClientQPS()).toBe(250);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(appMocks.SetKubernetesClientQPS).toHaveBeenCalledWith(250);
+  });
+
+  it('setKubernetesClientQPS clamps values outside the allowed range', async () => {
+    appMocks.GetAppSettings.mockResolvedValue({ appearanceMode: 'system' });
+    await hydrateAppPreferences({ force: true });
+
+    setKubernetesClientQPS(0);
+    expect(getKubernetesClientQPS()).toBe(KUBERNETES_CLIENT_QPS_DEFAULT);
+
+    setKubernetesClientQPS(-1);
+    expect(getKubernetesClientQPS()).toBe(KUBERNETES_CLIENT_QPS_DEFAULT);
+
+    setKubernetesClientQPS(999_999);
+    expect(getKubernetesClientQPS()).toBe(KUBERNETES_CLIENT_QPS_MAX);
+
+    setKubernetesClientQPS(KUBERNETES_CLIENT_QPS_MIN - 0.1);
+    expect(getKubernetesClientQPS()).toBe(KUBERNETES_CLIENT_QPS_MIN);
+  });
+
+  it('setKubernetesClientBurst round-trips and clamps values', async () => {
+    appMocks.GetAppSettings.mockResolvedValue({ appearanceMode: 'system' });
+    await hydrateAppPreferences({ force: true });
+
+    setKubernetesClientBurst(500);
+    expect(getKubernetesClientBurst()).toBe(500);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(appMocks.SetKubernetesClientBurst).toHaveBeenCalledWith(500);
+
+    setKubernetesClientBurst(0);
+    expect(getKubernetesClientBurst()).toBe(KUBERNETES_CLIENT_BURST_DEFAULT);
+
+    setKubernetesClientBurst(999_999);
+    expect(getKubernetesClientBurst()).toBe(KUBERNETES_CLIENT_BURST_MAX);
+
+    setKubernetesClientBurst(KUBERNETES_CLIENT_BURST_MIN - 0.1);
+    expect(getKubernetesClientBurst()).toBe(KUBERNETES_CLIENT_BURST_MIN);
+  });
+
+  it('setPermissionSSRRFetchConcurrency round-trips and clamps values', async () => {
+    appMocks.GetAppSettings.mockResolvedValue({ appearanceMode: 'system' });
+    await hydrateAppPreferences({ force: true });
+
+    setPermissionSSRRFetchConcurrency(16);
+    expect(getPermissionSSRRFetchConcurrency()).toBe(16);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(appMocks.SetPermissionSSRRFetchConcurrency).toHaveBeenCalledWith(16);
+
+    setPermissionSSRRFetchConcurrency(0);
+    expect(getPermissionSSRRFetchConcurrency()).toBe(PERMISSION_SSRR_FETCH_CONCURRENCY_DEFAULT);
+
+    setPermissionSSRRFetchConcurrency(999_999);
+    expect(getPermissionSSRRFetchConcurrency()).toBe(PERMISSION_SSRR_FETCH_CONCURRENCY_MAX);
+
+    setPermissionSSRRFetchConcurrency(PERMISSION_SSRR_FETCH_CONCURRENCY_MIN - 0.1);
+    expect(getPermissionSSRRFetchConcurrency()).toBe(PERMISSION_SSRR_FETCH_CONCURRENCY_MIN);
   });
 
   it('defaults Object Panel Logs Tab buffer size when the backend payload is missing the field', async () => {

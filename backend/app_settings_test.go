@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"k8s.io/client-go/rest"
 )
 
 func newTestAppWithDefaults(t *testing.T) *App {
@@ -85,10 +86,15 @@ func TestAppSaveAndLoadAppSettingsRoundTrip(t *testing.T) {
 		AppearanceMode:                           "dark",
 		SelectedKubeconfigs:                      []string{"/tmp/config:ctx"},
 		UseShortResourceNames:                    true,
+		DimInactiveNamespaces:                    false,
+		ExclusiveNamespaces:                      false,
 		AutoRefreshEnabled:                       false,
 		RefreshBackgroundClustersEnabled:         false,
 		MetricsRefreshIntervalMs:                 7000,
 		MaxTableRows:                             2500,
+		KubernetesClientQPS:                      250,
+		KubernetesClientBurst:                    500,
+		PermissionSSRRFetchConcurrency:           16,
 		ObjPanelLogsBufferMaxSize:                2500,
 		ObjPanelLogsTargetPerScopeLimit:          144,
 		ObjPanelLogsTargetGlobalLimit:            180,
@@ -118,11 +124,16 @@ func TestAppSaveAndLoadAppSettingsRoundTrip(t *testing.T) {
 	require.NoError(t, app.loadAppSettings())
 	require.Equal(t, "dark", app.appSettings.AppearanceMode)
 	require.True(t, app.appSettings.UseShortResourceNames)
+	require.False(t, app.appSettings.DimInactiveNamespaces)
+	require.False(t, app.appSettings.ExclusiveNamespaces)
 	require.Equal(t, []string{"/tmp/config:ctx"}, app.appSettings.SelectedKubeconfigs)
 	require.False(t, app.appSettings.AutoRefreshEnabled)
 	require.False(t, app.appSettings.RefreshBackgroundClustersEnabled)
 	require.Equal(t, 7000, app.appSettings.MetricsRefreshIntervalMs)
 	require.Equal(t, 2500, app.appSettings.MaxTableRows)
+	require.Equal(t, 250, app.appSettings.KubernetesClientQPS)
+	require.Equal(t, 500, app.appSettings.KubernetesClientBurst)
+	require.Equal(t, 16, app.appSettings.PermissionSSRRFetchConcurrency)
 	require.Equal(t, 2500, app.appSettings.ObjPanelLogsBufferMaxSize)
 	require.Equal(t, 144, app.appSettings.ObjPanelLogsTargetPerScopeLimit)
 	require.Equal(t, 180, app.appSettings.ObjPanelLogsTargetGlobalLimit)
@@ -183,6 +194,50 @@ func TestAppSetUseShortResourceNamesPersists(t *testing.T) {
 	last := entries[len(entries)-1]
 	require.Equal(t, "INFO", last.Level)
 	require.Contains(t, last.Message, "Use short resource names changed to: true")
+}
+
+func TestAppSetDimInactiveNamespacesPersists(t *testing.T) {
+	setTestConfigEnv(t)
+	app := newTestAppWithDefaults(t)
+
+	settings, err := app.GetAppSettings()
+	require.NoError(t, err)
+	require.True(t, settings.DimInactiveNamespaces)
+
+	require.NoError(t, app.SetDimInactiveNamespaces(false))
+	require.False(t, app.appSettings.DimInactiveNamespaces)
+
+	app.appSettings = nil
+	require.NoError(t, app.loadAppSettings())
+	require.False(t, app.appSettings.DimInactiveNamespaces)
+
+	entries := app.logger.GetEntries()
+	require.NotEmpty(t, entries)
+	last := entries[len(entries)-1]
+	require.Equal(t, "INFO", last.Level)
+	require.Contains(t, last.Message, "Dim inactive namespaces changed to: false")
+}
+
+func TestAppSetExclusiveNamespacesPersists(t *testing.T) {
+	setTestConfigEnv(t)
+	app := newTestAppWithDefaults(t)
+
+	settings, err := app.GetAppSettings()
+	require.NoError(t, err)
+	require.True(t, settings.ExclusiveNamespaces)
+
+	require.NoError(t, app.SetExclusiveNamespaces(false))
+	require.False(t, app.appSettings.ExclusiveNamespaces)
+
+	app.appSettings = nil
+	require.NoError(t, app.loadAppSettings())
+	require.False(t, app.appSettings.ExclusiveNamespaces)
+
+	entries := app.logger.GetEntries()
+	require.NotEmpty(t, entries)
+	last := entries[len(entries)-1]
+	require.Equal(t, "INFO", last.Level)
+	require.Contains(t, last.Message, "Exclusive namespaces changed to: false")
 }
 
 func TestAppSetAutoRefreshEnabledPersists(t *testing.T) {
@@ -282,6 +337,82 @@ func TestAppSetMaxTableRowsPersistsAndClamps(t *testing.T) {
 	settings, err := freshApp.GetAppSettings()
 	require.NoError(t, err)
 	require.Equal(t, defaultMaxTableRows, settings.MaxTableRows)
+}
+
+func TestAppSetKubernetesAPISettingsPersistAndClamp(t *testing.T) {
+	setTestConfigEnv(t)
+
+	app := newTestAppWithDefaults(t)
+	require.NoError(t, app.SetKubernetesClientQPS(250))
+	require.NoError(t, app.SetKubernetesClientBurst(500))
+	require.NoError(t, app.SetPermissionSSRRFetchConcurrency(16))
+	require.Equal(t, 250, app.appSettings.KubernetesClientQPS)
+	require.Equal(t, 500, app.appSettings.KubernetesClientBurst)
+	require.Equal(t, 16, app.appSettings.PermissionSSRRFetchConcurrency)
+
+	app.appSettings = nil
+	require.NoError(t, app.loadAppSettings())
+	require.Equal(t, 250, app.appSettings.KubernetesClientQPS)
+	require.Equal(t, 500, app.appSettings.KubernetesClientBurst)
+	require.Equal(t, 16, app.appSettings.PermissionSSRRFetchConcurrency)
+
+	require.NoError(t, app.SetKubernetesClientQPS(0))
+	require.Equal(t, minKubernetesClientQPS, app.appSettings.KubernetesClientQPS)
+	require.NoError(t, app.SetKubernetesClientQPS(999_999))
+	require.Equal(t, maxKubernetesClientQPS, app.appSettings.KubernetesClientQPS)
+
+	require.NoError(t, app.SetKubernetesClientBurst(0))
+	require.Equal(t, minKubernetesClientBurst, app.appSettings.KubernetesClientBurst)
+	require.NoError(t, app.SetKubernetesClientBurst(999_999))
+	require.Equal(t, maxKubernetesClientBurst, app.appSettings.KubernetesClientBurst)
+
+	require.NoError(t, app.SetPermissionSSRRFetchConcurrency(0))
+	require.Equal(t, minPermissionSSRRFetchConcurrency, app.appSettings.PermissionSSRRFetchConcurrency)
+	require.NoError(t, app.SetPermissionSSRRFetchConcurrency(999_999))
+	require.Equal(t, maxPermissionSSRRFetchConcurrency, app.appSettings.PermissionSSRRFetchConcurrency)
+
+	setTestConfigEnv(t)
+	freshApp := newTestAppWithDefaults(t)
+	settings, err := freshApp.GetAppSettings()
+	require.NoError(t, err)
+	require.Equal(t, defaultKubernetesClientQPS, settings.KubernetesClientQPS)
+	require.Equal(t, defaultKubernetesClientBurst, settings.KubernetesClientBurst)
+	require.Equal(t, defaultPermissionSSRRFetchConcurrency, settings.PermissionSSRRFetchConcurrency)
+}
+
+func TestAppSetKubernetesClientRateLimitsUpdatesExistingClients(t *testing.T) {
+	setTestConfigEnv(t)
+
+	app := newTestAppWithDefaults(t)
+	app.kubeAPIMetrics = newKubernetesAPIMetricsRegistry()
+	limiter := newMutableKubernetesRateLimiter(defaultKubernetesClientQPS, defaultKubernetesClientBurst)
+	app.clusterClients = map[string]*clusterClients{
+		"cluster-a": {
+			meta:        ClusterMeta{ID: "cluster-a", Name: "Cluster A"},
+			rateLimiter: limiter,
+			restConfig:  &rest.Config{QPS: float32(defaultKubernetesClientQPS), Burst: defaultKubernetesClientBurst},
+		},
+	}
+	app.kubeAPIMetrics.getOrCreate(ClusterMeta{ID: "cluster-a", Name: "Cluster A"}, defaultKubernetesClientQPS, defaultKubernetesClientBurst)
+
+	require.NoError(t, app.SetKubernetesClientQPS(150))
+	qps, burst := limiter.Limits()
+	require.Equal(t, 150, qps)
+	require.Equal(t, defaultKubernetesClientBurst, burst)
+	require.Equal(t, float32(150), app.clusterClients["cluster-a"].restConfig.QPS)
+	require.Equal(t, defaultKubernetesClientBurst, app.clusterClients["cluster-a"].restConfig.Burst)
+
+	require.NoError(t, app.SetKubernetesClientBurst(450))
+	qps, burst = limiter.Limits()
+	require.Equal(t, 150, qps)
+	require.Equal(t, 450, burst)
+	require.Equal(t, float32(150), app.clusterClients["cluster-a"].restConfig.QPS)
+	require.Equal(t, 450, app.clusterClients["cluster-a"].restConfig.Burst)
+
+	rows := app.kubeAPIMetrics.snapshot(time.Now())
+	require.Len(t, rows, 1)
+	require.Equal(t, 150, rows[0].ConfiguredQPS)
+	require.Equal(t, 450, rows[0].ConfiguredBurst)
 }
 
 func TestAppSetObjPanelLogsTargetPerScopeLimitPersistsAndClamps(t *testing.T) {

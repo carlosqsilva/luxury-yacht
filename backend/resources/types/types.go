@@ -32,10 +32,15 @@ type AppSettings struct {
 	AppearanceMode                           string   `json:"appearanceMode"`                           // "light", "dark", or "system"
 	SelectedKubeconfigs                      []string `json:"selectedKubeconfigs"`                      // Multi-cluster selections in "path:context" form
 	UseShortResourceNames                    bool     `json:"useShortResourceNames"`                    // Use short names like "po" for pods in badges/headers
+	DimInactiveNamespaces                    bool     `json:"dimInactiveNamespaces"`                    // Dim namespaces with no workloads in the sidebar
+	ExclusiveNamespaces                      bool     `json:"exclusiveNamespaces"`                      // Allow only one expanded namespace in the sidebar
 	AutoRefreshEnabled                       bool     `json:"autoRefreshEnabled"`                       // Enable automatic refresh cycles
 	RefreshBackgroundClustersEnabled         bool     `json:"refreshBackgroundClustersEnabled"`         // Refresh inactive clusters in the background
 	MetricsRefreshIntervalMs                 int      `json:"metricsRefreshIntervalMs"`                 // Metrics refresh interval (ms)
 	MaxTableRows                             int      `json:"maxTableRows"`                             // Max rows shown in a data table (100-10000)
+	KubernetesClientQPS                      int      `json:"kubernetesClientQPS"`                      // Per-cluster Kubernetes REST client QPS
+	KubernetesClientBurst                    int      `json:"kubernetesClientBurst"`                    // Per-cluster Kubernetes REST client burst allowance
+	PermissionSSRRFetchConcurrency           int      `json:"permissionSSRRFetchConcurrency"`           // Concurrent namespace SelfSubjectRulesReview fetches
 	ObjPanelLogsBufferMaxSize                int      `json:"objPanelLogsBufferMaxSize"`                // Max container log entries kept in memory per Object Panel Logs Tab (100-10000)
 	ObjPanelLogsTargetPerScopeLimit          int      `json:"objPanelLogsTargetPerScopeLimit"`          // Max pod/container Object Panel Logs Tab targets per Logs tab (1-1000)
 	ObjPanelLogsTargetGlobalLimit            int      `json:"objPanelLogsTargetGlobalLimit"`            // Max pod/container Object Panel Logs Tab targets across all log tabs (1-1000)

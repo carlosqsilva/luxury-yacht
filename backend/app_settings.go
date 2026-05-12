@@ -38,19 +38,22 @@ type settingsFile struct {
 
 // settingsPreferences captures user-configurable preferences.
 type settingsPreferences struct {
-	AppearanceMode                string                `json:"appearanceMode"`
-	UseShortResourceNames         bool                  `json:"useShortResourceNames"`
-	Refresh                       *settingsRefresh      `json:"refresh"`
-	MaxTableRows                  int                   `json:"maxTableRows"`
-	ObjPanelLogs                  *settingsObjPanelLogs `json:"objPanelLogs,omitempty"`
-	GridTablePersistenceMode      string                `json:"gridTablePersistenceMode"`
-	DefaultObjectPanelPosition    string                `json:"defaultObjectPanelPosition"`
-	ObjectPanelDockedRightWidth   int                   `json:"objectPanelDockedRightWidth"`
-	ObjectPanelDockedBottomHeight int                   `json:"objectPanelDockedBottomHeight"`
-	ObjectPanelFloatingWidth      int                   `json:"objectPanelFloatingWidth"`
-	ObjectPanelFloatingHeight     int                   `json:"objectPanelFloatingHeight"`
-	ObjectPanelFloatingX          int                   `json:"objectPanelFloatingX"`
-	ObjectPanelFloatingY          int                   `json:"objectPanelFloatingY"`
+	AppearanceMode                string                 `json:"appearanceMode"`
+	UseShortResourceNames         bool                   `json:"useShortResourceNames"`
+	DimInactiveNamespaces         *bool                  `json:"dimInactiveNamespaces,omitempty"`
+	ExclusiveNamespaces           *bool                  `json:"exclusiveNamespaces,omitempty"`
+	Refresh                       *settingsRefresh       `json:"refresh"`
+	MaxTableRows                  int                    `json:"maxTableRows"`
+	KubernetesAPI                 *settingsKubernetesAPI `json:"kubernetesAPI,omitempty"`
+	ObjPanelLogs                  *settingsObjPanelLogs  `json:"objPanelLogs,omitempty"`
+	GridTablePersistenceMode      string                 `json:"gridTablePersistenceMode"`
+	DefaultObjectPanelPosition    string                 `json:"defaultObjectPanelPosition"`
+	ObjectPanelDockedRightWidth   int                    `json:"objectPanelDockedRightWidth"`
+	ObjectPanelDockedBottomHeight int                    `json:"objectPanelDockedBottomHeight"`
+	ObjectPanelFloatingWidth      int                    `json:"objectPanelFloatingWidth"`
+	ObjectPanelFloatingHeight     int                    `json:"objectPanelFloatingHeight"`
+	ObjectPanelFloatingX          int                    `json:"objectPanelFloatingX"`
+	ObjectPanelFloatingY          int                    `json:"objectPanelFloatingY"`
 
 	// Migration: old single-value palette fields, read-only, omitted when zero.
 	PaletteHue        int `json:"paletteHue,omitempty"`
@@ -107,6 +110,13 @@ type settingsRefresh struct {
 	MetricsIntervalMs int  `json:"metricsIntervalMs"`
 }
 
+// settingsKubernetesAPI captures user-configurable Kubernetes API client settings.
+type settingsKubernetesAPI struct {
+	ClientQPS                      int `json:"clientQPS"`
+	ClientBurst                    int `json:"clientBurst"`
+	PermissionSSRRFetchConcurrency int `json:"permissionSSRRFetchConcurrency"`
+}
+
 // settingsObjPanelLogs captures user-configurable Object Panel Logs Tab settings.
 type settingsObjPanelLogs struct {
 	BufferMaxSize       int    `json:"bufferMaxSize"`       // Max container log entries kept in memory per Object Panel Logs Tab
@@ -133,6 +143,15 @@ const (
 	defaultObjPanelLogsTargetGlobalLimit   = config.ContainerLogsStreamGlobalTargetLimit
 	minObjPanelLogsTargetGlobalLimit       = 1
 	maxObjPanelLogsTargetGlobalLimit       = 1000
+	defaultKubernetesClientQPS             = config.KubernetesClientQPS
+	minKubernetesClientQPS                 = 1
+	maxKubernetesClientQPS                 = 5000
+	defaultKubernetesClientBurst           = config.KubernetesClientBurst
+	minKubernetesClientBurst               = 1
+	maxKubernetesClientBurst               = 10000
+	defaultPermissionSSRRFetchConcurrency  = config.PermissionSSRRFetchConcurrency
+	minPermissionSSRRFetchConcurrency      = 1
+	maxPermissionSSRRFetchConcurrency      = config.PermissionSSRRFetchConcurrency * 8
 )
 
 func clampMaxTableRows(size int) int {
@@ -143,6 +162,36 @@ func clampMaxTableRows(size int) int {
 		return maxMaxTableRows
 	}
 	return size
+}
+
+func clampKubernetesClientQPS(qps int) int {
+	if qps < minKubernetesClientQPS {
+		return minKubernetesClientQPS
+	}
+	if qps > maxKubernetesClientQPS {
+		return maxKubernetesClientQPS
+	}
+	return qps
+}
+
+func clampKubernetesClientBurst(burst int) int {
+	if burst < minKubernetesClientBurst {
+		return minKubernetesClientBurst
+	}
+	if burst > maxKubernetesClientBurst {
+		return maxKubernetesClientBurst
+	}
+	return burst
+}
+
+func clampPermissionSSRRFetchConcurrency(limit int) int {
+	if limit < minPermissionSSRRFetchConcurrency {
+		return minPermissionSSRRFetchConcurrency
+	}
+	if limit > maxPermissionSSRRFetchConcurrency {
+		return maxPermissionSSRRFetchConcurrency
+	}
+	return limit
 }
 
 func clampObjPanelLogsBufferMaxSize(size int) int {
@@ -195,9 +244,16 @@ func defaultSettingsFile() *settingsFile {
 		SchemaVersion: settingsSchemaVersion,
 		UpdatedAt:     time.Now().UTC(),
 		Preferences: settingsPreferences{
-			AppearanceMode: "system",
-			Refresh:        &settingsRefresh{Auto: true, Background: true, MetricsIntervalMs: defaultMetricsIntervalMs()},
-			MaxTableRows:   defaultMaxTableRows,
+			AppearanceMode:        "system",
+			DimInactiveNamespaces: boolPtr(true),
+			ExclusiveNamespaces:   boolPtr(true),
+			Refresh:               &settingsRefresh{Auto: true, Background: true, MetricsIntervalMs: defaultMetricsIntervalMs()},
+			MaxTableRows:          defaultMaxTableRows,
+			KubernetesAPI: &settingsKubernetesAPI{
+				ClientQPS:                      defaultKubernetesClientQPS,
+				ClientBurst:                    defaultKubernetesClientBurst,
+				PermissionSSRRFetchConcurrency: defaultPermissionSSRRFetchConcurrency,
+			},
 			ObjPanelLogs: &settingsObjPanelLogs{
 				BufferMaxSize:       defaultObjPanelLogsBufferMaxSize,
 				TargetPerScopeLimit: defaultObjPanelLogsTargetPerScopeLimit,
@@ -229,6 +285,12 @@ func normalizeSettingsFile(settings *settingsFile) *settingsFile {
 	if settings.Preferences.AppearanceMode == "" {
 		settings.Preferences.AppearanceMode = "system"
 	}
+	if settings.Preferences.DimInactiveNamespaces == nil {
+		settings.Preferences.DimInactiveNamespaces = boolPtr(true)
+	}
+	if settings.Preferences.ExclusiveNamespaces == nil {
+		settings.Preferences.ExclusiveNamespaces = boolPtr(true)
+	}
 	if settings.Preferences.Refresh == nil {
 		settings.Preferences.Refresh = &settingsRefresh{Auto: true, Background: true, MetricsIntervalMs: defaultMetricsIntervalMs()}
 	}
@@ -239,6 +301,28 @@ func normalizeSettingsFile(settings *settingsFile) *settingsFile {
 		settings.Preferences.MaxTableRows = defaultMaxTableRows
 	} else {
 		settings.Preferences.MaxTableRows = clampMaxTableRows(settings.Preferences.MaxTableRows)
+	}
+	if settings.Preferences.KubernetesAPI == nil {
+		settings.Preferences.KubernetesAPI = &settingsKubernetesAPI{
+			ClientQPS:                      defaultKubernetesClientQPS,
+			ClientBurst:                    defaultKubernetesClientBurst,
+			PermissionSSRRFetchConcurrency: defaultPermissionSSRRFetchConcurrency,
+		}
+	}
+	if settings.Preferences.KubernetesAPI.ClientQPS <= 0 {
+		settings.Preferences.KubernetesAPI.ClientQPS = defaultKubernetesClientQPS
+	} else {
+		settings.Preferences.KubernetesAPI.ClientQPS = clampKubernetesClientQPS(settings.Preferences.KubernetesAPI.ClientQPS)
+	}
+	if settings.Preferences.KubernetesAPI.ClientBurst <= 0 {
+		settings.Preferences.KubernetesAPI.ClientBurst = defaultKubernetesClientBurst
+	} else {
+		settings.Preferences.KubernetesAPI.ClientBurst = clampKubernetesClientBurst(settings.Preferences.KubernetesAPI.ClientBurst)
+	}
+	if settings.Preferences.KubernetesAPI.PermissionSSRRFetchConcurrency <= 0 {
+		settings.Preferences.KubernetesAPI.PermissionSSRRFetchConcurrency = defaultPermissionSSRRFetchConcurrency
+	} else {
+		settings.Preferences.KubernetesAPI.PermissionSSRRFetchConcurrency = clampPermissionSSRRFetchConcurrency(settings.Preferences.KubernetesAPI.PermissionSSRRFetchConcurrency)
 	}
 	if settings.Preferences.ObjPanelLogs == nil {
 		settings.Preferences.ObjPanelLogs = &settingsObjPanelLogs{
@@ -488,10 +572,15 @@ func getDefaultAppSettings() *AppSettings {
 		AppearanceMode:                           "system",
 		SelectedKubeconfigs:                      nil,
 		UseShortResourceNames:                    false,
+		DimInactiveNamespaces:                    true,
+		ExclusiveNamespaces:                      true,
 		AutoRefreshEnabled:                       true,
 		RefreshBackgroundClustersEnabled:         true,
 		MetricsRefreshIntervalMs:                 defaultMetricsIntervalMs(),
 		MaxTableRows:                             defaultMaxTableRows,
+		KubernetesClientQPS:                      defaultKubernetesClientQPS,
+		KubernetesClientBurst:                    defaultKubernetesClientBurst,
+		PermissionSSRRFetchConcurrency:           defaultPermissionSSRRFetchConcurrency,
 		ObjPanelLogsBufferMaxSize:                defaultObjPanelLogsBufferMaxSize,
 		ObjPanelLogsTargetPerScopeLimit:          defaultObjPanelLogsTargetPerScopeLimit,
 		ObjPanelLogsTargetGlobalLimit:            defaultObjPanelLogsTargetGlobalLimit,
@@ -514,6 +603,14 @@ func (a *App) loadAppSettings() error {
 	logAPITimestampFormat := defaultObjPanelLogsAPITimestampFormat
 	logAPITimestampUseLocalTimeZone := false
 	maxTableRows := defaultMaxTableRows
+	dimInactiveNamespaces := true
+	if settings.Preferences.DimInactiveNamespaces != nil {
+		dimInactiveNamespaces = *settings.Preferences.DimInactiveNamespaces
+	}
+	exclusiveNamespaces := true
+	if settings.Preferences.ExclusiveNamespaces != nil {
+		exclusiveNamespaces = *settings.Preferences.ExclusiveNamespaces
+	}
 	if settings.Preferences.MaxTableRows > 0 {
 		maxTableRows = clampMaxTableRows(settings.Preferences.MaxTableRows)
 	}
@@ -532,15 +629,34 @@ func (a *App) loadAppSettings() error {
 	if settings.Preferences.ObjPanelLogs != nil {
 		logAPITimestampUseLocalTimeZone = settings.Preferences.ObjPanelLogs.UseLocalTimeZone
 	}
+	kubernetesClientQPS := defaultKubernetesClientQPS
+	kubernetesClientBurst := defaultKubernetesClientBurst
+	permissionSSRRFetchConcurrency := defaultPermissionSSRRFetchConcurrency
+	if settings.Preferences.KubernetesAPI != nil {
+		if settings.Preferences.KubernetesAPI.ClientQPS > 0 {
+			kubernetesClientQPS = clampKubernetesClientQPS(settings.Preferences.KubernetesAPI.ClientQPS)
+		}
+		if settings.Preferences.KubernetesAPI.ClientBurst > 0 {
+			kubernetesClientBurst = clampKubernetesClientBurst(settings.Preferences.KubernetesAPI.ClientBurst)
+		}
+		if settings.Preferences.KubernetesAPI.PermissionSSRRFetchConcurrency > 0 {
+			permissionSSRRFetchConcurrency = clampPermissionSSRRFetchConcurrency(settings.Preferences.KubernetesAPI.PermissionSSRRFetchConcurrency)
+		}
+	}
 
 	a.appSettings = &AppSettings{
 		AppearanceMode:                           settings.Preferences.AppearanceMode,
 		SelectedKubeconfigs:                      append([]string(nil), settings.Kubeconfig.Selected...),
 		UseShortResourceNames:                    settings.Preferences.UseShortResourceNames,
+		DimInactiveNamespaces:                    dimInactiveNamespaces,
+		ExclusiveNamespaces:                      exclusiveNamespaces,
 		AutoRefreshEnabled:                       settings.Preferences.Refresh.Auto,
 		RefreshBackgroundClustersEnabled:         settings.Preferences.Refresh.Background,
 		MetricsRefreshIntervalMs:                 settings.Preferences.Refresh.MetricsIntervalMs,
 		MaxTableRows:                             maxTableRows,
+		KubernetesClientQPS:                      kubernetesClientQPS,
+		KubernetesClientBurst:                    kubernetesClientBurst,
+		PermissionSSRRFetchConcurrency:           permissionSSRRFetchConcurrency,
 		ObjPanelLogsBufferMaxSize:                objPanelLogsBufferMaxSize,
 		ObjPanelLogsTargetPerScopeLimit:          objPanelLogsTargetPerScopeLimit,
 		ObjPanelLogsTargetGlobalLimit:            objPanelLogsTargetGlobalLimit,
@@ -586,6 +702,8 @@ func (a *App) saveAppSettings() error {
 
 	settings.Preferences.AppearanceMode = a.appSettings.AppearanceMode
 	settings.Preferences.UseShortResourceNames = a.appSettings.UseShortResourceNames
+	settings.Preferences.DimInactiveNamespaces = boolPtr(a.appSettings.DimInactiveNamespaces)
+	settings.Preferences.ExclusiveNamespaces = boolPtr(a.appSettings.ExclusiveNamespaces)
 	if settings.Preferences.Refresh == nil {
 		settings.Preferences.Refresh = &settingsRefresh{}
 	}
@@ -593,6 +711,12 @@ func (a *App) saveAppSettings() error {
 	settings.Preferences.Refresh.Background = a.appSettings.RefreshBackgroundClustersEnabled
 	settings.Preferences.Refresh.MetricsIntervalMs = a.appSettings.MetricsRefreshIntervalMs
 	settings.Preferences.MaxTableRows = clampMaxTableRows(a.appSettings.MaxTableRows)
+	if settings.Preferences.KubernetesAPI == nil {
+		settings.Preferences.KubernetesAPI = &settingsKubernetesAPI{}
+	}
+	settings.Preferences.KubernetesAPI.ClientQPS = clampKubernetesClientQPS(a.appSettings.KubernetesClientQPS)
+	settings.Preferences.KubernetesAPI.ClientBurst = clampKubernetesClientBurst(a.appSettings.KubernetesClientBurst)
+	settings.Preferences.KubernetesAPI.PermissionSSRRFetchConcurrency = clampPermissionSSRRFetchConcurrency(a.appSettings.PermissionSSRRFetchConcurrency)
 	if settings.Preferences.ObjPanelLogs == nil {
 		settings.Preferences.ObjPanelLogs = &settingsObjPanelLogs{}
 	}
@@ -696,6 +820,38 @@ func (a *App) GetAppSettings() (*AppSettings, error) {
 	return &cp, nil
 }
 
+func (a *App) kubernetesClientRateLimits() (qps int, burst int) {
+	if a == nil {
+		return defaultKubernetesClientQPS, defaultKubernetesClientBurst
+	}
+	a.settingsMu.Lock()
+	defer a.settingsMu.Unlock()
+	if a.appSettings == nil {
+		return defaultKubernetesClientQPS, defaultKubernetesClientBurst
+	}
+	qps = a.appSettings.KubernetesClientQPS
+	if qps <= 0 {
+		qps = defaultKubernetesClientQPS
+	}
+	burst = a.appSettings.KubernetesClientBurst
+	if burst <= 0 {
+		burst = defaultKubernetesClientBurst
+	}
+	return clampKubernetesClientQPS(qps), clampKubernetesClientBurst(burst)
+}
+
+func (a *App) permissionSSRRFetchConcurrency() int {
+	if a == nil {
+		return defaultPermissionSSRRFetchConcurrency
+	}
+	a.settingsMu.Lock()
+	defer a.settingsMu.Unlock()
+	if a.appSettings == nil || a.appSettings.PermissionSSRRFetchConcurrency <= 0 {
+		return defaultPermissionSSRRFetchConcurrency
+	}
+	return clampPermissionSSRRFetchConcurrency(a.appSettings.PermissionSSRRFetchConcurrency)
+}
+
 func (a *App) SetAppearanceMode(mode string) error {
 	if mode != "light" && mode != "dark" && mode != "system" {
 		return fmt.Errorf("invalid appearance mode: %s", mode)
@@ -727,6 +883,36 @@ func (a *App) SetUseShortResourceNames(useShort bool) error {
 
 	a.logger.Info(fmt.Sprintf("Use short resource names changed to: %v", useShort), logsources.Settings)
 	a.appSettings.UseShortResourceNames = useShort
+	return a.saveAppSettings()
+}
+
+func (a *App) SetDimInactiveNamespaces(enabled bool) error {
+	a.settingsMu.Lock()
+	defer a.settingsMu.Unlock()
+
+	if a.appSettings == nil {
+		if err := a.loadAppSettings(); err != nil {
+			return err
+		}
+	}
+
+	a.logger.Info(fmt.Sprintf("Dim inactive namespaces changed to: %v", enabled), logsources.Settings)
+	a.appSettings.DimInactiveNamespaces = enabled
+	return a.saveAppSettings()
+}
+
+func (a *App) SetExclusiveNamespaces(enabled bool) error {
+	a.settingsMu.Lock()
+	defer a.settingsMu.Unlock()
+
+	if a.appSettings == nil {
+		if err := a.loadAppSettings(); err != nil {
+			return err
+		}
+	}
+
+	a.logger.Info(fmt.Sprintf("Exclusive namespaces changed to: %v", enabled), logsources.Settings)
+	a.appSettings.ExclusiveNamespaces = enabled
 	return a.saveAppSettings()
 }
 
@@ -791,6 +977,76 @@ func (a *App) SetMaxTableRows(size int) error {
 	clamped := clampMaxTableRows(size)
 	a.logger.Info(fmt.Sprintf("Max table rows changed to: %d", clamped), logsources.Settings)
 	a.appSettings.MaxTableRows = clamped
+	return a.saveAppSettings()
+}
+
+func (a *App) SetKubernetesClientQPS(qps int) error {
+	a.settingsMu.Lock()
+
+	if a.appSettings == nil {
+		if err := a.loadAppSettings(); err != nil {
+			a.settingsMu.Unlock()
+			return err
+		}
+	}
+
+	clamped := clampKubernetesClientQPS(qps)
+	a.logger.Info(fmt.Sprintf("Kubernetes client QPS changed to: %d", clamped), logsources.Settings)
+	a.appSettings.KubernetesClientQPS = clamped
+	effectiveQPS := a.appSettings.KubernetesClientQPS
+	effectiveBurst := a.appSettings.KubernetesClientBurst
+	if effectiveBurst <= 0 {
+		effectiveBurst = defaultKubernetesClientBurst
+	}
+	err := a.saveAppSettings()
+	a.settingsMu.Unlock()
+	if err != nil {
+		return err
+	}
+	a.applyKubernetesClientRateLimits(effectiveQPS, effectiveBurst)
+	return nil
+}
+
+func (a *App) SetKubernetesClientBurst(burst int) error {
+	a.settingsMu.Lock()
+
+	if a.appSettings == nil {
+		if err := a.loadAppSettings(); err != nil {
+			a.settingsMu.Unlock()
+			return err
+		}
+	}
+
+	clamped := clampKubernetesClientBurst(burst)
+	a.logger.Info(fmt.Sprintf("Kubernetes client burst changed to: %d", clamped), logsources.Settings)
+	a.appSettings.KubernetesClientBurst = clamped
+	effectiveQPS := a.appSettings.KubernetesClientQPS
+	if effectiveQPS <= 0 {
+		effectiveQPS = defaultKubernetesClientQPS
+	}
+	effectiveBurst := a.appSettings.KubernetesClientBurst
+	err := a.saveAppSettings()
+	a.settingsMu.Unlock()
+	if err != nil {
+		return err
+	}
+	a.applyKubernetesClientRateLimits(effectiveQPS, effectiveBurst)
+	return nil
+}
+
+func (a *App) SetPermissionSSRRFetchConcurrency(limit int) error {
+	a.settingsMu.Lock()
+	defer a.settingsMu.Unlock()
+
+	if a.appSettings == nil {
+		if err := a.loadAppSettings(); err != nil {
+			return err
+		}
+	}
+
+	clamped := clampPermissionSSRRFetchConcurrency(limit)
+	a.logger.Info(fmt.Sprintf("Permission SSRR fetch concurrency changed to: %d", clamped), logsources.Settings)
+	a.appSettings.PermissionSSRRFetchConcurrency = clamped
 	return a.saveAppSettings()
 }
 

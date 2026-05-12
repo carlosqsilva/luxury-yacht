@@ -26,6 +26,10 @@ const errorHandlerMocks = vi.hoisted(() => ({
   handle: vi.fn(),
 }));
 
+const appearanceModeMocks = vi.hoisted(() => ({
+  changeAppearanceMode: vi.fn().mockResolvedValue(undefined),
+}));
+
 vi.mock('@/core/contexts/AppearanceModeContext', () => ({
   useAppearanceMode: () => ({ mode: 'light', resolvedMode: 'light' }),
 }));
@@ -48,7 +52,7 @@ vi.mock('@/core/settings/appPreferences', () => ({
 }));
 
 vi.mock('@/utils/appearanceMode', () => ({
-  changeAppearanceMode: vi.fn().mockResolvedValue(undefined),
+  changeAppearanceMode: (...args: unknown[]) => appearanceModeMocks.changeAppearanceMode(...args),
 }));
 
 vi.mock('@utils/paletteTint', () => ({
@@ -119,6 +123,25 @@ describe('AppearanceSection', () => {
     vi.clearAllMocks();
   });
 
+  it('renders styled appearance mode buttons and changes modes', async () => {
+    const buttons = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('.settings-choice-button')
+    );
+    expect(buttons.map((button) => button.textContent)).toEqual(['System', 'Light', 'Dark']);
+
+    const lightButton = buttons.find((button) => button.textContent === 'Light');
+    const darkButton = buttons.find((button) => button.textContent === 'Dark');
+    expect(lightButton?.getAttribute('aria-pressed')).toBe('true');
+    expect(darkButton?.getAttribute('aria-pressed')).toBe('false');
+
+    await act(async () => {
+      darkButton!.click();
+      await Promise.resolve();
+    });
+
+    expect(appearanceModeMocks.changeAppearanceMode).toHaveBeenCalledWith('dark');
+  });
+
   it('prompts to save live appearance changes as the default theme', async () => {
     const hueInput = container.querySelector('#palette-hue') as HTMLInputElement | null;
     expect(hueInput).toBeTruthy();
@@ -127,9 +150,7 @@ describe('AppearanceSection', () => {
       setInputValue(hueInput!, '30');
     });
 
-    expect(container.textContent).toContain(
-      'There are unsaved changes. Would you like to save them as the default theme?'
-    );
+    expect(container.textContent).toContain('There are unsaved changes. Save as default?');
 
     const saveButton = Array.from(container.querySelectorAll('button')).find(
       (button) => button.textContent === 'Save'
@@ -171,9 +192,7 @@ describe('AppearanceSection', () => {
       await Promise.resolve();
     });
 
-    expect(container.textContent).toContain(
-      'There are unsaved changes. Would you like to save them as the default theme?'
-    );
+    expect(container.textContent).toContain('There are unsaved changes. Save as default?');
   });
 
   it('prompts when color swatches are reset', async () => {
@@ -191,9 +210,7 @@ describe('AppearanceSection', () => {
       await Promise.resolve();
     });
 
-    expect(container.textContent).toContain(
-      'There are unsaved changes. Would you like to save them as the default theme?'
-    );
+    expect(container.textContent).toContain('There are unsaved changes. Save as default?');
 
     const saveButton = Array.from(container.querySelectorAll('button')).find(
       (button) => button.textContent === 'Save'
@@ -210,9 +227,7 @@ describe('AppearanceSection', () => {
       await Promise.resolve();
     });
 
-    expect(container.textContent).toContain(
-      'There are unsaved changes. Would you like to save them as the default theme?'
-    );
+    expect(container.textContent).toContain('There are unsaved changes. Save as default?');
   });
 
   it('shows invalid theme pattern errors inline instead of using the global error handler', async () => {
@@ -222,7 +237,7 @@ describe('AppearanceSection', () => {
     });
 
     const newThemeButton = Array.from(container.querySelectorAll('button')).find(
-      (button) => button.textContent === '+ Save new theme'
+      (button) => button.textContent === 'Save new theme'
     ) as HTMLButtonElement | undefined;
     expect(newThemeButton).toBeTruthy();
 

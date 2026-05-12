@@ -1,14 +1,8 @@
 # TODO
 
-- Restarting deployment does not show 2/3 in the table
-
 ## Feature Ideas
 
 - In daemonset details, show a "NOT RUNNING ON" label that lists the nodes where the ds is missing
-
-- Configurable backend thresholds
-  - QPS (500) and Burst (1000)
-  - SSRR concurrency cap (32)
 
 - Gridtable improvements
 - Allow column order change via drag
