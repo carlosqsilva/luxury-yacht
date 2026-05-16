@@ -29,12 +29,12 @@ Applies to Go code under `backend/`.
 
 ## Refresh Subsystem Notes
 
-- Domain checklist: add or update snapshot builders in `backend/refresh/snapshot/*.go`, register domains and permission gates in `backend/refresh/system/manager.go`.
-- Permission-gated domains: use `RegisterPermissionDeniedDomain` in `backend/refresh/snapshot/permission.go` and surface `PermissionIssue` entries from `backend/refresh/system/manager.go`.
+- Domain checklist: add or update snapshot builders in `backend/refresh/snapshot/*.go`, register domains in `backend/refresh/system/registrations.go`, and keep permission gates aligned with `backend/refresh/system/permission_gate.go`.
+- Permission-gated domains: use `RegisterPermissionDeniedDomain` in `backend/refresh/snapshot/permission.go` and surface `PermissionIssue` entries through the refresh system permission-gate paths.
 - Manual refresh entrypoint: `/api/v2/refresh/{domain}` in `backend/refresh/api/server.go`, backed by `ManualQueue` in `backend/refresh/types.go`.
-- Streaming endpoints: wired in `backend/refresh/system/manager.go` (`/api/v2/stream/container-logs`, `/api/v2/stream/events`, `/api/v2/stream/catalog`); catalog SSE lives in `backend/refresh/snapshot/catalog_stream.go`.
+- Per-cluster stream endpoints are wired in `backend/refresh/system/streams.go`; aggregate stream routes are wired in `backend/app_refresh_setup.go`.
 - Diagnostics/telemetry sources: refresh domain telemetry in `backend/refresh/telemetry/recorder.go`; catalog diagnostics in `backend/app_object_catalog.go`.
-- Lifecycle: refresh subsystem setup in `backend/app_refresh_setup.go`, teardown/rebuild in `backend/app_refresh_recovery.go`, base URL in `backend/app_refresh.go`.
+- Lifecycle: refresh subsystem setup in `backend/app_refresh_setup.go`, selection updates in `backend/app_refresh_update.go`, replacement helpers in `backend/app_refresh_subsystems.go`, teardown/rebuild in `backend/app_refresh_recovery.go`, base URL in `backend/app_refresh.go`.
 - Client init: `backend/app_kubernetes_client.go` owns client setup and triggers refresh subsystem + object catalog start.
 - Multi-cluster refresh behavior is documented in
   `docs/architecture/multi-cluster.md` and `docs/architecture/refresh-system.md`.

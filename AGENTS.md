@@ -76,6 +76,9 @@ Add this to `.claude/settings.local.json` so memories are stored in the project
 
 ## Documentation
 
+- For large or cross-layer agent work, start with `.agents/README.md` after
+  reading this file. It routes common tasks to the right skills, docs, code
+  paths, and validation checks.
 - Start with `docs/README.md` when you are unsure which contract applies.
 - Durable architecture docs go in `docs/architecture`; frontend infrastructure
   docs go in `docs/frontend`; workflow-specific docs go in `docs/workflows`.

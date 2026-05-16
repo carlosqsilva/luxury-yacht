@@ -41,7 +41,10 @@ Order matters. Don't rearrange.
 5. Start HTTP server on loopback
 
 **Key files:**
+
 - `backend/app_refresh_setup.go` — orchestrates steps 1-5
+- `backend/app_refresh_update.go` — updates active per-cluster subsystems without restarting the HTTP server
+- `backend/app_refresh_subsystems.go` — replaces aggregate subsystem state and shared handlers
 - `backend/app_refresh_recovery.go` — teardown, auth recovery, transport rebuild
 - `backend/refresh/system/manager.go` — per-cluster subsystem creation
 
@@ -53,17 +56,19 @@ Domains are registered in a fixed order in `backend/refresh/system/registrations
 
 Three registration kinds:
 
-| Kind | Permission Gate | Fallback |
-|------|----------------|----------|
-| `direct` | None — always registers | None |
-| `list` | Checks list permission for required resources | Skips if denied |
-| `listWatch` | Checks list + watch permissions | Can fall back to list-only |
+| Kind        | Permission Gate                               | Fallback                   |
+| ----------- | --------------------------------------------- | -------------------------- |
+| `direct`    | None — always registers                       | None                       |
+| `list`      | Checks list permission for required resources | Skips if denied            |
+| `listWatch` | Checks list + watch permissions               | Can fall back to list-only |
 
 **Two-layer permission checking:**
+
 1. **Preflight** — bulk SSAR calls to warm the cache at startup
 2. **Per-domain runtime check** — `defaultPermissionChecks()` in `backend/refresh/snapshot/permission_checks.go`
 
 To register a new domain, add it to `domainRegistrations()` in `registrations.go`. Consider:
+
 - What permissions does it need? Add checks to `defaultPermissionChecks()` in `permission_checks.go`
 - Does it need informers? Register them in `backend/refresh/informer/factory.go`
 - What order? Place it after any domains it depends on
@@ -72,13 +77,13 @@ To register a new domain, add it to `domainRegistrations()` in `registrations.go
 
 Every backend domain has a frontend counterpart:
 
-| File | What to update |
-|------|----------------|
-| `frontend/src/core/refresh/types.ts` | Add to `RefreshDomain` union + `DomainPayloadMap` |
-| `frontend/src/core/refresh/refresherTypes.ts` | Add refresher name + map view to refresher |
-| `frontend/src/core/refresh/refresherConfig.ts` | Add interval/cooldown/timeout config |
-| `frontend/src/core/refresh/orchestrator.ts` | Register domain with orchestrator |
-| `frontend/src/core/refresh/components/diagnostics/diagnosticsPanelConfig.ts` | Add domain→refresher and domain→stream mappings |
+| File                                                                         | What to update                                    |
+| ---------------------------------------------------------------------------- | ------------------------------------------------- |
+| `frontend/src/core/refresh/types.ts`                                         | Add to `RefreshDomain` union + `DomainPayloadMap` |
+| `frontend/src/core/refresh/refresherTypes.ts`                                | Add refresher name + map view to refresher        |
+| `frontend/src/core/refresh/refresherConfig.ts`                               | Add interval/cooldown/timeout config              |
+| `frontend/src/core/refresh/orchestrator.ts`                                  | Register domain with orchestrator                 |
+| `frontend/src/core/refresh/components/diagnostics/diagnosticsPanelConfig.ts` | Add domain→refresher and domain→stream mappings   |
 
 **These must stay synchronized.** A backend domain without a frontend mapping breaks diagnostics. A frontend refresher without a backend domain gets empty snapshots.
 
@@ -95,21 +100,23 @@ Every backend domain has a frontend counterpart:
 
 ## Streaming
 
-Three stream types, each with different transport:
+Four stream types use the refresh HTTP server, with different transports:
 
-| Stream | Transport | Backend | Frontend |
-|--------|-----------|---------|----------|
-| Events | SSE (EventSource) | `backend/refresh/eventstream/` | `frontend/src/core/refresh/streaming/eventStreamManager.ts` |
-| Resources | WebSocket | `backend/refresh/resourcestream/` | `frontend/src/core/refresh/streaming/resourceStreamManager.ts` |
-| Catalog | SSE (EventSource) | `backend/refresh/snapshot/catalog_stream.go` | `frontend/src/core/refresh/streaming/catalogStreamManager.ts` |
+| Stream         | Transport         | Backend                                      | Frontend                                                            |
+| -------------- | ----------------- | -------------------------------------------- | ------------------------------------------------------------------- |
+| Events         | SSE (EventSource) | `backend/refresh/eventstream/`               | `frontend/src/core/refresh/streaming/eventStreamManager.ts`         |
+| Resources      | WebSocket         | `backend/refresh/resourcestream/`            | `frontend/src/core/refresh/streaming/resourceStreamManager.ts`      |
+| Catalog        | SSE (EventSource) | `backend/refresh/snapshot/catalog_stream.go` | `frontend/src/core/refresh/streaming/catalogStreamManager.ts`       |
+| Container logs | SSE (EventSource) | `backend/refresh/containerlogsstream/`       | `frontend/src/core/refresh/streaming/containerLogsStreamManager.ts` |
 
 **Event stream resume:** Backend buffers recent events in a circular buffer per scope. On reconnect, frontend sends `?since=<sequence>` to resume. If the buffer overflowed, resume returns empty and the client must re-snapshot. **Resume is not guaranteed.**
 
 **Stream endpoints:**
+
 - `/api/v2/stream/events`
 - `/api/v2/stream/resources`
 - `/api/v2/stream/catalog`
-- `/api/v2/stream/logs`
+- `/api/v2/stream/container-logs`
 
 ## RefreshManager (Frontend)
 
@@ -118,6 +125,7 @@ Three stream types, each with different transport:
 Lifecycle per refresher: `idle → refreshing → cooldown → idle`
 
 Key behaviors:
+
 - Callbacks run via `Promise.allSettled` — one failure doesn't kill others, but the refresh is marked failed
 - Exponential backoff on errors: `cooldown * 2^(errorCount-1)`, capped at 60s
 - Context changes (namespace, cluster, view) abort affected refreshers then re-trigger
