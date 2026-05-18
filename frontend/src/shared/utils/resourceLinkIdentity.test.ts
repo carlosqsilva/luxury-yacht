@@ -59,6 +59,51 @@ describe('resourceLinkIdentity', () => {
     expect(resourceLinkToObjectReference({ display: ref })).toBeUndefined();
   });
 
+  it('rejects openable refs that did not carry apiGroup', () => {
+    const missingGroup = { ...ref };
+    delete (missingGroup as Partial<ResourceRef>).group;
+
+    expect(validateResourceLink({ ref: missingGroup })).toBe(false);
+    expect(resourceLinkToObjectReference({ ref: missingGroup })).toBeUndefined();
+  });
+
+  it('rejects custom-resource refs with an empty apiGroup', () => {
+    const customWithoutGroup: ResourceRef = {
+      ...ref,
+      group: '',
+      version: 'v1alpha1',
+      kind: 'DBInstance',
+      resource: 'dbinstances',
+      name: 'primary',
+    };
+
+    expect(validateResourceLink({ ref: customWithoutGroup })).toBe(false);
+    expect(resourceLinkToObjectReference({ ref: customWithoutGroup })).toBeUndefined();
+  });
+
+  it('accepts core built-in refs with an explicit empty apiGroup', () => {
+    const pod: ResourceRef = {
+      clusterId: 'cluster-a',
+      group: '',
+      version: 'v1',
+      kind: 'Pod',
+      resource: 'pods',
+      namespace: 'prod',
+      name: 'api',
+    };
+
+    expect(validateResourceLink({ ref: pod })).toBe(true);
+    expect(resourceLinkToObjectReference({ ref: pod })).toEqual(
+      expect.objectContaining({
+        clusterId: 'cluster-a',
+        group: '',
+        version: 'v1',
+        kind: 'Pod',
+        name: 'api',
+      })
+    );
+  });
+
   it('resolves catalog objects by UID without guessing GVK from kind', async () => {
     findCatalogObjectByUIDMock.mockResolvedValue({
       ...ref,

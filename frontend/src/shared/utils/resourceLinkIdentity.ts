@@ -1,5 +1,6 @@
 import { readCatalogObjectByUID, readCatalogObjectMatch, requestData } from '@/core/data-access';
 import type { DisplayRef, ResourceLink, ResourceRef } from '@core/refresh/types';
+import { resolveBuiltinGroupVersion } from '@shared/constants/builtinGroupVersions';
 import {
   buildRequiredObjectReference,
   type ResolvedObjectReference,
@@ -11,12 +12,35 @@ const normalizeOptional = (value: string | null | undefined): string | undefined
 };
 
 const validateResourceRef = (ref?: ResourceRef | null): boolean =>
-  Boolean(
-    normalizeOptional(ref?.clusterId) &&
-    normalizeOptional(ref?.version) &&
-    normalizeOptional(ref?.kind) &&
-    normalizeOptional(ref?.name)
-  );
+  Boolean(validateResourceRefReason(ref) === undefined);
+
+const validateResourceRefReason = (ref?: ResourceRef | null): string | undefined => {
+  const clusterId = normalizeOptional(ref?.clusterId);
+  const version = normalizeOptional(ref?.version);
+  const kind = normalizeOptional(ref?.kind);
+  const name = normalizeOptional(ref?.name);
+  if (!clusterId) {
+    return 'clusterId';
+  }
+  if (!version) {
+    return 'version';
+  }
+  if (!kind) {
+    return 'kind';
+  }
+  if (!name) {
+    return 'name';
+  }
+
+  const groupWasCarried = ref?.group !== undefined && ref.group !== null;
+  const group = normalizeOptional(ref?.group) ?? '';
+  const builtinGVK = resolveBuiltinGroupVersion(kind);
+  const isKnownBuiltin = Boolean(builtinGVK.version);
+  if (!groupWasCarried || (!group && (!isKnownBuiltin || builtinGVK.group))) {
+    return 'group';
+  }
+  return undefined;
+};
 
 const validateDisplayRef = (ref?: DisplayRef | null): boolean =>
   Boolean(

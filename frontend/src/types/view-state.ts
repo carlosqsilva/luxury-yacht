@@ -4,6 +4,7 @@
  * Types for objects managed by ViewStateContext, including selected objects
  * and navigation history.
  */
+import { resolveBuiltinGroupVersion } from '@shared/constants/builtinGroupVersions';
 
 /**
  * Standard Kubernetes object metadata structure.
@@ -60,8 +61,8 @@ export interface KubernetesObjectReference {
 
 /**
  * Synthetic kinds that don't correspond to a real Kubernetes GVK and
- * therefore have no apiVersion. The runtime ref validator
- * (assertObjectRefHasGVK) skips the group/version requirement for these.
+ * therefore have no apiVersion. The runtime ref validator skips the
+ * group/version requirement for these.
  *
  * Kept in lockstep with the openWithObjectAudit.test.ts ALLOWED_LEGACY_FILES
  * exemption set: any kind here implies the file using it is also exempted
@@ -73,37 +74,41 @@ export interface KubernetesObjectReference {
  */
 const SYNTHETIC_OBJECT_KINDS = new Set<string>(['helmrelease']);
 
+const normalizeIdentityField = (value: string | null | undefined): string => value?.trim() ?? '';
+
 /**
- * Validates that a KubernetesObjectReference carries enough GVK
- * information to round-trip through the panel and the strict backend
- * resolvers. Throws if a real-Kubernetes-kind ref is missing version.
+ * Validates that a KubernetesObjectReference carries enough object identity to
+ * round-trip through the panel and the strict backend resolvers.
  *
- * This is the **runtime defense** for the kind-only-objects bug, sitting
- * at the single chokepoint where every object reference flows into the
- * panel system (useObjectPanel.openWithObject). It catches construction
- * shapes the literal-walking audit can't see: helpers that build refs,
- * mappers that return refs, destructure-and-rebuild patterns, and any
- * future programmatic construction. Together with the openWithObjectAudit
- * test (test-time defense for literal call sites) and the backend
- * hard-errors at object_detail_provider.go / app_capabilities.go /
- * app_permissions.go (boundary defense), it forms a defense-in-depth
- * stack: literal → programmatic → boundary.
+ * This is the runtime defense for incomplete object refs, sitting at the
+ * single chokepoint where every object reference flows into the panel system
+ * (useObjectPanel.openWithObject). It catches construction shapes the
+ * literal-walking audit can't see: helpers that build refs, mappers that
+ * return refs, destructure-and-rebuild patterns, and any future programmatic
+ * construction.
  *
  * @throws Error with stack trace pointing at the construction site if
- *   the ref carries a real Kubernetes kind without an apiVersion.
+ *   the ref is missing clusterId, kind, name, or complete GVK identity.
  */
-export function assertObjectRefHasGVK(ref: KubernetesObjectReference): void {
-  const kind = (ref.kind ?? '').trim();
+export function assertObjectRefHasRequiredIdentity(ref: KubernetesObjectReference): void {
+  const clusterId = normalizeIdentityField(ref.clusterId);
+  const kind = normalizeIdentityField(ref.kind);
+  const name = normalizeIdentityField(ref.name);
+
+  if (!clusterId) {
+    throw new Error(`KubernetesObjectReference is missing required field "clusterId"`);
+  }
   if (!kind) {
-    // No kind = nothing to open. The missing-kind case is a different
-    // bug shape that surfaces elsewhere; this validator is specifically
-    // for the kind-only-objects pattern (kind set, version missing).
-    return;
+    throw new Error(`KubernetesObjectReference is missing required field "kind"`);
+  }
+  if (!name) {
+    throw new Error(`KubernetesObjectReference for kind=${kind} is missing required field "name"`);
   }
   if (SYNTHETIC_OBJECT_KINDS.has(kind.toLowerCase())) {
     return;
   }
-  const version = (ref.version ?? '').trim();
+
+  const version = normalizeIdentityField(ref.version);
   if (!version) {
     throw new Error(
       `KubernetesObjectReference for kind=${kind} name=${ref.name ?? '?'} ` +
@@ -111,7 +116,20 @@ export function assertObjectRefHasGVK(ref: KubernetesObjectReference): void {
         `panel and backend resolvers cannot disambiguate two CRDs sharing ` +
         `a Kind without group+version. Spread ` +
         `\`...resolveBuiltinGroupVersion(kind)\` for built-ins, or thread ` +
-        `the actual apiVersion via \`parseApiVersion(...)\.`
+        `the actual apiVersion via \`parseApiVersion(...)\`.`
+    );
+  }
+
+  const groupWasCarried = ref.group !== undefined && ref.group !== null;
+  const group = normalizeIdentityField(ref.group);
+  const builtinGVK = resolveBuiltinGroupVersion(kind);
+  const isKnownBuiltin = Boolean(builtinGVK.version);
+  if (!groupWasCarried || (!group && (!isKnownBuiltin || builtinGVK.group))) {
+    throw new Error(
+      `KubernetesObjectReference for kind=${kind} name=${ref.name ?? '?'} ` +
+        `is missing apiGroup. Include \`group: ''\` for core/v1 built-ins, ` +
+        `spread \`...resolveBuiltinGroupVersion(kind)\` for other built-ins, ` +
+        `or thread group from the catalog/discovery source for custom resources.`
     );
   }
 }

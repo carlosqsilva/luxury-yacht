@@ -57,7 +57,7 @@ Refresh domain names and payload contracts live in:
 
 - `frontend/src/core/refresh/types.ts`
 - `frontend/src/core/refresh/refresherTypes.ts`
-- `frontend/src/core/refresh/refresherConfig.ts`
+- `frontend/src/core/refresh/domainRegistry.ts`
 
 Frontend domain registrations live in
 `frontend/src/core/refresh/orchestrator.ts`. Backend registrations live in
@@ -357,7 +357,7 @@ Domain changes must keep these surfaces synchronized:
 
 | Surface           | Required updates                                                                                      |
 | ----------------- | ----------------------------------------------------------------------------------------------------- |
-| Frontend domain   | `types.ts`, `DomainPayloadMap`, refresher names/config, orchestrator registration, diagnostics config |
+| Frontend domain   | `types.ts`, `DomainPayloadMap`, refresher name, and `domainRegistry.ts` metadata                     |
 | Backend domain    | Snapshot builder, `backend/refresh/system/registrations.go`, permission checks, tests                |
 | Streaming domain  | `streams.go`, frontend stream manager wiring, SSE handler or resource-stream registration/descriptors |
 | Table row payload | Shared Go row helper, matching `TestBuild*SummaryPopulatesAllFields`, TypeScript type, UI mapping    |

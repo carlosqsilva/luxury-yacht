@@ -116,6 +116,18 @@ describe('objectIdentity', () => {
     ).toThrow(/missing apiVersion/);
   });
 
+  it('throws when a custom resource has version but omits group', () => {
+    expect(() =>
+      buildObjectReference({
+        kind: 'DBInstance',
+        name: 'db-a',
+        namespace: 'ops',
+        clusterId: 'alpha:ctx',
+        version: 'v1alpha1',
+      })
+    ).toThrow(/missing apiGroup/);
+  });
+
   it('carries non-identity extras through real object references', () => {
     expect(
       buildObjectReference(

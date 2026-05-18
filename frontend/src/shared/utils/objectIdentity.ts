@@ -81,6 +81,14 @@ export const buildObjectReference = <TExtras extends object = {}>(
     );
   }
 
+  if (!group && !builtinGVK.version) {
+    throw new Error(
+      `Object identity for ${kind}/${name} is missing apiGroup. ` +
+        `Custom resources must thread group/version from discovery, catalog, events, ` +
+        `owner refs, HPA targets, or manifests.`
+    );
+  }
+
   return {
     kind,
     kindAlias: normalizeOptional(input.kindAlias),

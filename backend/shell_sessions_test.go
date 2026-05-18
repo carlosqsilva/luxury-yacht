@@ -116,6 +116,37 @@ func TestShellSessionLifecycleHelpers(t *testing.T) {
 	}
 }
 
+func TestTerminateShellWithReasonUnregistersRuntimeOperation(t *testing.T) {
+	app := newTestAppWithDefaults(t)
+	app.Ctx = context.Background()
+	app.shellSessions = make(map[string]*shellSession)
+
+	sess := &shellSession{
+		id:        "sess",
+		clusterID: "cluster1",
+		namespace: "default",
+		podName:   "pod-a",
+		container: "app",
+		command:   []string{"/bin/sh"},
+		startedAt: time.Now(),
+	}
+	app.shellSessions[sess.id] = sess
+	app.registerRuntimeOperation(runtimeOperationFromShellSession(sess), nil)
+
+	if operations := app.ListRuntimeOperations(); len(operations) != 1 {
+		t.Fatalf("expected registered runtime operation, got %+v", operations)
+	}
+
+	app.terminateShellWithReason(sess.id, "timeout", "session idle timeout")
+
+	if app.getShellSession(sess.id) != nil {
+		t.Fatalf("expected session to be removed")
+	}
+	if operations := app.ListRuntimeOperations(); len(operations) != 0 {
+		t.Fatalf("expected runtime operation to be unregistered, got %+v", operations)
+	}
+}
+
 func TestShellSessionMissingGuards(t *testing.T) {
 	app := newTestAppWithDefaults(t)
 	if err := app.SendShellInput("missing", "x"); err == nil {

@@ -15,21 +15,9 @@ import {
 } from './client';
 import { eventBus, type AppEvents } from '@/core/events';
 import { refreshManager, type RefreshContext } from './RefreshManager';
-import {
-  CLUSTER_REFRESHERS,
-  NAMESPACE_REFRESHERS,
-  SYSTEM_REFRESHERS,
-  type RefresherName,
-  type SystemRefresherName,
-  type ClusterRefresherName,
-  type NamespaceRefresherName,
-} from './refresherTypes';
-import {
-  clusterRefresherConfig,
-  namespaceRefresherConfig,
-  systemRefresherConfig,
-  type RefresherTiming,
-} from './refresherConfig';
+import type { RefresherName, StaticRefresherName } from './refresherTypes';
+import { refresherConfig, type RefresherTiming } from './refresherConfig';
+import { getRefreshDomainDescriptor, type DomainCategory } from './domainRegistry';
 import {
   getScopedDomainState,
   markPendingRequest,
@@ -56,8 +44,6 @@ import { errorHandler } from '@utils/errorHandler';
 import { APP_LOG_SOURCES, logAppLogsInfo, logAppLogsWarn } from '@/core/logging/appLogsClient';
 import { getAutoRefreshEnabled, getMetricsRefreshIntervalMs } from '@/core/settings/appPreferences';
 import { buildClusterScope, parseClusterScope, parseClusterScopeList } from './clusterScope';
-
-type DomainCategory = 'system' | 'cluster' | 'namespace';
 
 type StreamingRegistration = {
   start: (scope: string) => Promise<(() => void) | void> | (() => void);
@@ -1375,19 +1361,7 @@ class RefreshOrchestrator {
   }
 
   private resolveTiming(config: DomainRegistration<RefreshDomain>): RefresherTiming {
-    if (config.category === 'system') {
-      return systemRefresherConfig(config.refresherName as SystemRefresherName);
-    }
-
-    if (config.category === 'cluster') {
-      return clusterRefresherConfig(config.refresherName as ClusterRefresherName);
-    }
-
-    if (config.category === 'namespace') {
-      return namespaceRefresherConfig(config.refresherName as NamespaceRefresherName);
-    }
-
-    throw new Error(`Unsupported refresher category: ${config.category}`);
+    return refresherConfig(config.refresherName as StaticRefresherName);
   }
 
   private shouldAllowRefresher(config: DomainRegistration<RefreshDomain>): boolean {
@@ -2187,142 +2161,113 @@ export const refreshOrchestrator = new RefreshOrchestrator();
 // Domain registrations
 // ---------------------------------------------------------------------------
 
-// Helper for the common resource-stream domain pattern. 13 of 26 domains
-// follow this exact shape — only domain, refresher, and category differ.
+// Helper for the common resource-stream domain pattern. Registry metadata
+// supplies the category, refresher name, diagnostics stream, and timing.
 type ResourceStreamDomainName = Parameters<typeof resourceStreamManager.start>[0];
-function resourceStreamDomain(
-  domain: RefreshDomain & ResourceStreamDomainName,
-  refresherName: RefresherName,
-  category: DomainCategory,
-  options?: { metricsOnly?: boolean }
-) {
+function registerRefreshDomain(domain: RefreshDomain, streaming?: StreamingRegistration) {
+  const descriptor = getRefreshDomainDescriptor(domain);
   refreshOrchestrator.registerDomain({
     domain,
-    refresherName,
-    category,
-    streaming: {
-      start: (scope) => resourceStreamManager.start(domain, scope),
-      stop: (scope, opts) => resourceStreamManager.stop(domain, scope, opts?.reset ?? false),
-      refreshOnce: (scope) => resourceStreamManager.refreshOnce(domain, scope),
-      metricsOnly: options?.metricsOnly,
-      pauseRefresherWhenStreaming: !options?.metricsOnly,
-    },
+    refresherName: descriptor.refresherName,
+    category: descriptor.category,
+    ...(streaming ? { streaming } : {}),
   });
 }
 
-// System domains
-refreshOrchestrator.registerDomain({
-  domain: 'namespaces',
-  refresherName: SYSTEM_REFRESHERS.namespaces,
-  category: 'system',
-});
-refreshOrchestrator.registerDomain({
-  domain: 'cluster-overview',
-  refresherName: SYSTEM_REFRESHERS.clusterOverview,
-  category: 'system',
-});
-refreshOrchestrator.registerDomain({
-  domain: 'object-maintenance',
-  refresherName: SYSTEM_REFRESHERS.objectMaintenance,
-  category: 'system',
-});
-refreshOrchestrator.registerDomain({
-  domain: 'object-details',
-  refresherName: SYSTEM_REFRESHERS.objectDetails,
-  category: 'system',
-});
-refreshOrchestrator.registerDomain({
-  domain: 'object-events',
-  refresherName: SYSTEM_REFRESHERS.objectEvents,
-  category: 'system',
-});
-refreshOrchestrator.registerDomain({
-  domain: 'object-map',
-  refresherName: SYSTEM_REFRESHERS.objectMap,
-  category: 'system',
-});
-refreshOrchestrator.registerDomain({
-  domain: 'object-yaml',
-  refresherName: SYSTEM_REFRESHERS.objectYaml,
-  category: 'system',
-});
-refreshOrchestrator.registerDomain({
-  domain: 'object-helm-manifest',
-  refresherName: SYSTEM_REFRESHERS.objectHelmManifest,
-  category: 'system',
-});
-refreshOrchestrator.registerDomain({
-  domain: 'object-helm-values',
-  refresherName: SYSTEM_REFRESHERS.objectHelmValues,
-  category: 'system',
-});
-refreshOrchestrator.registerDomain({
-  domain: 'container-logs',
-  refresherName: SYSTEM_REFRESHERS.containerLogs,
-  category: 'system',
-  streaming: {
-    start: (scope) => containerLogsStreamManager.startStream(scope),
-    stop: (scope, options) => containerLogsStreamManager.stop(scope, options?.reset ?? false),
-    refreshOnce: (scope) => containerLogsStreamManager.refreshOnce(scope),
-  },
-});
-resourceStreamDomain('pods', SYSTEM_REFRESHERS.unifiedPods, 'system', { metricsOnly: true });
+function resourceStreamDomain(
+  domain: RefreshDomain & ResourceStreamDomainName,
+  options?: { metricsOnly?: boolean }
+) {
+  registerRefreshDomain(domain, {
+    start: (scope) => resourceStreamManager.start(domain, scope),
+    stop: (scope, opts) => resourceStreamManager.stop(domain, scope, opts?.reset ?? false),
+    refreshOnce: (scope) => resourceStreamManager.refreshOnce(domain, scope),
+    metricsOnly: options?.metricsOnly,
+    pauseRefresherWhenStreaming: !options?.metricsOnly,
+  });
+}
 
-// Cluster domains
-refreshOrchestrator.registerDomain({
-  domain: 'catalog',
-  refresherName: CLUSTER_REFRESHERS.browse,
-  category: 'cluster',
-  streaming: {
+function registerEventStreamDomain(
+  domain: 'cluster-events' | 'namespace-events',
+  start: (scope: string) => Promise<(() => void) | void> | (() => void),
+  stop: (scope: string, options?: { reset?: boolean }) => void,
+  refreshOnce: (scope: string) => Promise<void>
+) {
+  registerRefreshDomain(domain, {
+    start,
+    stop,
+    refreshOnce,
+    pauseRefresherWhenStreaming: true,
+  });
+}
+
+function registerCatalogDomain() {
+  registerRefreshDomain('catalog', {
     start: (scope) => catalogStreamManager.start(scope),
     stop: (_scope, options) => catalogStreamManager.stop(options?.reset ?? false),
     refreshOnce: (scope) => catalogStreamManager.refreshOnce(scope),
     pauseRefresherWhenStreaming: true,
-  },
-});
-refreshOrchestrator.registerDomain({
-  domain: 'catalog-diff',
-  refresherName: CLUSTER_REFRESHERS.catalogDiff,
-  category: 'cluster',
-});
-refreshOrchestrator.registerDomain({
-  domain: 'cluster-events',
-  refresherName: CLUSTER_REFRESHERS.events,
-  category: 'cluster',
-  streaming: {
-    start: (scope) => eventStreamManager.startCluster(scope),
-    stop: (scope, options) => eventStreamManager.stopCluster(scope, options?.reset ?? false),
-    refreshOnce: (scope) => eventStreamManager.refreshCluster(scope),
-    pauseRefresherWhenStreaming: true,
-  },
-});
-resourceStreamDomain('nodes', CLUSTER_REFRESHERS.nodes, 'cluster', { metricsOnly: true });
-resourceStreamDomain('cluster-rbac', CLUSTER_REFRESHERS.rbac, 'cluster');
-resourceStreamDomain('cluster-storage', CLUSTER_REFRESHERS.storage, 'cluster');
-resourceStreamDomain('cluster-config', CLUSTER_REFRESHERS.config, 'cluster');
-resourceStreamDomain('cluster-crds', CLUSTER_REFRESHERS.crds, 'cluster');
-resourceStreamDomain('cluster-custom', CLUSTER_REFRESHERS.custom, 'cluster');
+  });
+}
 
-// Namespace domains
-refreshOrchestrator.registerDomain({
-  domain: 'namespace-events',
-  refresherName: NAMESPACE_REFRESHERS.events,
-  category: 'namespace',
-  streaming: {
-    start: (scope) => eventStreamManager.startNamespace(scope),
-    stop: (scope, options) => eventStreamManager.stopNamespace(scope, options?.reset ?? false),
-    refreshOnce: (scope) => eventStreamManager.refreshNamespace(scope),
-    pauseRefresherWhenStreaming: true,
-  },
-});
-resourceStreamDomain('namespace-workloads', NAMESPACE_REFRESHERS.workloads, 'namespace', {
-  metricsOnly: true,
-});
-resourceStreamDomain('namespace-config', NAMESPACE_REFRESHERS.config, 'namespace');
-resourceStreamDomain('namespace-network', NAMESPACE_REFRESHERS.network, 'namespace');
-resourceStreamDomain('namespace-rbac', NAMESPACE_REFRESHERS.rbac, 'namespace');
-resourceStreamDomain('namespace-storage', NAMESPACE_REFRESHERS.storage, 'namespace');
-resourceStreamDomain('namespace-autoscaling', NAMESPACE_REFRESHERS.autoscaling, 'namespace');
-resourceStreamDomain('namespace-quotas', NAMESPACE_REFRESHERS.quotas, 'namespace');
-resourceStreamDomain('namespace-custom', NAMESPACE_REFRESHERS.custom, 'namespace');
-resourceStreamDomain('namespace-helm', NAMESPACE_REFRESHERS.helm, 'namespace');
+function registerContainerLogsDomain() {
+  registerRefreshDomain('container-logs', {
+    start: (scope) => containerLogsStreamManager.startStream(scope),
+    stop: (scope, options) => containerLogsStreamManager.stop(scope, options?.reset ?? false),
+    refreshOnce: (scope) => containerLogsStreamManager.refreshOnce(scope),
+  });
+}
+
+function registerSnapshotDomains(...domains: RefreshDomain[]) {
+  domains.forEach((domain) => registerRefreshDomain(domain));
+}
+
+/*
+  Preserve the existing frontend registration order.
+  Metadata such as category, refresher name, timing, diagnostics stream, and
+  priority lives in domainRegistry.ts so the refresh surfaces share one source.
+*/
+registerSnapshotDomains(
+  'namespaces',
+  'cluster-overview',
+  'object-maintenance',
+  'object-details',
+  'object-events',
+  'object-map',
+  'object-yaml',
+  'object-helm-manifest',
+  'object-helm-values'
+);
+registerContainerLogsDomain();
+resourceStreamDomain('pods', { metricsOnly: true });
+
+registerCatalogDomain();
+registerSnapshotDomains('catalog-diff');
+registerEventStreamDomain(
+  'cluster-events',
+  (scope) => eventStreamManager.startCluster(scope),
+  (scope, options) => eventStreamManager.stopCluster(scope, options?.reset ?? false),
+  (scope) => eventStreamManager.refreshCluster(scope)
+);
+resourceStreamDomain('nodes', { metricsOnly: true });
+resourceStreamDomain('cluster-rbac');
+resourceStreamDomain('cluster-storage');
+resourceStreamDomain('cluster-config');
+resourceStreamDomain('cluster-crds');
+resourceStreamDomain('cluster-custom');
+
+registerEventStreamDomain(
+  'namespace-events',
+  (scope) => eventStreamManager.startNamespace(scope),
+  (scope, options) => eventStreamManager.stopNamespace(scope, options?.reset ?? false),
+  (scope) => eventStreamManager.refreshNamespace(scope)
+);
+resourceStreamDomain('namespace-workloads', { metricsOnly: true });
+resourceStreamDomain('namespace-config');
+resourceStreamDomain('namespace-network');
+resourceStreamDomain('namespace-rbac');
+resourceStreamDomain('namespace-storage');
+resourceStreamDomain('namespace-autoscaling');
+resourceStreamDomain('namespace-quotas');
+resourceStreamDomain('namespace-custom');
+resourceStreamDomain('namespace-helm');

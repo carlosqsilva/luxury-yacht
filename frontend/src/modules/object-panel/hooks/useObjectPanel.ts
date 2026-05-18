@@ -10,7 +10,10 @@
 import { createContext, useCallback, useContext, useEffect, useRef } from 'react';
 import { useDockablePanelContext } from '@ui/dockable';
 import { useObjectPanelState } from '@/core/contexts/ObjectPanelStateContext';
-import { assertObjectRefHasGVK, type KubernetesObjectReference } from '@/types/view-state';
+import {
+  assertObjectRefHasRequiredIdentity,
+  type KubernetesObjectReference,
+} from '@/types/view-state';
 import { getGroupForPanel } from '@ui/dockable/tabGroupState';
 import type { ViewType } from '@modules/object-panel/components/ObjectPanel/types';
 
@@ -110,13 +113,9 @@ export function useObjectPanel() {
   const openWithObject = useCallback(
     (obj: KubernetesObjectReference, options?: OpenWithObjectOptions) => {
       const enriched = hydrateClusterMeta(obj);
-      // Runtime defense for the kind-only-objects bug. Catches programmatic
-      // ref constructions (helpers, mappers, destructure-and-rebuild) that
-      // the openWithObjectAudit literal-walker can't see. Throws loudly
-      // with a stack trace at the panel's entry point — much earlier than
-      // the backend hard-errors at object_detail_provider.go,
-      // app_capabilities.go, and app_permissions.go would surface it.
-      assertObjectRefHasGVK(enriched);
+      // Runtime defense for incomplete object refs. Catches programmatic ref
+      // constructions that the openWithObjectAudit literal walker can't see.
+      assertObjectRefHasRequiredIdentity(enriched);
       const panelId = onRowClick(enriched);
 
       // Set the requested initial tab BEFORE focusing so the panel
