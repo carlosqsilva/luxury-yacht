@@ -38,6 +38,8 @@ const registeredShortcuts: Array<{
 const isMacPlatformMock = vi.fn(() => true);
 const setSelectedKubeconfigsMock = vi.fn();
 const setActiveKubeconfigMock = vi.fn();
+const loadKubeconfigsMock = vi.fn();
+const closeKubeconfigMock = vi.fn();
 const kubeconfigState = {
   selectedKubeconfig: 'cluster-1',
   selectedKubeconfigs: ['cluster-1', 'cluster-2'],
@@ -69,9 +71,10 @@ vi.mock('@modules/kubernetes/config/KubeconfigContext', () => ({
     kubeconfigsLoading: false,
     setSelectedKubeconfigs: setSelectedKubeconfigsMock,
     setSelectedKubeconfig: vi.fn(),
+    closeKubeconfig: closeKubeconfigMock,
     setActiveKubeconfig: setActiveKubeconfigMock,
     getClusterMeta: (selection: string) => ({ id: selection, name: selection }),
-    loadKubeconfigs: vi.fn(),
+    loadKubeconfigs: loadKubeconfigsMock,
   }),
 }));
 
@@ -144,6 +147,10 @@ describe('GlobalShortcuts', () => {
     latestHelpProps = null;
     setSelectedKubeconfigsMock.mockClear();
     setActiveKubeconfigMock.mockClear();
+    loadKubeconfigsMock.mockClear();
+    loadKubeconfigsMock.mockResolvedValue(undefined);
+    closeKubeconfigMock.mockClear();
+    closeKubeconfigMock.mockResolvedValue(undefined);
     QuitMock.mockClear();
     // Clear captured Wails event handlers
     for (const key of Object.keys(wailsEventHandlers)) {
@@ -378,11 +385,14 @@ describe('GlobalShortcuts', () => {
 
     expect(wailsEventHandlers['menu:close']).toBeDefined();
 
-    act(() => {
+    await act(async () => {
       wailsEventHandlers['menu:close']();
+      await Promise.resolve();
     });
 
-    expect(setSelectedKubeconfigsMock).toHaveBeenCalledWith(['cluster-1']);
+    expect(closeKubeconfigMock).toHaveBeenCalledWith('cluster-2');
+    expect(loadKubeconfigsMock).not.toHaveBeenCalled();
+    expect(setSelectedKubeconfigsMock).not.toHaveBeenCalled();
     expect(QuitMock).not.toHaveBeenCalled();
   });
 

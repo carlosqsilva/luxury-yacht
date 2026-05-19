@@ -1,30 +1,27 @@
 ### Added
 
-- Object Map support for `PodDisruptionBudget` and `NetworkPolicy`.
-- Kubernetes API diagnostics and controls.
-  - Advanced Settings now include Kubernetes API QPS, burst allowance, and permission-check concurrency controls.
-  - Diagnostics panel now shows per-cluster Kubernetes API request rates, configured QPS/burst values, total requests, throttling responses, server errors, and last request timing.
-- Sidebar display preferences in Settings.
-  - Dimming namespaces with no workloads can be disabled
-  - Namespace expansion can now be configured to keep only one namespace open at a time or multiple namespaces open.
+- Support for Gateway API resources in the Object Map.
 
 ### Changed
 
-- Settings, modal, icon, and command palette polish.
-  - Common modal headers now use a more consistent title and close-button treatment.
-  - Consistent icons and more logical item arrangement in the command palette.
-  - Settings sections use clearer icons and labels.
-- Improved Object Map zoom behavior.
-  - Auto-fit now limits maximum zoom so small maps do not over-enlarge.
-  - Map rendering now responds better to app zoom changes without unexpectedly refitting the view.
-- Numeric inputs no longer have spinner controls and are right-aligned for readability.
-- Themes now use an internal pattern matcher instead of filename globbing.
+- HPA-managed workloads now show explicit `Scale to 0` and `Resume from 0`
+  actions instead of a disabled scale placeholder, while regular workloads keep
+  the existing `Scale` action.
+- The workload scale modal now includes a direct `Scale to 0` action.
+- Resource refresh and streaming are now more consistently scoped per cluster.
+  - Background refresh fans out as separate per-cluster work instead of relying on aggregate refresh scopes.
+  - Resource streams now resume, resync, and fall back to snapshots more predictably when connections reset or data drift is detected.
+- GridTable behavior is more consistent across resource tables.
+  - Filtering, CSV export, column sizing, column visibility, keyboard navigation, focus handling, and persisted table state now share the same underlying table logic.
+- Container Logs and Node Logs now share more of the same viewer behavior.
+  - Search, filtering, JSON parsing, copy/export behavior, ANSI rendering, and scroll restoration are more consistent between the two log surfaces.
+- App preferences are now saved through a unified settings path.
+  - Settings use backend-provided defaults, validation, and bounds.
+  - Failed preference saves roll back optimistic frontend changes instead of leaving the UI and persisted settings out of sync.
 
 ### Fixed
 
-- Letters with descenders (j, g, y) should no longer be clipped in Windows.
-- Workload readiness during rollouts now uses live Pod readiness counts when available, making rollout status more accurate.
-- Map tabs no longer show manual-refresh state while they are only waiting for their first snapshot.
-- Selecting a view before refresh data is ready now populates once the data arrives.
-- Kind badge hover styling no longer clips the bottom border.
-- Event badges render with the correct success/warning styles.
+- Refresh rejects multi-cluster scopes by default, preventing accidental mixed-cluster state from being written to the refresh store.
+- Resource stream connection health and diagnostics are more accurate during reconnects, resets, and visibility changes.
+- GridTable row and cell lookups handle cluster-scoped keys and column keys without unsafe assumptions.
+- Node log fetching routes through the shared cluster data-access policy, so paused refresh behavior and diagnostics are handled consistently.

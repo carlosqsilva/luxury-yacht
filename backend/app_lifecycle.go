@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/luxury-yacht/app/backend/internal/errorcapture"
 	"github.com/luxury-yacht/app/backend/internal/logclassify"
@@ -29,6 +30,8 @@ var (
 	runtimeWindowMaximise = runtime.WindowMaximise
 	runtimeWindowShow     = runtime.WindowShow
 )
+
+const beforeCloseSelectionFlushTimeout = 2 * time.Second
 
 // Startup is called when the app starts. The context passed is stored for later use.
 func (a *App) Startup(ctx context.Context) {
@@ -198,6 +201,10 @@ func NewBeforeCloseHandler(app *App) func(context.Context) bool {
 	return func(ctx context.Context) bool {
 		app.logger.Info("Application close requested", logsources.App)
 
+		if !app.waitForSelectionMutationIdle(beforeCloseSelectionFlushTimeout) {
+			app.logger.Warn("Timed out waiting for cluster selection persistence before close", logsources.App)
+		}
+
 		if err := app.SaveWindowSettings(); err != nil {
 			app.logger.Warn(fmt.Sprintf("Failed to save window settings: %v", err), logsources.App)
 		} else {
@@ -214,12 +221,23 @@ func (a *App) Shutdown(ctx context.Context) {
 
 	// Shutdown all per-cluster auth managers to stop any recovery goroutines.
 	a.clusterClientsMu.Lock()
+	clusterIDSet := make(map[string]struct{})
 	for _, clients := range a.clusterClients {
+		if clients != nil && clients.meta.ID != "" {
+			clusterIDSet[clients.meta.ID] = struct{}{}
+		}
 		if clients != nil && clients.authManager != nil {
 			clients.authManager.Shutdown()
 		}
 	}
 	a.clusterClientsMu.Unlock()
+
+	for _, clusterID := range a.runtimeOperationClusterIDs() {
+		clusterIDSet[clusterID] = struct{}{}
+	}
+	for clusterID := range clusterIDSet {
+		a.cleanupClusterRuntimeOperations(clusterID, "app shutdown")
+	}
 
 	// Stop the kubeconfig directory watcher before tearing down cluster state.
 	a.stopKubeconfigWatcher()

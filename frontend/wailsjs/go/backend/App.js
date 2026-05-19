@@ -38,16 +38,12 @@ export function ClearSSRRCache(arg1) {
   return window['go']['backend']['App']['ClearSSRRCache'](arg1);
 }
 
+export function CloseCluster(arg1) {
+  return window['go']['backend']['App']['CloseCluster'](arg1);
+}
+
 export function CloseShellSession(arg1) {
   return window['go']['backend']['App']['CloseShellSession'](arg1);
-}
-
-export function CordonNode(arg1, arg2) {
-  return window['go']['backend']['App']['CordonNode'](arg1, arg2);
-}
-
-export function CreateDebugContainer(arg1, arg2) {
-  return window['go']['backend']['App']['CreateDebugContainer'](arg1, arg2);
 }
 
 export function CreateVersionedEndpoint(arg1, arg2, arg3, arg4) {
@@ -70,32 +66,12 @@ export function DeleteGridTablePersistenceEntries(arg1) {
   return window['go']['backend']['App']['DeleteGridTablePersistenceEntries'](arg1);
 }
 
-export function DeleteHelmRelease(arg1, arg2, arg3) {
-  return window['go']['backend']['App']['DeleteHelmRelease'](arg1, arg2, arg3);
-}
-
-export function DeleteNode(arg1, arg2) {
-  return window['go']['backend']['App']['DeleteNode'](arg1, arg2);
-}
-
-export function DeletePod(arg1, arg2, arg3) {
-  return window['go']['backend']['App']['DeletePod'](arg1, arg2, arg3);
-}
-
-export function DeleteResourceByGVK(arg1, arg2, arg3, arg4, arg5) {
-  return window['go']['backend']['App']['DeleteResourceByGVK'](arg1, arg2, arg3, arg4, arg5);
-}
-
 export function DeleteTheme(arg1) {
   return window['go']['backend']['App']['DeleteTheme'](arg1);
 }
 
 export function DiscoverNodeLogs(arg1, arg2) {
   return window['go']['backend']['App']['DiscoverNodeLogs'](arg1, arg2);
-}
-
-export function DrainNode(arg1, arg2, arg3) {
-  return window['go']['backend']['App']['DrainNode'](arg1, arg2, arg3);
 }
 
 export function FetchContainerLogs(arg1, arg2) {
@@ -112,10 +88,6 @@ export function FindCatalogObjectByUID(arg1, arg2) {
 
 export function FindCatalogObjectMatch(arg1, arg2, arg3, arg4, arg5, arg6) {
   return window['go']['backend']['App']['FindCatalogObjectMatch'](arg1, arg2, arg3, arg4, arg5, arg6);
-}
-
-export function ForceDeleteNode(arg1, arg2) {
-  return window['go']['backend']['App']['ForceDeleteNode'](arg1, arg2);
 }
 
 export function GetAllClusterAuthStates() {
@@ -140,6 +112,10 @@ export function GetAppLogsSince(arg1) {
 
 export function GetAppSettings() {
   return window['go']['backend']['App']['GetAppSettings']();
+}
+
+export function GetAppSettingsSchema() {
+  return window['go']['backend']['App']['GetAppSettingsSchema']();
 }
 
 export function GetAppearanceModeInfo() {
@@ -418,6 +394,10 @@ export function ListPortForwards() {
   return window['go']['backend']['App']['ListPortForwards']();
 }
 
+export function ListRuntimeOperations() {
+  return window['go']['backend']['App']['ListRuntimeOperations']();
+}
+
 export function ListShellSessions() {
   return window['go']['backend']['App']['ListShellSessions']();
 }
@@ -428,6 +408,10 @@ export function LoadWindowSettings() {
 
 export function LogAppLogsFromFrontend(arg1, arg2, arg3) {
   return window['go']['backend']['App']['LogAppLogsFromFrontend'](arg1, arg2, arg3);
+}
+
+export function LogAppLogsFromFrontendWithCluster(arg1, arg2, arg3, arg4, arg5) {
+  return window['go']['backend']['App']['LogAppLogsFromFrontendWithCluster'](arg1, arg2, arg3, arg4, arg5);
 }
 
 export function MatchThemeForCluster(arg1) {
@@ -454,10 +438,6 @@ export function ResizeShellSession(arg1, arg2, arg3) {
   return window['go']['backend']['App']['ResizeShellSession'](arg1, arg2, arg3);
 }
 
-export function RestartWorkload(arg1, arg2, arg3, arg4, arg5, arg6) {
-  return window['go']['backend']['App']['RestartWorkload'](arg1, arg2, arg3, arg4, arg5, arg6);
-}
-
 export function RetryAuth() {
   return window['go']['backend']['App']['RetryAuth']();
 }
@@ -466,8 +446,8 @@ export function RetryClusterAuth(arg1) {
   return window['go']['backend']['App']['RetryClusterAuth'](arg1);
 }
 
-export function RollbackWorkload(arg1, arg2, arg3, arg4, arg5, arg6, arg7) {
-  return window['go']['backend']['App']['RollbackWorkload'](arg1, arg2, arg3, arg4, arg5, arg6, arg7);
+export function RunObjectAction(arg1) {
+  return window['go']['backend']['App']['RunObjectAction'](arg1);
 }
 
 export function SaveTheme(arg1) {
@@ -476,10 +456,6 @@ export function SaveTheme(arg1) {
 
 export function SaveWindowSettings() {
   return window['go']['backend']['App']['SaveWindowSettings']();
-}
-
-export function ScaleWorkload(arg1, arg2, arg3, arg4, arg5, arg6, arg7) {
-  return window['go']['backend']['App']['ScaleWorkload'](arg1, arg2, arg3, arg4, arg5, arg6, arg7);
 }
 
 export function SendShellInput(arg1, arg2) {
@@ -622,14 +598,6 @@ export function ShowSettings() {
   return window['go']['backend']['App']['ShowSettings']();
 }
 
-export function StartDrainNode(arg1, arg2, arg3) {
-  return window['go']['backend']['App']['StartDrainNode'](arg1, arg2, arg3);
-}
-
-export function StartPortForward(arg1, arg2) {
-  return window['go']['backend']['App']['StartPortForward'](arg1, arg2);
-}
-
 export function StartShellSession(arg1, arg2) {
   return window['go']['backend']['App']['StartShellSession'](arg1, arg2);
 }
@@ -650,10 +618,6 @@ export function StopPortForward(arg1) {
   return window['go']['backend']['App']['StopPortForward'](arg1);
 }
 
-export function SuspendCronJob(arg1, arg2, arg3, arg4) {
-  return window['go']['backend']['App']['SuspendCronJob'](arg1, arg2, arg3, arg4);
-}
-
 export function ToggleAppLogsPanel() {
   return window['go']['backend']['App']['ToggleAppLogsPanel']();
 }
@@ -670,12 +634,8 @@ export function ToggleSidebar() {
   return window['go']['backend']['App']['ToggleSidebar']();
 }
 
-export function TriggerCronJob(arg1, arg2, arg3) {
-  return window['go']['backend']['App']['TriggerCronJob'](arg1, arg2, arg3);
-}
-
-export function UncordonNode(arg1, arg2) {
-  return window['go']['backend']['App']['UncordonNode'](arg1, arg2);
+export function UpdateAppPreferences(arg1) {
+  return window['go']['backend']['App']['UpdateAppPreferences'](arg1);
 }
 
 export function UpdateFavorite(arg1) {

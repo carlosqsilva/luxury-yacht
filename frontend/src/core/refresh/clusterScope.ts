@@ -123,15 +123,8 @@ export const parseClusterScopeList = (
  * returned string does NOT include the cluster prefix — wrap it with
  * buildClusterScope when feeding it into a scoped refresh domain.
  *
- * Two formats are supported, matching the backend parser:
- *
- *   - Legacy:  "namespace:kind:name"                     (when group and
- *                                                         version are both
- *                                                         empty/absent)
- *   - GVK:     "namespace:group/version:kind:name"       (when version is
- *                                                         set, even if
- *                                                         group is empty
- *                                                         for core types)
+ * The returned format is "namespace:group/version:kind:name". Core resources
+ * use an explicit empty group, encoded as "/v1:kind:name".
  *
  * The cluster-scope sentinel "__cluster__" should be passed for the
  * namespace when the object is cluster-scoped (matches the backend's
@@ -154,36 +147,16 @@ export const buildObjectScope = (args: {
   const name = args.name.trim();
 
   if (!version) {
-    return `${namespace}:${kind}:${name}`;
+    throw new Error(
+      `Object scope for ${kind || 'unknown'}/${name || 'unknown'} is missing apiVersion`
+    );
+  }
+  if (args.group === undefined || args.group === null) {
+    throw new Error(
+      `Object scope for ${kind || 'unknown'}/${name || 'unknown'} is missing apiGroup`
+    );
   }
 
   const group = (args.group ?? '').trim();
   return `${namespace}:${group}/${version}:${kind}:${name}`;
-};
-
-// buildClusterScopeList prefixes scope with a list of cluster IDs for multi-cluster refreshes.
-export const buildClusterScopeList = (
-  clusterIds: Array<string | null | undefined>,
-  scope?: string | null
-): string => {
-  const raw = (scope ?? '').trim();
-  if (raw) {
-    const { clusterId: existingClusterId } = splitClusterScope(raw);
-    if (existingClusterId) {
-      return raw;
-    }
-  }
-
-  const ids = normalizeClusterIds(clusterIds);
-  if (ids.length === 0) {
-    return raw;
-  }
-
-  const clusterToken = ids.length === 1 ? ids[0] : `${CLUSTER_SCOPE_LIST_PREFIX}${ids.join(',')}`;
-
-  if (!raw) {
-    return `${clusterToken}${CLUSTER_SCOPE_DELIMITER}`;
-  }
-
-  return `${clusterToken}${CLUSTER_SCOPE_DELIMITER}${raw}`;
 };

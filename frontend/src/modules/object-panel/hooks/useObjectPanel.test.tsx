@@ -240,8 +240,8 @@ describe('useObjectPanel', () => {
   // Runtime defense for the kind-only-objects bug. The audit test
   // (openWithObjectAudit.test.ts) covers literal call sites; this guard
   // covers programmatic constructions (helpers, mappers, destructure-and-
-  // rebuild) that the literal walker can't see. See assertObjectRefHasGVK in
-  // src/types/view-state.ts.
+  // rebuild) that the literal walker can't see. See
+  // assertObjectRefHasRequiredIdentity in src/types/view-state.ts.
   describe('kind-only-objects runtime guard', () => {
     it('throws when openWithObject receives a ref with kind but no version', () => {
       // The shape of bug we want to catch: a future helper builds a ref
@@ -273,12 +273,28 @@ describe('useObjectPanel', () => {
       }).toThrow(/resolveBuiltinGroupVersion|parseApiVersion/);
     });
 
-    it('exempts synthetic kinds (HelmRelease) that have no real GVK', () => {
-      // HelmRelease is the panel's synthetic name for a Helm CLI release.
-      // It is not a Kubernetes resource and never resolves through
-      // discovery. The guard must not block it.
+    it('throws when a custom resource carries version but omits group', () => {
+      const brokenRef = {
+        kind: 'DBInstance',
+        version: 'v1alpha1',
+        name: 'primary',
+        namespace: 'default',
+        clusterId: 'test-cluster',
+      };
+
+      expect(() => {
+        act(() => {
+          hookResult.openWithObject(brokenRef);
+        });
+      }).toThrow(/missing apiGroup/);
+      expect(hookResult.openPanels.size).toBe(0);
+    });
+
+    it('requires synthetic HelmRelease refs to use canonical identity', () => {
       const helmRelease = {
         kind: 'HelmRelease',
+        group: 'helm.sh',
+        version: 'v3',
         name: 'demo',
         namespace: 'default',
         clusterId: 'test-cluster',

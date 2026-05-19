@@ -2,14 +2,14 @@
  * frontend/src/core/refresh/clusterScope.test.ts
  *
  * Test suite for clusterScope helpers.
- * Covers multi-cluster prefix encoding and decoding behaviors.
+ * Covers single-cluster prefix encoding and cluster-list decoding behaviors.
  */
 
 import { describe, expect, it } from 'vitest';
 
 import {
+  buildObjectScope,
   buildClusterScope,
-  buildClusterScopeList,
   parseClusterScopeList,
   parseClusterScope,
   stripClusterScope,
@@ -40,21 +40,9 @@ describe('clusterScope helpers', () => {
     expect(stripClusterScope('namespace:default')).toBe('namespace:default');
   });
 
-  it('builds multi-cluster scopes with a cluster list prefix', () => {
-    // Cluster lists should dedupe ids and preserve ordering.
-    const scope = buildClusterScopeList(['cluster-a', 'cluster-a', ' cluster-b '], 'limit=25');
-    expect(scope).toBe('clusters=cluster-a,cluster-b|limit=25');
-  });
-
-  it('keeps single-cluster lists in the short prefix form', () => {
-    // Single-cluster lists should still use the short prefix form.
-    expect(buildClusterScopeList(['cluster-a'], 'limit=50')).toBe('cluster-a|limit=50');
-    expect(buildClusterScopeList(['cluster-a'], '')).toBe('cluster-a|');
-  });
-
   it('does not re-prefix scopes that already include a cluster', () => {
     // When scopes already include a cluster id, keep them untouched.
-    expect(buildClusterScopeList(['cluster-b'], 'cluster-a|namespace:default')).toBe(
+    expect(buildClusterScope('cluster-b', 'cluster-a|namespace:default')).toBe(
       'cluster-a|namespace:default'
     );
   });
@@ -120,5 +108,39 @@ describe('clusterScope helpers', () => {
       scope: 'namespace:default',
       isMultiCluster: false,
     });
+  });
+
+  it('builds object scopes with full GVK identity', () => {
+    expect(
+      buildObjectScope({
+        namespace: 'team-a',
+        group: '',
+        version: 'v1',
+        kind: 'Pod',
+        name: 'api',
+      })
+    ).toBe('team-a:/v1:Pod:api');
+  });
+
+  it('rejects object scopes missing apiVersion', () => {
+    expect(() =>
+      buildObjectScope({
+        namespace: 'team-a',
+        group: '',
+        kind: 'Pod',
+        name: 'api',
+      })
+    ).toThrow(/missing apiVersion/);
+  });
+
+  it('rejects object scopes missing apiGroup', () => {
+    expect(() =>
+      buildObjectScope({
+        namespace: 'team-a',
+        version: 'v1',
+        kind: 'Pod',
+        name: 'api',
+      })
+    ).toThrow(/missing apiGroup/);
   });
 });

@@ -11,25 +11,11 @@ import {
   invalidateRefreshBaseURL,
   setMetricsActive,
   type Snapshot,
-  type SnapshotStats,
 } from './client';
 import { eventBus, type AppEvents } from '@/core/events';
 import { refreshManager, type RefreshContext } from './RefreshManager';
-import {
-  CLUSTER_REFRESHERS,
-  NAMESPACE_REFRESHERS,
-  SYSTEM_REFRESHERS,
-  type RefresherName,
-  type SystemRefresherName,
-  type ClusterRefresherName,
-  type NamespaceRefresherName,
-} from './refresherTypes';
-import {
-  clusterRefresherConfig,
-  namespaceRefresherConfig,
-  systemRefresherConfig,
-  type RefresherTiming,
-} from './refresherConfig';
+import type { RefresherName, StaticRefresherName } from './refresherTypes';
+import { refresherConfig, type RefresherTiming } from './refresherConfig';
 import {
   getScopedDomainState,
   markPendingRequest,
@@ -37,53 +23,34 @@ import {
   resetScopedDomainState,
   setScopedDomainState,
 } from './store';
-import type {
-  CatalogSnapshotPayload,
-  ClusterNodeSnapshotPayload,
-  DomainPayloadMap,
-  NamespaceSnapshotPayload,
-  NamespaceWorkloadSummary,
-  NamespaceWorkloadSnapshotPayload,
-  NodeMaintenanceSnapshotPayload,
-  PodSnapshotPayload,
-  RefreshDomain,
-} from './types';
-import { containerLogsStreamManager } from './streaming/containerLogsStreamManager';
-import { eventStreamManager } from './streaming/eventStreamManager';
+import type { DomainPayloadMap, RefreshDomain } from './types';
 import { resourceStreamManager } from './streaming/resourceStreamManager';
 import { catalogStreamManager } from './streaming/catalogStreamManager';
-import { errorHandler } from '@utils/errorHandler';
-import { APP_LOG_SOURCES, logAppLogsInfo, logAppLogsWarn } from '@/core/logging/appLogsClient';
-import { getAutoRefreshEnabled, getMetricsRefreshIntervalMs } from '@/core/settings/appPreferences';
 import {
-  buildClusterScope,
-  buildClusterScopeList,
-  parseClusterScope,
-  parseClusterScopeList,
-} from './clusterScope';
-
-type DomainCategory = 'system' | 'cluster' | 'namespace';
-
-type StreamingRegistration = {
-  start: (scope: string) => Promise<(() => void) | void> | (() => void);
-  stop?: (scope: string, options?: { reset?: boolean }) => void;
-  refreshOnce?: (scope: string) => Promise<void>;
-  metricsOnly?: boolean;
-  // Pause scheduled polling while streaming is active; resume polling as a fallback when it stops.
-  pauseRefresherWhenStreaming?: boolean;
-};
-
-type DomainRegistration<K extends RefreshDomain> = {
-  domain: K;
-  refresherName: RefresherName;
-  category: DomainCategory;
-  streaming?: StreamingRegistration;
-};
+  APP_LOG_SOURCES,
+  logAppLogsInfo,
+  logAppLogsWarn,
+  type AppLogsClusterMeta,
+} from '@/core/logging/appLogsClient';
+import { getAutoRefreshEnabled, getMetricsRefreshIntervalMs } from '@/core/settings/appPreferences';
+import { buildClusterScope, parseClusterScope, parseClusterScopeList } from './clusterScope';
+import { ClusterRefreshRuntime, makeInFlightKey } from './refreshRuntime';
+import { mergePollingListPayload } from './snapshotMerge';
+import { registerDefaultRefreshDomains } from './domainRegistrations';
+import type { DomainRegistration, StreamingRegistration } from './refreshRegistration';
+import { isResourceStreamDomain, isResourceStreamViewActive } from './resourceStreamViews';
+import { applyMetricsSnapshot } from './metricsSnapshotApplicator';
+import {
+  normalizeNamespaceScope as normalizeNamespaceScopeValue,
+  normalizeRefreshDomainScope,
+} from './scopeNormalization';
+import { RefreshErrorNotifier } from './refreshErrorNotifier';
 
 type DomainFetchOptions = {
   isManual: boolean;
   signal?: AbortSignal;
   metricsOnly?: boolean;
+  allowDisabledRetainedScope?: boolean;
 };
 
 // Refreshers are disabled at registration by default. Most domains rely on
@@ -97,137 +64,40 @@ const noopStreamingCleanup = () => {};
 // Keep streaming metrics refreshes aligned with the configurable metrics cadence.
 const getStreamingMetricsMinIntervalMs = (): number => getMetricsRefreshIntervalMs();
 
-const logInfo = (message: string): void => {
-  logAppLogsInfo(message, APP_LOG_SOURCES.RefreshOrchestrator);
+const logInfo = (message: string, cluster?: AppLogsClusterMeta): void => {
+  logAppLogsInfo(message, APP_LOG_SOURCES.RefreshOrchestrator, cluster);
 };
 
-const logWarning = (message: string): void => {
-  logAppLogsWarn(message, APP_LOG_SOURCES.RefreshOrchestrator);
+const logWarning = (message: string, cluster?: AppLogsClusterMeta): void => {
+  logAppLogsWarn(message, APP_LOG_SOURCES.RefreshOrchestrator, cluster);
 };
 
-const makeInFlightKey = (domain: RefreshDomain, scope?: string) => `${domain}::${scope ?? '*'}`;
-// Domains that should never keep multiple concurrently-enabled scopes.
-const SINGLE_ACTIVE_SCOPE_DOMAINS = new Set<RefreshDomain>(['namespaces', 'cluster-overview']);
-
-const shallowEqualRecord = (left: Record<string, unknown>, right: Record<string, unknown>) => {
-  if (left === right) {
-    return true;
-  }
-  const leftKeys = Object.keys(left);
-  const rightKeys = Object.keys(right);
-  if (leftKeys.length !== rightKeys.length) {
-    return false;
-  }
-  for (const key of leftKeys) {
-    if (left[key] !== right[key]) {
-      return false;
-    }
-  }
-  return true;
-};
-
-// Reuse cached row objects when incoming rows are unchanged to cut re-render churn.
-const mergeListByKey = <T extends object>(
-  incoming: T[],
-  previous: T[],
-  keyFor: (item: T) => string
-): T[] => {
-  if (incoming.length === 0 || previous.length === 0) {
-    return incoming;
-  }
-  const previousByKey = new Map<string, T>();
-  previous.forEach((item) => {
-    const key = keyFor(item);
-    if (key) {
-      previousByKey.set(key, item);
-    }
-  });
-  let reused = false;
-  const merged = incoming.map((item) => {
-    const key = keyFor(item);
-    if (!key) {
-      return item;
-    }
-    const cached = previousByKey.get(key);
-    if (
-      cached &&
-      shallowEqualRecord(cached as Record<string, unknown>, item as Record<string, unknown>)
-    ) {
-      reused = true;
-      return cached;
-    }
-    return item;
-  });
-  return reused ? merged : incoming;
-};
-
-const mergeWorkloadMetricRows = (
-  previous: NamespaceWorkloadSummary[],
-  incoming: NamespaceWorkloadSummary[],
-  fallbackClusterId: string
-): NamespaceWorkloadSummary[] => {
-  if (previous.length === 0 || incoming.length === 0) {
-    return previous;
-  }
-
-  const incomingByKey = new Map(
-    incoming.map((workload) => [
-      `${workload.clusterId ?? fallbackClusterId}::${workload.namespace}::${workload.kind}::${workload.name}`,
-      workload,
-    ])
-  );
-
-  let changed = false;
-  const next = previous.map((existing) => {
-    const key = `${existing.clusterId ?? fallbackClusterId}::${existing.namespace}::${existing.kind}::${existing.name}`;
-    const candidate = incomingByKey.get(key);
-    if (!candidate) {
-      return existing;
-    }
-
-    if (existing.cpuUsage === candidate.cpuUsage && existing.memUsage === candidate.memUsage) {
-      return existing;
-    }
-
-    changed = true;
-    return {
-      ...existing,
-      cpuUsage: candidate.cpuUsage,
-      memUsage: candidate.memUsage,
-    };
-  });
-
-  return changed ? next : previous;
-};
+// Most domains should only keep one enabled scope per cluster runtime. These
+// domains have real concurrent consumers, such as browse data plus metadata,
+// object-diff left/right panes, or namespace table plus object-panel pod lists.
+const MULTI_ACTIVE_SCOPE_DOMAINS = new Set<RefreshDomain>([
+  'catalog',
+  'catalog-diff',
+  'container-logs',
+  'object-details',
+  'object-events',
+  'object-helm-manifest',
+  'object-helm-values',
+  'object-maintenance',
+  'object-map',
+  'object-yaml',
+  'pods',
+]);
 
 class RefreshOrchestrator {
   private configs = new Map<RefreshDomain, DomainRegistration<RefreshDomain>>();
   private unsubscriptions = new Map<RefreshDomain, () => void>();
   private registeredRefreshers = new Set<RefresherName>();
+  private coordinatorRuntime = new ClusterRefreshRuntime('__coordinator__');
+  private clusterRuntimes = new Map<string, ClusterRefreshRuntime>();
 
-  private inFlight = new Map<
-    string,
-    {
-      controller: AbortController;
-      isManual: boolean;
-      requestId: number;
-      cleanup?: () => void;
-      contextVersion: number;
-      domain: RefreshDomain;
-      scope?: string;
-    }
-  >();
   private requestCounter = 0;
-  private streamingCleanup = new Map<string, () => void>();
-  private pendingStreaming = new Map<string, Promise<(() => void) | void>>();
-  private streamingReady = new Map<string, Promise<void>>();
-  private cancelledStreaming = new Set<string>();
-
-  private blockedStreaming = new Set<string>();
-  private lastMetricsRefreshAt = new Map<string, number>();
   private metricsDemandActive = false;
-
-  private scopedEnabledState = new Map<RefreshDomain, Map<string, boolean>>();
 
   private suspendedDomains = new Map<RefreshDomain, boolean>();
   private contextVersion = 0;
@@ -235,8 +105,7 @@ class RefreshOrchestrator {
     currentView: 'namespace',
     objectPanel: { isOpen: false },
   };
-  private lastNotifiedErrors = new Map<string, string>();
-  private suppressNetworkErrorsUntil = 0;
+  private errorNotifier = new RefreshErrorNotifier();
 
   // Tracks clusters with auth failures so refresh is paused while auth is invalid.
   private authFailedClusters = new Set<string>();
@@ -256,77 +125,21 @@ class RefreshOrchestrator {
     logInfo('[refresh] resource streaming enabled (mode=active, domains=all)');
   }
 
-  private getErrorNotificationKey(domain: RefreshDomain, scope?: string): string {
-    return makeInFlightKey(domain, scope ?? '__global__');
-  }
-
   private notifyRefreshError(
     domain: RefreshDomain,
     scope: string | undefined,
     message: string
   ): void {
-    if (this.shouldSuppressNetworkError(message)) {
-      return;
-    }
-    const key = this.getErrorNotificationKey(domain, scope);
-    if (this.lastNotifiedErrors.get(key) === message) {
-      return;
-    }
-
-    const normalizedMessage = message.toLowerCase();
-    if (
-      domain === 'object-details' &&
-      (normalizedMessage.includes('not found') || normalizedMessage.includes('could not find'))
-    ) {
-      // Suppress toasts for transient not-found errors when panels hold stale objects.
-      this.lastNotifiedErrors.set(key, message);
-      return;
-    }
-    if (normalizedMessage.includes('catalog hydration incomplete')) {
-      this.lastNotifiedErrors.set(key, message);
-      if (process.env.NODE_ENV !== 'production') {
-        // Surface in dev tools without triggering user-facing toasts
-        console.warn(
-          `[Refresh] hydration warning suppressed for ${domain} (${scope ?? 'global'}): ${message}`
-        );
-      }
-      return;
-    }
-
-    this.lastNotifiedErrors.set(key, message);
-    errorHandler.handle(new Error(message), {
-      source: 'refresh-orchestrator',
+    this.errorNotifier.notify({
       domain,
-      scope: scope ?? 'global',
+      scope,
+      message,
       category: this.configs.get(domain)?.category,
     });
   }
 
   private clearRefreshError(domain: RefreshDomain, scope?: string): void {
-    const key = this.getErrorNotificationKey(domain, scope);
-    if (this.lastNotifiedErrors.has(key)) {
-      this.lastNotifiedErrors.delete(key);
-    }
-  }
-
-  private suppressNetworkErrors(durationMs: number): void {
-    this.suppressNetworkErrorsUntil = Math.max(
-      this.suppressNetworkErrorsUntil,
-      Date.now() + durationMs
-    );
-  }
-
-  private shouldSuppressNetworkError(message: string): boolean {
-    if (Date.now() > this.suppressNetworkErrorsUntil) {
-      return false;
-    }
-    const normalized = message.toLowerCase();
-    return (
-      normalized.includes('load failed') ||
-      normalized.includes('failed to fetch') ||
-      normalized.includes('could not connect to the server') ||
-      normalized.includes('snapshot request failed')
-    );
+    this.errorNotifier.clear(domain, scope);
   }
 
   registerDomain<K extends RefreshDomain>(config: DomainRegistration<K>): void {
@@ -372,6 +185,10 @@ class RefreshOrchestrator {
     this.context = { ...this.context, ...normalizedContext };
     refreshManager.updateContext(normalizedContext);
 
+    if (Object.prototype.hasOwnProperty.call(normalizedContext, 'allConnectedClusterIds')) {
+      this.pruneRemovedClusterRuntimes(normalizedContext.allConnectedClusterIds ?? []);
+    }
+
     const wasNamespaceActive = this.isNamespaceContextActive(previousContext);
     const isNamespaceActive = this.isNamespaceContextActive(this.context);
 
@@ -399,11 +216,13 @@ class RefreshOrchestrator {
 
   setDomainEnabled(domain: RefreshDomain, enabled: boolean): void {
     // All domains are scoped — delegate to each known scope.
-    const scopedState = this.scopedEnabledState.get(domain) ?? new Map<string, boolean>();
-    scopedState.forEach((_value, scope) => {
+    const scopes = this.getKnownScopes(domain);
+    scopes.forEach((scope) => {
       this.setScopedDomainEnabled(domain, scope, enabled);
     });
-    this.scopedEnabledState.set(domain, scopedState);
+    if (scopes.length === 0) {
+      this.coordinatorRuntime.scopedEnabledState.set(domain, new Map<string, boolean>());
+    }
     this.updateMetricsDemand();
   }
 
@@ -417,8 +236,9 @@ class RefreshOrchestrator {
       return;
     }
 
+    const runtime = this.getRuntimeForScope(domain, normalizedScope);
     const readyKey = makeInFlightKey(domain, normalizedScope);
-    if (this.streamingReady.has(readyKey)) {
+    if (runtime.streamingReady.has(readyKey)) {
       return;
     }
 
@@ -451,37 +271,50 @@ class RefreshOrchestrator {
         this.notifyRefreshError(domain, notificationScope, message);
       })
       .finally(() => {
-        this.streamingReady.delete(readyKey);
+        runtime.streamingReady.delete(readyKey);
       });
 
-    this.streamingReady.set(readyKey, readyTask);
+    runtime.streamingReady.set(readyKey, readyTask);
   }
 
   private hasEnabledScopedSources(domain: RefreshDomain): boolean {
-    const scopedMap = this.scopedEnabledState.get(domain);
-    if (!scopedMap) {
-      return false;
-    }
-    for (const enabled of scopedMap.values()) {
-      if (enabled) {
-        return true;
+    for (const runtime of this.getAllRuntimes()) {
+      const scopedMap = runtime.scopedEnabledState.get(domain);
+      if (!scopedMap) {
+        continue;
+      }
+      for (const enabled of scopedMap.values()) {
+        if (enabled) {
+          return true;
+        }
       }
     }
     return false;
   }
 
   private getEnabledScopes(domain: RefreshDomain): string[] {
-    const scopedMap = this.scopedEnabledState.get(domain);
-    if (!scopedMap) {
-      return [];
-    }
     const scopes: string[] = [];
-    scopedMap.forEach((enabled, scope) => {
-      if (enabled) {
-        scopes.push(scope);
+    this.getAllRuntimes().forEach((runtime) => {
+      const scopedMap = runtime.scopedEnabledState.get(domain);
+      if (!scopedMap) {
+        return;
       }
+      scopedMap.forEach((enabled, scope) => {
+        if (enabled) {
+          scopes.push(scope);
+        }
+      });
     });
     return scopes;
+  }
+
+  private getKnownScopes(domain: RefreshDomain): string[] {
+    const scopes = new Set<string>();
+    this.getAllRuntimes().forEach((runtime) => {
+      const scopedMap = runtime.scopedEnabledState.get(domain);
+      scopedMap?.forEach((_enabled, scope) => scopes.add(scope));
+    });
+    return Array.from(scopes);
   }
 
   private async refreshEnabledScopes(
@@ -508,18 +341,19 @@ class RefreshOrchestrator {
   ): void {
     const config = this.getConfig(domain);
     const allowRefresher = this.shouldAllowRefresher(config);
-    const normalizedScope = this.normalizeScope(scope);
+    const normalizedScope = this.normalizeDomainScope(domain, scope);
     if (!normalizedScope) {
       throw new Error(`Scoped domain "${domain}" requires a non-empty scope value`);
     }
 
-    let scopedMap = this.scopedEnabledState.get(domain);
+    const runtime = this.getRuntimeForScope(domain, normalizedScope);
+    let scopedMap = runtime.scopedEnabledState.get(domain);
     if (!scopedMap) {
       scopedMap = new Map<string, boolean>();
-      this.scopedEnabledState.set(domain, scopedMap);
+      runtime.scopedEnabledState.set(domain, scopedMap);
     }
 
-    if (enabled && SINGLE_ACTIVE_SCOPE_DOMAINS.has(domain)) {
+    if (enabled && !MULTI_ACTIVE_SCOPE_DOMAINS.has(domain)) {
       const staleScopes: string[] = [];
       scopedMap.forEach((scopeEnabled, existingScope) => {
         if (!scopeEnabled || existingScope === normalizedScope) {
@@ -531,7 +365,9 @@ class RefreshOrchestrator {
         scopedMap!.set(staleScope, false);
         this.cancelInFlightForScopedDomain(domain, staleScope);
         if (config.streaming) {
-          this.streamingReady.delete(makeInFlightKey(domain, staleScope));
+          this.getRuntimeForScope(domain, staleScope).streamingReady.delete(
+            makeInFlightKey(domain, staleScope)
+          );
           this.stopStreamingScope(domain, staleScope, config.streaming, true);
         } else {
           resetScopedDomainState(domain, staleScope);
@@ -568,22 +404,22 @@ class RefreshOrchestrator {
       const readyKey = makeInFlightKey(domain, normalizedScope);
       const shouldStream = this.shouldStreamScope(domain, normalizedScope);
       if (enabled && shouldStream) {
-        this.streamingReady.delete(readyKey);
+        runtime.streamingReady.delete(readyKey);
         if (!preserveState) {
           resetScopedDomainState(domain, normalizedScope);
         }
         this.scheduleStreamingStart(domain, normalizedScope, config.streaming);
       } else if (!enabled) {
-        this.streamingReady.delete(readyKey);
+        runtime.streamingReady.delete(readyKey);
         this.stopStreamingScope(domain, normalizedScope, config.streaming, resetOnDisable);
         this.cancelInFlightForScopedDomain(domain, normalizedScope);
       } else if (!shouldStream) {
         if (
-          this.streamingCleanup.has(readyKey) ||
-          this.pendingStreaming.has(readyKey) ||
-          this.streamingReady.has(readyKey)
+          runtime.streamingCleanup.has(readyKey) ||
+          runtime.pendingStreaming.has(readyKey) ||
+          runtime.streamingReady.has(readyKey)
         ) {
-          this.streamingReady.delete(readyKey);
+          runtime.streamingReady.delete(readyKey);
           this.stopStreamingScope(domain, normalizedScope, config.streaming, false);
         }
       }
@@ -601,7 +437,7 @@ class RefreshOrchestrator {
   }
 
   resetScopedDomain(domain: RefreshDomain, scope: string): void {
-    const normalizedScope = this.normalizeScope(scope);
+    const normalizedScope = this.normalizeDomainScope(domain, scope);
     if (!normalizedScope) {
       return;
     }
@@ -613,7 +449,7 @@ class RefreshOrchestrator {
     if (!config.streaming) {
       throw new Error(`Domain "${domain}" is not registered as streaming`);
     }
-    const normalizedScope = this.normalizeScope(scope);
+    const normalizedScope = this.normalizeDomainScope(domain, scope);
     if (!normalizedScope) {
       throw new Error(`Streaming domain "${domain}" requires a non-empty scope value`);
     }
@@ -629,7 +465,7 @@ class RefreshOrchestrator {
     if (!config.streaming) {
       throw new Error(`Domain "${domain}" is not registered as streaming`);
     }
-    const normalizedScope = this.normalizeScope(scope);
+    const normalizedScope = this.normalizeDomainScope(domain, scope);
     if (!normalizedScope) {
       throw new Error(`Streaming domain "${domain}" requires a non-empty scope value`);
     }
@@ -645,7 +481,7 @@ class RefreshOrchestrator {
       await this.restartStreamingDomain(domain, scope);
       return;
     }
-    const normalizedScope = this.normalizeScope(scope);
+    const normalizedScope = this.normalizeDomainScope(domain, scope);
     if (!normalizedScope) {
       throw new Error(`Streaming domain "${domain}" requires a non-empty scope value`);
     }
@@ -657,7 +493,7 @@ class RefreshOrchestrator {
     if (!config.streaming) {
       throw new Error(`Domain "${domain}" is not registered as streaming`);
     }
-    const normalizedScope = this.normalizeScope(scope);
+    const normalizedScope = this.normalizeDomainScope(domain, scope);
     if (!normalizedScope) {
       throw new Error(`Streaming domain "${domain}" requires a non-empty scope value`);
     }
@@ -698,9 +534,13 @@ class RefreshOrchestrator {
     if (!config) {
       return;
     }
-    // Build a cluster-scoped scope string and perform a direct snapshot fetch.
-    const clusterScope = buildClusterScopeList([clusterId], scope ?? '');
-    await this.performFetch(domain, clusterScope, { isManual: false }, config);
+    // Route background work through the target cluster runtime, then perform a direct snapshot fetch.
+    this.getClusterRuntime(clusterId);
+    const clusterScope = buildClusterScope(clusterId, scope ?? '');
+    await this.performFetch(domain, clusterScope, {
+      isManual: false,
+      allowDisabledRetainedScope: true,
+    });
   }
 
   isStreamingDomain(domain: RefreshDomain): boolean {
@@ -708,160 +548,15 @@ class RefreshOrchestrator {
     return Boolean(config?.streaming);
   }
 
-  private isResourceStreamDomain(
-    domain: RefreshDomain
-  ): domain is
-    | 'pods'
-    | 'namespace-workloads'
-    | 'namespace-config'
-    | 'namespace-network'
-    | 'namespace-rbac'
-    | 'namespace-custom'
-    | 'namespace-helm'
-    | 'namespace-autoscaling'
-    | 'namespace-quotas'
-    | 'namespace-storage'
-    | 'cluster-rbac'
-    | 'cluster-storage'
-    | 'cluster-config'
-    | 'cluster-crds'
-    | 'cluster-custom'
-    | 'nodes' {
-    return (
-      domain === 'pods' ||
-      domain === 'namespace-workloads' ||
-      domain === 'namespace-config' ||
-      domain === 'namespace-network' ||
-      domain === 'namespace-rbac' ||
-      domain === 'namespace-custom' ||
-      domain === 'namespace-helm' ||
-      domain === 'namespace-autoscaling' ||
-      domain === 'namespace-quotas' ||
-      domain === 'namespace-storage' ||
-      domain === 'cluster-rbac' ||
-      domain === 'cluster-storage' ||
-      domain === 'cluster-config' ||
-      domain === 'cluster-crds' ||
-      domain === 'cluster-custom' ||
-      domain === 'nodes'
-    );
-  }
-
-  private isMultiClusterStreamDomain(domain: RefreshDomain): boolean {
-    return (
-      domain === 'pods' ||
-      domain === 'namespace-workloads' ||
-      domain === 'nodes' ||
-      domain === 'cluster-rbac' ||
-      domain === 'cluster-storage' ||
-      domain === 'cluster-config' ||
-      domain === 'cluster-crds' ||
-      domain === 'cluster-custom'
-    );
-  }
-
-  private isResourceStreamViewActive(domain: RefreshDomain): boolean {
-    if (!this.isResourceStreamDomain(domain)) {
-      return true;
-    }
-
-    if (domain === 'pods') {
-      return (
-        this.context.currentView === 'namespace' && this.context.activeNamespaceView === 'pods'
-      );
-    }
-
-    if (domain === 'namespace-workloads') {
-      return (
-        this.context.currentView === 'namespace' && this.context.activeNamespaceView === 'workloads'
-      );
-    }
-
-    if (domain === 'namespace-config') {
-      return (
-        this.context.currentView === 'namespace' && this.context.activeNamespaceView === 'config'
-      );
-    }
-
-    if (domain === 'namespace-network') {
-      return (
-        this.context.currentView === 'namespace' && this.context.activeNamespaceView === 'network'
-      );
-    }
-
-    if (domain === 'namespace-rbac') {
-      return (
-        this.context.currentView === 'namespace' && this.context.activeNamespaceView === 'rbac'
-      );
-    }
-
-    if (domain === 'namespace-custom') {
-      return (
-        this.context.currentView === 'namespace' && this.context.activeNamespaceView === 'custom'
-      );
-    }
-
-    if (domain === 'namespace-helm') {
-      return (
-        this.context.currentView === 'namespace' && this.context.activeNamespaceView === 'helm'
-      );
-    }
-
-    if (domain === 'namespace-autoscaling') {
-      return (
-        this.context.currentView === 'namespace' &&
-        this.context.activeNamespaceView === 'autoscaling'
-      );
-    }
-
-    if (domain === 'namespace-quotas') {
-      return (
-        this.context.currentView === 'namespace' && this.context.activeNamespaceView === 'quotas'
-      );
-    }
-
-    if (domain === 'namespace-storage') {
-      return (
-        this.context.currentView === 'namespace' && this.context.activeNamespaceView === 'storage'
-      );
-    }
-
-    if (domain === 'nodes') {
-      return this.context.currentView === 'cluster' && this.context.activeClusterView === 'nodes';
-    }
-
-    if (domain === 'cluster-rbac') {
-      return this.context.currentView === 'cluster' && this.context.activeClusterView === 'rbac';
-    }
-
-    if (domain === 'cluster-storage') {
-      return this.context.currentView === 'cluster' && this.context.activeClusterView === 'storage';
-    }
-
-    if (domain === 'cluster-config') {
-      return this.context.currentView === 'cluster' && this.context.activeClusterView === 'config';
-    }
-
-    if (domain === 'cluster-crds') {
-      return this.context.currentView === 'cluster' && this.context.activeClusterView === 'crds';
-    }
-
-    if (domain === 'cluster-custom') {
-      return this.context.currentView === 'cluster' && this.context.activeClusterView === 'custom';
-    }
-
-    return true;
-  }
-
   private isStreamingBlocked(domain: RefreshDomain, scope?: string): boolean {
-    if (!this.isResourceStreamDomain(domain) || !scope) {
+    if (!isResourceStreamDomain(domain) || !scope) {
       return false;
     }
-    return this.blockedStreaming.has(makeInFlightKey(domain, scope));
+    return this.getRuntimeForScope(domain, scope).isStreamingBlocked(domain, scope);
   }
 
   private isStreamingActive(domain: RefreshDomain, scope: string): boolean {
-    return this.streamingCleanup.has(makeInFlightKey(domain, scope));
+    return this.getRuntimeForScope(domain, scope).isStreamingActive(domain, scope);
   }
 
   // Resource stream health gates polling so snapshots stay active until delivery resumes.
@@ -869,7 +564,7 @@ class RefreshOrchestrator {
     if (!scope) {
       return false;
     }
-    if (this.isResourceStreamDomain(domain)) {
+    if (isResourceStreamDomain(domain)) {
       return resourceStreamManager.isHealthy(domain, scope);
     }
     // SSE-based streaming domains: check the stream manager directly.
@@ -887,42 +582,23 @@ class RefreshOrchestrator {
     if (!getAutoRefreshEnabled()) {
       return false;
     }
-    if (!this.isResourceStreamDomain(domain)) {
+    if (!isResourceStreamDomain(domain)) {
       return true;
     }
-    if (!this.isResourceStreamViewActive(domain)) {
+    if (!isResourceStreamViewActive(domain, this.context)) {
       return false;
     }
     const parsed = parseClusterScopeList(trimmed);
     if (parsed.clusterIds.length === 0) {
       return false;
     }
-    if (parsed.isMultiCluster && !this.isMultiClusterStreamDomain(domain)) {
+    if (parsed.isMultiCluster) {
       return false;
     }
     if (this.isStreamingBlocked(domain, trimmed)) {
       return false;
     }
     return true;
-  }
-
-  private shouldSkipStreamingMetricsRefresh(domain: RefreshDomain, scope?: string): boolean {
-    if (!scope) {
-      return false;
-    }
-    const key = makeInFlightKey(domain, scope);
-    const last = this.lastMetricsRefreshAt.get(key);
-    if (!last) {
-      return false;
-    }
-    return Date.now() - last < getStreamingMetricsMinIntervalMs();
-  }
-
-  private recordStreamingMetricsRefresh(domain: RefreshDomain, scope?: string): void {
-    if (!scope) {
-      return;
-    }
-    this.lastMetricsRefreshAt.set(makeInFlightKey(domain, scope), Date.now());
   }
 
   private getConfig(domain: RefreshDomain): DomainRegistration<RefreshDomain> {
@@ -934,9 +610,15 @@ class RefreshOrchestrator {
   }
 
   private stopAllStreaming(reset: boolean): void {
+    this.getAllRuntimes().forEach((runtime) => {
+      this.stopRuntimeStreaming(runtime, reset);
+    });
+  }
+
+  private stopRuntimeStreaming(runtime: ClusterRefreshRuntime, reset: boolean): void {
     const keys = new Set<string>();
-    this.streamingCleanup.forEach((_cleanup, key) => keys.add(key));
-    this.pendingStreaming.forEach((_promise, key) => keys.add(key));
+    runtime.streamingCleanup.forEach((_cleanup, key) => keys.add(key));
+    runtime.pendingStreaming.forEach((_promise, key) => keys.add(key));
 
     keys.forEach((key) => {
       const [domainPart, scopePart] = key.split('::');
@@ -950,13 +632,12 @@ class RefreshOrchestrator {
         return;
       }
       this.stopStreamingScope(domain, scope, config.streaming, reset);
-      // All domains are scoped — no need to clean up domainStreamingScopes.
     });
 
     if (reset) {
-      this.streamingCleanup.clear();
-      this.pendingStreaming.clear();
-      this.cancelledStreaming.clear();
+      runtime.streamingCleanup.clear();
+      runtime.pendingStreaming.clear();
+      runtime.cancelledStreaming.clear();
     }
   }
 
@@ -968,24 +649,25 @@ class RefreshOrchestrator {
     if (!this.isScopedDomainEnabledInternal(domain, scope)) {
       return Promise.resolve();
     }
+    const runtime = this.getRuntimeForScope(domain, scope);
     const key = makeInFlightKey(domain, scope);
-    if (this.streamingCleanup.has(key) || this.pendingStreaming.has(key)) {
+    if (runtime.streamingCleanup.has(key) || runtime.pendingStreaming.has(key)) {
       return Promise.resolve();
     }
 
-    this.cancelledStreaming.delete(key);
+    runtime.cancelledStreaming.delete(key);
     const startResult = streaming.start(scope);
     const startPromise = Promise.resolve(startResult);
-    this.pendingStreaming.set(key, startPromise);
+    runtime.pendingStreaming.set(key, startPromise);
 
     startPromise
       .then((cleanup) => {
-        this.pendingStreaming.delete(key);
+        runtime.pendingStreaming.delete(key);
         if (
           !this.isScopedDomainEnabledInternal(domain, scope) ||
-          this.cancelledStreaming.has(key)
+          runtime.cancelledStreaming.has(key)
         ) {
-          this.cancelledStreaming.delete(key);
+          runtime.cancelledStreaming.delete(key);
           if (typeof cleanup === 'function') {
             try {
               cleanup();
@@ -997,13 +679,13 @@ class RefreshOrchestrator {
         }
 
         if (typeof cleanup === 'function') {
-          this.streamingCleanup.set(key, cleanup);
+          runtime.streamingCleanup.set(key, cleanup);
         } else {
-          this.streamingCleanup.set(key, noopStreamingCleanup);
+          runtime.streamingCleanup.set(key, noopStreamingCleanup);
         }
       })
       .catch((error) => {
-        this.pendingStreaming.delete(key);
+        runtime.pendingStreaming.delete(key);
         const message = error instanceof Error ? error.message : String(error);
         console.error(`Failed to start streaming domain ${domain}::${scope}`, error);
         // All domains are scoped — write error to scoped store.
@@ -1026,11 +708,12 @@ class RefreshOrchestrator {
     streaming: StreamingRegistration,
     reset: boolean
   ): void {
+    const runtime = this.getRuntimeForScope(domain, scope);
     const key = makeInFlightKey(domain, scope);
-    this.cancelledStreaming.add(key);
-    this.streamingReady.delete(key);
+    runtime.cancelledStreaming.add(key);
+    runtime.streamingReady.delete(key);
 
-    const pending = this.pendingStreaming.get(key);
+    const pending = runtime.pendingStreaming.get(key);
     if (pending) {
       pending
         .then((cleanup) => {
@@ -1043,20 +726,21 @@ class RefreshOrchestrator {
           }
         })
         .finally(() => {
-          this.pendingStreaming.delete(key);
-          this.cancelledStreaming.delete(key);
+          runtime.pendingStreaming.delete(key);
+          runtime.cancelledStreaming.delete(key);
         });
     }
 
-    const cleanup = this.streamingCleanup.get(key);
+    const cleanup = runtime.streamingCleanup.get(key);
     if (cleanup) {
       try {
         cleanup();
       } catch (error) {
         console.error(`Failed to stop streaming domain ${domain}::${scope}`, error);
       }
-      this.streamingCleanup.delete(key);
+      runtime.streamingCleanup.delete(key);
     }
+    runtime.streamHealth.delete(key);
     streaming.stop?.(scope, { reset });
     if (reset) {
       resetScopedDomainState(domain, scope);
@@ -1101,47 +785,109 @@ class RefreshOrchestrator {
     return this.fetchScopedDomain('pods', scope, { isManual: true });
   }
 
-  private normalizeScope(value?: string | null, allowEmpty = false): string | undefined {
-    const selectedClusterIds = this.getSelectedClusterIds();
-    if (!value) {
-      if (!allowEmpty) {
-        return undefined;
-      }
-      const clusterScope = buildClusterScopeList(selectedClusterIds, '');
-      return clusterScope || undefined;
-    }
-    const trimmed = value.trim();
-    if (!trimmed) {
-      if (!allowEmpty) {
-        return undefined;
-      }
-      const clusterScope = buildClusterScopeList(selectedClusterIds, '');
-      return clusterScope || undefined;
-    }
-    const parsed = parseClusterScopeList(trimmed);
-    // Preserve explicit cluster-scoped inputs to avoid rewriting historical keys
-    // when selectedClusterIds changes between enable/disable calls.
-    if (parsed.clusterIds.length > 0) {
-      return buildClusterScopeList(parsed.clusterIds, parsed.scope);
-    }
-    return buildClusterScopeList(selectedClusterIds, parsed.scope || trimmed);
+  private normalizeDomainScope(
+    domain: RefreshDomain,
+    value?: string | null,
+    allowEmpty = false
+  ): string | undefined {
+    return normalizeRefreshDomainScope({
+      domain,
+      value,
+      selectedClusterId: this.getSelectedClusterId(),
+      allowEmpty,
+    });
   }
 
-  private isMultiClusterMetricsDomain(domain: RefreshDomain): boolean {
-    return domain === 'pods' || domain === 'namespace-workloads' || domain === 'nodes';
+  private getClusterRuntime(clusterId: string): ClusterRefreshRuntime {
+    const normalized = clusterId.trim();
+    let runtime = this.clusterRuntimes.get(normalized);
+    if (!runtime) {
+      runtime = new ClusterRefreshRuntime(normalized);
+      this.clusterRuntimes.set(normalized, runtime);
+    }
+    return runtime;
   }
 
-  private parseMultiClusterScope(
-    scope?: string | null
-  ): { clusterIds: string[]; scope: string } | null {
+  private getRuntimeForScope(domain: RefreshDomain, scope?: string): ClusterRefreshRuntime {
     if (!scope) {
-      return null;
+      return this.coordinatorRuntime;
     }
     const parsed = parseClusterScopeList(scope);
-    if (!parsed.isMultiCluster || parsed.clusterIds.length < 2) {
-      return null;
+    if (parsed.isMultiCluster) {
+      throw new Error(`Refresh domain "${domain}" requires a single cluster scope`);
     }
-    return { clusterIds: parsed.clusterIds, scope: parsed.scope };
+    if (!parsed.isMultiCluster && parsed.clusterIds.length === 1) {
+      return this.getClusterRuntime(parsed.clusterIds[0]);
+    }
+    return this.coordinatorRuntime;
+  }
+
+  private getAllRuntimes(): ClusterRefreshRuntime[] {
+    return [this.coordinatorRuntime, ...this.clusterRuntimes.values()];
+  }
+
+  private forEachRuntime(callback: (runtime: ClusterRefreshRuntime) => void): void {
+    this.getAllRuntimes().forEach(callback);
+  }
+
+  private deleteDomainFromAllRuntimes(domain: RefreshDomain): void {
+    this.forEachRuntime((runtime) => runtime.scopedEnabledState.delete(domain));
+  }
+
+  private abortAllInFlight(): void {
+    this.forEachRuntime((runtime) => {
+      runtime.inFlight.forEach((details, key) => {
+        this.teardownInFlight(runtime, key, details);
+      });
+    });
+  }
+
+  private clearAllBlockedStreaming(): void {
+    this.forEachRuntime((runtime) => runtime.blockedStreaming.clear());
+  }
+
+  private clearAllMetricsRefreshTracking(): void {
+    this.forEachRuntime((runtime) => runtime.lastMetricsRefreshAt.clear());
+  }
+
+  private clearAllAsyncStreamingBookkeeping(): void {
+    this.forEachRuntime((runtime) => {
+      runtime.pendingStreaming.clear();
+      runtime.cancelledStreaming.clear();
+      runtime.streamingReady.clear();
+    });
+  }
+
+  private clearAllStreamHealth(): void {
+    this.forEachRuntime((runtime) => runtime.streamHealth.clear());
+  }
+
+  private pruneRemovedClusterRuntimes(connectedClusterIds: string[]): void {
+    const connected = new Set(
+      connectedClusterIds.map((clusterId) => clusterId.trim()).filter(Boolean)
+    );
+
+    Array.from(this.clusterRuntimes.entries()).forEach(([clusterId, runtime]) => {
+      if (connected.has(clusterId)) {
+        return;
+      }
+
+      this.stopRuntimeStreaming(runtime, true);
+      runtime.inFlight.forEach((details, key) => {
+        this.teardownInFlight(runtime, key, details);
+      });
+      runtime.scopedEnabledState.forEach((scopedMap, domain) => {
+        scopedMap.forEach((_enabled, scope) => resetScopedDomainState(domain, scope));
+      });
+      runtime.scopedEnabledState.clear();
+      runtime.blockedStreaming.clear();
+      runtime.lastMetricsRefreshAt.clear();
+      runtime.streamHealth.clear();
+      runtime.pendingStreaming.clear();
+      runtime.cancelledStreaming.clear();
+      runtime.streamingReady.clear();
+      this.clusterRuntimes.delete(clusterId);
+    });
   }
 
   private getSelectedClusterIds(context: RefreshContext = this.context): string[] {
@@ -1157,17 +903,9 @@ class RefreshOrchestrator {
   }
 
   private normalizeNamespaceScope(value?: string | null): string | null {
-    if (!value) {
-      return null;
-    }
-    const trimmed = value.trim();
-    if (!trimmed) {
-      return null;
-    }
-    const namespaceScope = trimmed.startsWith('namespace:') ? trimmed : `namespace:${trimmed}`;
     // Prefer the cluster tied to the namespace selection for scoped refreshes.
     const clusterId = this.context.selectedNamespaceClusterId ?? this.context.selectedClusterId;
-    return buildClusterScope(clusterId, namespaceScope) || null;
+    return normalizeNamespaceScopeValue(value, clusterId);
   }
 
   private ensureRefresher(config: DomainRegistration<RefreshDomain>): void {
@@ -1189,19 +927,7 @@ class RefreshOrchestrator {
   }
 
   private resolveTiming(config: DomainRegistration<RefreshDomain>): RefresherTiming {
-    if (config.category === 'system') {
-      return systemRefresherConfig(config.refresherName as SystemRefresherName);
-    }
-
-    if (config.category === 'cluster') {
-      return clusterRefresherConfig(config.refresherName as ClusterRefresherName);
-    }
-
-    if (config.category === 'namespace') {
-      return namespaceRefresherConfig(config.refresherName as NamespaceRefresherName);
-    }
-
-    throw new Error(`Unsupported refresher category: ${config.category}`);
+    return refresherConfig(config.refresherName as StaticRefresherName);
   }
 
   private shouldAllowRefresher(config: DomainRegistration<RefreshDomain>): boolean {
@@ -1218,13 +944,18 @@ class RefreshOrchestrator {
     options: { signal?: AbortSignal; isManual?: boolean } = {}
   ): Promise<void> {
     const config = this.getConfig(domain);
-    const normalizedScope = this.normalizeScope(scope);
+    const normalizedScope = this.normalizeDomainScope(domain, scope);
     if (!normalizedScope) {
       throw new Error(`Scoped domain "${domain}" requires a non-empty scope`);
     }
 
+    if (isResourceStreamDomain(domain) && parseClusterScopeList(normalizedScope).isMultiCluster) {
+      throw new Error(`Resource stream domain "${domain}" requires a single cluster scope`);
+    }
+
     if (config.streaming) {
       const shouldStream = this.shouldStreamScope(domain, normalizedScope);
+      const runtime = this.getRuntimeForScope(domain, normalizedScope);
       if (shouldStream) {
         if (options.isManual) {
           // For resource-stream (WebSocket) domains, use refreshOnce when
@@ -1233,10 +964,7 @@ class RefreshOrchestrator {
           // snapshot fetch — the SSE stream delivers full snapshots on its
           // own schedule and refreshStreamingDomainOnce just restarts the
           // connection, which is wasteful for a manual refresh.
-          if (
-            this.isResourceStreamDomain(domain) &&
-            this.isStreamingActive(domain, normalizedScope)
-          ) {
+          if (isResourceStreamDomain(domain) && this.isStreamingActive(domain, normalizedScope)) {
             await this.refreshStreamingDomainOnce(domain, normalizedScope);
             return;
           }
@@ -1245,46 +973,42 @@ class RefreshOrchestrator {
           this.startStreamingScope(domain, normalizedScope, config.streaming);
         }
       }
-      if (config.streaming.metricsOnly && !options.isManual) {
-        const metricsOnly =
-          shouldStream &&
-          this.isStreamingActive(domain, normalizedScope) &&
-          this.isStreamingHealthy(domain, normalizedScope);
-        if (metricsOnly && this.shouldSkipStreamingMetricsRefresh(domain, normalizedScope)) {
-          return;
-        }
-        await this.performFetch(
-          domain,
-          normalizedScope,
-          { isManual: options.isManual ?? true, signal: options.signal, metricsOnly },
-          config
-        );
+      const fetchMode = runtime.resolveStreamingFetchMode({
+        domain,
+        scope: normalizedScope,
+        shouldStream,
+        isManual: Boolean(options.isManual),
+        metricsOnly: Boolean(config.streaming.metricsOnly),
+        streamingHealthy: this.isStreamingHealthy(domain, normalizedScope),
+        metricsMinIntervalMs: getStreamingMetricsMinIntervalMs(),
+      });
+      if (fetchMode === 'skip') {
         return;
       }
-      // Skip polling when the stream is healthy — but not for manual fetches,
-      // which may be explicit pagination requests that the stream won't serve.
-      if (!options.isManual && shouldStream && this.isStreamingHealthy(domain, normalizedScope)) {
+      if (fetchMode === 'metrics-only') {
+        await this.performFetch(domain, normalizedScope, {
+          isManual: options.isManual ?? true,
+          signal: options.signal,
+          metricsOnly: true,
+        });
         return;
       }
     }
 
-    await this.performFetch(
-      domain,
-      normalizedScope,
-      { isManual: options.isManual ?? true, signal: options.signal },
-      config
-    );
+    await this.performFetch(domain, normalizedScope, {
+      isManual: options.isManual ?? true,
+      signal: options.signal,
+    });
   }
 
   private async performFetch<K extends RefreshDomain>(
     domain: K,
     scope: string | undefined,
-    options: DomainFetchOptions,
-    config: DomainRegistration<RefreshDomain>
+    options: DomainFetchOptions
   ): Promise<void> {
     const metricsOnly = Boolean(options.metricsOnly);
     // All domains are scoped — normalizeScope without allowEmpty.
-    const normalizedScope = this.normalizeScope(scope);
+    const normalizedScope = this.normalizeDomainScope(domain, scope);
 
     if (options.signal?.aborted) {
       return;
@@ -1294,24 +1018,28 @@ class RefreshOrchestrator {
       throw new Error(`Scoped domain "${domain}" requires a valid scope`);
     }
 
-    if (!this.isScopedDomainEnabledInternal(domain, normalizedScope)) {
+    if (
+      !options.allowDisabledRetainedScope &&
+      !this.isScopedDomainEnabledInternal(domain, normalizedScope)
+    ) {
       resetScopedDomainState(domain, normalizedScope);
       return;
     }
 
+    const runtime = this.getRuntimeForScope(domain, normalizedScope);
     const contextVersion = this.contextVersion;
     const inFlightKey = makeInFlightKey(domain, normalizedScope);
-    const currentInFlight = this.inFlight.get(inFlightKey);
+    const currentInFlight = runtime.inFlight.get(inFlightKey);
 
     if (currentInFlight) {
       if (options.isManual && !currentInFlight.isManual) {
         currentInFlight.controller.abort();
-        this.teardownInFlight(inFlightKey, currentInFlight);
+        this.teardownInFlight(runtime, inFlightKey, currentInFlight);
       } else if (!options.isManual) {
         return;
       } else if (options.isManual && currentInFlight.isManual) {
         currentInFlight.controller.abort();
-        this.teardownInFlight(inFlightKey, currentInFlight);
+        this.teardownInFlight(runtime, inFlightKey, currentInFlight);
       }
     }
 
@@ -1339,7 +1067,7 @@ class RefreshOrchestrator {
       cleanup = () => options.signal?.removeEventListener('abort', abortListener);
     }
 
-    this.inFlight.set(inFlightKey, {
+    runtime.inFlight.set(inFlightKey, {
       controller,
       isManual: options.isManual,
       requestId,
@@ -1352,23 +1080,6 @@ class RefreshOrchestrator {
     markPendingRequest(1);
 
     try {
-      const multiClusterScope = metricsOnly ? this.parseMultiClusterScope(normalizedScope) : null;
-      if (metricsOnly && multiClusterScope && this.isMultiClusterMetricsDomain(domain)) {
-        await this.performMultiClusterMetricsFetch(
-          domain,
-          normalizedScope,
-          multiClusterScope,
-          options,
-          config,
-          controller,
-          contextVersion
-        );
-        if (metricsOnly && !options.isManual) {
-          this.recordStreamingMetricsRefresh(domain, normalizedScope);
-        }
-        return;
-      }
-
       const { snapshot, etag, notModified } = await fetchSnapshot<DomainPayloadMap[K]>(domain, {
         scope: normalizedScope,
         signal: controller.signal,
@@ -1384,7 +1095,10 @@ class RefreshOrchestrator {
       }
 
       if (notModified || !snapshot) {
-        if (!this.isScopedDomainEnabledInternal(domain, normalizedScope)) {
+        if (
+          !options.allowDisabledRetainedScope &&
+          !this.isScopedDomainEnabledInternal(domain, normalizedScope)
+        ) {
           return;
         }
         setScopedDomainState(domain, normalizedScope, (prev) => ({
@@ -1394,28 +1108,43 @@ class RefreshOrchestrator {
           lastAutoRefresh: options.isManual ? prev.lastAutoRefresh : Date.now(),
         }));
         if (metricsOnly && !options.isManual) {
-          this.recordStreamingMetricsRefresh(domain, normalizedScope);
+          runtime.recordMetricsRefresh(domain, normalizedScope);
         }
         this.clearRefreshError(domain, normalizedScope);
         return;
       }
 
       if (metricsOnly) {
-        const applied = this.applyMetricsSnapshot(
+        const applied = applyMetricsSnapshot({
+          domain,
+          snapshot,
+          etag,
+          isManual: options.isManual,
+          scope: normalizedScope,
+          clearRefreshError: this.clearRefreshError.bind(this),
+        });
+        if (!applied) {
+          this.applySnapshot(
+            domain,
+            snapshot,
+            etag,
+            options.isManual,
+            normalizedScope,
+            options.allowDisabledRetainedScope
+          );
+        }
+      } else {
+        this.applySnapshot(
           domain,
           snapshot,
           etag,
           options.isManual,
-          normalizedScope
+          normalizedScope,
+          options.allowDisabledRetainedScope
         );
-        if (!applied) {
-          this.applySnapshot(domain, snapshot, etag, options.isManual, normalizedScope);
-        }
-      } else {
-        this.applySnapshot(domain, snapshot, etag, options.isManual, normalizedScope);
       }
       if (metricsOnly && !options.isManual) {
-        this.recordStreamingMetricsRefresh(domain, normalizedScope);
+        runtime.recordMetricsRefresh(domain, normalizedScope);
       }
     } catch (error) {
       if (controller.signal.aborted) {
@@ -1427,7 +1156,7 @@ class RefreshOrchestrator {
       }
 
       const message = error instanceof Error ? error.message : String(error);
-      if (this.shouldSuppressNetworkError(message)) {
+      if (this.errorNotifier.shouldSuppressNetworkError(message)) {
         setScopedDomainState(domain, normalizedScope, (prev) => ({
           ...prev,
           status: prev.data ? 'ready' : prev.status,
@@ -1445,75 +1174,14 @@ class RefreshOrchestrator {
       }));
       this.notifyRefreshError(domain, normalizedScope, message);
     } finally {
-      const tracked = this.inFlight.get(inFlightKey);
+      const tracked = runtime.inFlight.get(inFlightKey);
       if (tracked && tracked.requestId === requestId) {
         tracked.cleanup?.();
-        this.inFlight.delete(inFlightKey);
+        runtime.inFlight.delete(inFlightKey);
       }
 
       markPendingRequest(-1);
     }
-  }
-
-  private async performMultiClusterMetricsFetch<K extends RefreshDomain>(
-    domain: K,
-    reportScope: string,
-    clusterScope: { clusterIds: string[]; scope: string },
-    options: DomainFetchOptions,
-    _config: DomainRegistration<RefreshDomain>,
-    controller: AbortController,
-    contextVersion: number
-  ): Promise<void> {
-    // Fan out metrics-only refreshes per cluster to avoid invalid multi-cluster scopes.
-    let applied = false;
-
-    for (const clusterId of clusterScope.clusterIds) {
-      const scope = buildClusterScopeList([clusterId], clusterScope.scope);
-      const { snapshot, etag, notModified } = await fetchSnapshot<DomainPayloadMap[K]>(domain, {
-        scope,
-        signal: controller.signal,
-      });
-
-      if (controller.signal.aborted) {
-        return;
-      }
-
-      if (contextVersion !== this.contextVersion) {
-        return;
-      }
-
-      if (notModified || !snapshot) {
-        continue;
-      }
-
-      const appliedMetrics = this.applyMetricsSnapshot(
-        domain,
-        snapshot,
-        etag,
-        options.isManual,
-        reportScope
-      );
-      if (!appliedMetrics) {
-        this.applySnapshot(domain, snapshot, etag, options.isManual, reportScope);
-      }
-      applied = true;
-    }
-
-    if (applied) {
-      return;
-    }
-
-    if (!this.isScopedDomainEnabledInternal(domain, reportScope)) {
-      return;
-    }
-    setScopedDomainState(domain, reportScope, (prev) => ({
-      ...prev,
-      status: prev.data ? 'ready' : 'idle',
-      isManual: options.isManual,
-      lastAutoRefresh: options.isManual ? prev.lastAutoRefresh : Date.now(),
-    }));
-
-    this.clearRefreshError(domain, reportScope);
   }
 
   private applySnapshot<K extends RefreshDomain>(
@@ -1521,18 +1189,22 @@ class RefreshOrchestrator {
     snapshot: Snapshot<DomainPayloadMap[K]>,
     etag: string | undefined,
     isManual: boolean,
-    scope?: string
+    scope?: string,
+    allowDisabledRetainedScope = false
   ): void {
     const inFlightKey = makeInFlightKey(domain, scope);
-    const tracked = this.inFlight.get(inFlightKey);
+    const tracked = this.getRuntimeForScope(domain, scope).inFlight.get(inFlightKey);
     if (tracked && tracked.contextVersion !== this.contextVersion) {
       return;
     }
-    const payload = this.mergePollingListPayload(domain, snapshot.payload, scope);
+    const payload = mergePollingListPayload(domain, snapshot.payload, scope);
     const resolvedScope = scope ?? snapshot.scope ?? '';
 
     if (resolvedScope) {
-      if (!this.isScopedDomainEnabledInternal(domain, resolvedScope)) {
+      if (
+        !allowDisabledRetainedScope &&
+        !this.isScopedDomainEnabledInternal(domain, resolvedScope)
+      ) {
         return;
       }
       setScopedDomainState(domain, resolvedScope, (prev) => ({
@@ -1552,280 +1224,6 @@ class RefreshOrchestrator {
       }));
       this.clearRefreshError(domain, resolvedScope);
     }
-  }
-
-  // Incrementally reuse row objects for polling-only list payloads.
-  private mergePollingListPayload<K extends RefreshDomain>(
-    domain: K,
-    payload: DomainPayloadMap[K],
-    scope?: string
-  ): DomainPayloadMap[K] {
-    if (domain === 'namespaces') {
-      const previous = getScopedDomainState('namespaces', scope!)
-        .data as NamespaceSnapshotPayload | null;
-      if (!previous?.namespaces?.length) {
-        return payload;
-      }
-      const incoming = payload as NamespaceSnapshotPayload;
-      // incoming.clusterId is now a required field on ClusterMeta-derived
-      // payloads, so the merge-key fallback doesn't need a `?? ''` guard.
-      const fallbackClusterId = incoming.clusterId;
-      const merged = mergeListByKey(
-        incoming.namespaces ?? [],
-        previous.namespaces ?? [],
-        (entry) => `${entry.clusterId ?? fallbackClusterId}::${entry.name}`
-      );
-      if (merged === incoming.namespaces) {
-        return payload;
-      }
-      return { ...incoming, namespaces: merged } as DomainPayloadMap[K];
-    }
-
-    if (domain === 'object-maintenance') {
-      if (!scope) {
-        return payload;
-      }
-      const previous = getScopedDomainState('object-maintenance', scope)
-        .data as NodeMaintenanceSnapshotPayload | null;
-      if (!previous?.drains?.length) {
-        return payload;
-      }
-      const incoming = payload as NodeMaintenanceSnapshotPayload;
-      const fallbackClusterId = incoming.clusterId;
-      const merged = mergeListByKey(
-        incoming.drains ?? [],
-        previous.drains ?? [],
-        (entry) => `${entry.clusterId ?? fallbackClusterId}::${entry.id}`
-      );
-      if (merged === incoming.drains) {
-        return payload;
-      }
-      return { ...incoming, drains: merged } as DomainPayloadMap[K];
-    }
-
-    if (domain === 'catalog-diff') {
-      if (!scope) {
-        return payload;
-      }
-      const previous = getScopedDomainState('catalog-diff', scope)
-        .data as CatalogSnapshotPayload | null;
-      if (!previous?.items?.length) {
-        return payload;
-      }
-      const incoming = payload as CatalogSnapshotPayload;
-      const fallbackClusterId = incoming.clusterId;
-      const merged = mergeListByKey(incoming.items ?? [], previous.items ?? [], (entry) => {
-        const clusterId = entry.clusterId ?? fallbackClusterId;
-        if (entry.uid) {
-          return `${clusterId}::${entry.uid}`;
-        }
-        return `${clusterId}::${entry.group}::${entry.version}::${entry.resource}::${entry.namespace ?? ''}::${entry.name}`;
-      });
-      if (merged === incoming.items) {
-        return payload;
-      }
-      return { ...incoming, items: merged } as DomainPayloadMap[K];
-    }
-
-    return payload;
-  }
-
-  private applyMetricsSnapshot<K extends RefreshDomain>(
-    domain: K,
-    snapshot: Snapshot<DomainPayloadMap[K]>,
-    etag: string | undefined,
-    isManual: boolean,
-    scope?: string
-  ): boolean {
-    // Metrics-only refreshes update usage fields without replacing stream-driven rows.
-    const now = Date.now();
-    const resolvedScope = scope ?? snapshot.scope ?? '';
-    const parsedScope = parseClusterScope(resolvedScope);
-    // parseClusterScope always returns a string clusterId (empty when the
-    // scope carries no cluster prefix); no fallback needed.
-    const clusterId = parsedScope.clusterId;
-
-    const updateStats = (stats: SnapshotStats | null, count: number): SnapshotStats | null => {
-      if (!stats) {
-        return null;
-      }
-      return { ...stats, itemCount: count };
-    };
-
-    if (domain === 'pods') {
-      if (!scope) {
-        return false;
-      }
-      const previous = getScopedDomainState('pods', scope);
-      if (!previous.data) {
-        return false;
-      }
-      const payload = snapshot.payload as PodSnapshotPayload;
-      const incomingByKey = new Map(
-        payload.pods.map((pod) => [
-          `${pod.clusterId ?? clusterId}::${pod.namespace}::${pod.name}`,
-          pod,
-        ])
-      );
-      const existingPods = previous.data.pods ?? [];
-      const mappedPods = existingPods.map((existing) => {
-        const key = `${existing.clusterId ?? clusterId}::${existing.namespace}::${existing.name}`;
-        const incoming = incomingByKey.get(key);
-        if (!incoming) {
-          return existing;
-        }
-        const nextCpuUsage = incoming.cpuUsage ?? existing.cpuUsage;
-        const nextMemUsage = incoming.memUsage ?? existing.memUsage;
-        if (nextCpuUsage === existing.cpuUsage && nextMemUsage === existing.memUsage) {
-          return existing;
-        }
-        return {
-          ...existing,
-          cpuUsage: nextCpuUsage,
-          memUsage: nextMemUsage,
-        };
-      });
-      const nextPods = mappedPods.every((pod, index) => pod === existingPods[index])
-        ? existingPods
-        : mappedPods;
-      const nextMetrics = (() => {
-        const incomingMetrics = payload.metrics;
-        const previousMetrics = previous.data.metrics;
-        if (!incomingMetrics) {
-          return previousMetrics;
-        }
-        if (!previousMetrics) {
-          return incomingMetrics;
-        }
-        return incomingMetrics.stale === previousMetrics.stale &&
-          incomingMetrics.lastError === previousMetrics.lastError &&
-          incomingMetrics.collectedAt === previousMetrics.collectedAt &&
-          incomingMetrics.consecutiveFailures === previousMetrics.consecutiveFailures &&
-          incomingMetrics.successCount === previousMetrics.successCount &&
-          incomingMetrics.failureCount === previousMetrics.failureCount
-          ? previousMetrics
-          : incomingMetrics;
-      })();
-      const nextPayload: PodSnapshotPayload =
-        nextPods === existingPods && nextMetrics === previous.data.metrics
-          ? previous.data
-          : {
-              ...previous.data,
-              pods: nextPods,
-              metrics: nextMetrics,
-            };
-      setScopedDomainState('pods', scope, (prev) => ({
-        ...prev,
-        status: 'ready',
-        data: nextPayload,
-        stats: updateStats(prev.stats ?? snapshot.stats ?? null, nextPods.length),
-        version: snapshot.version,
-        checksum: snapshot.checksum,
-        etag: etag ?? snapshot.checksum ?? prev.etag,
-        lastUpdated: now,
-        lastManualRefresh: isManual ? now : prev.lastManualRefresh,
-        lastAutoRefresh: !isManual ? now : prev.lastAutoRefresh,
-        error: null,
-        isManual,
-        scope,
-      }));
-      this.clearRefreshError(domain, scope);
-      return true;
-    }
-
-    if (domain === 'namespace-workloads') {
-      if (!scope) {
-        return false;
-      }
-      const previous = getScopedDomainState('namespace-workloads', scope);
-      if (!previous.data) {
-        return false;
-      }
-      const payload = snapshot.payload as NamespaceWorkloadSnapshotPayload;
-      const existingWorkloads = previous.data.workloads ?? [];
-      const nextWorkloads = mergeWorkloadMetricRows(
-        existingWorkloads,
-        payload.workloads ?? [],
-        clusterId
-      );
-      const nextPayload: NamespaceWorkloadSnapshotPayload =
-        nextWorkloads === existingWorkloads
-          ? previous.data
-          : {
-              ...previous.data,
-              workloads: nextWorkloads,
-            };
-      setScopedDomainState('namespace-workloads', scope, (prev) => ({
-        ...prev,
-        status: 'ready',
-        data: nextPayload,
-        stats: updateStats(prev.stats ?? snapshot.stats ?? null, nextWorkloads.length),
-        version: snapshot.version,
-        checksum: snapshot.checksum,
-        etag: etag ?? snapshot.checksum ?? prev.etag,
-        lastUpdated: now,
-        lastManualRefresh: isManual ? now : prev.lastManualRefresh,
-        lastAutoRefresh: !isManual ? now : prev.lastAutoRefresh,
-        error: null,
-        isManual,
-        scope,
-      }));
-      this.clearRefreshError(domain, scope || undefined);
-      return true;
-    }
-
-    if (domain === 'nodes') {
-      if (!scope) {
-        return false;
-      }
-      const previous = getScopedDomainState('nodes', scope);
-      if (!previous.data) {
-        return false;
-      }
-      const payload = snapshot.payload as ClusterNodeSnapshotPayload;
-      const incomingByKey = new Map(
-        payload.nodes.map((node) => [`${node.clusterId ?? clusterId}::${node.name}`, node])
-      );
-      const existingNodes = previous.data.nodes ?? [];
-      const nextNodes = existingNodes.map((existing) => {
-        const key = `${existing.clusterId ?? clusterId}::${existing.name}`;
-        const incoming = incomingByKey.get(key);
-        if (!incoming) {
-          return existing;
-        }
-        return {
-          ...existing,
-          cpuUsage: incoming.cpuUsage ?? existing.cpuUsage,
-          memoryUsage: incoming.memoryUsage ?? existing.memoryUsage,
-          podMetrics: incoming.podMetrics ?? existing.podMetrics,
-        };
-      });
-      const nextPayload: ClusterNodeSnapshotPayload = {
-        ...previous.data,
-        nodes: nextNodes,
-        metrics: payload.metrics ?? previous.data.metrics,
-        metricsByCluster: payload.metricsByCluster ?? previous.data.metricsByCluster,
-      };
-      setScopedDomainState('nodes', scope, (prev) => ({
-        ...prev,
-        status: 'ready',
-        data: nextPayload,
-        stats: updateStats(prev.stats ?? snapshot.stats ?? null, nextNodes.length),
-        version: snapshot.version,
-        checksum: snapshot.checksum,
-        etag: etag ?? snapshot.checksum ?? prev.etag,
-        lastUpdated: now,
-        lastManualRefresh: isManual ? now : prev.lastManualRefresh,
-        lastAutoRefresh: !isManual ? now : prev.lastAutoRefresh,
-        error: null,
-        isManual,
-        scope,
-      }));
-      this.clearRefreshError(domain, scope || undefined);
-      return true;
-    }
-
-    return false;
   }
 
   private isMetricsDemandActive(): boolean {
@@ -1857,7 +1255,7 @@ class RefreshOrchestrator {
   }
 
   private isScopedDomainEnabledInternal(domain: RefreshDomain, scope: string): boolean {
-    const scopedMap = this.scopedEnabledState.get(domain);
+    const scopedMap = this.getRuntimeForScope(domain, scope).scopedEnabledState.get(domain);
     if (!scopedMap) {
       return true;
     }
@@ -1866,12 +1264,13 @@ class RefreshOrchestrator {
   }
 
   private teardownInFlight(
+    runtime: ClusterRefreshRuntime,
     key: string,
     details: { controller: AbortController; cleanup?: () => void; contextVersion: number }
   ): void {
     details.controller.abort();
     details.cleanup?.();
-    this.inFlight.delete(key);
+    runtime.inFlight.delete(key);
   }
 
   private incrementContextVersion(): void {
@@ -1879,10 +1278,11 @@ class RefreshOrchestrator {
   }
 
   private cancelInFlightForScopedDomain(domain: RefreshDomain, scope: string): void {
+    const runtime = this.getRuntimeForScope(domain, scope);
     const key = makeInFlightKey(domain, scope);
-    const details = this.inFlight.get(key);
+    const details = runtime.inFlight.get(key);
     if (details) {
-      this.teardownInFlight(key, details);
+      this.teardownInFlight(runtime, key, details);
     }
   }
 
@@ -1895,13 +1295,14 @@ class RefreshOrchestrator {
     }
     // Disable streaming for drifted scopes so snapshots remain the source of truth.
     const domain = payload.domain as RefreshDomain;
+    const runtime = this.getRuntimeForScope(domain, scope);
     const key = makeInFlightKey(domain, scope);
-    if (this.blockedStreaming.has(key)) {
+    if (runtime.blockedStreaming.has(key)) {
       return;
     }
-    this.blockedStreaming.add(key);
-    this.streamingReady.delete(key);
-    this.pendingStreaming.delete(key);
+    runtime.blockedStreaming.add(key);
+    runtime.streamingReady.delete(key);
+    runtime.pendingStreaming.delete(key);
 
     const config = this.configs.get(domain);
     if (config?.streaming) {
@@ -1909,15 +1310,23 @@ class RefreshOrchestrator {
     }
 
     logWarning(
-      `[refresh] resource stream drift detected domain=${domain} scope=${scope} reason=${payload.reason}`
+      `[refresh] resource stream drift detected domain=${domain} scope=${scope} reason=${payload.reason}`,
+      { clusterId: parseClusterScope(scope).clusterId }
     );
   };
 
   private handleResourceStreamHealth = (
-    _payload: AppEvents['refresh:resource-stream-health']
+    payload: AppEvents['refresh:resource-stream-health']
   ): void => {
-    // All domains are scoped — streaming health is managed via the scoped
-    // domain lifecycle (shouldStreamScope / handleStreamingScopeChanges).
+    const scope = payload.scope.trim();
+    if (!scope) {
+      return;
+    }
+    const domain = payload.domain as RefreshDomain;
+    this.getRuntimeForScope(domain, scope).streamHealth.set(
+      makeInFlightKey(domain, scope),
+      payload
+    );
   };
 
   private handleClusterAuthFailed = (payload: { clusterId: string }) => {
@@ -1927,18 +1336,14 @@ class RefreshOrchestrator {
     }
     // Pause all refresh activity — the refresh subsystem is unavailable while auth is invalid.
     this.authPaused = true;
-    logInfo('[refresh] pausing — cluster auth failed');
+    logInfo('[refresh] pausing — cluster auth failed', { clusterId: payload.clusterId });
     this.incrementContextVersion();
     invalidateRefreshBaseURL();
     this.stopAllStreaming(false);
-    this.inFlight.forEach((details, key) => {
-      this.teardownInFlight(key, details);
-    });
+    this.abortAllInFlight();
     // Clear async streaming bookkeeping so stale entries from in-progress
     // connections don't block restart when auth recovers.
-    this.pendingStreaming.clear();
-    this.cancelledStreaming.clear();
-    this.streamingReady.clear();
+    this.clearAllAsyncStreamingBookkeeping();
   };
 
   private handleClusterAuthRecovered = (payload: { clusterId: string }) => {
@@ -1951,14 +1356,15 @@ class RefreshOrchestrator {
       return;
     }
     this.authPaused = false;
-    logInfo('[refresh] resuming — cluster auth recovered');
+    logInfo('[refresh] resuming — cluster auth recovered', { clusterId: payload.clusterId });
     this.incrementContextVersion();
     invalidateRefreshBaseURL();
     // Suppress transient errors while the backend refresh subsystem reinitialises.
-    this.suppressNetworkErrors(6000);
-    this.blockedStreaming.clear();
-    this.lastMetricsRefreshAt.clear();
-    this.lastNotifiedErrors.clear();
+    this.errorNotifier.suppressNetworkErrors(6000);
+    this.clearAllBlockedStreaming();
+    this.clearAllMetricsRefreshTracking();
+    this.clearAllStreamHealth();
+    this.errorNotifier.clearAll();
     // Restart streaming for all enabled scopes. The ensureRefreshBaseURL retry
     // loop (30 attempts with backoff) naturally waits for the backend refresh
     // subsystem to reinitialise after auth recovery.
@@ -1969,11 +1375,10 @@ class RefreshOrchestrator {
     this.incrementContextVersion();
     invalidateRefreshBaseURL();
     this.stopAllStreaming(true);
-    this.inFlight.forEach((details, key) => {
-      this.teardownInFlight(key, details);
-    });
-    this.blockedStreaming.clear();
-    this.lastMetricsRefreshAt.clear();
+    this.abortAllInFlight();
+    this.clearAllBlockedStreaming();
+    this.clearAllMetricsRefreshTracking();
+    this.clearAllStreamHealth();
     this.configs.forEach((_, domain) => {
       this.resetDomain(domain);
     });
@@ -1986,11 +1391,10 @@ class RefreshOrchestrator {
     this.incrementContextVersion();
     invalidateRefreshBaseURL();
     this.stopAllStreaming(true);
-    this.inFlight.forEach((details, key) => {
-      this.teardownInFlight(key, details);
-    });
-    this.blockedStreaming.clear();
-    this.lastMetricsRefreshAt.clear();
+    this.abortAllInFlight();
+    this.clearAllBlockedStreaming();
+    this.clearAllMetricsRefreshTracking();
+    this.clearAllStreamHealth();
     this.configs.forEach((_config, domain) => {
       const wasEnabled = this.hasEnabledScopedSources(domain);
       this.suspendedDomains.set(domain, wasEnabled);
@@ -1998,7 +1402,7 @@ class RefreshOrchestrator {
       this.setDomainEnabled(domain, false);
       this.resetDomain(domain);
 
-      this.scopedEnabledState.delete(domain);
+      this.deleteDomainFromAllRuntimes(domain);
     });
   };
 
@@ -2009,27 +1413,31 @@ class RefreshOrchestrator {
         return;
       }
 
-      const scopedMap = this.scopedEnabledState.get(domain);
-      if (!scopedMap) {
-        return;
-      }
-      scopedMap.forEach((enabled, scope) => {
-        if (!enabled) {
+      this.getAllRuntimes().forEach((runtime) => {
+        const scopedMap = runtime.scopedEnabledState.get(domain);
+        if (!scopedMap) {
           return;
         }
-        const readyKey = makeInFlightKey(domain, scope);
-        const shouldStream = this.shouldStreamScope(domain, scope);
-        const alreadyStreaming =
-          this.streamingCleanup.has(readyKey) || this.pendingStreaming.has(readyKey);
+        scopedMap.forEach((enabled, scope) => {
+          if (!enabled) {
+            return;
+          }
+          const readyKey = makeInFlightKey(domain, scope);
+          const shouldStream = this.shouldStreamScope(domain, scope);
+          const scopeRuntime = this.getRuntimeForScope(domain, scope);
+          const alreadyStreaming =
+            scopeRuntime.streamingCleanup.has(readyKey) ||
+            scopeRuntime.pendingStreaming.has(readyKey);
 
-        if (shouldStream && !alreadyStreaming) {
-          // Context now allows streaming for this scope — start it.
-          this.scheduleStreamingStart(domain, scope, config.streaming!);
-        } else if (!shouldStream && alreadyStreaming) {
-          // Context no longer allows streaming — stop it.
-          this.streamingReady.delete(readyKey);
-          this.stopStreamingScope(domain, scope, config.streaming!, false);
-        }
+          if (shouldStream && !alreadyStreaming) {
+            // Context now allows streaming for this scope — start it.
+            this.scheduleStreamingStart(domain, scope, config.streaming!);
+          } else if (!shouldStream && alreadyStreaming) {
+            // Context no longer allows streaming — stop it.
+            scopeRuntime.streamingReady.delete(readyKey);
+            this.stopStreamingScope(domain, scope, config.streaming!, false);
+          }
+        });
       });
     });
   }
@@ -2037,19 +1445,21 @@ class RefreshOrchestrator {
   private handleKubeconfigChanged = () => {
     this.incrementContextVersion();
     invalidateRefreshBaseURL();
-    this.suppressNetworkErrors(6000);
+    this.errorNotifier.suppressNetworkErrors(6000);
     this.suspendedDomains.clear();
-    this.blockedStreaming.clear();
-    this.lastMetricsRefreshAt.clear();
+    this.clearAllBlockedStreaming();
+    this.clearAllMetricsRefreshTracking();
+    this.clearAllStreamHealth();
   };
 
   private handleKubeconfigSelectionChanged = () => {
     // Backend may rebuild the refresh subsystem; invalidate base URL and suppress transient errors.
     this.incrementContextVersion();
     invalidateRefreshBaseURL();
-    this.suppressNetworkErrors(6000);
-    this.blockedStreaming.clear();
-    this.lastMetricsRefreshAt.clear();
+    this.errorNotifier.suppressNetworkErrors(6000);
+    this.clearAllBlockedStreaming();
+    this.clearAllMetricsRefreshTracking();
+    this.clearAllStreamHealth();
   };
 
   private handleAutoRefreshChanged = () => {
@@ -2058,147 +1468,4 @@ class RefreshOrchestrator {
 }
 
 export const refreshOrchestrator = new RefreshOrchestrator();
-
-// ---------------------------------------------------------------------------
-// Domain registrations
-// ---------------------------------------------------------------------------
-
-// Helper for the common resource-stream domain pattern. 13 of 26 domains
-// follow this exact shape — only domain, refresher, and category differ.
-type ResourceStreamDomainName = Parameters<typeof resourceStreamManager.start>[0];
-function resourceStreamDomain(
-  domain: RefreshDomain & ResourceStreamDomainName,
-  refresherName: RefresherName,
-  category: DomainCategory,
-  options?: { metricsOnly?: boolean }
-) {
-  refreshOrchestrator.registerDomain({
-    domain,
-    refresherName,
-    category,
-    streaming: {
-      start: (scope) => resourceStreamManager.start(domain, scope),
-      stop: (scope, opts) => resourceStreamManager.stop(domain, scope, opts?.reset ?? false),
-      refreshOnce: (scope) => resourceStreamManager.refreshOnce(domain, scope),
-      metricsOnly: options?.metricsOnly,
-      pauseRefresherWhenStreaming: !options?.metricsOnly,
-    },
-  });
-}
-
-// System domains
-refreshOrchestrator.registerDomain({
-  domain: 'namespaces',
-  refresherName: SYSTEM_REFRESHERS.namespaces,
-  category: 'system',
-});
-refreshOrchestrator.registerDomain({
-  domain: 'cluster-overview',
-  refresherName: SYSTEM_REFRESHERS.clusterOverview,
-  category: 'system',
-});
-refreshOrchestrator.registerDomain({
-  domain: 'object-maintenance',
-  refresherName: SYSTEM_REFRESHERS.objectMaintenance,
-  category: 'system',
-});
-refreshOrchestrator.registerDomain({
-  domain: 'object-details',
-  refresherName: SYSTEM_REFRESHERS.objectDetails,
-  category: 'system',
-});
-refreshOrchestrator.registerDomain({
-  domain: 'object-events',
-  refresherName: SYSTEM_REFRESHERS.objectEvents,
-  category: 'system',
-});
-refreshOrchestrator.registerDomain({
-  domain: 'object-map',
-  refresherName: SYSTEM_REFRESHERS.objectMap,
-  category: 'system',
-});
-refreshOrchestrator.registerDomain({
-  domain: 'object-yaml',
-  refresherName: SYSTEM_REFRESHERS.objectYaml,
-  category: 'system',
-});
-refreshOrchestrator.registerDomain({
-  domain: 'object-helm-manifest',
-  refresherName: SYSTEM_REFRESHERS.objectHelmManifest,
-  category: 'system',
-});
-refreshOrchestrator.registerDomain({
-  domain: 'object-helm-values',
-  refresherName: SYSTEM_REFRESHERS.objectHelmValues,
-  category: 'system',
-});
-refreshOrchestrator.registerDomain({
-  domain: 'container-logs',
-  refresherName: SYSTEM_REFRESHERS.containerLogs,
-  category: 'system',
-  streaming: {
-    start: (scope) => containerLogsStreamManager.startStream(scope),
-    stop: (scope, options) => containerLogsStreamManager.stop(scope, options?.reset ?? false),
-    refreshOnce: (scope) => containerLogsStreamManager.refreshOnce(scope),
-  },
-});
-resourceStreamDomain('pods', SYSTEM_REFRESHERS.unifiedPods, 'system', { metricsOnly: true });
-
-// Cluster domains
-refreshOrchestrator.registerDomain({
-  domain: 'catalog',
-  refresherName: CLUSTER_REFRESHERS.browse,
-  category: 'cluster',
-  streaming: {
-    start: (scope) => catalogStreamManager.start(scope),
-    stop: (_scope, options) => catalogStreamManager.stop(options?.reset ?? false),
-    refreshOnce: (scope) => catalogStreamManager.refreshOnce(scope),
-    pauseRefresherWhenStreaming: true,
-  },
-});
-refreshOrchestrator.registerDomain({
-  domain: 'catalog-diff',
-  refresherName: CLUSTER_REFRESHERS.catalogDiff,
-  category: 'cluster',
-});
-refreshOrchestrator.registerDomain({
-  domain: 'cluster-events',
-  refresherName: CLUSTER_REFRESHERS.events,
-  category: 'cluster',
-  streaming: {
-    start: (scope) => eventStreamManager.startCluster(scope),
-    stop: (scope, options) => eventStreamManager.stopCluster(scope, options?.reset ?? false),
-    refreshOnce: (scope) => eventStreamManager.refreshCluster(scope),
-    pauseRefresherWhenStreaming: true,
-  },
-});
-resourceStreamDomain('nodes', CLUSTER_REFRESHERS.nodes, 'cluster', { metricsOnly: true });
-resourceStreamDomain('cluster-rbac', CLUSTER_REFRESHERS.rbac, 'cluster');
-resourceStreamDomain('cluster-storage', CLUSTER_REFRESHERS.storage, 'cluster');
-resourceStreamDomain('cluster-config', CLUSTER_REFRESHERS.config, 'cluster');
-resourceStreamDomain('cluster-crds', CLUSTER_REFRESHERS.crds, 'cluster');
-resourceStreamDomain('cluster-custom', CLUSTER_REFRESHERS.custom, 'cluster');
-
-// Namespace domains
-refreshOrchestrator.registerDomain({
-  domain: 'namespace-events',
-  refresherName: NAMESPACE_REFRESHERS.events,
-  category: 'namespace',
-  streaming: {
-    start: (scope) => eventStreamManager.startNamespace(scope),
-    stop: (scope, options) => eventStreamManager.stopNamespace(scope, options?.reset ?? false),
-    refreshOnce: (scope) => eventStreamManager.refreshNamespace(scope),
-    pauseRefresherWhenStreaming: true,
-  },
-});
-resourceStreamDomain('namespace-workloads', NAMESPACE_REFRESHERS.workloads, 'namespace', {
-  metricsOnly: true,
-});
-resourceStreamDomain('namespace-config', NAMESPACE_REFRESHERS.config, 'namespace');
-resourceStreamDomain('namespace-network', NAMESPACE_REFRESHERS.network, 'namespace');
-resourceStreamDomain('namespace-rbac', NAMESPACE_REFRESHERS.rbac, 'namespace');
-resourceStreamDomain('namespace-storage', NAMESPACE_REFRESHERS.storage, 'namespace');
-resourceStreamDomain('namespace-autoscaling', NAMESPACE_REFRESHERS.autoscaling, 'namespace');
-resourceStreamDomain('namespace-quotas', NAMESPACE_REFRESHERS.quotas, 'namespace');
-resourceStreamDomain('namespace-custom', NAMESPACE_REFRESHERS.custom, 'namespace');
-resourceStreamDomain('namespace-helm', NAMESPACE_REFRESHERS.helm, 'namespace');
+registerDefaultRefreshDomains(refreshOrchestrator);

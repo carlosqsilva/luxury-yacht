@@ -21,6 +21,7 @@ behavior, frontend infrastructure, or workflow-specific code.
 | Question                                                       | Start here                                                         |
 | -------------------------------------------------------------- | ------------------------------------------------------------------ |
 | Where should frontend code live?                               | [frontend/component-structure.md](frontend/component-structure.md) |
+| How should shared resource tables be built and maintained?     | [frontend/gridtable.md](frontend/gridtable.md)                     |
 | How do keyboard shortcuts, surfaces, and focus ownership work? | [frontend/keyboard.md](frontend/keyboard.md)                       |
 | How should blocking modals be built?                           | [frontend/modals.md](frontend/modals.md)                           |
 | How do shared tabs and tab drag/drop work?                     | [frontend/tabs.md](frontend/tabs.md)                               |
@@ -31,6 +32,7 @@ behavior, frontend infrastructure, or workflow-specific code.
 | Question                                     | Start here                                                               |
 | -------------------------------------------- | ------------------------------------------------------------------------ |
 | How does the object relationship map work?   | [workflows/object-map.md](workflows/object-map.md)                       |
+| How are live shell, port-forward, and drain operations tracked and cleaned up? | [workflows/operation-lifecycle.md](workflows/operation-lifecycle.md) |
 | How do shell exec and debug containers work? | [workflows/shell-debug.md](workflows/shell-debug.md)                     |
 | Which logs doc should I use?                 | [workflows/logs/overview.md](workflows/logs/overview.md)                 |
 | How do container/pod/workload logs work?     | [workflows/logs/container-logs.md](workflows/logs/container-logs.md)     |

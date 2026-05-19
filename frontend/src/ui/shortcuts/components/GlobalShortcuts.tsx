@@ -15,6 +15,7 @@ import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
 import {
   getClusterTabOrder,
   hydrateClusterTabOrder,
+  mergeClusterTabOrder,
   subscribeClusterTabOrder,
 } from '@core/persistence/clusterTabOrder';
 import { EventsOn, EventsOff, Quit } from '@wailsjs/runtime/runtime';
@@ -44,7 +45,7 @@ export function GlobalShortcuts({
 }: GlobalShortcutsProps) {
   const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [isModalAnimating, setIsModalAnimating] = useState(false);
-  const { selectedKubeconfig, selectedKubeconfigs, setSelectedKubeconfigs, setActiveKubeconfig } =
+  const { selectedKubeconfig, selectedKubeconfigs, setActiveKubeconfig, closeKubeconfig } =
     useKubeconfig();
   const { zoomIn, zoomOut, resetZoom } = useZoom();
   const [clusterTabOrder, setClusterTabOrder] = useState<string[]>(() => getClusterTabOrder());
@@ -113,28 +114,17 @@ export function GlobalShortcuts({
     if (!selectedKubeconfig) {
       return;
     }
-    // Close the active cluster tab by removing it from the selection list.
-    const nextSelections = selectedKubeconfigs.filter((config) => config !== selectedKubeconfig);
-    if (nextSelections.length === selectedKubeconfigs.length) {
+    if (!selectedKubeconfigs.includes(selectedKubeconfig)) {
       return;
     }
-    void setSelectedKubeconfigs(nextSelections);
-  }, [selectedKubeconfig, selectedKubeconfigs, setSelectedKubeconfigs]);
+    void closeKubeconfig(selectedKubeconfig).catch((err) => {
+      console.warn('Failed to close cluster:', err);
+    });
+  }, [closeKubeconfig, selectedKubeconfig, selectedKubeconfigs]);
 
   const orderedClusterSelections = useMemo(() => {
     // Follow the persisted tab order to mirror the visible cluster tabs.
-    const tabEntries = selectedKubeconfigs.map((selection) => ({
-      selection,
-      id: selection,
-    }));
-    const selectionOrderIds = tabEntries.map((entry) => entry.id);
-    const persisted = clusterTabOrder.filter((id) => selectionOrderIds.includes(id));
-    const missing = selectionOrderIds.filter((id) => !persisted.includes(id));
-    const mergedOrder = [...persisted, ...missing];
-    const selectionById = new Map(tabEntries.map((entry) => [entry.id, entry.selection]));
-    return mergedOrder
-      .map((id) => selectionById.get(id))
-      .filter((selection): selection is string => Boolean(selection));
+    return mergeClusterTabOrder(selectedKubeconfigs, clusterTabOrder);
   }, [clusterTabOrder, selectedKubeconfigs]);
 
   const handleSwitchClusterTab = useCallback(

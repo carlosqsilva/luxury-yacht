@@ -15,15 +15,13 @@ import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
 import {
   getClusterTabOrder,
   hydrateClusterTabOrder,
+  mergeClusterTabOrder,
   setClusterTabOrder,
   subscribeClusterTabOrder,
 } from '@core/persistence/clusterTabOrder';
-import { StopClusterPortForwards, StopClusterShellSessions } from '@wailsjs/go/backend/App';
-import ConfirmationModal from '@shared/components/modals/ConfirmationModal';
 import { CloseIcon } from '@shared/components/icons/SharedIcons';
 import { Tabs, type TabDescriptor } from '@shared/components/tabs';
 import { useTabDragSourceFactory, useTabDropTarget } from '@shared/components/tabs/dragCoordinator';
-import { readClusterPortForwardCount, requestAppState } from '@/core/app-state-access';
 import './ClusterTabs.css';
 
 const ordersMatch = (left: string[], right: string[]) =>
@@ -39,19 +37,12 @@ const ClusterTabs: React.FC = () => {
   const {
     selectedKubeconfigs,
     selectedKubeconfig,
-    setSelectedKubeconfigs,
     setActiveKubeconfig,
     getClusterMeta,
+    closeKubeconfig,
   } = useKubeconfig();
   const [tabOrder, setTabOrder] = useState<string[]>(() => getClusterTabOrder());
   const tabsRef = useRef<HTMLDivElement | null>(null);
-  // State for cluster close confirmation modal when port forwards are active.
-  const [closeConfirm, setCloseConfirm] = useState<{
-    show: boolean;
-    clusterId: string | null;
-    clusterLabel: string;
-    forwardCount: number;
-  }>({ show: false, clusterId: null, clusterLabel: '', forwardCount: 0 });
 
   useEffect(() => {
     let active = true;
@@ -93,9 +84,7 @@ const ClusterTabs: React.FC = () => {
 
   const mergedOrder = useMemo(() => {
     // Prefer persisted drag order, then append any newly opened tabs by selection order.
-    const persisted = tabOrder.filter((id) => selectionOrderIds.includes(id));
-    const missing = selectionOrderIds.filter((id) => !persisted.includes(id));
-    return [...persisted, ...missing];
+    return mergeClusterTabOrder(selectionOrderIds, tabOrder);
   }, [selectionOrderIds, tabOrder]);
 
   useEffect(() => {
@@ -128,74 +117,14 @@ const ClusterTabs: React.FC = () => {
     [setActiveKubeconfig]
   );
 
-  // Handles closing a cluster tab. Checks for active port forwards first and
-  // prompts for confirmation if any are found.
-  const handleCloseTab = useCallback(
-    async (selection: string) => {
-      // Find the tab label for the cluster being closed.
-      const tab = tabs.find((t) => t.selection === selection);
-      const label = tab?.label ?? selection;
-
-      // Check if there are active port forwards for this cluster.
-      try {
-        const count = await requestAppState({
-          resource: 'cluster-port-forward-count',
-          adapter: 'runtime-read',
-          read: () => readClusterPortForwardCount(selection),
-        });
-        if (count > 0) {
-          // Show confirmation modal with the count.
-          setCloseConfirm({
-            show: true,
-            clusterId: selection,
-            clusterLabel: label,
-            forwardCount: count,
-          });
-          return;
-        }
-      } catch (err) {
-        console.warn('Failed to check cluster port forward count:', err);
-      }
-
-      // Stop tracked shell sessions for this cluster before closing.
-      try {
-        await StopClusterShellSessions(selection);
-      } catch (err) {
-        console.warn('Failed to stop cluster shell sessions:', err);
-      }
-
-      // No active port forwards, proceed directly with closing.
-      const nextSelections = selectedKubeconfigs.filter((config) => config !== selection);
-      void setSelectedKubeconfigs(nextSelections);
+  const closeClusterSelection = useCallback(
+    (selection: string) => {
+      void closeKubeconfig(selection).catch((err) => {
+        console.warn('Failed to close cluster:', err);
+      });
     },
-    [selectedKubeconfigs, setSelectedKubeconfigs, tabs]
+    [closeKubeconfig]
   );
-
-  // Handles confirmed close when user accepts stopping port forwards.
-  const handleConfirmClose = useCallback(async () => {
-    if (!closeConfirm.clusterId) return;
-
-    // Stop all port forwards for this cluster.
-    try {
-      await StopClusterPortForwards(closeConfirm.clusterId);
-    } catch (err) {
-      console.warn('Failed to stop cluster port forwards:', err);
-    }
-    try {
-      await StopClusterShellSessions(closeConfirm.clusterId);
-    } catch (err) {
-      console.warn('Failed to stop cluster shell sessions:', err);
-    }
-
-    // Close the tab.
-    const nextSelections = selectedKubeconfigs.filter(
-      (config) => config !== closeConfirm.clusterId
-    );
-    void setSelectedKubeconfigs(nextSelections);
-
-    // Reset confirmation state.
-    setCloseConfirm({ show: false, clusterId: null, clusterLabel: '', forwardCount: 0 });
-  }, [closeConfirm.clusterId, selectedKubeconfigs, setSelectedKubeconfigs]);
 
   // One useContext call for the entire drag coordinator, regardless of how
   // many tabs are rendered. Returned factory is a plain function legal inside
@@ -283,7 +212,7 @@ const ClusterTabs: React.FC = () => {
     closeIcon: <CloseIcon width={10} height={10} />,
     closeAriaLabel: `Close ${tab.label}`,
     onClose: () => {
-      void handleCloseTab(tab.selection);
+      closeClusterSelection(tab.selection);
     },
     extraProps: {
       title: tab.label, // tooltip for full text when truncated
@@ -292,33 +221,19 @@ const ClusterTabs: React.FC = () => {
   }));
 
   return (
-    <>
-      <div ref={assignRootRef} className="cluster-tabs-wrapper">
-        <Tabs
-          aria-label="Cluster Tabs"
-          tabs={tabDescriptors}
-          activeId={activeTabId}
-          onActivate={(id) => {
-            const tab = tabsById.get(id);
-            if (tab) handleTabClick(tab.selection);
-          }}
-          dropInsertIndex={dropInsertIndex}
-          className="cluster-tabs"
-        />
-      </div>
-      <ConfirmationModal
-        isOpen={closeConfirm.show}
-        title="Active Port Forwards"
-        message={`Cluster "${closeConfirm.clusterLabel}" has ${closeConfirm.forwardCount} active port forward${closeConfirm.forwardCount > 1 ? 's' : ''}. Stop ${closeConfirm.forwardCount > 1 ? 'them' : 'it'} and close?`}
-        confirmText="Stop & Close"
-        cancelText="Cancel"
-        confirmButtonClass="danger"
-        onConfirm={handleConfirmClose}
-        onCancel={() =>
-          setCloseConfirm({ show: false, clusterId: null, clusterLabel: '', forwardCount: 0 })
-        }
+    <div ref={assignRootRef} className="cluster-tabs-wrapper">
+      <Tabs
+        aria-label="Cluster Tabs"
+        tabs={tabDescriptors}
+        activeId={activeTabId}
+        onActivate={(id) => {
+          const tab = tabsById.get(id);
+          if (tab) handleTabClick(tab.selection);
+        }}
+        dropInsertIndex={dropInsertIndex}
+        className="cluster-tabs"
       />
-    </>
+    </div>
   );
 };
 

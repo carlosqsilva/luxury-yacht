@@ -64,6 +64,11 @@ type App struct {
 	// This preserves sequential behavior while allowing kubeconfigChangeMu to stay
 	// narrowly scoped to short state-transition sections.
 	selectionMutationMu sync.Mutex
+	// selectionMutationDrain tracks queued and active selection mutations so app
+	// shutdown can wait for durable selection writes, not just active runtime work.
+	selectionMutationDrainMu   sync.Mutex
+	selectionMutationDrainCond *sync.Cond
+	selectionMutationPending   int
 	// kubeconfigChangeMu serializes runtime cluster/subsystem mutation paths.
 	// Lock ordering for runtime cluster mutation paths:
 	//   1) selectionMutationMu
@@ -92,6 +97,9 @@ type App struct {
 
 	portForwardSessions   map[string]*portForwardSessionInternal
 	portForwardSessionsMu sync.Mutex
+
+	runtimeOperations   *runtimeOperationRegistry
+	runtimeOperationsMu sync.Mutex
 
 	updateCheckOnce sync.Once
 	updateCheckMu   sync.RWMutex
@@ -137,6 +145,7 @@ func NewApp() *App {
 		objectCatalogEntries:     make(map[string]*objectCatalogEntry),
 		shellSessions:            make(map[string]*shellSession),
 		portForwardSessions:      make(map[string]*portForwardSessionInternal),
+		runtimeOperations:        newRuntimeOperationRegistry(),
 		eventEmitter:             func(context.Context, string, ...interface{}) {},
 	}
 	app.kubeClientInitializer = func() error {

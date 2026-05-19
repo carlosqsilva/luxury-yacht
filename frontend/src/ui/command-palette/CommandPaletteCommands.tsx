@@ -72,7 +72,8 @@ export function useCommandPaletteCommands() {
     selectedKubeconfig,
     selectedClusterId,
     selectedKubeconfigs,
-    setSelectedKubeconfigs,
+    openKubeconfig,
+    closeKubeconfig,
     kubeconfigs,
     setActiveKubeconfig,
     getClusterMeta,
@@ -109,9 +110,10 @@ export function useCommandPaletteCommands() {
     if (!selectedKubeconfigs.includes(active)) {
       return;
     }
-    const nextSelections = selectedKubeconfigs.filter((selection) => selection !== active);
-    void setSelectedKubeconfigs(nextSelections);
-  }, [selectedKubeconfig, selectedKubeconfigs, setSelectedKubeconfigs]);
+    void closeKubeconfig(active).catch((err) => {
+      console.warn('Failed to close cluster:', err);
+    });
+  }, [closeKubeconfig, selectedKubeconfig, selectedKubeconfigs]);
 
   const selectNamespace = useCallback(
     (scope: string) => {
@@ -677,12 +679,12 @@ export function useCommandPaletteCommands() {
             setActiveKubeconfig(configValue);
             return;
           }
-          void setSelectedKubeconfigs([...selectedKubeconfigs, configValue]);
+          void openKubeconfig(configValue);
         },
         keywords: ['kubeconfig', 'context', config.name, config.context],
       };
     });
-  }, [kubeconfigs, selectedKubeconfigs, setActiveKubeconfig, setSelectedKubeconfigs]);
+  }, [kubeconfigs, openKubeconfig, selectedKubeconfigs, setActiveKubeconfig]);
 
   // Build commands from saved favorites so they appear as a searchable group.
   const favoriteCommands: Command[] = useMemo(
@@ -700,7 +702,7 @@ export function useCommandPaletteCommands() {
           navigateToFavorite(fav, {
             selectedKubeconfigs,
             selectedClusterId,
-            setSelectedKubeconfigs,
+            openKubeconfig,
             setActiveKubeconfig,
             getClusterMeta,
             setPendingFavorite,
@@ -712,7 +714,7 @@ export function useCommandPaletteCommands() {
       favorites,
       selectedKubeconfigs,
       selectedClusterId,
-      setSelectedKubeconfigs,
+      openKubeconfig,
       setActiveKubeconfig,
       getClusterMeta,
       setPendingFavorite,

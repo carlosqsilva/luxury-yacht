@@ -13,7 +13,8 @@ import ModalHeader from './ModalHeader';
 import { useModalFocusTrap } from './useModalFocusTrap';
 import Tooltip from '@shared/components/Tooltip';
 import { DrainIcon } from '@shared/components/icons/SharedIcons';
-import { CancelDrainNodeJob, StartDrainNode } from '@wailsjs/go/backend/App';
+import { CancelDrainNodeJob } from '@wailsjs/go/backend/App';
+import { buildObjectActionTarget, runStartDrain } from '@shared/actions/objectActionClient';
 import { types } from '@wailsjs/go/models';
 import { errorHandler } from '@/utils/errorHandler';
 import { requestRefreshDomain } from '@/core/data-access';
@@ -162,6 +163,11 @@ const DrainNodeModal = ({
   );
 
   const mostRecentJob: NodeMaintenanceDrainJob | null = useMemo(() => drains[0] ?? null, [drains]);
+  const primaryDrainJob = activeDrainJob ?? mostRecentJob;
+  const earlierDrains = useMemo(
+    () => (primaryDrainJob ? drains.filter((job) => job.id !== primaryDrainJob.id) : drains),
+    [drains, primaryDrainJob]
+  );
 
   const drainsLoadingState = applyPassiveLoadingPolicy({
     loading: scope
@@ -253,7 +259,10 @@ const DrainNodeModal = ({
       if (drainOptions.timeoutSeconds != null && drainOptions.timeoutSeconds > 0) {
         payload.timeoutSeconds = normalizeTimeoutSeconds(drainOptions.timeoutSeconds);
       }
-      await StartDrainNode(clusterId, nodeName, payload);
+      await runStartDrain(
+        buildObjectActionTarget({ clusterId, kind: 'Node', name: nodeName }, 'drain'),
+        payload
+      );
       await refreshMaintenance();
     } catch (error) {
       const message =
@@ -338,6 +347,30 @@ const DrainNodeModal = ({
             </>
           )}
         </div>
+
+        {primaryDrainJob && (
+          <div className="drain-node-modal-current">
+            <DrainProgressCard
+              job={primaryDrainJob}
+              isActive={Boolean(activeDrainJob && activeDrainJob.id === primaryDrainJob.id)}
+              onCancel={
+                activeDrainJob && activeDrainJob.id === primaryDrainJob.id
+                  ? () => void cancelActiveDrain()
+                  : undefined
+              }
+              cancelDisabled={
+                activeDrainJob && activeDrainJob.id === primaryDrainJob.id
+                  ? cancelDrainPending || Boolean(cancelPermissionReason)
+                  : undefined
+              }
+              cancelDisabledReason={
+                activeDrainJob && activeDrainJob.id === primaryDrainJob.id
+                  ? cancelPermissionReason
+                  : undefined
+              }
+            />
+          </div>
+        )}
 
         {showOptions && (
           <details className="drain-node-modal-advanced">
@@ -465,30 +498,17 @@ const DrainNodeModal = ({
           </details>
         )}
 
-        {drainsLoadingState.loading && drains.length === 0 && (
+        {drainsLoadingState.loading && !primaryDrainJob && drains.length === 0 && (
           <div className="drain-node-modal-helper">Loading drain status…</div>
         )}
 
-        {drains.length > 0 && (
+        {earlierDrains.length > 0 && (
           <div className="drain-node-modal-history">
-            {drains.map((job, idx) => {
-              const isActiveCard = Boolean(activeDrainJob && activeDrainJob.id === job.id);
+            <div className="drain-node-modal-history-label">Earlier drains</div>
+            {earlierDrains.map((job) => {
               return (
                 <div key={job.id} className="drain-node-modal-history-entry">
-                  {idx === 1 && (
-                    <div className="drain-node-modal-history-label">Earlier drains</div>
-                  )}
-                  <DrainProgressCard
-                    job={job}
-                    isActive={isActiveCard}
-                    onCancel={isActiveCard ? () => void cancelActiveDrain() : undefined}
-                    cancelDisabled={
-                      isActiveCard
-                        ? cancelDrainPending || Boolean(cancelPermissionReason)
-                        : undefined
-                    }
-                    cancelDisabledReason={isActiveCard ? cancelPermissionReason : undefined}
-                  />
+                  <DrainProgressCard job={job} isActive={false} />
                 </div>
               );
             })}

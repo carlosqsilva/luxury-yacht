@@ -10,6 +10,7 @@ package backend
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/luxury-yacht/app/backend/nodemaintenance"
 	"github.com/luxury-yacht/app/backend/resources/common"
@@ -27,91 +28,137 @@ func (a *App) GetNode(clusterID, name string) (*NodeDetails, error) {
 	})
 }
 
-func (a *App) CordonNode(clusterID, nodeName string) error {
+func (a *App) cordonNode(clusterID, nodeName string) error {
 	if err := requireObjectName(nodeName); err != nil {
 		return err
 	}
-	deps, selectionKey, err := a.resolveClusterDependencies(clusterID)
+	_, err := a.RunObjectAction(ObjectActionRequest{
+		Action: ObjectActionCordon,
+		Target: objectActionTarget(clusterID, "", "v1", "Node", "", nodeName),
+	})
+	return err
+}
+
+func (a *App) cordonNodeAction(target ObjectActionTargetRef) error {
+	if err := requireNodeActionTarget(ObjectActionCordon, target); err != nil {
+		return err
+	}
+	deps, selectionKey, err := a.resolveClusterDependencies(target.ClusterID)
 	if err != nil {
 		return err
 	}
-	if err := a.requireNodeMaintenancePermission(deps, nodeName); err != nil {
+	if err := a.requireNodeMaintenancePermission(deps, target.Name); err != nil {
 		return err
 	}
-	if err := nodes.NewService(deps).Cordon(nodeName); err != nil {
+	if err := nodes.NewService(deps).Cordon(target.Name); err != nil {
 		return err
 	}
-	a.clearNodeCaches(selectionKey, nodeName)
+	a.clearNodeCaches(selectionKey, target.Name)
 	return nil
 }
 
-func (a *App) UncordonNode(clusterID, nodeName string) error {
+func (a *App) uncordonNode(clusterID, nodeName string) error {
 	if err := requireObjectName(nodeName); err != nil {
 		return err
 	}
-	deps, selectionKey, err := a.resolveClusterDependencies(clusterID)
+	_, err := a.RunObjectAction(ObjectActionRequest{
+		Action: ObjectActionUncordon,
+		Target: objectActionTarget(clusterID, "", "v1", "Node", "", nodeName),
+	})
+	return err
+}
+
+func (a *App) uncordonNodeAction(target ObjectActionTargetRef) error {
+	if err := requireNodeActionTarget(ObjectActionUncordon, target); err != nil {
+		return err
+	}
+	deps, selectionKey, err := a.resolveClusterDependencies(target.ClusterID)
 	if err != nil {
 		return err
 	}
-	if err := a.requireNodeMaintenancePermission(deps, nodeName); err != nil {
+	if err := a.requireNodeMaintenancePermission(deps, target.Name); err != nil {
 		return err
 	}
-	if err := nodes.NewService(deps).Uncordon(nodeName); err != nil {
+	if err := nodes.NewService(deps).Uncordon(target.Name); err != nil {
 		return err
 	}
-	a.clearNodeCaches(selectionKey, nodeName)
+	a.clearNodeCaches(selectionKey, target.Name)
 	return nil
 }
 
-func (a *App) DrainNode(clusterID, nodeName string, options DrainNodeOptions) error {
+func (a *App) drainNode(clusterID, nodeName string, options DrainNodeOptions) error {
 	if err := requireObjectName(nodeName); err != nil {
+		return err
+	}
+	_, err := a.RunObjectAction(ObjectActionRequest{
+		Action:       ObjectActionDrain,
+		Target:       objectActionTarget(clusterID, "", "v1", "Node", "", nodeName),
+		DrainOptions: &options,
+	})
+	return err
+}
+
+func (a *App) drainNodeAction(target ObjectActionTargetRef, options DrainNodeOptions) error {
+	if err := requireNodeActionTarget(ObjectActionDrain, target); err != nil {
 		return err
 	}
 	if err := nodes.ValidateDrainOptions(options); err != nil {
 		return err
 	}
-	deps, selectionKey, err := a.resolveClusterDependencies(clusterID)
+	deps, selectionKey, err := a.resolveClusterDependencies(target.ClusterID)
 	if err != nil {
 		return err
 	}
-	if err := a.requireNodeMaintenancePermission(deps, nodeName); err != nil {
+	if err := a.requireNodeMaintenancePermission(deps, target.Name); err != nil {
 		return err
 	}
 	if err := a.requireDrainPodPermission(deps, options); err != nil {
 		return err
 	}
-	if err := nodes.NewService(deps).Drain(nodeName, options); err != nil {
+	if err := nodes.NewService(deps).Drain(target.Name, options); err != nil {
 		return err
 	}
-	a.clearNodeCaches(selectionKey, nodeName)
+	a.clearNodeCaches(selectionKey, target.Name)
 	return nil
 }
 
-func (a *App) StartDrainNode(clusterID, nodeName string, options DrainNodeOptions) (string, error) {
-	if err := requireObjectName(nodeName); err != nil {
+func (a *App) startDrainNodeAction(target ObjectActionTargetRef, options DrainNodeOptions) (string, error) {
+	if err := requireNodeActionTarget(ObjectActionStartDrain, target); err != nil {
 		return "", err
 	}
 	if err := nodes.ValidateDrainOptions(options); err != nil {
 		return "", err
 	}
-	deps, selectionKey, err := a.resolveClusterDependencies(clusterID)
+	deps, selectionKey, err := a.resolveClusterDependencies(target.ClusterID)
 	if err != nil {
 		return "", err
 	}
-	if err := a.requireNodeMaintenancePermission(deps, nodeName); err != nil {
+	if err := a.requireNodeMaintenancePermission(deps, target.Name); err != nil {
 		return "", err
 	}
 	if err := a.requireDrainPodPermission(deps, options); err != nil {
 		return "", err
 	}
-	job, err := nodes.NewService(deps).StartDrainWithCompletion(nodeName, options, func() {
-		a.clearNodeCaches(selectionKey, nodeName)
+	job, err := nodes.NewService(deps).StartDrainWithCompletion(target.Name, options, func(jobID string) {
+		a.clearNodeCaches(selectionKey, target.Name)
+		a.unregisterRuntimeOperation(jobID)
 	})
 	if err != nil {
 		return "", err
 	}
-	a.clearNodeCaches(selectionKey, nodeName)
+	a.registerRuntimeOperation(runtimeOperationFromDrainJob(job), func(reason string) error {
+		nodemaintenance.GlobalStore().CancelDrainForClusterLifecycle(job.ID, deps.ClusterID, reason)
+		return nil
+	})
+	a.clearNodeCaches(selectionKey, target.Name)
 	return job.ID, nil
+}
+
+func requireNodeActionTarget(action string, target ObjectActionTargetRef) error {
+	if target.Group != "" || target.Version != "v1" || target.Kind != "Node" {
+		return errUnsupportedActionTarget(action, target, "/v1", "Node")
+	}
+	return requireObjectName(target.Name)
 }
 
 func (a *App) requireNodeMaintenancePermission(deps common.Dependencies, nodeName string) error {
@@ -169,47 +216,68 @@ func (a *App) CancelDrainNodeJob(clusterID, jobID string) error {
 	return store.CancelDrainForCluster(trimmedJobID, deps.ClusterID)
 }
 
-func (a *App) DeleteNode(clusterID, nodeName string) error {
-	if err := requireObjectName(nodeName); err != nil {
-		return err
+func runtimeOperationFromDrainJob(job *nodemaintenance.DrainJob) RuntimeOperation {
+	if job == nil {
+		return RuntimeOperation{}
 	}
-	deps, selectionKey, err := a.resolveClusterDependencies(clusterID)
-	if err != nil {
-		return err
+	return RuntimeOperation{
+		ID:          job.ID,
+		Type:        RuntimeOperationDrain,
+		ClusterID:   job.ClusterID,
+		ClusterName: job.ClusterName,
+		Target:      runtimeOperationTarget(job.ClusterID, "", "v1", "Node", "", job.NodeName),
+		Status:      string(job.Status),
+		StartedAt:   time.UnixMilli(job.StartedAt).Format(time.RFC3339),
+		DisplayName: fmt.Sprintf("Drain %s", job.NodeName),
+		Summary: map[string]string{
+			"nodeName": job.NodeName,
+		},
 	}
-	if err := a.requireResourcePermission(deps.Context, deps, resourcePermissionCheck{
-		Kind: "Node",
-		Name: nodeName,
-		Verb: "delete",
-	}); err != nil {
-		return err
-	}
-	if err := nodes.NewService(deps).Delete(nodeName, false); err != nil {
-		return err
-	}
-	a.clearNodeCaches(selectionKey, nodeName)
-	return nil
 }
 
-func (a *App) ForceDeleteNode(clusterID, nodeName string) error {
+func (a *App) deleteNode(clusterID, nodeName string) error {
 	if err := requireObjectName(nodeName); err != nil {
 		return err
 	}
-	deps, selectionKey, err := a.resolveClusterDependencies(clusterID)
+	_, err := a.RunObjectAction(ObjectActionRequest{
+		Action: ObjectActionDelete,
+		Target: objectActionTarget(clusterID, "", "v1", "Node", "", nodeName),
+	})
+	return err
+}
+
+func (a *App) forceDeleteNode(clusterID, nodeName string) error {
+	if err := requireObjectName(nodeName); err != nil {
+		return err
+	}
+	_, err := a.RunObjectAction(ObjectActionRequest{
+		Action: ObjectActionForceDelete,
+		Target: objectActionTarget(clusterID, "", "v1", "Node", "", nodeName),
+	})
+	return err
+}
+
+func (a *App) deleteNodeAction(target ObjectActionTargetRef, force bool) error {
+	if err := requireNodeActionTarget(ObjectActionDelete, target); err != nil {
+		return err
+	}
+	deps, selectionKey, err := a.resolveClusterDependencies(target.ClusterID)
 	if err != nil {
 		return err
 	}
 	if err := a.requireResourcePermission(deps.Context, deps, resourcePermissionCheck{
-		Kind: "Node",
-		Name: nodeName,
-		Verb: "delete",
+		Group:   target.Group,
+		Version: target.Version,
+		Kind:    target.Kind,
+		Name:    target.Name,
+		Verb:    "delete",
 	}); err != nil {
 		return err
 	}
-	if err := nodes.NewService(deps).Delete(nodeName, true); err != nil {
+	if err := nodes.NewService(deps).Delete(target.Name, force); err != nil {
 		return err
 	}
-	a.clearNodeCaches(selectionKey, nodeName)
+	a.clearNodeCaches(selectionKey, target.Name)
 	return nil
 }
 

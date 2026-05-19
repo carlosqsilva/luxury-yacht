@@ -76,7 +76,8 @@ Internal infrastructure reads such as `GetRefreshBaseURL` and
 
 `dataAccess` reader wrappers currently cover:
 
-- target ports, pod containers, and log-scope containers
+- target ports, pod containers, log-scope containers, container logs, and node
+  logs
 - object YAML by GVK
 - catalog object lookup by UID or object match
 - revision history
@@ -93,6 +94,75 @@ Internal infrastructure reads such as `GetRefreshBaseURL` and
 
 Reader wrappers are the only place generated Wails read imports should be
 needed for these paths.
+
+## Settings Contract
+
+Persisted app preferences and runtime-enforced settings are described by the
+backend settings schema returned through the `appStateAccess` reader
+`readAppSettingsSchema`. Frontend settings code should hydrate defaults, bounds,
+enum values, and current values from that schema instead of duplicating the
+backend contract.
+
+`frontend/src/core/settings/appPreferences.ts` owns the frontend schema metadata
+cache. Settings UI code should read backend-owned defaults, bounds, enum values,
+validation hints, and runtime flags through the typed metadata helpers in that
+module, not through section-local constants. The module may keep fallback
+metadata for first paint, Wails-unavailable tests, or schema-load failure, but
+those fallbacks are not a second contract.
+
+Settings components should not fetch the backend schema directly. If a UI
+surface needs preference metadata, add or reuse a typed helper in
+`frontend/src/core/settings/appPreferences.ts` and keep schema loading behind
+`appStateAccess`.
+
+The ownership boundary is:
+
+- backend-owned: values persisted in `settings.json`, values validated or
+  clamped by backend code, and values with backend/runtime side effects
+- frontend-owned: transient component state, UI-local preferences that are not
+  persisted by the backend, and localStorage bootstrap caches needed before
+  Wails/backend reads are available
+- derived frontend cache: appearance mode and appearance bootstrap localStorage
+  mirror backend-owned persisted values for first paint, but they are not an
+  independent source of truth
+
+Object panel position and layout defaults are persisted preferences with
+backend-normalized defaults. Do not reintroduce frontend-only fallback constants
+as the source of truth for those settings.
+
+Settings mutations use `UpdateAppPreferences` as an atomic batch command:
+
+- validate every requested key before mutating backend in-memory settings
+- persist normalized settings before applying runtime side effects
+- apply runtime side effects only after persistence succeeds
+- fail the whole batch when any key is invalid or persistence fails
+- return normalized settings and changed keys; keep schema refresh separate
+  unless a response-shape change is truly needed
+
+The frontend may still keep local-only state, such as the last active Settings
+tab, and first-paint appearance bootstrap values in localStorage. Appearance
+bootstrap localStorage is a derived cache used before Wails is available, not an
+independent source of truth.
+
+Frontend preference setters may update local cache and derived runtime/UI state
+optimistically. On persistence failure they must restore the cache, re-emit
+events for restored values, and restore derived localStorage mirrors such as
+appearance mode and appearance bootstrap data.
+
+When adding or changing a preference:
+
+1. Classify it as backend-owned persisted/runtime state, frontend-owned
+   local-only state, or a derived frontend cache.
+2. For backend-owned preferences, update backend defaults, normalization,
+   schema metadata, validation, Wails DTOs, and tests together.
+3. Keep backend schema coverage aligned with every preference accepted by
+   `UpdateAppPreferences`, without adding non-preference state such as selected
+   kubeconfigs or saved themes to the preference schema.
+4. Route frontend reads through `appStateAccess` and the settings schema.
+5. Route frontend persistence through `UpdateAppPreferences` and preserve
+   optimistic rollback behavior.
+6. Regenerate Wails bindings when DTO/schema fields or response shapes change.
+7. Keep compatibility setters only when external Wails callers still need them.
 
 ## Refresh Domains
 
@@ -145,8 +215,10 @@ All cluster/resource request scopes must preserve Kubernetes identity:
 - object-scoped reads include `clusterId`, `group`, `version`, `kind`, and
   object identity
 
-Foreground views scope reads to the active cluster only. Multi-cluster scopes
-are valid only for intentionally aggregated, background, or system behavior.
+Foreground views scope reads to the active cluster only. Refresh-domain reads
+always use one cluster scope at a time; background refresh and cross-cluster
+displays fan out across per-cluster state instead of using aggregate refresh
+scopes.
 
 ## Loading And Diagnostics
 

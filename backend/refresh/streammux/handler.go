@@ -13,6 +13,7 @@ import (
 	"github.com/gorilla/websocket"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
+	"github.com/luxury-yacht/app/backend/internal/applog"
 	"github.com/luxury-yacht/app/backend/internal/config"
 	"github.com/luxury-yacht/app/backend/internal/logsources"
 	"github.com/luxury-yacht/app/backend/refresh"
@@ -76,6 +77,7 @@ func NewHandler(cfg Config) (*Handler, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = noopLogger{}
 	}
+	cfg.Logger = applog.ClusterScoped(cfg.Logger, cfg.ClusterID, cfg.ClusterName)
 	if cfg.StreamName == "" {
 		return nil, errors.New("stream name is required")
 	}
@@ -404,7 +406,7 @@ func (s *session) enqueue(msg ServerMessage) {
 
 func (s *session) handleBackpressure(msg ServerMessage) {
 	if msg.Type == MessageTypeHeartbeat {
-		s.logger.Warn("stream mux: outgoing buffer full, dropping heartbeat", logsources.StreamMux)
+		s.logger.Warn("stream mux: outgoing buffer full, dropping heartbeat", logsources.StreamMux, s.clusterID, s.clusterName)
 		return
 	}
 
@@ -418,7 +420,7 @@ func (s *session) handleBackpressure(msg ServerMessage) {
 	}
 
 	if msg.Domain == "" || msg.Scope == "" {
-		s.logger.Warn("stream mux: outgoing buffer full, dropping message", logsources.StreamMux)
+		s.logger.Warn("stream mux: outgoing buffer full, dropping message", logsources.StreamMux, s.clusterID, s.clusterName)
 		return
 	}
 
@@ -439,9 +441,9 @@ func (s *session) handleBackpressure(msg ServerMessage) {
 	}
 	select {
 	case s.outgoing <- reset:
-		s.logger.Warn(fmt.Sprintf("stream mux: outgoing buffer full, issued reset for %s/%s", msg.Domain, msg.Scope), logsources.StreamMux)
+		s.logger.Warn(fmt.Sprintf("stream mux: outgoing buffer full, issued reset for %s/%s", msg.Domain, msg.Scope), logsources.StreamMux, clusterID, clusterName)
 	default:
-		s.logger.Warn("stream mux: outgoing buffer full, dropping message", logsources.StreamMux)
+		s.logger.Warn("stream mux: outgoing buffer full, dropping message", logsources.StreamMux, clusterID, clusterName)
 	}
 }
 
@@ -487,21 +489,33 @@ func (s *session) writeMessage(msg ServerMessage) error {
 
 // resolveClusterID determines the cluster to use for the incoming message.
 func (s *session) resolveClusterID(msg ClientMessage) (string, error) {
+	scopeClusterIDs, _ := refresh.SplitClusterScopeList(msg.Scope)
+	if len(scopeClusterIDs) > 1 {
+		return "", errors.New("stream scope must target a single cluster")
+	}
+	scopeClusterID := ""
+	if len(scopeClusterIDs) == 1 {
+		scopeClusterID = scopeClusterIDs[0]
+	}
+
 	if !s.allowClusterScopedRequest {
 		if msg.ClusterID != "" && msg.ClusterID != s.clusterID {
+			return "", errors.New("cluster mismatch")
+		}
+		if scopeClusterID != "" && scopeClusterID != s.clusterID {
 			return "", errors.New("cluster mismatch")
 		}
 		return s.clusterID, nil
 	}
 	clusterID := strings.TrimSpace(msg.ClusterID)
 	if clusterID == "" {
-		clusterIDs, _ := refresh.SplitClusterScopeList(msg.Scope)
-		if len(clusterIDs) == 1 {
-			clusterID = clusterIDs[0]
-		}
+		clusterID = scopeClusterID
 	}
 	if clusterID == "" {
 		return "", errors.New("cluster id is required")
+	}
+	if scopeClusterID != "" && scopeClusterID != clusterID {
+		return "", errors.New("cluster mismatch")
 	}
 	return clusterID, nil
 }

@@ -21,13 +21,13 @@ func TestStartPortForward_InvalidCluster(t *testing.T) {
 	app.clusterClients = make(map[string]*clusterClients)
 
 	// Test with empty cluster ID.
-	_, err := app.StartPortForward("", PortForwardRequest{})
+	_, err := app.startPortForward("", PortForwardRequest{})
 	if err == nil {
 		t.Fatal("expected error for empty cluster ID")
 	}
 
 	// Test with nonexistent cluster.
-	_, err = app.StartPortForward("nonexistent", PortForwardRequest{})
+	_, err = app.startPortForward("nonexistent", PortForwardRequest{})
 	if err == nil {
 		t.Fatal("expected error for nonexistent cluster")
 	}
@@ -48,7 +48,7 @@ func TestStartPortForward_MissingClient(t *testing.T) {
 		},
 	}
 
-	_, err := app.StartPortForward(portForwardClusterID, PortForwardRequest{
+	_, err := app.startPortForward(portForwardClusterID, PortForwardRequest{
 		Namespace:     "default",
 		TargetKind:    "Pod",
 		TargetGroup:   "",
@@ -77,7 +77,7 @@ func TestStartPortForward_MissingRestConfig(t *testing.T) {
 		},
 	}
 
-	_, err := app.StartPortForward(portForwardClusterID, PortForwardRequest{
+	_, err := app.startPortForward(portForwardClusterID, PortForwardRequest{
 		Namespace:     "default",
 		TargetKind:    "Pod",
 		TargetGroup:   "",
@@ -108,7 +108,7 @@ func TestStartPortForward_ValidationErrors(t *testing.T) {
 	}
 
 	// Missing namespace.
-	_, err := app.StartPortForward(portForwardClusterID, PortForwardRequest{
+	_, err := app.startPortForward(portForwardClusterID, PortForwardRequest{
 		TargetKind:    "Pod",
 		TargetGroup:   "",
 		TargetVersion: "v1",
@@ -120,7 +120,7 @@ func TestStartPortForward_ValidationErrors(t *testing.T) {
 	}
 
 	// Missing target name.
-	_, err = app.StartPortForward(portForwardClusterID, PortForwardRequest{
+	_, err = app.startPortForward(portForwardClusterID, PortForwardRequest{
 		Namespace:     "default",
 		TargetKind:    "Pod",
 		TargetGroup:   "",
@@ -132,7 +132,7 @@ func TestStartPortForward_ValidationErrors(t *testing.T) {
 	}
 
 	// Invalid container port.
-	_, err = app.StartPortForward(portForwardClusterID, PortForwardRequest{
+	_, err = app.startPortForward(portForwardClusterID, PortForwardRequest{
 		Namespace:     "default",
 		TargetKind:    "Pod",
 		TargetGroup:   "",
@@ -175,7 +175,7 @@ func TestStartPortForwardRequiresPortForwardPermission(t *testing.T) {
 		},
 	}
 
-	_, err := app.StartPortForward(portForwardClusterID, PortForwardRequest{
+	_, err := app.startPortForward(portForwardClusterID, PortForwardRequest{
 		Namespace:     "default",
 		TargetKind:    "Pod",
 		TargetGroup:   "",
@@ -317,6 +317,43 @@ func TestStopPortForward_Success(t *testing.T) {
 	}
 	if statusEvents[0].Status != "stopped" {
 		t.Fatalf("expected stopped status, got %s", statusEvents[0].Status)
+	}
+}
+
+func TestRunPortForwarderUnregistersRuntimeOperationOnTerminalError(t *testing.T) {
+	app := newTestAppWithDefaults(t)
+	app.Ctx = context.Background()
+	app.portForwardSessions = make(map[string]*portForwardSessionInternal)
+	app.clusterClients = make(map[string]*clusterClients)
+	app.eventEmitter = func(context.Context, string, ...interface{}) {}
+
+	session := &portForwardSessionInternal{
+		PortForwardSession: PortForwardSession{
+			ID:            "session-terminal-error",
+			ClusterID:     "missing-cluster",
+			Namespace:     "default",
+			PodName:       "pod-1",
+			ContainerPort: 8080,
+			LocalPort:     9000,
+			TargetKind:    "Pod",
+			TargetVersion: "v1",
+			TargetName:    "pod-1",
+			Status:        "active",
+			StartedAt:     time.Now().Format(time.RFC3339),
+		},
+		stopChan:  make(chan struct{}),
+		readyChan: make(chan error, 1),
+	}
+	app.portForwardSessions[session.ID] = session
+	app.registerRuntimeOperation(runtimeOperationFromPortForward(session), nil)
+
+	app.runPortForwarder(context.Background(), session)
+
+	if operations := app.ListRuntimeOperations(); len(operations) != 0 {
+		t.Fatalf("expected runtime operation to be removed, got %+v", operations)
+	}
+	if _, exists := app.portForwardSessions[session.ID]; exists {
+		t.Fatal("expected terminal port forward session to be removed")
 	}
 }
 

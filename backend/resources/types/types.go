@@ -7,7 +7,10 @@
 
 package types
 
-import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+import (
+	"github.com/luxury-yacht/app/backend/resourcemodel"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
 
 // KubeconfigInfo represents information about a kubeconfig context
 type KubeconfigInfo struct {
@@ -66,6 +69,42 @@ type AppSettings struct {
 	LinkColorDark                            string   `json:"linkColorDark"`                            // Custom link hex for dark mode (empty = default)
 	Themes                                   []Theme  `json:"themes"`                                   // Saved theme library
 	SuppressNetworkErrorNotifications        bool     `json:"suppressNetworkErrorNotifications"`        // Hide network error notifications
+}
+
+// AppPreferenceSchema describes one persisted/runtime app preference the
+// frontend can edit through the settings contract.
+type AppPreferenceSchema struct {
+	Key               string   `json:"key"`
+	Type              string   `json:"type"`
+	DefaultValue      any      `json:"defaultValue"`
+	CurrentValue      any      `json:"currentValue"`
+	Min               *int     `json:"min,omitempty"`
+	Max               *int     `json:"max,omitempty"`
+	EnumOptions       []string `json:"enumOptions,omitempty"`
+	Validation        string   `json:"validation,omitempty"`
+	RuntimeSideEffect bool     `json:"runtimeSideEffect"`
+}
+
+// AppSettingsSchema describes the persisted/runtime settings contract.
+type AppSettingsSchema struct {
+	Preferences []AppPreferenceSchema `json:"preferences"`
+}
+
+// AppPreferenceChange updates one persisted/runtime app preference.
+type AppPreferenceChange struct {
+	Key   string `json:"key"`
+	Value any    `json:"value"`
+}
+
+// UpdateAppPreferencesRequest applies one atomic batch of preference changes.
+type UpdateAppPreferencesRequest struct {
+	Changes []AppPreferenceChange `json:"changes"`
+}
+
+// UpdateAppPreferencesResponse returns the normalized settings after an update.
+type UpdateAppPreferencesResponse struct {
+	Settings    *AppSettings `json:"settings"`
+	ChangedKeys []string     `json:"changedKeys"`
 }
 
 // AppearanceModeInfo represents the appearance mode payload sent to the frontend.
@@ -733,26 +772,12 @@ type IngressTLSDetails struct {
 	SecretName string   `json:"secretName,omitempty"`
 }
 
-// ObjectRef carries the cluster ID + GVK + namespace/name required to open
-// an object without ambiguous kind-only resolution.
-type ObjectRef struct {
-	ClusterID string `json:"clusterId"`
-	Group     string `json:"group"`
-	Version   string `json:"version"`
-	Kind      string `json:"kind"`
-	Namespace string `json:"namespace,omitempty"`
-	Name      string `json:"name"`
-}
+// ObjectRef is the shared openable Kubernetes object identity.
+type ObjectRef = resourcemodel.ResourceRef
 
 // DisplayRef preserves unresolved cross-references that cannot be opened safely
 // because the source object did not provide a full GVK.
-type DisplayRef struct {
-	ClusterID string `json:"clusterId"`
-	Group     string `json:"group,omitempty"`
-	Kind      string `json:"kind"`
-	Namespace string `json:"namespace,omitempty"`
-	Name      string `json:"name"`
-}
+type DisplayRef = resourcemodel.DisplayRef
 
 type RefOrDisplay struct {
 	Ref     *ObjectRef  `json:"ref,omitempty"`

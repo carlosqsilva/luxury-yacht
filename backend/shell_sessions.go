@@ -313,6 +313,9 @@ func (a *App) StartShellSession(clusterID string, req ShellSessionRequest) (*She
 	a.shellSessionsMu.Lock()
 	a.shellSessions[sessionID] = sess
 	a.shellSessionsMu.Unlock()
+	a.registerRuntimeOperation(runtimeOperationFromShellSession(sess), func(reason string) error {
+		return a.closeShellSessionForRuntime(sessionID, reason)
+	})
 	a.emitShellList()
 
 	// Start timeout monitor goroutine
@@ -322,6 +325,7 @@ func (a *App) StartShellSession(clusterID string, req ShellSessionRequest) (*She
 		defer func() {
 			sess.Close()
 			if a.removeShellSession(sessionID) != nil {
+				a.unregisterRuntimeOperation(sessionID)
 				a.emitShellList()
 			}
 		}()
@@ -395,13 +399,17 @@ func (a *App) ResizeShellSession(sessionID string, columns, rows int) error {
 
 // CloseShellSession terminates an active shell session.
 func (a *App) CloseShellSession(sessionID string) error {
-	sess := a.removeShellSession(sessionID)
-	if sess == nil {
+	if !a.closeShellSessionByID(sessionID, "closed", "terminated", true) {
 		return fmt.Errorf("shell session %q not found", sessionID)
 	}
-	sess.Close()
-	a.emitShellStatus(sessionID, sess.clusterID, "closed", "terminated")
-	a.emitShellList()
+	return nil
+}
+
+func (a *App) closeShellSessionForRuntime(sessionID, reason string) error {
+	if strings.TrimSpace(reason) == "" {
+		reason = "cluster disconnected"
+	}
+	a.closeShellSessionByID(sessionID, "closed", reason, true)
 	return nil
 }
 
@@ -457,13 +465,32 @@ func (a *App) StopClusterShellSessions(clusterID string) error {
 	a.shellSessionsMu.Unlock()
 
 	for _, sess := range toStop {
-		sess.Close()
-		a.emitShellStatus(sess.id, sess.clusterID, "closed", "cluster disconnected")
+		a.closeRemovedShellSession(sess, "closed", "cluster disconnected", false)
 	}
 	if len(toStop) > 0 {
 		a.emitShellList()
 	}
 	return nil
+}
+
+func runtimeOperationFromShellSession(sess *shellSession) RuntimeOperation {
+	if sess == nil {
+		return RuntimeOperation{}
+	}
+	return RuntimeOperation{
+		ID:          sess.id,
+		Type:        RuntimeOperationShell,
+		ClusterID:   sess.clusterID,
+		ClusterName: sess.clusterName,
+		Target:      runtimeOperationTarget(sess.clusterID, "", "v1", "Pod", sess.namespace, sess.podName),
+		Status:      "open",
+		StartedAt:   sess.startedAt.Format(time.RFC3339),
+		DisplayName: fmt.Sprintf("Shell %s/%s", sess.namespace, sess.podName),
+		Summary: map[string]string{
+			"container": sess.container,
+			"command":   strings.Join(sess.command, " "),
+		},
+	}
 }
 
 // GetShellSessionBacklog returns buffered shell output for replaying on reattach.
@@ -489,6 +516,27 @@ func (a *App) removeShellSession(sessionID string) *shellSession {
 		delete(a.shellSessions, sessionID)
 	}
 	return sess
+}
+
+func (a *App) closeShellSessionByID(sessionID, status, reason string, emitList bool) bool {
+	sess := a.removeShellSession(sessionID)
+	if sess == nil {
+		return false
+	}
+	a.closeRemovedShellSession(sess, status, reason, emitList)
+	return true
+}
+
+func (a *App) closeRemovedShellSession(sess *shellSession, status, reason string, emitList bool) {
+	if sess == nil {
+		return
+	}
+	sess.Close()
+	a.emitShellStatus(sess.id, sess.clusterID, status, reason)
+	if emitList {
+		a.emitShellList()
+	}
+	a.unregisterRuntimeOperation(sess.id)
 }
 
 func (a *App) emitShellOutput(sessionID, clusterID, stream, data string) {
@@ -567,11 +615,5 @@ func (a *App) monitorShellTimeout(ctx context.Context, sess *shellSession) {
 
 // terminateShellWithReason closes a shell session and emits a status with the given reason.
 func (a *App) terminateShellWithReason(sessionID, status, reason string) {
-	sess := a.removeShellSession(sessionID)
-	if sess == nil {
-		return
-	}
-	sess.Close()
-	a.emitShellStatus(sessionID, sess.clusterID, status, reason)
-	a.emitShellList()
+	a.closeShellSessionByID(sessionID, status, reason, true)
 }

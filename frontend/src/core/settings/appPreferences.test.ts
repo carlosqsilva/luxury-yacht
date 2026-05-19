@@ -5,16 +5,22 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { eventBus } from '@/core/events';
 import {
   getAccentColor,
   getAppearanceModePreference,
   getAutoRefreshEnabled,
   getBackgroundRefreshEnabled,
+  getDefaultObjectPanelPosition,
   getDimInactiveNamespaces,
   getExclusiveNamespaces,
   getGridTablePersistenceMode,
   getKubernetesClientBurst,
   getKubernetesClientQPS,
+  getIntegerPreferenceMetadata,
+  getPreferenceMetadata,
+  getObjectPanelLayoutDefaults,
+  getLinkColor,
   getObjPanelLogsApiTimestampFormat,
   getObjPanelLogsApiTimestampUseLocalTimeZone,
   getObjPanelLogsBufferMaxSize,
@@ -46,6 +52,7 @@ import {
   PERMISSION_SSRR_FETCH_CONCURRENCY_MAX,
   PERMISSION_SSRR_FETCH_CONCURRENCY_MIN,
   resetAppPreferencesCacheForTesting,
+  normalizeIntegerPreferenceValue,
   setAccentColor,
   setAppearanceModePreference,
   setAutoRefreshEnabled,
@@ -59,53 +66,337 @@ import {
   setObjPanelLogsApiTimestampUseLocalTimeZone,
   setObjPanelLogsBufferMaxSize,
   setMaxTableRows,
+  setObjectPanelLayoutDefaults,
   setObjPanelLogsTargetGlobalLimit,
   setObjPanelLogsTargetPerScopeLimit,
   setPaletteTint,
   setPermissionSSRRFetchConcurrency,
+  setLinkColor,
   setUseShortResourceNames,
   validateThemeClusterPattern,
+  type AppPreferenceKey,
 } from './appPreferences';
 
 const appMocks = vi.hoisted(() => ({
   GetAppSettings: vi.fn(),
-  SetAppearanceMode: vi.fn(),
-  SetDimInactiveNamespaces: vi.fn(),
-  SetExclusiveNamespaces: vi.fn(),
-  SetUseShortResourceNames: vi.fn(),
-  SetObjPanelLogsAPITimestampFormat: vi.fn(),
-  SetObjPanelLogsAPITimestampUseLocalTimeZone: vi.fn(),
-  SetMaxTableRows: vi.fn(),
-  SetObjPanelLogsBufferMaxSize: vi.fn(),
-  SetObjPanelLogsTargetPerScopeLimit: vi.fn(),
-  SetObjPanelLogsTargetGlobalLimit: vi.fn(),
-  SetKubernetesClientQPS: vi.fn(),
-  SetKubernetesClientBurst: vi.fn(),
-  SetPermissionSSRRFetchConcurrency: vi.fn(),
+  GetAppSettingsSchema: vi.fn(),
+  UpdateAppPreferences: vi.fn(),
   ValidateThemeClusterPattern: vi.fn(),
 }));
 
+const flushPromises = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+const preferenceSchema = (overrides: Record<string, Partial<Record<string, unknown>>> = {}) => {
+  const definitions: Array<{
+    key: string;
+    type: string;
+    defaultValue: unknown;
+    currentValue: unknown;
+    min?: number;
+    max?: number;
+    enumOptions?: string[];
+    validation?: string;
+    runtimeSideEffect: boolean;
+  }> = [
+    {
+      key: 'appearanceMode',
+      type: 'enum',
+      defaultValue: 'system',
+      currentValue: 'system',
+      enumOptions: ['light', 'dark', 'system'],
+      runtimeSideEffect: true,
+    },
+    {
+      key: 'useShortResourceNames',
+      type: 'boolean',
+      defaultValue: false,
+      currentValue: false,
+      runtimeSideEffect: false,
+    },
+    {
+      key: 'dimInactiveNamespaces',
+      type: 'boolean',
+      defaultValue: true,
+      currentValue: true,
+      runtimeSideEffect: false,
+    },
+    {
+      key: 'exclusiveNamespaces',
+      type: 'boolean',
+      defaultValue: true,
+      currentValue: true,
+      runtimeSideEffect: false,
+    },
+    {
+      key: 'autoRefreshEnabled',
+      type: 'boolean',
+      defaultValue: true,
+      currentValue: true,
+      runtimeSideEffect: true,
+    },
+    {
+      key: 'refreshBackgroundClustersEnabled',
+      type: 'boolean',
+      defaultValue: true,
+      currentValue: true,
+      runtimeSideEffect: true,
+    },
+    {
+      key: 'metricsRefreshIntervalMs',
+      type: 'integer',
+      defaultValue: 5000,
+      currentValue: 5000,
+      min: 1,
+      runtimeSideEffect: true,
+    },
+    {
+      key: 'maxTableRows',
+      type: 'integer',
+      defaultValue: 1000,
+      currentValue: 1000,
+      min: 100,
+      max: 10000,
+      runtimeSideEffect: false,
+    },
+    {
+      key: 'kubernetesClientQPS',
+      type: 'integer',
+      defaultValue: 200,
+      currentValue: 200,
+      min: 1,
+      max: 5000,
+      runtimeSideEffect: true,
+    },
+    {
+      key: 'kubernetesClientBurst',
+      type: 'integer',
+      defaultValue: 500,
+      currentValue: 500,
+      min: 1,
+      max: 10000,
+      runtimeSideEffect: true,
+    },
+    {
+      key: 'permissionSSRRFetchConcurrency',
+      type: 'integer',
+      defaultValue: 32,
+      currentValue: 32,
+      min: 1,
+      max: 256,
+      runtimeSideEffect: false,
+    },
+    {
+      key: 'objPanelLogsBufferMaxSize',
+      type: 'integer',
+      defaultValue: 1000,
+      currentValue: 1000,
+      min: 100,
+      max: 10000,
+      runtimeSideEffect: false,
+    },
+    {
+      key: 'objPanelLogsApiTimestampFormat',
+      type: 'string',
+      defaultValue: 'YYYY-MM-DDTHH:mm:ss.SSS[Z]',
+      currentValue: 'YYYY-MM-DDTHH:mm:ss.SSS[Z]',
+      validation: 'dayjs-format',
+      runtimeSideEffect: false,
+    },
+    {
+      key: 'objPanelLogsApiTimestampUseLocalTimeZone',
+      type: 'boolean',
+      defaultValue: false,
+      currentValue: false,
+      runtimeSideEffect: false,
+    },
+    {
+      key: 'objPanelLogsTargetPerScopeLimit',
+      type: 'integer',
+      defaultValue: 100,
+      currentValue: 100,
+      min: 1,
+      max: 1000,
+      runtimeSideEffect: true,
+    },
+    {
+      key: 'objPanelLogsTargetGlobalLimit',
+      type: 'integer',
+      defaultValue: 200,
+      currentValue: 200,
+      min: 1,
+      max: 1000,
+      runtimeSideEffect: true,
+    },
+    {
+      key: 'gridTablePersistenceMode',
+      type: 'enum',
+      defaultValue: 'shared',
+      currentValue: 'shared',
+      enumOptions: ['shared', 'namespaced'],
+      runtimeSideEffect: false,
+    },
+    {
+      key: 'defaultObjectPanelPosition',
+      type: 'enum',
+      defaultValue: 'right',
+      currentValue: 'right',
+      enumOptions: ['right', 'bottom', 'floating'],
+      runtimeSideEffect: false,
+    },
+    {
+      key: 'objectPanelDockedRightWidth',
+      type: 'integer',
+      defaultValue: 600,
+      currentValue: 600,
+      min: 500,
+      max: 9999,
+      runtimeSideEffect: false,
+    },
+    {
+      key: 'objectPanelDockedBottomHeight',
+      type: 'integer',
+      defaultValue: 400,
+      currentValue: 400,
+      min: 200,
+      max: 9999,
+      runtimeSideEffect: false,
+    },
+    {
+      key: 'objectPanelFloatingWidth',
+      type: 'integer',
+      defaultValue: 500,
+      currentValue: 500,
+      min: 450,
+      max: 9999,
+      runtimeSideEffect: false,
+    },
+    {
+      key: 'objectPanelFloatingHeight',
+      type: 'integer',
+      defaultValue: 400,
+      currentValue: 400,
+      min: 200,
+      max: 9999,
+      runtimeSideEffect: false,
+    },
+    {
+      key: 'objectPanelFloatingX',
+      type: 'integer',
+      defaultValue: 100,
+      currentValue: 100,
+      min: 1,
+      max: 9999,
+      runtimeSideEffect: false,
+    },
+    {
+      key: 'objectPanelFloatingY',
+      type: 'integer',
+      defaultValue: 100,
+      currentValue: 100,
+      min: 1,
+      max: 9999,
+      runtimeSideEffect: false,
+    },
+    {
+      key: 'paletteHueLight',
+      type: 'integer',
+      defaultValue: 0,
+      currentValue: 0,
+      min: 0,
+      max: 360,
+      runtimeSideEffect: false,
+    },
+    {
+      key: 'paletteSaturationLight',
+      type: 'integer',
+      defaultValue: 0,
+      currentValue: 0,
+      min: 0,
+      max: 100,
+      runtimeSideEffect: false,
+    },
+    {
+      key: 'paletteBrightnessLight',
+      type: 'integer',
+      defaultValue: 0,
+      currentValue: 0,
+      min: -50,
+      max: 50,
+      runtimeSideEffect: false,
+    },
+    {
+      key: 'paletteHueDark',
+      type: 'integer',
+      defaultValue: 0,
+      currentValue: 0,
+      min: 0,
+      max: 360,
+      runtimeSideEffect: false,
+    },
+    {
+      key: 'paletteSaturationDark',
+      type: 'integer',
+      defaultValue: 0,
+      currentValue: 0,
+      min: 0,
+      max: 100,
+      runtimeSideEffect: false,
+    },
+    {
+      key: 'paletteBrightnessDark',
+      type: 'integer',
+      defaultValue: 0,
+      currentValue: 0,
+      min: -50,
+      max: 50,
+      runtimeSideEffect: false,
+    },
+    {
+      key: 'accentColorLight',
+      type: 'color',
+      defaultValue: '',
+      currentValue: '',
+      validation: '#rrggbb-or-empty',
+      runtimeSideEffect: false,
+    },
+    {
+      key: 'accentColorDark',
+      type: 'color',
+      defaultValue: '',
+      currentValue: '',
+      validation: '#rrggbb-or-empty',
+      runtimeSideEffect: false,
+    },
+    {
+      key: 'linkColorLight',
+      type: 'color',
+      defaultValue: '',
+      currentValue: '',
+      validation: '#rrggbb-or-empty',
+      runtimeSideEffect: false,
+    },
+    {
+      key: 'linkColorDark',
+      type: 'color',
+      defaultValue: '',
+      currentValue: '',
+      validation: '#rrggbb-or-empty',
+      runtimeSideEffect: false,
+    },
+  ];
+
+  return {
+    preferences: definitions.map((definition) => ({
+      ...definition,
+      ...overrides[definition.key],
+    })),
+  };
+};
+
 vi.mock('@wailsjs/go/backend/App', () => ({
   GetAppSettings: (...args: unknown[]) => appMocks.GetAppSettings(...args),
-  SetAppearanceMode: (...args: unknown[]) => appMocks.SetAppearanceMode(...args),
-  SetDimInactiveNamespaces: (...args: unknown[]) => appMocks.SetDimInactiveNamespaces(...args),
-  SetExclusiveNamespaces: (...args: unknown[]) => appMocks.SetExclusiveNamespaces(...args),
-  SetUseShortResourceNames: (...args: unknown[]) => appMocks.SetUseShortResourceNames(...args),
-  SetObjPanelLogsAPITimestampFormat: (...args: unknown[]) =>
-    appMocks.SetObjPanelLogsAPITimestampFormat(...args),
-  SetObjPanelLogsAPITimestampUseLocalTimeZone: (...args: unknown[]) =>
-    appMocks.SetObjPanelLogsAPITimestampUseLocalTimeZone(...args),
-  SetMaxTableRows: (...args: unknown[]) => appMocks.SetMaxTableRows(...args),
-  SetObjPanelLogsBufferMaxSize: (...args: unknown[]) =>
-    appMocks.SetObjPanelLogsBufferMaxSize(...args),
-  SetObjPanelLogsTargetPerScopeLimit: (...args: unknown[]) =>
-    appMocks.SetObjPanelLogsTargetPerScopeLimit(...args),
-  SetObjPanelLogsTargetGlobalLimit: (...args: unknown[]) =>
-    appMocks.SetObjPanelLogsTargetGlobalLimit(...args),
-  SetKubernetesClientQPS: (...args: unknown[]) => appMocks.SetKubernetesClientQPS(...args),
-  SetKubernetesClientBurst: (...args: unknown[]) => appMocks.SetKubernetesClientBurst(...args),
-  SetPermissionSSRRFetchConcurrency: (...args: unknown[]) =>
-    appMocks.SetPermissionSSRRFetchConcurrency(...args),
+  GetAppSettingsSchema: (...args: unknown[]) => appMocks.GetAppSettingsSchema(...args),
+  UpdateAppPreferences: (...args: unknown[]) => appMocks.UpdateAppPreferences(...args),
   ValidateThemeClusterPattern: (...args: unknown[]) =>
     appMocks.ValidateThemeClusterPattern(...args),
 }));
@@ -114,46 +405,15 @@ describe('appPreferences', () => {
   beforeEach(() => {
     resetAppPreferencesCacheForTesting();
     appMocks.GetAppSettings.mockReset();
-    appMocks.SetAppearanceMode.mockReset();
-    appMocks.SetDimInactiveNamespaces.mockReset();
-    appMocks.SetExclusiveNamespaces.mockReset();
-    appMocks.SetUseShortResourceNames.mockReset();
-    appMocks.SetObjPanelLogsAPITimestampFormat.mockReset();
-    appMocks.SetObjPanelLogsAPITimestampUseLocalTimeZone.mockReset();
-    appMocks.SetMaxTableRows.mockReset();
-    appMocks.SetObjPanelLogsBufferMaxSize.mockReset();
-    appMocks.SetObjPanelLogsTargetPerScopeLimit.mockReset();
-    appMocks.SetObjPanelLogsTargetGlobalLimit.mockReset();
-    appMocks.SetKubernetesClientQPS.mockReset();
-    appMocks.SetKubernetesClientBurst.mockReset();
-    appMocks.SetPermissionSSRRFetchConcurrency.mockReset();
+    appMocks.GetAppSettingsSchema.mockReset();
+    appMocks.UpdateAppPreferences.mockReset();
     appMocks.ValidateThemeClusterPattern.mockReset();
-    appMocks.SetObjPanelLogsAPITimestampFormat.mockResolvedValue(undefined);
-    appMocks.SetObjPanelLogsAPITimestampUseLocalTimeZone.mockResolvedValue(undefined);
-    appMocks.SetMaxTableRows.mockResolvedValue(undefined);
-    appMocks.SetObjPanelLogsBufferMaxSize.mockResolvedValue(undefined);
-    appMocks.SetObjPanelLogsTargetPerScopeLimit.mockResolvedValue(undefined);
-    appMocks.SetObjPanelLogsTargetGlobalLimit.mockResolvedValue(undefined);
-    appMocks.SetKubernetesClientQPS.mockResolvedValue(undefined);
-    appMocks.SetKubernetesClientBurst.mockResolvedValue(undefined);
-    appMocks.SetPermissionSSRRFetchConcurrency.mockResolvedValue(undefined);
+    appMocks.GetAppSettingsSchema.mockResolvedValue(null);
+    appMocks.UpdateAppPreferences.mockResolvedValue({ settings: {}, changedKeys: [] });
     (window as any).go = {
       backend: {
         App: {
-          SetAutoRefreshEnabled: vi.fn().mockResolvedValue(undefined),
-          SetBackgroundRefreshEnabled: vi.fn().mockResolvedValue(undefined),
-          SetGridTablePersistenceMode: vi.fn().mockResolvedValue(undefined),
-          SetObjPanelLogsAPITimestampFormat: vi.fn().mockResolvedValue(undefined),
-          SetObjPanelLogsAPITimestampUseLocalTimeZone: vi.fn().mockResolvedValue(undefined),
-          SetMaxTableRows: vi.fn().mockResolvedValue(undefined),
-          SetObjPanelLogsBufferMaxSize: vi.fn().mockResolvedValue(undefined),
-          SetObjPanelLogsTargetPerScopeLimit: vi.fn().mockResolvedValue(undefined),
-          SetObjPanelLogsTargetGlobalLimit: vi.fn().mockResolvedValue(undefined),
-          SetKubernetesClientQPS: vi.fn().mockResolvedValue(undefined),
-          SetKubernetesClientBurst: vi.fn().mockResolvedValue(undefined),
-          SetPermissionSSRRFetchConcurrency: vi.fn().mockResolvedValue(undefined),
-          SetPaletteTint: vi.fn().mockResolvedValue(undefined),
-          SetAccentColor: vi.fn().mockResolvedValue(undefined),
+          UpdateAppPreferences: vi.fn().mockResolvedValue({ settings: {}, changedKeys: [] }),
         },
       },
     };
@@ -228,6 +488,80 @@ describe('appPreferences', () => {
     expect(getAccentColor('dark')).toBe('#f59e0b');
   });
 
+  it('hydrates preferences from backend schema when available', async () => {
+    appMocks.GetAppSettingsSchema.mockResolvedValue({
+      preferences: [
+        { key: 'appearanceMode', type: 'enum', defaultValue: 'system', currentValue: 'dark' },
+        { key: 'maxTableRows', type: 'integer', defaultValue: 1000, currentValue: 5000 },
+        {
+          key: 'defaultObjectPanelPosition',
+          type: 'enum',
+          defaultValue: 'right',
+          currentValue: 'bottom',
+        },
+        {
+          key: 'objectPanelDockedRightWidth',
+          type: 'integer',
+          defaultValue: 600,
+          currentValue: 720,
+        },
+      ],
+    });
+
+    await hydrateAppPreferences({ force: true });
+
+    expect(appMocks.GetAppSettings).not.toHaveBeenCalled();
+    expect(getAppearanceModePreference()).toBe('dark');
+    expect(getMaxTableRows()).toBe(5000);
+    expect(getDefaultObjectPanelPosition()).toBe('bottom');
+  });
+
+  it('exposes typed preference metadata from the backend schema', async () => {
+    appMocks.GetAppSettingsSchema.mockResolvedValue(
+      preferenceSchema({
+        maxTableRows: { defaultValue: 750, currentValue: 5000, min: 50, max: 9000 },
+        appearanceMode: { defaultValue: 'system', currentValue: 'dark' },
+      })
+    );
+
+    await hydrateAppPreferences({ force: true });
+
+    expect(getPreferenceMetadata('appearanceMode')).toMatchObject({
+      key: 'appearanceMode',
+      type: 'enum',
+      defaultValue: 'system',
+      currentValue: 'dark',
+      enumOptions: ['light', 'dark', 'system'],
+      runtimeSideEffect: true,
+    });
+    expect(getIntegerPreferenceMetadata('maxTableRows')).toMatchObject({
+      key: 'maxTableRows',
+      type: 'integer',
+      defaultValue: 750,
+      currentValue: 5000,
+      min: 50,
+      max: 9000,
+    });
+    expect(normalizeIntegerPreferenceValue('maxTableRows', 10)).toBe(50);
+    expect(normalizeIntegerPreferenceValue('maxTableRows', 99999)).toBe(9000);
+  });
+
+  it('tracks schema metadata for every appPreferences key', async () => {
+    const schema = preferenceSchema();
+    appMocks.GetAppSettingsSchema.mockResolvedValue(schema);
+
+    await hydrateAppPreferences({ force: true });
+
+    const keys = schema.preferences.map((entry) => entry.key);
+    for (const key of keys) {
+      expect(getPreferenceMetadata(key as AppPreferenceKey)).toMatchObject({
+        key,
+      });
+    }
+    expect(keys).not.toContain('selectedKubeconfigs');
+    expect(keys).not.toContain('themes');
+  });
+
   it('defaults palette hue, saturation, and brightness to 0 when not present', async () => {
     appMocks.GetAppSettings.mockResolvedValue({
       appearanceMode: 'system',
@@ -282,21 +616,45 @@ describe('appPreferences', () => {
     setBackgroundRefreshEnabled(false);
     setGridTablePersistenceMode('namespaced');
 
-    expect(appMocks.SetAppearanceMode).toHaveBeenCalledWith('dark');
-    expect(appMocks.SetUseShortResourceNames).toHaveBeenCalledWith(true);
-    expect(appMocks.SetDimInactiveNamespaces).toHaveBeenCalledWith(false);
-    expect(appMocks.SetExclusiveNamespaces).toHaveBeenCalledWith(false);
-    expect(appMocks.SetObjPanelLogsAPITimestampFormat).toHaveBeenCalledWith('HH:mm:ss.SSS');
-    expect(appMocks.SetObjPanelLogsAPITimestampUseLocalTimeZone).toHaveBeenCalledWith(true);
-    expect(appMocks.SetMaxTableRows).toHaveBeenCalledWith(2500);
-    expect(appMocks.SetKubernetesClientQPS).toHaveBeenCalledWith(250);
-    expect(appMocks.SetKubernetesClientBurst).toHaveBeenCalledWith(500);
-    expect(appMocks.SetPermissionSSRRFetchConcurrency).toHaveBeenCalledWith(16);
-    expect((window as any).go.backend.App.SetAutoRefreshEnabled).toHaveBeenCalledWith(false);
-    expect((window as any).go.backend.App.SetBackgroundRefreshEnabled).toHaveBeenCalledWith(false);
-    expect((window as any).go.backend.App.SetGridTablePersistenceMode).toHaveBeenCalledWith(
-      'namespaced'
-    );
+    expect(appMocks.UpdateAppPreferences).toHaveBeenCalledWith({
+      changes: [{ key: 'appearanceMode', value: 'dark' }],
+    });
+    expect(appMocks.UpdateAppPreferences).toHaveBeenCalledWith({
+      changes: [{ key: 'useShortResourceNames', value: true }],
+    });
+    expect(appMocks.UpdateAppPreferences).toHaveBeenCalledWith({
+      changes: [{ key: 'dimInactiveNamespaces', value: false }],
+    });
+    expect(appMocks.UpdateAppPreferences).toHaveBeenCalledWith({
+      changes: [{ key: 'exclusiveNamespaces', value: false }],
+    });
+    expect(appMocks.UpdateAppPreferences).toHaveBeenCalledWith({
+      changes: [{ key: 'objPanelLogsApiTimestampFormat', value: 'HH:mm:ss.SSS' }],
+    });
+    expect(appMocks.UpdateAppPreferences).toHaveBeenCalledWith({
+      changes: [{ key: 'objPanelLogsApiTimestampUseLocalTimeZone', value: true }],
+    });
+    expect(appMocks.UpdateAppPreferences).toHaveBeenCalledWith({
+      changes: [{ key: 'maxTableRows', value: 2500 }],
+    });
+    expect(appMocks.UpdateAppPreferences).toHaveBeenCalledWith({
+      changes: [{ key: 'kubernetesClientQPS', value: 250 }],
+    });
+    expect(appMocks.UpdateAppPreferences).toHaveBeenCalledWith({
+      changes: [{ key: 'kubernetesClientBurst', value: 500 }],
+    });
+    expect(appMocks.UpdateAppPreferences).toHaveBeenCalledWith({
+      changes: [{ key: 'permissionSSRRFetchConcurrency', value: 16 }],
+    });
+    expect(appMocks.UpdateAppPreferences).toHaveBeenCalledWith({
+      changes: [{ key: 'autoRefreshEnabled', value: false }],
+    });
+    expect(appMocks.UpdateAppPreferences).toHaveBeenCalledWith({
+      changes: [{ key: 'refreshBackgroundClustersEnabled', value: false }],
+    });
+    expect(appMocks.UpdateAppPreferences).toHaveBeenCalledWith({
+      changes: [{ key: 'gridTablePersistenceMode', value: 'namespaced' }],
+    });
 
     expect(getAppearanceModePreference()).toBe('dark');
     expect(getUseShortResourceNames()).toBe(true);
@@ -314,12 +672,99 @@ describe('appPreferences', () => {
     expect(getGridTablePersistenceMode()).toBe('namespaced');
   });
 
+  it('normalizes Object Panel layout updates from schema metadata', async () => {
+    appMocks.GetAppSettingsSchema.mockResolvedValue(preferenceSchema());
+    await hydrateAppPreferences({ force: true });
+
+    setObjectPanelLayoutDefaults({
+      dockedRightWidth: 1,
+      dockedBottomHeight: 20_000,
+      floatingWidth: 1,
+      floatingHeight: 20_000,
+      floatingX: -5,
+      floatingY: 20_000,
+    });
+
+    expect(getObjectPanelLayoutDefaults()).toEqual({
+      dockedRightWidth: 500,
+      dockedBottomHeight: 9999,
+      floatingWidth: 450,
+      floatingHeight: 9999,
+      floatingX: 100,
+      floatingY: 9999,
+    });
+    expect(appMocks.UpdateAppPreferences).toHaveBeenCalledWith({
+      changes: [
+        { key: 'objectPanelDockedRightWidth', value: 500 },
+        { key: 'objectPanelDockedBottomHeight', value: 9999 },
+        { key: 'objectPanelFloatingWidth', value: 450 },
+        { key: 'objectPanelFloatingHeight', value: 9999 },
+        { key: 'objectPanelFloatingX', value: 100 },
+        { key: 'objectPanelFloatingY', value: 9999 },
+      ],
+    });
+  });
+
+  it('persists link color updates through the shared update path', async () => {
+    appMocks.GetAppSettings.mockResolvedValue({
+      appearanceMode: 'system',
+      linkColorLight: '',
+      linkColorDark: '',
+    });
+
+    await hydrateAppPreferences({ force: true });
+
+    setLinkColor('light', '#326ce5');
+
+    expect(getLinkColor('light')).toBe('#326ce5');
+    expect(appMocks.UpdateAppPreferences).toHaveBeenCalledWith({
+      changes: [{ key: 'linkColorLight', value: '#326ce5' }],
+    });
+  });
+
+  it('rolls back optimistic runtime preference state and events when persistence fails', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const events: boolean[] = [];
+    appMocks.GetAppSettings.mockResolvedValue({
+      appearanceMode: 'system',
+      autoRefreshEnabled: true,
+    });
+    await hydrateAppPreferences({ force: true });
+    const unsubscribe = eventBus.on('settings:auto-refresh', (enabled) => events.push(enabled));
+    appMocks.UpdateAppPreferences.mockRejectedValueOnce(new Error('forced failure'));
+
+    setAutoRefreshEnabled(false);
+    expect(getAutoRefreshEnabled()).toBe(false);
+    await flushPromises();
+
+    expect(getAutoRefreshEnabled()).toBe(true);
+    expect(events).toEqual([false, true]);
+    unsubscribe();
+    consoleError.mockRestore();
+  });
+
+  it('rolls back appearance localStorage mirrors when persistence fails', async () => {
+    localStorage.setItem('app-appearance-mode-preference', 'system');
+    localStorage.setItem('app-appearance-bootstrap-v1', '{"light":{},"dark":{}}');
+    appMocks.GetAppSettings.mockResolvedValue({ appearanceMode: 'system' });
+    await hydrateAppPreferences({ force: true });
+    localStorage.setItem('app-appearance-mode-preference', 'system');
+    localStorage.setItem('app-appearance-bootstrap-v1', 'previous-bootstrap');
+    appMocks.UpdateAppPreferences.mockRejectedValueOnce(new Error('forced failure'));
+
+    await expect(setAppearanceModePreference('dark')).rejects.toThrow('forced failure');
+
+    expect(getAppearanceModePreference()).toBe('system');
+    expect(localStorage.getItem('app-appearance-mode-preference')).toBe('system');
+    expect(localStorage.getItem('app-appearance-bootstrap-v1')).toBe('previous-bootstrap');
+  });
+
   it('rejects invalid Object Panel Logs Tab API timestamp formats before persisting', async () => {
     appMocks.GetAppSettings.mockResolvedValue({ appearanceMode: 'system' });
     await hydrateAppPreferences({ force: true });
 
     expect(() => setObjPanelLogsApiTimestampFormat('foo')).toThrow(/Unsupported token/);
-    expect(appMocks.SetObjPanelLogsAPITimestampFormat).not.toHaveBeenCalled();
+    expect(appMocks.UpdateAppPreferences).not.toHaveBeenCalled();
   });
 
   it('setPaletteTint updates cache and calls backend for the specified mode', async () => {
@@ -340,19 +785,26 @@ describe('appPreferences', () => {
     expect(getPaletteTint('light')).toEqual({ hue: 180, saturation: 75, brightness: -25 });
     // Dark mode should remain at defaults.
     expect(getPaletteTint('dark')).toEqual({ hue: 0, saturation: 0, brightness: 0 });
-    expect((window as any).go.backend.App.SetPaletteTint).toHaveBeenCalledWith(
-      'light',
-      180,
-      75,
-      -25
-    );
+    expect(appMocks.UpdateAppPreferences).toHaveBeenCalledWith({
+      changes: [
+        { key: 'paletteHueLight', value: 180 },
+        { key: 'paletteSaturationLight', value: 75 },
+        { key: 'paletteBrightnessLight', value: -25 },
+      ],
+    });
 
     setPaletteTint('dark', 300, 60, 20);
 
     expect(getPaletteTint('dark')).toEqual({ hue: 300, saturation: 60, brightness: 20 });
     // Light mode should be unchanged.
     expect(getPaletteTint('light')).toEqual({ hue: 180, saturation: 75, brightness: -25 });
-    expect((window as any).go.backend.App.SetPaletteTint).toHaveBeenCalledWith('dark', 300, 60, 20);
+    expect(appMocks.UpdateAppPreferences).toHaveBeenCalledWith({
+      changes: [
+        { key: 'paletteHueDark', value: 300 },
+        { key: 'paletteSaturationDark', value: 60 },
+        { key: 'paletteBrightnessDark', value: 20 },
+      ],
+    });
   });
 
   it('setAccentColor updates cache and calls backend for the specified mode', async () => {
@@ -369,14 +821,18 @@ describe('appPreferences', () => {
     expect(getAccentColor('light')).toBe('#326ce5');
     // Dark mode should remain at default.
     expect(getAccentColor('dark')).toBe('');
-    expect((window as any).go.backend.App.SetAccentColor).toHaveBeenCalledWith('light', '#326ce5');
+    expect(appMocks.UpdateAppPreferences).toHaveBeenCalledWith({
+      changes: [{ key: 'accentColorLight', value: '#326ce5' }],
+    });
 
     setAccentColor('dark', '#f59e0b');
 
     expect(getAccentColor('dark')).toBe('#f59e0b');
     // Light mode should be unchanged.
     expect(getAccentColor('light')).toBe('#326ce5');
-    expect((window as any).go.backend.App.SetAccentColor).toHaveBeenCalledWith('dark', '#f59e0b');
+    expect(appMocks.UpdateAppPreferences).toHaveBeenCalledWith({
+      changes: [{ key: 'accentColorDark', value: '#f59e0b' }],
+    });
   });
 
   it('setAccentColor resets to empty string', async () => {
@@ -433,7 +889,9 @@ describe('appPreferences', () => {
     setMaxTableRows(2500);
     expect(getMaxTableRows()).toBe(2500);
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    expect(appMocks.SetMaxTableRows).toHaveBeenCalledWith(2500);
+    expect(appMocks.UpdateAppPreferences).toHaveBeenCalledWith({
+      changes: [{ key: 'maxTableRows', value: 2500 }],
+    });
   });
 
   it('setMaxTableRows clamps values outside the allowed range', async () => {
@@ -462,7 +920,9 @@ describe('appPreferences', () => {
     setKubernetesClientQPS(250);
     expect(getKubernetesClientQPS()).toBe(250);
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    expect(appMocks.SetKubernetesClientQPS).toHaveBeenCalledWith(250);
+    expect(appMocks.UpdateAppPreferences).toHaveBeenCalledWith({
+      changes: [{ key: 'kubernetesClientQPS', value: 250 }],
+    });
   });
 
   it('setKubernetesClientQPS clamps values outside the allowed range', async () => {
@@ -489,7 +949,9 @@ describe('appPreferences', () => {
     setKubernetesClientBurst(500);
     expect(getKubernetesClientBurst()).toBe(500);
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    expect(appMocks.SetKubernetesClientBurst).toHaveBeenCalledWith(500);
+    expect(appMocks.UpdateAppPreferences).toHaveBeenCalledWith({
+      changes: [{ key: 'kubernetesClientBurst', value: 500 }],
+    });
 
     setKubernetesClientBurst(0);
     expect(getKubernetesClientBurst()).toBe(KUBERNETES_CLIENT_BURST_DEFAULT);
@@ -508,7 +970,9 @@ describe('appPreferences', () => {
     setPermissionSSRRFetchConcurrency(16);
     expect(getPermissionSSRRFetchConcurrency()).toBe(16);
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    expect(appMocks.SetPermissionSSRRFetchConcurrency).toHaveBeenCalledWith(16);
+    expect(appMocks.UpdateAppPreferences).toHaveBeenCalledWith({
+      changes: [{ key: 'permissionSSRRFetchConcurrency', value: 16 }],
+    });
 
     setPermissionSSRRFetchConcurrency(0);
     expect(getPermissionSSRRFetchConcurrency()).toBe(PERMISSION_SSRR_FETCH_CONCURRENCY_DEFAULT);
@@ -544,13 +1008,10 @@ describe('appPreferences', () => {
 
     setObjPanelLogsBufferMaxSize(3500);
     expect(getObjPanelLogsBufferMaxSize()).toBe(3500);
-    // Allow the fire-and-forget persist promise to resolve before we
-    // assert the backend call landed. The setter calls the imported
-    // Wails binding (mocked via appMocks), not window.go.backend.App
-    // directly — the window object is only read to check that the
-    // runtime is present.
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    expect(appMocks.SetObjPanelLogsBufferMaxSize).toHaveBeenCalledWith(3500);
+    expect(appMocks.UpdateAppPreferences).toHaveBeenCalledWith({
+      changes: [{ key: 'objPanelLogsBufferMaxSize', value: 3500 }],
+    });
   });
 
   it('setObjPanelLogsBufferMaxSize clamps values below the minimum', async () => {
@@ -592,7 +1053,9 @@ describe('appPreferences', () => {
     setObjPanelLogsTargetPerScopeLimit(144);
     expect(getObjPanelLogsTargetPerScopeLimit()).toBe(144);
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    expect(appMocks.SetObjPanelLogsTargetPerScopeLimit).toHaveBeenCalledWith(144);
+    expect(appMocks.UpdateAppPreferences).toHaveBeenCalledWith({
+      changes: [{ key: 'objPanelLogsTargetPerScopeLimit', value: 144 }],
+    });
   });
 
   it('setObjPanelLogsTargetPerScopeLimit defaults zero and clamps large values', async () => {
@@ -613,7 +1076,9 @@ describe('appPreferences', () => {
     setObjPanelLogsTargetGlobalLimit(180);
     expect(getObjPanelLogsTargetGlobalLimit()).toBe(180);
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    expect(appMocks.SetObjPanelLogsTargetGlobalLimit).toHaveBeenCalledWith(180);
+    expect(appMocks.UpdateAppPreferences).toHaveBeenCalledWith({
+      changes: [{ key: 'objPanelLogsTargetGlobalLimit', value: 180 }],
+    });
   });
 
   it('setObjPanelLogsTargetGlobalLimit defaults zero and clamps large values', async () => {

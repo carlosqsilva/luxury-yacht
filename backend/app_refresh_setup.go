@@ -158,6 +158,7 @@ func (a *App) buildRefreshSubsystemForSelection(
 		ResyncInterval:             config.RefreshResyncInterval,
 		MetricsInterval:            a.resolveMetricsInterval(),
 		APIExtensionsClient:        clients.apiextensionsClient,
+		GatewayClient:              clients.gatewayClient,
 		GatewayInformerFactory:     clients.gatewayInformerFactory,
 		GatewayAPIPresence:         clients.gatewayAPIPresence,
 		DynamicClient:              clients.dynamicClient,
@@ -200,11 +201,12 @@ func (a *App) startRefreshSubsystems(ctx context.Context, subsystems map[string]
 		if manager == nil {
 			continue
 		}
-		go func(mgr *refresh.Manager) {
+		clusterName := a.clusterNameForID(clusterID)
+		go func(mgr *refresh.Manager, clusterID, clusterName string) {
 			if err := mgr.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
-				a.logger.Warn(fmt.Sprintf("refresh manager stopped: %v", err), logsources.Refresh)
+				a.logger.Warn(fmt.Sprintf("refresh manager stopped: %v", err), logsources.Refresh, clusterID, clusterName)
 			}
-		}(manager)
+		}(manager, clusterID, clusterName)
 		// Keep permission grants fresh; revoke access stops refresh informers/streams.
 		permCtx, cancel := context.WithCancel(ctx)
 		a.storeRefreshPermissionCancel(clusterID, cancel)

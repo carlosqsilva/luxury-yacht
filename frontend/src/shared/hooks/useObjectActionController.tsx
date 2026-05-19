@@ -1,13 +1,12 @@
 import { useCallback, useMemo, useState } from 'react';
 import {
-  DeleteNode,
-  DeletePod,
-  DeleteResourceByGVK,
-  RestartWorkload,
-  ScaleWorkload,
-  SuspendCronJob,
-  TriggerCronJob,
-} from '@wailsjs/go/backend/App';
+  buildObjectActionTarget,
+  runCronJobSuspend,
+  runCronJobTrigger,
+  runObjectDelete,
+  runObjectRestart,
+  runObjectScale,
+} from '@shared/actions/objectActionClient';
 import { getPermissionKey, queryKindPermissions, useUserPermissions } from '@/core/capabilities';
 import { errorHandler } from '@/utils/errorHandler';
 import ConfirmationModal from '@shared/components/modals/ConfirmationModal';
@@ -72,34 +71,6 @@ const extractDesiredReplicas = (object: ObjectActionData): number => {
   return Number.isFinite(candidate) ? clampReplicas(candidate) : 0;
 };
 
-const apiVersionFor = (object: ObjectActionData): string => {
-  if (object.requiresExplicitVersion && !object.explicitVersionProvided) {
-    throw new Error(
-      `Cannot delete ${object.kind}/${object.name}: apiVersion missing on custom resource row`
-    );
-  }
-  const version = object.version?.trim();
-  if (!version) {
-    throw new Error(`Cannot delete ${object.kind}/${object.name}: apiVersion is missing`);
-  }
-  const group = object.group?.trim();
-  return group ? `${group}/${version}` : version;
-};
-
-const groupVersionFor = (
-  object: ObjectActionData,
-  action: string
-): { group: string; version: string } => {
-  const version = object.version?.trim();
-  if (!version) {
-    throw new Error(`Cannot ${action} ${object.kind}/${object.name}: apiVersion is missing`);
-  }
-  return {
-    group: object.group?.trim() ?? '',
-    version,
-  };
-};
-
 const requireClusterId = (object: ObjectActionData, action: string): string => {
   const clusterId = object.clusterId?.trim();
   if (!clusterId) {
@@ -118,6 +89,15 @@ const portForwardTargetFor = (object: ObjectActionData): PortForwardTarget => ({
   clusterName: object.clusterName ?? '',
   ports: [],
 });
+
+const actionTargetFor = (object: ObjectActionData, action: string) => {
+  if (object.requiresExplicitVersion && !object.explicitVersionProvided) {
+    throw new Error(
+      `Cannot ${action} ${object.kind}/${object.name}: apiVersion missing on custom resource row`
+    );
+  }
+  return buildObjectActionTarget(object, action);
+};
 
 export const useObjectActionController = ({
   context,
@@ -166,6 +146,10 @@ export const useObjectActionController = ({
         permissionMap.get(
           getPermissionKey(normalizedKind, 'patch', namespace, null, clusterId, group, version)
         ) ?? null;
+      const rollbackStatus =
+        permissionMap.get(
+          getPermissionKey(normalizedKind, 'update', namespace, null, clusterId, group, version)
+        ) ?? null;
       const deleteStatus =
         permissionMap.get(
           getPermissionKey(object.kind, 'delete', namespace, null, clusterId, group, version)
@@ -174,6 +158,18 @@ export const useObjectActionController = ({
         permissionMap.get(
           getPermissionKey(normalizedKind, 'update', namespace, 'scale', clusterId, group, version)
         ) ?? null;
+      const triggerStatus =
+        normalizedKind === 'CronJob'
+          ? (permissionMap.get(
+              getPermissionKey('Job', 'create', namespace, null, clusterId, 'batch', 'v1')
+            ) ?? null)
+          : null;
+      const suspendStatus =
+        normalizedKind === 'CronJob'
+          ? (permissionMap.get(
+              getPermissionKey('CronJob', 'patch', namespace, null, clusterId, 'batch', 'v1')
+            ) ?? null)
+          : null;
       const portForwardStatus =
         permissionMap.get(
           getPermissionKey('Pod', 'create', namespace, 'portforward', clusterId, '', 'v1')
@@ -245,6 +241,38 @@ export const useObjectActionController = ({
                     error: null,
                   })
               : undefined),
+          onScaleToZero:
+            handlerOverrides?.onScaleToZero ??
+            (useDefaultHandlers
+              ? async () => {
+                  try {
+                    await runObjectScale(actionTargetFor(object, 'scale'), 0);
+                    onAfterAction?.(object, 'scale');
+                  } catch (error) {
+                    errorHandler.handle(error, {
+                      action: 'scale',
+                      kind: object.kind,
+                      name: object.name,
+                    });
+                  }
+                }
+              : undefined),
+          onResumeFromZero:
+            handlerOverrides?.onResumeFromZero ??
+            (useDefaultHandlers
+              ? async () => {
+                  try {
+                    await runObjectScale(actionTargetFor(object, 'scale'), 1);
+                    onAfterAction?.(object, 'scale');
+                  } catch (error) {
+                    errorHandler.handle(error, {
+                      action: 'scale',
+                      kind: object.kind,
+                      name: object.name,
+                    });
+                  }
+                }
+              : undefined),
           onDelete:
             handlerOverrides?.onDelete ??
             (useDefaultHandlers ? () => setDeleteTarget(object) : undefined),
@@ -278,10 +306,8 @@ export const useObjectActionController = ({
               ? async () => {
                   const isSuspended = object.status === 'Suspended';
                   try {
-                    await SuspendCronJob(
-                      requireClusterId(object, isSuspended ? 'resume' : 'suspend'),
-                      object.namespace ?? '',
-                      object.name,
+                    await runCronJobSuspend(
+                      actionTargetFor(object, isSuspended ? 'resume' : 'suspend'),
                       !isSuspended
                     );
                     onAfterAction?.(object, isSuspended ? 'resume' : 'suspend');
@@ -297,8 +323,10 @@ export const useObjectActionController = ({
         },
         permissions: {
           restart: restartStatus,
-          rollback: restartStatus,
+          rollback: rollbackStatus,
           scale: scaleStatus,
+          trigger: triggerStatus,
+          suspend: suspendStatus,
           delete: deleteStatus,
           portForward: portForwardStatus,
           cordon: nodeActionPermissions.cordon,
@@ -329,15 +357,7 @@ export const useObjectActionController = ({
     const object = restartTarget;
     if (!object) return;
     try {
-      const { group, version } = groupVersionFor(object, 'restart');
-      await RestartWorkload(
-        requireClusterId(object, 'restart'),
-        object.namespace ?? '',
-        group,
-        version,
-        object.kind,
-        object.name
-      );
+      await runObjectRestart(actionTargetFor(object, 'restart'));
       onAfterAction?.(object, 'restart');
     } catch (error) {
       errorHandler.handle(error, { action: 'restart', kind: object.kind, name: object.name });
@@ -350,23 +370,7 @@ export const useObjectActionController = ({
     const object = deleteTarget;
     if (!object) return;
     try {
-      const clusterId = requireClusterId(object, 'delete');
-      const kind = normalizeKind(object.kind);
-      if (kind === 'Pod') {
-        await DeletePod(clusterId, object.namespace ?? '', object.name);
-      } else if (kind === 'Node') {
-        // The Node delete API enforces its own RBAC pre-flight check, which
-        // mirrors the kind-aware behaviour we want here.
-        await DeleteNode(clusterId, object.name);
-      } else {
-        await DeleteResourceByGVK(
-          clusterId,
-          apiVersionFor(object),
-          object.kind,
-          object.namespace ?? '',
-          object.name
-        );
-      }
+      await runObjectDelete(actionTargetFor(object, 'delete'));
       onAfterDelete?.(object);
       onAfterAction?.(object, 'delete');
     } catch (error) {
@@ -380,11 +384,7 @@ export const useObjectActionController = ({
     const object = triggerTarget;
     if (!object) return;
     try {
-      await TriggerCronJob(
-        requireClusterId(object, 'trigger'),
-        object.namespace ?? '',
-        object.name
-      );
+      await runCronJobTrigger(actionTargetFor(object, 'trigger'));
       onAfterAction?.(object, 'trigger');
     } catch (error) {
       errorHandler.handle(error, { action: 'trigger', kind: object.kind, name: object.name });
@@ -393,29 +393,27 @@ export const useObjectActionController = ({
     }
   }, [onAfterAction, triggerTarget]);
 
+  const applyScaleValue = useCallback(
+    async (replicas: number) => {
+      const object = scaleState.object;
+      if (!object) return;
+      setScaleState((previous) => ({ ...previous, loading: true, error: null }));
+      try {
+        await runObjectScale(actionTargetFor(object, 'scale'), replicas);
+        onAfterAction?.(object, 'scale');
+        setScaleState({ object: null, value: 1, loading: false, error: null });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setScaleState((previous) => ({ ...previous, loading: false, error: message }));
+        errorHandler.handle(error, { action: 'scale', kind: object.kind, name: object.name });
+      }
+    },
+    [onAfterAction, scaleState.object]
+  );
+
   const confirmScale = useCallback(async () => {
-    const object = scaleState.object;
-    if (!object) return;
-    setScaleState((previous) => ({ ...previous, loading: true, error: null }));
-    try {
-      const { group, version } = groupVersionFor(object, 'scale');
-      await ScaleWorkload(
-        requireClusterId(object, 'scale'),
-        object.namespace ?? '',
-        group,
-        version,
-        object.kind,
-        object.name,
-        scaleState.value
-      );
-      onAfterAction?.(object, 'scale');
-      setScaleState({ object: null, value: 1, loading: false, error: null });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setScaleState((previous) => ({ ...previous, loading: false, error: message }));
-      errorHandler.handle(error, { action: 'scale', kind: object.kind, name: object.name });
-    }
-  }, [onAfterAction, scaleState.object, scaleState.value]);
+    await applyScaleValue(scaleState.value);
+  }, [applyScaleValue, scaleState.value]);
 
   const confirmation = useMemo(() => {
     if (restartTarget) {
@@ -480,6 +478,7 @@ export const useObjectActionController = ({
           error={scaleState.error}
           onCancel={closeScale}
           onApply={confirmScale}
+          onScaleToZero={() => applyScaleValue(0)}
           onValueChange={(value) =>
             setScaleState((previous) => ({ ...previous, value: clampReplicas(value) }))
           }
@@ -500,6 +499,7 @@ export const useObjectActionController = ({
       </>
     ),
     [
+      applyScaleValue,
       closeScale,
       confirmation,
       confirmScale,

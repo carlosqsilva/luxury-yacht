@@ -5,24 +5,29 @@
  * accent, link, saved themes).
  */
 
-import { useState, useEffect, useRef, useCallback, type CSSProperties } from 'react';
+import {
+  useState,
+  useEffect,
+  useRef,
+  useCallback,
+  type CSSProperties,
+  type ReactElement,
+  type RefObject,
+} from 'react';
 import { types } from '@wailsjs/go/models';
 import { errorHandler } from '@utils/errorHandler';
 import { changeAppearanceMode } from '@/utils/appearanceMode';
 import {
+  getIntegerPreferenceMetadata,
+  getPreferenceMetadata,
   hydrateAppPreferences,
+  normalizeIntegerPreferenceValue,
   setPaletteTint as persistPaletteTint,
   getPaletteTint,
   getAccentColor,
   setAccentColor as persistAccentColor,
   getLinkColor,
   setLinkColor as persistLinkColor,
-  getThemes,
-  saveTheme,
-  validateThemeClusterPattern,
-  deleteTheme as deleteThemeApi,
-  reorderThemes,
-  applyTheme as applyThemeApi,
 } from '@/core/settings/appPreferences';
 import { useAppearanceMode } from '@/core/contexts/AppearanceModeContext';
 import {
@@ -46,6 +51,7 @@ import {
   DarkModeIcon,
   LightModeIcon,
 } from '@shared/components/icons/SettingsIcons';
+import { useThemes } from './useThemes';
 
 const DEFAULT_THEME_ID = 'default';
 
@@ -65,6 +71,253 @@ const buildPaletteSliderStyle = (thumbColor: string, background?: string): Palet
   '--palette-slider-thumb': thumbColor,
   ...(background ? { background } : {}),
 });
+
+function AppearanceModeSelector({
+  mode,
+  options,
+  onChange,
+}: {
+  mode: string;
+  options: ReadonlyArray<(typeof appearanceModeOptions)[number]>;
+  onChange: (mode: string) => void;
+}) {
+  return (
+    <div className="settings-row">
+      <div className="settings-row-label">
+        <div className="settings-row-label-title">Mode</div>
+        <div className="settings-row-label-help">
+          Follow the system mode or choose light/dark mode.
+        </div>
+      </div>
+      <div className="settings-row-control">
+        <div className="settings-choice-buttons" role="group" aria-label="Appearance mode">
+          {options.map((option) => {
+            const Icon = option.icon;
+            const isSelected = mode === option.value;
+            return (
+              <button
+                key={option.value}
+                type="button"
+                className={`settings-choice-button${isSelected ? ' settings-choice-button--active' : ''}`}
+                aria-pressed={isSelected}
+                onClick={() => onChange(option.value)}
+              >
+                <Icon width={18} height={18} />
+                <span>{option.label}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PaletteControls({
+  paletteHue,
+  paletteSaturation,
+  paletteBrightness,
+  hueSliderStyle,
+  saturationSliderStyle,
+  brightnessSliderStyle,
+  paletteBounds,
+  renderEditableValue,
+  onHueChange,
+  onSaturationChange,
+  onBrightnessChange,
+  onHueReset,
+  onSaturationReset,
+  onBrightnessReset,
+}: {
+  paletteHue: number;
+  paletteSaturation: number;
+  paletteBrightness: number;
+  hueSliderStyle: PaletteSliderStyle;
+  saturationSliderStyle: PaletteSliderStyle;
+  brightnessSliderStyle: PaletteSliderStyle;
+  paletteBounds: {
+    hue: { min: number; max?: number };
+    saturation: { min: number; max?: number };
+    brightness: { min: number; max?: number };
+  };
+  renderEditableValue: (
+    field: 'hue' | 'saturation' | 'brightness',
+    value: number,
+    suffix: string
+  ) => ReactElement;
+  onHueChange: (value: number) => void;
+  onSaturationChange: (value: number) => void;
+  onBrightnessChange: (value: number) => void;
+  onHueReset: () => void;
+  onSaturationReset: () => void;
+  onBrightnessReset: () => void;
+}) {
+  return (
+    <div className="settings-row">
+      <div className="settings-row-label">
+        <div className="settings-row-label-title">Tint</div>
+        <div className="settings-row-label-help">
+          Overall tint in the UI. Hue sets the color, saturation increases the strength, and
+          brightness lightens or darkens.
+        </div>
+      </div>
+      <div className="settings-row-control">
+        <div className="palette-tint-controls">
+          <label htmlFor="palette-hue">Hue</label>
+          <input
+            type="range"
+            id="palette-hue"
+            className="palette-slider palette-slider-hue"
+            min={paletteBounds.hue.min}
+            max={paletteBounds.hue.max}
+            value={paletteHue}
+            onChange={(e) => onHueChange(Number(e.target.value))}
+            style={hueSliderStyle}
+          />
+          {renderEditableValue('hue', paletteHue, '°')}
+          <button
+            type="button"
+            className="palette-row-reset"
+            onClick={onHueReset}
+            disabled={paletteHue === 0}
+            title="Reset Hue"
+          >
+            ↺
+          </button>
+
+          <label htmlFor="palette-saturation">Saturation</label>
+          <input
+            type="range"
+            id="palette-saturation"
+            className="palette-slider palette-slider-saturation"
+            min={paletteBounds.saturation.min}
+            max={paletteBounds.saturation.max}
+            value={paletteSaturation}
+            onChange={(e) => onSaturationChange(Number(e.target.value))}
+            style={saturationSliderStyle}
+          />
+          {renderEditableValue('saturation', paletteSaturation, '%')}
+          <button
+            type="button"
+            className="palette-row-reset"
+            onClick={onSaturationReset}
+            disabled={paletteSaturation === 0}
+            title="Reset Saturation"
+          >
+            ↺
+          </button>
+
+          <label htmlFor="palette-brightness">Brightness</label>
+          <input
+            type="range"
+            id="palette-brightness"
+            className="palette-slider palette-slider-brightness"
+            min={paletteBounds.brightness.min}
+            max={paletteBounds.brightness.max}
+            value={paletteBrightness}
+            onChange={(e) => onBrightnessChange(Number(e.target.value))}
+            style={brightnessSliderStyle}
+          />
+          {renderEditableValue('brightness', paletteBrightness, '')}
+          <button
+            type="button"
+            className="palette-row-reset"
+            onClick={onBrightnessReset}
+            disabled={paletteBrightness === 0}
+            title="Reset Brightness"
+          >
+            ↺
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ColorControl({
+  title,
+  help,
+  value,
+  defaultColor,
+  isEditing,
+  inputRef,
+  draft,
+  onDraftChange,
+  onChange,
+  onHexClick,
+  onHexCommit,
+  onHexCancel,
+  onReset,
+}: {
+  title: string;
+  help: string;
+  value: string;
+  defaultColor: string;
+  isEditing: boolean;
+  inputRef: RefObject<HTMLInputElement | null>;
+  draft: string;
+  onDraftChange: (value: string) => void;
+  onChange: (value: string) => void;
+  onHexClick: () => void;
+  onHexCommit: () => void;
+  onHexCancel: () => void;
+  onReset: () => void;
+}) {
+  return (
+    <div className="settings-row">
+      <div className="settings-row-label">
+        <div className="settings-row-label-title">{title}</div>
+        <div className="settings-row-label-help">{help}</div>
+      </div>
+      <div className="settings-row-control">
+        <div className="palette-color-field">
+          <input
+            type="color"
+            className="palette-accent-swatch"
+            value={value || defaultColor}
+            onChange={(e) => onChange(e.target.value)}
+          />
+          {isEditing ? (
+            <input
+              ref={inputRef}
+              className="color-swatch-value palette-hex-input"
+              value={draft}
+              onChange={(e) => onDraftChange(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  onHexCommit();
+                } else if (e.key === 'Escape') {
+                  e.preventDefault();
+                  onHexCancel();
+                } else e.stopPropagation();
+              }}
+              onBlur={onHexCancel}
+              maxLength={7}
+            />
+          ) : (
+            <span
+              className="color-swatch-value palette-hex-clickable"
+              onClick={onHexClick}
+              title="Click to edit hex value"
+            >
+              {value || defaultColor}
+            </span>
+          )}
+          <button
+            type="button"
+            className="palette-row-reset"
+            onClick={onReset}
+            disabled={!value}
+            title={`Reset ${title}`}
+          >
+            ↺
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function AppearanceSection() {
   const { mode, resolvedMode } = useAppearanceMode();
@@ -96,9 +349,15 @@ function AppearanceSection() {
   const [paletteDraft, setPaletteDraft] = useState('');
   const paletteInputRef = useRef<HTMLInputElement>(null);
 
-  // Saved themes.
-  const [themes, setThemes] = useState<types.Theme[]>([]);
-  const [themesLoading, setThemesLoading] = useState(false);
+  const {
+    themes,
+    themesLoading,
+    validateThemePattern,
+    saveThemeEntry,
+    deleteThemeEntry,
+    reorderThemeEntries,
+    applyThemeEntry,
+  } = useThemes();
   const [activeThemeId, setActiveThemeId] = useState<string | null>(null);
   const [editingThemeId, setEditingThemeId] = useState<string | null>(null);
   const [themeDraft, setThemeDraft] = useState({ name: '', clusterPattern: '' });
@@ -107,22 +366,29 @@ function AppearanceSection() {
   const [deleteConfirmThemeId, setDeleteConfirmThemeId] = useState<string | null>(null);
   const [hasUnsavedDefaultThemeChanges, setHasUnsavedDefaultThemeChanges] = useState(false);
   const [themePatternError, setThemePatternError] = useState<string | null>(null);
-
-  // Load saved themes once on mount.
-  useEffect(() => {
-    const loadThemes = async () => {
-      setThemesLoading(true);
-      try {
-        const result = await getThemes();
-        setThemes(result);
-      } catch (error) {
-        errorHandler.handle(error, { action: 'loadThemes' });
-      } finally {
-        setThemesLoading(false);
-      }
-    };
-    loadThemes();
-  }, []);
+  const appearanceModeMetadata = getPreferenceMetadata('appearanceMode');
+  const enabledAppearanceModeOptions = appearanceModeOptions.filter(
+    (option) =>
+      !appearanceModeMetadata.enumOptions ||
+      appearanceModeMetadata.enumOptions.includes(option.value)
+  );
+  const palettePreferenceKeys =
+    resolvedMode === 'light'
+      ? {
+          hue: 'paletteHueLight' as const,
+          saturation: 'paletteSaturationLight' as const,
+          brightness: 'paletteBrightnessLight' as const,
+        }
+      : {
+          hue: 'paletteHueDark' as const,
+          saturation: 'paletteSaturationDark' as const,
+          brightness: 'paletteBrightnessDark' as const,
+        };
+  const paletteBounds = {
+    hue: getIntegerPreferenceMetadata(palettePreferenceKeys.hue),
+    saturation: getIntegerPreferenceMetadata(palettePreferenceKeys.saturation),
+    brightness: getIntegerPreferenceMetadata(palettePreferenceKeys.brightness),
+  };
 
   // Reload slider/accent/link values when the resolved appearance mode changes.
   useEffect(() => {
@@ -180,45 +446,55 @@ function AppearanceSection() {
   );
 
   const handlePaletteHueChange = (value: number) => {
+    const normalized = normalizeIntegerPreferenceValue(palettePreferenceKeys.hue, value);
     flagUnsavedDefaultThemeChange();
-    setPaletteHue(value);
-    applyTintedPalette(value, paletteSaturation, paletteBrightness);
-    debouncePalettePersist(value, paletteSaturation, paletteBrightness);
+    setPaletteHue(normalized);
+    applyTintedPalette(normalized, paletteSaturation, paletteBrightness);
+    debouncePalettePersist(normalized, paletteSaturation, paletteBrightness);
   };
 
   const handlePaletteSaturationChange = (value: number) => {
+    const normalized = normalizeIntegerPreferenceValue(palettePreferenceKeys.saturation, value);
     flagUnsavedDefaultThemeChange();
-    setPaletteSaturation(value);
-    applyTintedPalette(paletteHue, value, paletteBrightness);
-    debouncePalettePersist(paletteHue, value, paletteBrightness);
+    setPaletteSaturation(normalized);
+    applyTintedPalette(paletteHue, normalized, paletteBrightness);
+    debouncePalettePersist(paletteHue, normalized, paletteBrightness);
   };
 
   const handlePaletteBrightnessChange = (value: number) => {
+    const normalized = normalizeIntegerPreferenceValue(palettePreferenceKeys.brightness, value);
     flagUnsavedDefaultThemeChange();
-    setPaletteBrightness(value);
-    applyTintedPalette(paletteHue, paletteSaturation, value);
-    debouncePalettePersist(paletteHue, paletteSaturation, value);
+    setPaletteBrightness(normalized);
+    applyTintedPalette(paletteHue, paletteSaturation, normalized);
+    debouncePalettePersist(paletteHue, paletteSaturation, normalized);
   };
 
   const handleHueReset = () => {
+    const defaultValue = Number(getPreferenceMetadata(palettePreferenceKeys.hue).defaultValue);
     flagUnsavedDefaultThemeChange();
-    setPaletteHue(0);
-    applyTintedPalette(0, paletteSaturation, paletteBrightness);
-    debouncePalettePersist(0, paletteSaturation, paletteBrightness);
+    setPaletteHue(defaultValue);
+    applyTintedPalette(defaultValue, paletteSaturation, paletteBrightness);
+    debouncePalettePersist(defaultValue, paletteSaturation, paletteBrightness);
   };
 
   const handleSaturationReset = () => {
+    const defaultValue = Number(
+      getPreferenceMetadata(palettePreferenceKeys.saturation).defaultValue
+    );
     flagUnsavedDefaultThemeChange();
-    setPaletteSaturation(0);
-    applyTintedPalette(paletteHue, 0, paletteBrightness);
-    debouncePalettePersist(paletteHue, 0, paletteBrightness);
+    setPaletteSaturation(defaultValue);
+    applyTintedPalette(paletteHue, defaultValue, paletteBrightness);
+    debouncePalettePersist(paletteHue, defaultValue, paletteBrightness);
   };
 
   const handleBrightnessReset = () => {
+    const defaultValue = Number(
+      getPreferenceMetadata(palettePreferenceKeys.brightness).defaultValue
+    );
     flagUnsavedDefaultThemeChange();
-    setPaletteBrightness(0);
-    applyTintedPalette(paletteHue, paletteSaturation, 0);
-    debouncePalettePersist(paletteHue, paletteSaturation, 0);
+    setPaletteBrightness(defaultValue);
+    applyTintedPalette(paletteHue, paletteSaturation, defaultValue);
+    debouncePalettePersist(paletteHue, paletteSaturation, defaultValue);
   };
 
   const debounceAccentPersist = useCallback(
@@ -345,39 +621,25 @@ function AppearanceSection() {
       return;
     }
     if (editingPaletteField === 'hue') {
-      handlePaletteHueChange(Math.max(0, Math.min(360, parsed)));
+      handlePaletteHueChange(parsed);
     } else if (editingPaletteField === 'saturation') {
-      handlePaletteSaturationChange(Math.max(0, Math.min(100, parsed)));
+      handlePaletteSaturationChange(parsed);
     } else if (editingPaletteField === 'brightness') {
-      handlePaletteBrightnessChange(Math.max(-50, Math.min(50, parsed)));
+      handlePaletteBrightnessChange(parsed);
     }
     setEditingPaletteField(null);
   };
 
   const handlePaletteValueCancel = () => setEditingPaletteField(null);
 
-  const reloadThemes = async () => {
-    try {
-      const result = await getThemes();
-      setThemes(result);
-    } catch (error) {
-      errorHandler.handle(error, { action: 'loadThemes' });
-    }
-  };
-
   const validateThemePatternDraft = async (pattern: string): Promise<boolean> => {
     setThemePatternError(null);
-    try {
-      const result = await validateThemeClusterPattern(pattern);
-      if (!result.valid) {
-        setThemePatternError(result.message || 'Invalid cluster pattern.');
-        return false;
-      }
-      return true;
-    } catch (error) {
-      errorHandler.handle(error, { action: 'validateThemeClusterPattern' });
+    const result = await validateThemePattern(pattern);
+    if (!result.valid) {
+      setThemePatternError(result.message || 'Invalid cluster pattern.');
       return false;
     }
+    return true;
   };
 
   const handleSaveCurrentAsTheme = () => {
@@ -419,8 +681,7 @@ function AppearanceSection() {
         name: isDefault ? existing.name : trimmedName,
         clusterPattern,
       });
-      await saveTheme(updated);
-      await reloadThemes();
+      await saveThemeEntry(updated);
       setActiveThemeId(null);
       if (isDefault) {
         setHasUnsavedDefaultThemeChanges(false);
@@ -457,8 +718,7 @@ function AppearanceSection() {
           clusterPattern,
         }),
       });
-      await saveTheme(newTheme);
-      await reloadThemes();
+      await saveThemeEntry(newTheme);
       setEditingThemeId(null);
     } catch (error) {
       errorHandler.handle(error, { action: 'saveTheme' });
@@ -473,8 +733,7 @@ function AppearanceSection() {
   const handleDeleteThemeConfirm = async () => {
     if (!deleteConfirmThemeId) return;
     try {
-      await deleteThemeApi(deleteConfirmThemeId);
-      await reloadThemes();
+      await deleteThemeEntry(deleteConfirmThemeId);
     } catch (error) {
       errorHandler.handle(error, { action: 'deleteTheme' });
     } finally {
@@ -484,7 +743,7 @@ function AppearanceSection() {
 
   const handleApplyTheme = async (id: string) => {
     try {
-      await applyThemeApi(id);
+      await applyThemeEntry(id);
       setActiveThemeId(id);
       setHasUnsavedDefaultThemeChanges(false);
       await hydrateAppPreferences({ force: true });
@@ -608,14 +867,13 @@ function AppearanceSection() {
   const handleSaveDefaultThemeFromPrompt = async () => {
     if (!defaultTheme) return;
     try {
-      await saveTheme(
+      await saveThemeEntry(
         buildThemeFromCurrentAppearance({
           theme: defaultTheme,
           name: defaultTheme.name,
           clusterPattern: '',
         })
       );
-      await reloadThemes();
       setHasUnsavedDefaultThemeChanges(false);
     } catch (error) {
       errorHandler.handle(error, { action: 'saveDefaultTheme' });
@@ -643,8 +901,7 @@ function AppearanceSection() {
     reordered.splice(toIdx, 0, draggingThemeId);
 
     try {
-      await reorderThemes(reordered);
-      await reloadThemes();
+      await reorderThemeEntries(reordered);
     } catch (error) {
       errorHandler.handle(error, { action: 'reorderThemes' });
     } finally {
@@ -715,34 +972,11 @@ function AppearanceSection() {
       <div className="settings-subgroup-label">Mode</div>
       <hr className="settings-subgroup-divider" />
 
-      <div className="settings-row">
-        <div className="settings-row-label">
-          <div className="settings-row-label-title">Mode</div>
-          <div className="settings-row-label-help">
-            Follow the system mode or choose light/dark mode.
-          </div>
-        </div>
-        <div className="settings-row-control">
-          <div className="settings-choice-buttons" role="group" aria-label="Appearance mode">
-            {appearanceModeOptions.map((option) => {
-              const Icon = option.icon;
-              const isSelected = mode === option.value;
-              return (
-                <button
-                  key={option.value}
-                  type="button"
-                  className={`settings-choice-button${isSelected ? ' settings-choice-button--active' : ''}`}
-                  aria-pressed={isSelected}
-                  onClick={() => handleAppearanceModeChange(option.value)}
-                >
-                  <Icon width={18} height={18} />
-                  <span>{option.label}</span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      </div>
+      <AppearanceModeSelector
+        mode={mode}
+        options={enabledAppearanceModeOptions}
+        onChange={handleAppearanceModeChange}
+      />
 
       <div className="settings-subgroup-label">Theme</div>
       <hr className="settings-subgroup-divider" />
@@ -753,194 +987,54 @@ function AppearanceSection() {
         name -- for example, a red theme for prod clusters, blue for dev, etc.
       </div>
 
-      <div className="settings-row">
-        <div className="settings-row-label">
-          <div className="settings-row-label-title">Tint</div>
-          <div className="settings-row-label-help">
-            Overall tint in the UI. Hue sets the color, saturation increases the strength, and
-            brightness lightens or darkens.
-          </div>
-        </div>
-        <div className="settings-row-control">
-          <div className="palette-tint-controls">
-            <label htmlFor="palette-hue">Hue</label>
-            <input
-              type="range"
-              id="palette-hue"
-              className="palette-slider palette-slider-hue"
-              min={0}
-              max={360}
-              value={paletteHue}
-              onChange={(e) => handlePaletteHueChange(Number(e.target.value))}
-              style={hueSliderStyle}
-            />
-            {renderEditableValue('hue', paletteHue, '°')}
-            <button
-              type="button"
-              className="palette-row-reset"
-              onClick={handleHueReset}
-              disabled={paletteHue === 0}
-              title="Reset Hue"
-            >
-              ↺
-            </button>
+      <PaletteControls
+        paletteHue={paletteHue}
+        paletteSaturation={paletteSaturation}
+        paletteBrightness={paletteBrightness}
+        hueSliderStyle={hueSliderStyle}
+        saturationSliderStyle={saturationSliderStyle}
+        brightnessSliderStyle={brightnessSliderStyle}
+        paletteBounds={paletteBounds}
+        renderEditableValue={renderEditableValue}
+        onHueChange={handlePaletteHueChange}
+        onSaturationChange={handlePaletteSaturationChange}
+        onBrightnessChange={handlePaletteBrightnessChange}
+        onHueReset={handleHueReset}
+        onSaturationReset={handleSaturationReset}
+        onBrightnessReset={handleBrightnessReset}
+      />
 
-            <label htmlFor="palette-saturation">Saturation</label>
-            <input
-              type="range"
-              id="palette-saturation"
-              className="palette-slider palette-slider-saturation"
-              min={0}
-              max={100}
-              value={paletteSaturation}
-              onChange={(e) => handlePaletteSaturationChange(Number(e.target.value))}
-              style={saturationSliderStyle}
-            />
-            {renderEditableValue('saturation', paletteSaturation, '%')}
-            <button
-              type="button"
-              className="palette-row-reset"
-              onClick={handleSaturationReset}
-              disabled={paletteSaturation === 0}
-              title="Reset Saturation"
-            >
-              ↺
-            </button>
+      <ColorControl
+        title="Accent color"
+        help="Used for active states, focus, and other elements that require emphasis."
+        value={accentColor}
+        defaultColor={defaultAccent}
+        isEditing={isEditingAccentHex}
+        inputRef={accentHexInputRef}
+        draft={accentHexDraft}
+        onDraftChange={setAccentHexDraft}
+        onChange={handleAccentColorChange}
+        onHexClick={handleAccentHexClick}
+        onHexCommit={handleAccentHexCommit}
+        onHexCancel={handleAccentHexCancel}
+        onReset={handleAccentReset}
+      />
 
-            <label htmlFor="palette-brightness">Brightness</label>
-            <input
-              type="range"
-              id="palette-brightness"
-              className="palette-slider palette-slider-brightness"
-              min={-50}
-              max={50}
-              value={paletteBrightness}
-              onChange={(e) => handlePaletteBrightnessChange(Number(e.target.value))}
-              style={brightnessSliderStyle}
-            />
-            {renderEditableValue('brightness', paletteBrightness, '')}
-            <button
-              type="button"
-              className="palette-row-reset"
-              onClick={handleBrightnessReset}
-              disabled={paletteBrightness === 0}
-              title="Reset Brightness"
-            >
-              ↺
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <div className="settings-row">
-        <div className="settings-row-label">
-          <div className="settings-row-label-title">Accent color</div>
-          <div className="settings-row-label-help">
-            Used for active states, focus, and other elements that require emphasis.
-          </div>
-        </div>
-        <div className="settings-row-control">
-          <div className="palette-color-field">
-            <input
-              type="color"
-              className="palette-accent-swatch"
-              value={accentColor || defaultAccent}
-              onChange={(e) => handleAccentColorChange(e.target.value)}
-            />
-            {isEditingAccentHex ? (
-              <input
-                ref={accentHexInputRef}
-                className="color-swatch-value palette-hex-input"
-                value={accentHexDraft}
-                onChange={(e) => setAccentHexDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault();
-                    handleAccentHexCommit();
-                  } else if (e.key === 'Escape') {
-                    e.preventDefault();
-                    handleAccentHexCancel();
-                  } else e.stopPropagation();
-                }}
-                onBlur={handleAccentHexCancel}
-                maxLength={7}
-              />
-            ) : (
-              <span
-                className="color-swatch-value palette-hex-clickable"
-                onClick={handleAccentHexClick}
-                title="Click to edit hex value"
-              >
-                {accentColor || defaultAccent}
-              </span>
-            )}
-            <button
-              type="button"
-              className="palette-row-reset"
-              onClick={handleAccentReset}
-              disabled={!accentColor}
-              title="Reset Accent Color"
-            >
-              ↺
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <div className="settings-row">
-        <div className="settings-row-label">
-          <div className="settings-row-label-title">Link color</div>
-          <div className="settings-row-label-help">
-            Color of inline links in throughout the app.
-          </div>
-        </div>
-        <div className="settings-row-control">
-          <div className="palette-color-field">
-            <input
-              type="color"
-              className="palette-accent-swatch"
-              value={linkColor || defaultLink}
-              onChange={(e) => handleLinkColorChange(e.target.value)}
-            />
-            {isEditingLinkHex ? (
-              <input
-                ref={linkHexInputRef}
-                className="color-swatch-value palette-hex-input"
-                value={linkHexDraft}
-                onChange={(e) => setLinkHexDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault();
-                    handleLinkHexCommit();
-                  } else if (e.key === 'Escape') {
-                    e.preventDefault();
-                    handleLinkHexCancel();
-                  } else e.stopPropagation();
-                }}
-                onBlur={handleLinkHexCancel}
-                maxLength={7}
-              />
-            ) : (
-              <span
-                className="color-swatch-value palette-hex-clickable"
-                onClick={handleLinkHexClick}
-                title="Click to edit hex value"
-              >
-                {linkColor || defaultLink}
-              </span>
-            )}
-            <button
-              type="button"
-              className="palette-row-reset"
-              onClick={handleLinkReset}
-              disabled={!linkColor}
-              title="Reset Link Color"
-            >
-              ↺
-            </button>
-          </div>
-        </div>
-      </div>
+      <ColorControl
+        title="Link color"
+        help="Color of inline links in throughout the app."
+        value={linkColor}
+        defaultColor={defaultLink}
+        isEditing={isEditingLinkHex}
+        inputRef={linkHexInputRef}
+        draft={linkHexDraft}
+        onDraftChange={setLinkHexDraft}
+        onChange={handleLinkColorChange}
+        onHexClick={handleLinkHexClick}
+        onHexCommit={handleLinkHexCommit}
+        onHexCancel={handleLinkHexCancel}
+        onReset={handleLinkReset}
+      />
 
       <div className="settings-row">
         <div className="settings-row-label">

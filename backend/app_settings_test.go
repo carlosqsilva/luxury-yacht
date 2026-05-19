@@ -3,11 +3,13 @@ package backend
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/luxury-yacht/app/backend/internal/containerlogs"
 	"github.com/stretchr/testify/require"
 	"k8s.io/client-go/rest"
 )
@@ -66,6 +68,41 @@ func TestAppLoadWindowSettingsReadsExistingFile(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, want, got)
 	require.Equal(t, want, app.windowSettings)
+}
+
+func TestAppSaveWindowSettingsPreservesInMemoryKubeconfigSelection(t *testing.T) {
+	origGetPos := runtimeWindowGetPosition
+	origGetSize := runtimeWindowGetSize
+	origIsMax := runtimeWindowIsMaximised
+	t.Cleanup(func() {
+		runtimeWindowGetPosition = origGetPos
+		runtimeWindowGetSize = origGetSize
+		runtimeWindowIsMaximised = origIsMax
+	})
+
+	setTestConfigEnv(t)
+	app := newTestAppWithDefaults(t)
+	app.Ctx = context.Background()
+	app.appSettings = getDefaultAppSettings()
+	app.appSettings.SelectedKubeconfigs = []string{"/new/config:ctx-new"}
+
+	settings := defaultSettingsFile()
+	settings.Kubeconfig.Selected = []string{"/old/config:ctx-old"}
+	require.NoError(t, app.saveSettingsFile(settings))
+
+	runtimeWindowGetPosition = func(context.Context) (int, int) { return 10, 20 }
+	runtimeWindowGetSize = func(context.Context) (int, int) { return 900, 600 }
+	runtimeWindowIsMaximised = func(context.Context) bool { return false }
+
+	require.NoError(t, app.SaveWindowSettings())
+
+	saved, err := app.loadSettingsFile()
+	require.NoError(t, err)
+	require.Equal(t, []string{"/new/config:ctx-new"}, saved.Kubeconfig.Selected)
+	require.Equal(t, 10, saved.UI.Window.X)
+	require.Equal(t, 20, saved.UI.Window.Y)
+	require.Equal(t, 900, saved.UI.Window.Width)
+	require.Equal(t, 600, saved.UI.Window.Height)
 }
 
 func TestAppGetAppSettingsReturnsDefaultWhenMissing(t *testing.T) {
@@ -606,8 +643,150 @@ func TestLoadSettingsFileNormalizesDefaults(t *testing.T) {
 	require.True(t, settings.Preferences.Refresh.Auto)
 	require.True(t, settings.Preferences.Refresh.Background)
 	require.Equal(t, "shared", settings.Preferences.GridTablePersistenceMode)
-	require.Equal(t, "", settings.Preferences.DefaultObjectPanelPosition)
+	require.Equal(t, defaultObjectPanelPosition, settings.Preferences.DefaultObjectPanelPosition)
+	require.Equal(t, defaultObjectPanelDockedRightWidth, settings.Preferences.ObjectPanelDockedRightWidth)
+	require.Equal(t, defaultObjectPanelDockedBottomHeight, settings.Preferences.ObjectPanelDockedBottomHeight)
+	require.Equal(t, defaultObjectPanelFloatingWidth, settings.Preferences.ObjectPanelFloatingWidth)
+	require.Equal(t, defaultObjectPanelFloatingHeight, settings.Preferences.ObjectPanelFloatingHeight)
+	require.Equal(t, defaultObjectPanelFloatingX, settings.Preferences.ObjectPanelFloatingX)
+	require.Equal(t, defaultObjectPanelFloatingY, settings.Preferences.ObjectPanelFloatingY)
 	require.Equal(t, defaultKubeconfigSearchPaths(), settings.Kubeconfig.SearchPaths)
+}
+
+func TestAppGetAppSettingsSchemaIncludesBackendOwnedDefaults(t *testing.T) {
+	setTestConfigEnv(t)
+	app := newTestAppWithDefaults(t)
+
+	schema, err := app.GetAppSettingsSchema()
+	require.NoError(t, err)
+
+	byKey := make(map[string]AppPreferenceSchema, len(schema.Preferences))
+	for _, pref := range schema.Preferences {
+		byKey[pref.Key] = pref
+	}
+
+	require.Equal(t, "enum", byKey[appPreferenceAppearanceMode].Type)
+	require.Equal(t, []string{"light", "dark", "system"}, byKey[appPreferenceAppearanceMode].EnumOptions)
+	require.True(t, byKey[appPreferenceAppearanceMode].RuntimeSideEffect)
+	require.Equal(t, defaultObjectPanelPosition, byKey[appPreferenceDefaultObjectPanelPosition].DefaultValue)
+	require.Equal(t, defaultObjectPanelPosition, byKey[appPreferenceDefaultObjectPanelPosition].CurrentValue)
+	require.Equal(t, defaultObjectPanelDockedRightWidth, byKey[appPreferenceObjectPanelDockedRightWidth].DefaultValue)
+	require.Equal(t, defaultKubernetesClientQPS, byKey[appPreferenceKubernetesClientQPS].DefaultValue)
+	require.Equal(t, minKubernetesClientQPS, *byKey[appPreferenceKubernetesClientQPS].Min)
+	require.Equal(t, maxKubernetesClientQPS, *byKey[appPreferenceKubernetesClientQPS].Max)
+	require.Equal(t, minObjectPanelDockedRightWidth, *byKey[appPreferenceObjectPanelDockedRightWidth].Min)
+	require.Equal(t, maxObjectPanelLayoutValue, *byKey[appPreferenceObjectPanelDockedRightWidth].Max)
+	require.Equal(t, minObjectPanelFloatingX, *byKey[appPreferenceObjectPanelFloatingX].Min)
+	require.Equal(t, maxObjectPanelLayoutValue, *byKey[appPreferenceObjectPanelFloatingX].Max)
+}
+
+func TestAppSettingsSchemaCoversUpdateAppPreferenceKeys(t *testing.T) {
+	setTestConfigEnv(t)
+	app := newTestAppWithDefaults(t)
+
+	schema, err := app.GetAppSettingsSchema()
+	require.NoError(t, err)
+
+	schemaKeys := make([]string, 0, len(schema.Preferences))
+	seen := make(map[string]struct{}, len(schema.Preferences))
+	for _, pref := range schema.Preferences {
+		require.NotEmpty(t, pref.Key)
+		require.NotEmpty(t, pref.Type)
+		require.NotContains(t, seen, pref.Key, "duplicate schema key %q", pref.Key)
+		seen[pref.Key] = struct{}{}
+		schemaKeys = append(schemaKeys, pref.Key)
+	}
+
+	require.ElementsMatch(t, appPreferenceKeys(), schemaKeys)
+}
+
+func TestAppUpdateAppPreferencesAppliesAtomicBatch(t *testing.T) {
+	setTestConfigEnv(t)
+	app := newTestAppWithDefaults(t)
+	app.kubeAPIMetrics = newKubernetesAPIMetricsRegistry()
+	limiter := newMutableKubernetesRateLimiter(defaultKubernetesClientQPS, defaultKubernetesClientBurst)
+	app.clusterClients = map[string]*clusterClients{
+		"cluster-a": {
+			meta:        ClusterMeta{ID: "cluster-a", Name: "Cluster A"},
+			rateLimiter: limiter,
+			restConfig:  &rest.Config{QPS: float32(defaultKubernetesClientQPS), Burst: defaultKubernetesClientBurst},
+		},
+	}
+
+	response, err := app.UpdateAppPreferences(UpdateAppPreferencesRequest{Changes: []AppPreferenceChange{
+		{Key: appPreferenceAppearanceMode, Value: "dark"},
+		{Key: appPreferenceKubernetesClientQPS, Value: 150},
+		{Key: appPreferenceKubernetesClientBurst, Value: 450},
+		{Key: appPreferenceObjPanelLogsTargetPerScopeLimit, Value: 144},
+		{Key: appPreferenceDefaultObjectPanelPosition, Value: "bottom"},
+	}})
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		appPreferenceAppearanceMode,
+		appPreferenceKubernetesClientQPS,
+		appPreferenceKubernetesClientBurst,
+		appPreferenceObjPanelLogsTargetPerScopeLimit,
+		appPreferenceDefaultObjectPanelPosition,
+	}, response.ChangedKeys)
+	require.Equal(t, "dark", response.Settings.AppearanceMode)
+	require.Equal(t, 150, response.Settings.KubernetesClientQPS)
+	require.Equal(t, 450, response.Settings.KubernetesClientBurst)
+	require.Equal(t, 144, containerlogs.GetPerScopeTargetLimit())
+	require.Equal(t, "bottom", response.Settings.DefaultObjectPanelPosition)
+
+	qps, burst := limiter.Limits()
+	require.Equal(t, 150, qps)
+	require.Equal(t, 450, burst)
+
+	app.appSettings = nil
+	require.NoError(t, app.loadAppSettings())
+	require.Equal(t, "dark", app.appSettings.AppearanceMode)
+	require.Equal(t, 150, app.appSettings.KubernetesClientQPS)
+	require.Equal(t, 450, app.appSettings.KubernetesClientBurst)
+	require.Equal(t, "bottom", app.appSettings.DefaultObjectPanelPosition)
+}
+
+func TestAppUpdateAppPreferencesRejectsInvalidBatchWithoutMutation(t *testing.T) {
+	setTestConfigEnv(t)
+	app := newTestAppWithDefaults(t)
+	require.NoError(t, app.SetAppearanceMode("light"))
+
+	_, err := app.UpdateAppPreferences(UpdateAppPreferencesRequest{Changes: []AppPreferenceChange{
+		{Key: appPreferenceAppearanceMode, Value: "dark"},
+		{Key: appPreferenceGridTablePersistenceMode, Value: "invalid"},
+	}})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid grid table persistence mode")
+	require.Equal(t, "light", app.appSettings.AppearanceMode)
+
+	app.appSettings = nil
+	require.NoError(t, app.loadAppSettings())
+	require.Equal(t, "light", app.appSettings.AppearanceMode)
+}
+
+func TestAppUpdateAppPreferencesDoesNotApplySideEffectsWhenPersistenceFails(t *testing.T) {
+	setTestConfigEnv(t)
+	app := newTestAppWithDefaults(t)
+	containerlogs.SetPerScopeTargetLimit(defaultObjPanelLogsTargetPerScopeLimit)
+	require.NoError(t, app.SetObjPanelLogsTargetPerScopeLimit(144))
+	require.Equal(t, 144, containerlogs.GetPerScopeTargetLimit())
+
+	originalWrite := writeSettingsFileAtomic
+	t.Cleanup(func() {
+		writeSettingsFileAtomic = originalWrite
+		containerlogs.SetPerScopeTargetLimit(defaultObjPanelLogsTargetPerScopeLimit)
+	})
+	writeSettingsFileAtomic = func(string, []byte, os.FileMode) error {
+		return errors.New("forced write failure")
+	}
+
+	_, err := app.UpdateAppPreferences(UpdateAppPreferencesRequest{Changes: []AppPreferenceChange{
+		{Key: appPreferenceObjPanelLogsTargetPerScopeLimit, Value: 222},
+	}})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "forced write failure")
+	require.Equal(t, 144, app.appSettings.ObjPanelLogsTargetPerScopeLimit)
+	require.Equal(t, 144, containerlogs.GetPerScopeTargetLimit())
 }
 
 func TestLoadSettingsFileMigratesOldAppearanceModePreference(t *testing.T) {

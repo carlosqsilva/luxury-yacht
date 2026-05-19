@@ -25,10 +25,38 @@ import (
 	"k8s.io/client-go/transport/spdy"
 )
 
-// StartPortForward initiates a new port forwarding session to a Kubernetes pod.
+// startPortForward initiates a new port forwarding session to a Kubernetes pod.
 // For workloads (Deployment, StatefulSet, DaemonSet) and Services, the session
 // will automatically reconnect if the underlying pod is replaced.
-func (a *App) StartPortForward(clusterID string, req PortForwardRequest) (string, error) {
+func (a *App) startPortForward(clusterID string, req PortForwardRequest) (string, error) {
+	resp, err := a.RunObjectAction(ObjectActionRequest{
+		Action: ObjectActionStartPortForward,
+		Target: objectActionTarget(
+			clusterID,
+			req.TargetGroup,
+			req.TargetVersion,
+			req.TargetKind,
+			req.Namespace,
+			req.TargetName,
+		),
+		PortForward: &ObjectActionPortForwardOptions{
+			ContainerPort: req.ContainerPort,
+			LocalPort:     req.LocalPort,
+		},
+	})
+	return resp.SessionID, err
+}
+
+func (a *App) startPortForwardAction(targetRef ObjectActionTargetRef, options ObjectActionPortForwardOptions) (string, error) {
+	req := PortForwardRequest{
+		Namespace:     targetRef.Namespace,
+		TargetKind:    targetRef.Kind,
+		TargetGroup:   targetRef.Group,
+		TargetVersion: targetRef.Version,
+		TargetName:    targetRef.Name,
+		ContainerPort: options.ContainerPort,
+		LocalPort:     options.LocalPort,
+	}
 	target, err := portForwardTargetFromRequest(req)
 	if err != nil {
 		return "", err
@@ -37,7 +65,7 @@ func (a *App) StartPortForward(clusterID string, req PortForwardRequest) (string
 		return "", fmt.Errorf("container port must be positive")
 	}
 
-	deps, _, err := a.resolveClusterDependencies(clusterID)
+	deps, _, err := a.resolveClusterDependencies(targetRef.ClusterID)
 	if err != nil {
 		return "", err
 	}
@@ -74,7 +102,7 @@ func (a *App) StartPortForward(clusterID string, req PortForwardRequest) (string
 	session := &portForwardSessionInternal{
 		PortForwardSession: PortForwardSession{
 			ID:            sessionID,
-			ClusterID:     clusterID,
+			ClusterID:     targetRef.ClusterID,
 			ClusterName:   deps.ClusterName,
 			Namespace:     target.Namespace,
 			PodName:       resolved.PodName,
@@ -96,6 +124,9 @@ func (a *App) StartPortForward(clusterID string, req PortForwardRequest) (string
 	a.portForwardSessionsMu.Lock()
 	a.portForwardSessions[sessionID] = session
 	a.portForwardSessionsMu.Unlock()
+	a.registerRuntimeOperation(runtimeOperationFromPortForward(session), func(reason string) error {
+		return a.stopPortForwardForRuntime(sessionID, reason)
+	})
 
 	// Emit initial status.
 	a.emitPortForwardStatus(session)
@@ -109,12 +140,14 @@ func (a *App) StartPortForward(clusterID string, req PortForwardRequest) (string
 		if err != nil {
 			// Initial connection failed - remove session and return error.
 			a.removePortForwardSession(sessionID)
+			a.unregisterRuntimeOperation(sessionID)
 			a.emitPortForwardList()
 			return "", fmt.Errorf("failed to start port forward: %w", err)
 		}
 	case <-time.After(config.PortForwardConnectTimeout):
 		// Timeout waiting for connection.
 		a.removePortForwardSession(sessionID)
+		a.unregisterRuntimeOperation(sessionID)
 		session.close()
 		a.emitPortForwardList()
 		return "", fmt.Errorf("timeout waiting for port forward to connect")
@@ -134,6 +167,27 @@ func (a *App) StopPortForward(sessionID string) error {
 	session.mu.Lock()
 	session.Status = "stopped"
 	session.StatusReason = "user stopped"
+	session.mu.Unlock()
+
+	a.emitPortForwardStatus(session)
+	a.emitPortForwardList()
+	a.unregisterRuntimeOperation(sessionID)
+	return nil
+}
+
+func (a *App) stopPortForwardForRuntime(sessionID, reason string) error {
+	session := a.removePortForwardSession(sessionID)
+	if session == nil {
+		return nil
+	}
+	session.close()
+
+	session.mu.Lock()
+	session.Status = "stopped"
+	if strings.TrimSpace(reason) == "" {
+		reason = "cluster disconnected"
+	}
+	session.StatusReason = reason
 	session.mu.Unlock()
 
 	a.emitPortForwardStatus(session)
@@ -164,6 +218,7 @@ func (a *App) StopClusterPortForwards(clusterID string) error {
 		session.StatusReason = "cluster disconnected"
 		session.mu.Unlock()
 		a.emitPortForwardStatus(session)
+		a.unregisterRuntimeOperation(session.ID)
 	}
 
 	if len(toRemove) > 0 {
@@ -210,6 +265,7 @@ func (a *App) GetClusterPortForwardCount(clusterID string) int {
 func (a *App) runPortForwarder(ctx context.Context, session *portForwardSessionInternal) {
 	defer func() {
 		a.removePortForwardSession(session.ID)
+		a.unregisterRuntimeOperation(session.ID)
 		a.emitPortForwardList()
 	}()
 
@@ -380,6 +436,9 @@ func (a *App) executePortForward(ctx context.Context, session *portForwardSessio
 		session.StatusReason = ""
 		session.reconnectAttempt = 0
 		session.mu.Unlock()
+		a.registerRuntimeOperation(runtimeOperationFromPortForward(session), func(reason string) error {
+			return a.stopPortForwardForRuntime(session.ID, reason)
+		})
 		a.emitPortForwardStatus(session)
 		a.emitPortForwardList()
 
@@ -501,6 +560,37 @@ func (a *App) emitPortForwardStatus(session *portForwardSessionInternal) {
 func (a *App) emitPortForwardList() {
 	sessions := a.ListPortForwards()
 	a.emitEvent(portForwardListEventName, sessions)
+}
+
+func runtimeOperationFromPortForward(session *portForwardSessionInternal) RuntimeOperation {
+	if session == nil {
+		return RuntimeOperation{}
+	}
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	return RuntimeOperation{
+		ID:          session.ID,
+		Type:        RuntimeOperationPortForward,
+		ClusterID:   session.ClusterID,
+		ClusterName: session.ClusterName,
+		Target: runtimeOperationTarget(
+			session.ClusterID,
+			session.TargetGroup,
+			session.TargetVersion,
+			session.TargetKind,
+			session.Namespace,
+			session.TargetName,
+		),
+		Status:       session.Status,
+		StatusReason: session.StatusReason,
+		StartedAt:    session.StartedAt,
+		DisplayName:  fmt.Sprintf("Port forward %s/%s", session.Namespace, session.TargetName),
+		Summary: map[string]string{
+			"podName":       session.PodName,
+			"containerPort": fmt.Sprintf("%d", session.ContainerPort),
+			"localPort":     fmt.Sprintf("%d", session.LocalPort),
+		},
+	}
 }
 
 // ValidatePortForwardURL checks if a URL string is valid and safe for port forwarding.

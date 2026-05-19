@@ -5,84 +5,34 @@
  * Implements refresherConfig logic for the core layer.
  */
 
-import {
-  CLUSTER_REFRESHERS,
-  type ClusterRefresherName,
-  NAMESPACE_REFRESHERS,
-  type NamespaceRefresherName,
-  SYSTEM_REFRESHERS,
-  type SystemRefresherName,
-  type StaticRefresherName,
+import type {
+  ClusterRefresherName,
+  NamespaceRefresherName,
+  StaticRefresherName,
+  SystemRefresherName,
 } from './refresherTypes';
+import {
+  METRICS_INTERVAL_REFRESHERS,
+  REFRESHER_TIMING_BY_NAME,
+  type RefresherTiming,
+} from './domainRegistry';
 import { getMetricsRefreshIntervalMs } from '@/core/settings/appPreferences';
 
-export interface RefresherTiming {
-  interval: number;
-  cooldown: number;
-  timeout: number;
-}
-
-const STATIC_REFRESHER_CONFIG: Record<StaticRefresherName, RefresherTiming> = {
-  // Streaming domains only poll for metrics; keep the interval aligned to the streaming cadence.
-  [NAMESPACE_REFRESHERS.workloads]: { interval: 5000, cooldown: 500, timeout: 10 },
-  [NAMESPACE_REFRESHERS.config]: { interval: 5000, cooldown: 1000, timeout: 10 },
-  [NAMESPACE_REFRESHERS.network]: { interval: 5000, cooldown: 1000, timeout: 10 },
-  [NAMESPACE_REFRESHERS.rbac]: { interval: 10000, cooldown: 1000, timeout: 10 },
-  [NAMESPACE_REFRESHERS.storage]: { interval: 10000, cooldown: 1000, timeout: 10 },
-  [NAMESPACE_REFRESHERS.events]: { interval: 3000, cooldown: 1000, timeout: 10 },
-  [NAMESPACE_REFRESHERS.quotas]: { interval: 10000, cooldown: 1000, timeout: 10 },
-  [NAMESPACE_REFRESHERS.autoscaling]: { interval: 5000, cooldown: 1000, timeout: 10 },
-  [NAMESPACE_REFRESHERS.custom]: { interval: 10000, cooldown: 1000, timeout: 60 },
-  [NAMESPACE_REFRESHERS.helm]: { interval: 10000, cooldown: 1000, timeout: 10 },
-
-  [CLUSTER_REFRESHERS.nodes]: { interval: 5000, cooldown: 1000, timeout: 10 },
-  [CLUSTER_REFRESHERS.rbac]: { interval: 10000, cooldown: 1000, timeout: 10 },
-  [CLUSTER_REFRESHERS.storage]: { interval: 10000, cooldown: 1000, timeout: 10 },
-  [CLUSTER_REFRESHERS.config]: { interval: 10000, cooldown: 1000, timeout: 10 },
-  [CLUSTER_REFRESHERS.crds]: { interval: 15000, cooldown: 1000, timeout: 60 },
-  [CLUSTER_REFRESHERS.custom]: { interval: 15000, cooldown: 1000, timeout: 60 },
-  [CLUSTER_REFRESHERS.events]: { interval: 3000, cooldown: 1000, timeout: 10 },
-  [CLUSTER_REFRESHERS.browse]: { interval: 15000, cooldown: 1500, timeout: 30 },
-  [CLUSTER_REFRESHERS.catalogDiff]: { interval: 15000, cooldown: 1500, timeout: 30 },
-
-  [SYSTEM_REFRESHERS.namespaces]: { interval: 2000, cooldown: 1000, timeout: 10 },
-  [SYSTEM_REFRESHERS.clusterOverview]: { interval: 10000, cooldown: 1000, timeout: 10 },
-  [SYSTEM_REFRESHERS.unifiedPods]: { interval: 5000, cooldown: 1000, timeout: 30 },
-  [SYSTEM_REFRESHERS.objectYaml]: { interval: 5000, cooldown: 1000, timeout: 10 },
-  [SYSTEM_REFRESHERS.objectHelmManifest]: { interval: 5000, cooldown: 1000, timeout: 10 },
-  [SYSTEM_REFRESHERS.objectHelmValues]: { interval: 5000, cooldown: 1000, timeout: 10 },
-  [SYSTEM_REFRESHERS.containerLogs]: { interval: 5000, cooldown: 1000, timeout: 10 },
-  [SYSTEM_REFRESHERS.objectMaintenance]: { interval: 5000, cooldown: 1000, timeout: 10 },
-  // Object map polling is enabled only while a map tab is active. Keep the
-  // scoped interval responsive for rollout changes; the backend snapshot cache
-  // remains global and intentionally longer-lived.
-  [SYSTEM_REFRESHERS.objectMap]: { interval: 2000, cooldown: 1000, timeout: 10 },
-
-  // Placeholder value. Changing these intervals has no effect.
-  // Actual timings are in frontend/src/modules/object-panel/components/ObjectPanel/hooks/useObjectPanelRefresh.ts
-  // and will be `object-${kind}`.
-  [SYSTEM_REFRESHERS.objectDetails]: { interval: 10000, cooldown: 1000, timeout: 10 },
-
-  // Placeholder value. Changing these intervals has no effect.
-  // Actual timings are in frontend/src/modules/object-panel/components/ObjectPanel/Events/EventsTab.tsx
-  // and will be `object-${kind}-events`.
-  [SYSTEM_REFRESHERS.objectEvents]: { interval: 10000, cooldown: 1000, timeout: 10 },
-};
-
-// Metrics-only refreshers should inherit the configurable metrics cadence.
-const METRICS_INTERVAL_REFRESHERS = new Set<StaticRefresherName>([
-  NAMESPACE_REFRESHERS.workloads,
-  CLUSTER_REFRESHERS.nodes,
-  SYSTEM_REFRESHERS.unifiedPods,
-]);
+export type { RefresherTiming };
 
 const resolveTiming = (name: StaticRefresherName): RefresherTiming => {
-  const timing = STATIC_REFRESHER_CONFIG[name];
+  const timing = REFRESHER_TIMING_BY_NAME[name];
+  if (!timing) {
+    throw new Error(`No refresh timing registered for ${name}`);
+  }
+
   if (METRICS_INTERVAL_REFRESHERS.has(name)) {
     return { ...timing, interval: getMetricsRefreshIntervalMs() };
   }
   return timing;
 };
+
+export const refresherConfig = (name: StaticRefresherName): RefresherTiming => resolveTiming(name);
 
 export const namespaceRefresherConfig = (name: NamespaceRefresherName): RefresherTiming =>
   resolveTiming(name);

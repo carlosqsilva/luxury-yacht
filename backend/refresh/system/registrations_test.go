@@ -1,8 +1,15 @@
 package system
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	goruntime "runtime"
 	"testing"
 
+	"github.com/luxury-yacht/app/backend/refresh/permissions"
+	"github.com/luxury-yacht/app/backend/refresh/resourcestream"
+	"github.com/luxury-yacht/app/backend/refresh/snapshot"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/runtime"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
@@ -10,39 +17,22 @@ import (
 
 // These tests guard the registration table ordering and dependency checks.
 
+type refreshDomainContract struct {
+	Version int                   `json:"version"`
+	Domains []refreshDomainRecord `json:"domains"`
+}
+
+type refreshDomainRecord struct {
+	Domain  string `json:"domain"`
+	Backend struct {
+		Registration   string `json:"registration"`
+		Permission     string `json:"permission"`
+		ResourceStream bool   `json:"resourceStream"`
+	} `json:"backend"`
+}
+
 func TestDomainRegistrationOrder(t *testing.T) {
-	// Keep the expected order in sync with domainRegistrations to prevent drift.
-	expected := []string{
-		"namespaces",
-		"cluster-overview",
-		"catalog",
-		"catalog-diff",
-		"nodes",
-		"cluster-config",
-		"cluster-crds",
-		"cluster-custom",
-		"cluster-events",
-		"cluster-rbac",
-		"cluster-storage",
-		"namespace-workloads",
-		"namespace-autoscaling",
-		"namespace-config",
-		"namespace-custom",
-		"namespace-events",
-		"namespace-helm",
-		"namespace-network",
-		"namespace-quotas",
-		"namespace-rbac",
-		"namespace-storage",
-		"pods",
-		"object-details",
-		"object-yaml",
-		"object-helm-manifest",
-		"object-helm-values",
-		"object-events",
-		"object-map",
-		"object-maintenance",
-	}
+	expected := contractSnapshotDomains(t)
 
 	registrations := domainRegistrations(registrationDeps{cfg: Config{}})
 	actual := make([]string, 0, len(registrations))
@@ -51,6 +41,97 @@ func TestDomainRegistrationOrder(t *testing.T) {
 	}
 
 	require.Equal(t, expected, actual)
+}
+
+func TestDomainRegistrationsMatchAuthoredContract(t *testing.T) {
+	contract := loadRefreshDomainContract(t)
+	registrations := domainRegistrations(registrationDeps{cfg: Config{}})
+	registered := make(map[string]domainRegistration, len(registrations))
+	for _, registration := range registrations {
+		registered[registration.name] = registration
+	}
+
+	contractDomains := make(map[string]struct{}, len(contract.Domains))
+	for _, domain := range contract.Domains {
+		require.NotEmpty(t, domain.Domain)
+		require.NotContains(t, contractDomains, domain.Domain)
+		contractDomains[domain.Domain] = struct{}{}
+
+		if domain.Backend.Registration == "streamOnly" {
+			require.NotContains(t, registered, domain.Domain)
+			continue
+		}
+
+		registration, ok := registered[domain.Domain]
+		require.Truef(t, ok, "domain %q is missing backend registration", domain.Domain)
+		require.Equalf(t, domain.Backend.Registration, registrationKind(registration), "domain %q registration kind drifted", domain.Domain)
+	}
+
+	for _, registration := range registrations {
+		require.Containsf(t, contractDomains, registration.name, "backend domain %q is missing from refresh-domain-contract.json", registration.name)
+	}
+}
+
+func TestResourceStreamDomainsAreRegisteredRefreshDomains(t *testing.T) {
+	registrations := domainRegistrations(registrationDeps{cfg: Config{}})
+	registered := make(map[string]struct{}, len(registrations))
+	for _, registration := range registrations {
+		registered[registration.name] = struct{}{}
+	}
+
+	for _, domainName := range resourcestream.SupportedDomains() {
+		require.Contains(t, registered, domainName)
+	}
+}
+
+func TestDomainRegistrationsHaveRuntimePermissionPolicyOrExemption(t *testing.T) {
+	runtimePolicies := snapshot.RuntimePermissionRequirements()
+	for _, domain := range loadRefreshDomainContract(t).Domains {
+		switch domain.Backend.Permission {
+		case "runtime":
+			require.Containsf(t, runtimePolicies, domain.Domain, "domain %q must have a runtime permission policy", domain.Domain)
+		case "exempt":
+			require.NotContainsf(t, runtimePolicies, domain.Domain, "domain %q is contract-exempt and should not have a broad runtime policy", domain.Domain)
+		case "stream-specific":
+			require.Equal(t, "streamOnly", domain.Backend.Registration)
+		default:
+			require.Failf(t, "unknown permission contract", "domain=%s permission=%s", domain.Domain, domain.Backend.Permission)
+		}
+	}
+}
+
+func TestResourceStreamDomainsMatchAuthoredContract(t *testing.T) {
+	contractDomains := contractResourceStreamDomains(t)
+	require.ElementsMatch(t, contractDomains, resourcestream.SupportedDomains())
+
+	streamRequirements := resourcestream.PermissionRequirementsByDomain()
+	for _, domainName := range contractDomains {
+		require.Containsf(t, streamRequirements, domainName, "resource stream domain %q must declare permission requirements", domainName)
+	}
+}
+
+func TestResourceStreamPermissionRequirementsStayAlignedWithSnapshotRuntime(t *testing.T) {
+	streamRequirements := resourcestream.PermissionRequirementsByDomain()
+	snapshotRequirements := snapshot.RuntimePermissionRequirements()
+
+	for _, domainName := range resourcestream.SupportedDomains() {
+		streamReqs, ok := streamRequirements[domainName]
+		require.Truef(t, ok, "stream domain %q is missing a permission requirement contract", domainName)
+		snapshotReq, ok := snapshotRequirements[domainName]
+		require.Truef(t, ok, "stream domain %q is missing a snapshot runtime permission contract", domainName)
+
+		streamKeys := requirementKeys(streamReqs)
+		for _, req := range snapshotReq.Requirements {
+			require.Containsf(
+				t,
+				streamKeys,
+				permissions.ResourceKey(req.Group, req.Resource),
+				"stream domain %q must include snapshot resource %s",
+				domainName,
+				permissions.ResourceKey(req.Group, req.Resource),
+			)
+		}
+	}
 }
 
 func TestDomainRegistrationRequiresDependencies(t *testing.T) {
@@ -90,4 +171,64 @@ func findRegistration(t *testing.T, registrations []domainRegistration, name str
 	}
 	require.FailNowf(t, "registration not found", "name=%s", name)
 	return domainRegistration{}
+}
+
+func requirementKeys(reqs []permissions.ResourceRequirement) map[string]struct{} {
+	keys := make(map[string]struct{}, len(reqs))
+	for _, req := range reqs {
+		keys[permissions.ResourceKey(req.Group, req.Resource)] = struct{}{}
+	}
+	return keys
+}
+
+func loadRefreshDomainContract(t *testing.T) refreshDomainContract {
+	t.Helper()
+	_, filename, _, ok := goruntime.Caller(0)
+	require.True(t, ok)
+	contractPath := filepath.Join(filepath.Dir(filename), "..", "domain", "refresh-domain-contract.json")
+	data, err := os.ReadFile(contractPath)
+	require.NoError(t, err)
+
+	var contract refreshDomainContract
+	require.NoError(t, json.Unmarshal(data, &contract))
+	require.Equal(t, 2, contract.Version)
+	require.NotEmpty(t, contract.Domains)
+	return contract
+}
+
+func contractSnapshotDomains(t *testing.T) []string {
+	t.Helper()
+	contract := loadRefreshDomainContract(t)
+	result := make([]string, 0, len(contract.Domains))
+	for _, domain := range contract.Domains {
+		if domain.Backend.Registration != "streamOnly" {
+			result = append(result, domain.Domain)
+		}
+	}
+	return result
+}
+
+func contractResourceStreamDomains(t *testing.T) []string {
+	t.Helper()
+	contract := loadRefreshDomainContract(t)
+	result := make([]string, 0, len(contract.Domains))
+	for _, domain := range contract.Domains {
+		if domain.Backend.ResourceStream {
+			result = append(result, domain.Domain)
+		}
+	}
+	return result
+}
+
+func registrationKind(registration domainRegistration) string {
+	switch {
+	case registration.direct != nil:
+		return "direct"
+	case registration.list != nil:
+		return "list"
+	case registration.listWatch != nil:
+		return "listWatch"
+	default:
+		return ""
+	}
 }
