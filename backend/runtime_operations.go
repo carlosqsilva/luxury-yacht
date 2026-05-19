@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/luxury-yacht/app/backend/internal/logsources"
-	"github.com/luxury-yacht/app/backend/nodemaintenance"
+	"github.com/luxury-yacht/app/backend/resourcemodel"
 )
 
 const runtimeOperationsListEventName = "runtime-operations:list"
@@ -21,14 +21,7 @@ const (
 	RuntimeOperationDrain       RuntimeOperationType = "drain"
 )
 
-type RuntimeOperationTargetRef struct {
-	ClusterID string `json:"clusterId"`
-	Group     string `json:"group"`
-	Version   string `json:"version"`
-	Kind      string `json:"kind"`
-	Namespace string `json:"namespace,omitempty"`
-	Name      string `json:"name"`
-}
+type RuntimeOperationTargetRef = resourcemodel.ResourceRef
 
 type RuntimeOperation struct {
 	ID           string                     `json:"id"`
@@ -209,67 +202,30 @@ func (a *App) cleanupClusterRuntimeOperations(clusterID, reason string) {
 		return
 	}
 	registry := a.ensureRuntimeOperationRegistry()
-	if registry != nil {
-		for _, entry := range registry.removeCluster(trimmedClusterID) {
-			if entry.cleanup == nil {
-				continue
-			}
-			if err := entry.cleanup(reason); err != nil && a.logger != nil {
-				a.logger.Warn(fmt.Sprintf("Failed to clean up %s operation %s for cluster %s: %v", entry.operation.Type, entry.operation.ID, trimmedClusterID, err), logsources.App)
-			}
+	if registry == nil {
+		return
+	}
+
+	for _, entry := range registry.removeCluster(trimmedClusterID) {
+		if entry.cleanup == nil {
+			continue
+		}
+		if err := entry.cleanup(reason); err != nil && a.logger != nil {
+			a.logger.Warn(fmt.Sprintf("Failed to clean up %s operation %s for cluster %s: %v", entry.operation.Type, entry.operation.ID, trimmedClusterID, err), logsources.App)
 		}
 	}
 
-	if err := a.StopClusterShellSessions(trimmedClusterID); err != nil && a.logger != nil {
-		a.logger.Warn(fmt.Sprintf("Failed to stop shell sessions for cluster %s: %v", trimmedClusterID, err), logsources.App)
-	}
-	if err := a.StopClusterPortForwards(trimmedClusterID); err != nil && a.logger != nil {
-		a.logger.Warn(fmt.Sprintf("Failed to stop port forwards for cluster %s: %v", trimmedClusterID, err), logsources.App)
-	}
-	cancelled := nodemaintenance.GlobalStore().CancelActiveDrainsForClusterLifecycle(trimmedClusterID, reason)
-	if cancelled > 0 {
-		a.emitRuntimeOperationsList()
-	}
 	a.emitRuntimeOperationsList()
 }
 
 func (a *App) runtimeOperationClusterIDs() []string {
-	seen := make(map[string]struct{})
 	if registry := a.ensureRuntimeOperationRegistry(); registry != nil {
-		for _, clusterID := range registry.clusterIDs() {
-			seen[clusterID] = struct{}{}
-		}
+		return registry.clusterIDs()
 	}
-	a.shellSessionsMu.Lock()
-	for _, session := range a.shellSessions {
-		if session != nil && session.clusterID != "" {
-			seen[session.clusterID] = struct{}{}
-		}
-	}
-	a.shellSessionsMu.Unlock()
-	a.portForwardSessionsMu.Lock()
-	for _, session := range a.portForwardSessions {
-		if session != nil && session.ClusterID != "" {
-			seen[session.ClusterID] = struct{}{}
-		}
-	}
-	a.portForwardSessionsMu.Unlock()
-
-	result := make([]string, 0, len(seen))
-	for clusterID := range seen {
-		result = append(result, clusterID)
-	}
-	sort.Strings(result)
-	return result
+	return nil
 }
 
 func runtimeOperationTarget(clusterID, group, version, kind, namespace, name string) *RuntimeOperationTargetRef {
-	return &RuntimeOperationTargetRef{
-		ClusterID: strings.TrimSpace(clusterID),
-		Group:     strings.TrimSpace(group),
-		Version:   strings.TrimSpace(version),
-		Kind:      strings.TrimSpace(kind),
-		Namespace: strings.TrimSpace(namespace),
-		Name:      strings.TrimSpace(name),
-	}
+	ref := resourcemodel.NewResourceRef(clusterID, group, version, kind, "", namespace, name, "")
+	return &ref
 }
