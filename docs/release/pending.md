@@ -1,31 +1,29 @@
+This release is primarily refactoring and hardening, with just a few new convenience features.
+
 ### Added
 
-- Support for Gateway API resources in the Object Map.
+- HPA-managed workloads now have "Scale to 0" and "Resume from 0" actions, replacing the previous disabled "Scale" placeholder.
+- The Scale modal now includes a "Scale to 0" button, so you don't have to open the Scale modal and manually type 0 first.
+- App logs panel updates:
+  - Column-based layout with header.
+  - Logs now include the source (cluster name or "Global").
 
 ### Changed
 
-- HPA-managed workloads now show state-appropriate `Scale to 0` or
-  `Resume from 0` actions instead of a disabled scale placeholder, while regular
-  workloads keep the existing `Scale` action.
-- The workload scale modal now includes a direct `Scale to 0` action with
-  confirmation before applying the change.
-- Resource refresh and streaming are now more consistently scoped per cluster.
-  - Background refresh fans out as separate per-cluster work instead of relying on aggregate refresh scopes.
-  - Resource streams now resume, resync, and fall back to snapshots more predictably when connections reset or data drift is detected.
-  - Resource stream row updates now carry full backend object identity and use the same projected row helpers as snapshots to reduce snapshot/stream drift.
-  - Snapshot and stream row construction are now contractually parity-tested for every streamed domain, so a field added to one path cannot silently drop on the other.
-  - Wire payloads for stream updates carry row identity only through `ref` (full `ResourceRef`); the legacy top-level identity fields have been retired now that all consumers read from `ref`.
-- GridTable behavior is more consistent across resource tables.
-  - Filtering, CSV export, column sizing, column visibility, keyboard navigation, focus handling, and persisted table state now share the same underlying table logic.
-- Container Logs and Node Logs now share more of the same viewer behavior.
-  - Search, filtering, JSON parsing, copy/export behavior, ANSI rendering, and scroll restoration are more consistent between the two log surfaces.
-- App preferences are now saved through a unified settings path.
-  - Settings use backend-provided defaults, validation, and bounds.
-  - Failed preference saves roll back optimistic frontend changes instead of leaving the UI and persisted settings out of sync.
+- Object panel and table actions are gated by an explicit per-action permission matrix (objectActionPermissionMatrix) derived from effective RBAC capabilities.
+- App preferences: the backend now owns the authoritative settings schema (defaults, validation, integer bounds, enum options); the Appearance / Advanced / Object Panel settings sections
+  derive slider ranges, enum lists, and clamps from that schema instead of hard-coded frontend constants.
+- Refresh subsystem: the refresh-domain registry now derives from a single JSON contract (backend/refresh/domain/refresh-domain-contract.json) shared by backend registrations and frontend
+  descriptors.
+- Resource stream row updates carry full backend object identity through ref (`ResourceRef`); the legacy top-level identity fields on the wire have been retired now that all consumers read
+  from ref.
+- Snapshot and stream row construction now share projected-row helpers and are parity-tested for every streamed domain, so a field added to one path cannot silently drop on the other.
+- Shell sessions, port-forwards, and node drains are tracked through a unified backend runtime-operation registry; SessionsStatus now sources its state from a single runtimeOperationStatus
+  reducer. (Internal refactor — the popover still surfaces shell sessions and port-forwards as before.)
+- Backend SIGSEGV sigstack workaround for Linux removed; no longer required under Wails 2.12.0.
 
 ### Fixed
 
-- Refresh rejects multi-cluster scopes by default, preventing accidental mixed-cluster state from being written to the refresh store.
-- Resource stream connection health and diagnostics are more accurate during reconnects, resets, and visibility changes.
-- GridTable row and cell lookups handle cluster-scoped keys and column keys without unsafe assumptions.
-- Node log fetching routes through the shared cluster data-access policy, so paused refresh behavior and diagnostics are handled consistently.
+- Shell-jump from the sessions status now verifies that the requested object-panel tab actually changed, surfacing dispatch failures instead of silently no-op'ing.
+- Shell session close paths routed through a single `closeShellSessionByID` helper and the runtime registry, fixing inconsistent status events when sessions were closed by user action vs.
+  cluster disconnect.
