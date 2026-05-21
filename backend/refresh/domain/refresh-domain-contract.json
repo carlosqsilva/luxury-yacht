@@ -1,5 +1,661 @@
 {
   "version": 2,
+  "domainInventory": {
+    "namespaces": {
+      "behaviorClass": "snapshot-table",
+      "scopeContract": {
+        "kind": "optional-namespace",
+        "clusterPrefix": "required",
+        "parser": "backend/refresh/snapshot/namespaces.go:NamespaceBuilder.Build",
+        "frontendBuilder": "frontend/src/core/refresh/clusterScope.ts:buildClusterScope",
+        "acceptedEncodings": ["", "<namespace>"]
+      },
+      "singleCluster": true,
+      "payloadOwner": "backend/refresh/snapshot.NamespaceBuilder",
+      "cachePolicy": "snapshot-cache-with-merge",
+      "streamSemantics": ["snapshot-replace"],
+      "coverageContract": "snapshot-table-payload",
+      "coverageStatus": "enforced"
+    },
+    "cluster-overview": {
+      "behaviorClass": "aggregate-snapshot",
+      "scopeContract": {
+        "kind": "cluster",
+        "clusterPrefix": "required",
+        "parser": "backend/refresh/snapshot/cluster_overview.go:ClusterOverviewBuilder.Build",
+        "frontendBuilder": "frontend/src/core/refresh/clusterScope.ts:buildClusterScope",
+        "acceptedEncodings": [""]
+      },
+      "singleCluster": true,
+      "payloadOwner": "backend/refresh/snapshot/cluster_overview.go:ClusterOverviewBuilder.Build",
+      "cachePolicy": "snapshot-cache",
+      "streamSemantics": ["snapshot-replace"],
+      "coverageContract": "aggregate-snapshot-permission-fallback",
+      "coverageStatus": "enforced"
+    },
+    "catalog": {
+      "behaviorClass": "catalog-stream",
+      "scopeContract": {
+        "kind": "catalog-query",
+        "clusterPrefix": "required",
+        "parser": "backend/refresh/snapshot/catalog.go:parseBrowseScope",
+        "frontendBuilder": "frontend/src/core/refresh/clusterScope.ts:buildClusterScope",
+        "acceptedEncodings": ["", "limit=<n>&namespace=<namespace>&kind=<kind>&search=<query>&continue=<token>"]
+      },
+      "singleCluster": true,
+      "payloadOwner": "backend/objectcatalog.Service",
+      "cachePolicy": "external-catalog-cache",
+      "streamSemantics": ["snapshot-replace", "append-merge"],
+      "coverageContract": "catalog-consistency",
+      "coverageStatus": "enforced"
+    },
+    "catalog-diff": {
+      "behaviorClass": "catalog-snapshot",
+      "scopeContract": {
+        "kind": "catalog-query",
+        "clusterPrefix": "required",
+        "parser": "backend/refresh/snapshot/catalog.go:parseBrowseScope",
+        "frontendBuilder": "frontend/src/ui/modals/ObjectDiffModal.tsx:buildCatalogDiffScope",
+        "acceptedEncodings": ["limit=<n>&namespace=<namespace>&kind=<kind>&search=<query>"]
+      },
+      "singleCluster": true,
+      "payloadOwner": "backend/objectcatalog.Service",
+      "cachePolicy": "external-catalog-cache-with-merge",
+      "streamSemantics": ["snapshot-replace"],
+      "coverageContract": "catalog-snapshot-query",
+      "coverageStatus": "enforced"
+    },
+    "nodes": {
+      "behaviorClass": "resource-stream-table",
+      "scopeContract": {
+        "kind": "resource-stream-selector",
+        "clusterPrefix": "required",
+        "parser": "backend/refresh/resourcestream/selector.go:ParseStreamSelector",
+        "frontendBuilder": "frontend/src/core/refresh/streaming/resourceStreamSubscriptions.ts:ResourceStreamSubscriptionStore:ResourceStreamSubscriptionStore",
+        "acceptedEncodings": [""]
+      },
+      "singleCluster": true,
+      "payloadOwner": "backend/refresh/snapshot.NodeBuilder",
+      "cachePolicy": "snapshot-cache",
+      "streamSemantics": ["snapshot-replace", "row-update", "complete-resync"],
+      "coverageContract": "resource-stream-row-parity",
+      "coverageStatus": "enforced"
+    },
+    "cluster-config": {
+      "behaviorClass": "resource-stream-table",
+      "scopeContract": {
+        "kind": "resource-stream-selector",
+        "clusterPrefix": "required",
+        "parser": "backend/refresh/resourcestream/selector.go:ParseStreamSelector",
+        "frontendBuilder": "frontend/src/core/refresh/streaming/resourceStreamSubscriptions.ts:ResourceStreamSubscriptionStore:ResourceStreamSubscriptionStore",
+        "acceptedEncodings": [""]
+      },
+      "singleCluster": true,
+      "payloadOwner": "backend/refresh/snapshot.ClusterConfigBuilder",
+      "cachePolicy": "snapshot-cache",
+      "streamSemantics": ["snapshot-replace", "row-update", "complete-resync"],
+      "coverageContract": "resource-stream-row-parity",
+      "coverageStatus": "enforced"
+    },
+    "cluster-crds": {
+      "behaviorClass": "resource-stream-table",
+      "scopeContract": {
+        "kind": "resource-stream-selector",
+        "clusterPrefix": "required",
+        "parser": "backend/refresh/resourcestream/selector.go:ParseStreamSelector",
+        "frontendBuilder": "frontend/src/core/refresh/streaming/resourceStreamSubscriptions.ts:ResourceStreamSubscriptionStore:ResourceStreamSubscriptionStore",
+        "acceptedEncodings": [""]
+      },
+      "singleCluster": true,
+      "payloadOwner": "backend/refresh/snapshot.ClusterCRDBuilder",
+      "cachePolicy": "snapshot-cache",
+      "streamSemantics": ["snapshot-replace", "row-update", "complete-resync"],
+      "coverageContract": "resource-stream-row-parity",
+      "coverageStatus": "enforced"
+    },
+    "cluster-custom": {
+      "behaviorClass": "resource-stream-table",
+      "scopeContract": {
+        "kind": "resource-stream-selector",
+        "clusterPrefix": "required",
+        "parser": "backend/refresh/resourcestream/selector.go:ParseStreamSelector",
+        "frontendBuilder": "frontend/src/core/refresh/streaming/resourceStreamSubscriptions.ts:ResourceStreamSubscriptionStore:ResourceStreamSubscriptionStore",
+        "acceptedEncodings": [""]
+      },
+      "singleCluster": true,
+      "payloadOwner": "backend/refresh/snapshot.ClusterCustomBuilder",
+      "cachePolicy": "snapshot-cache",
+      "streamSemantics": ["snapshot-replace", "row-update", "complete-resync"],
+      "coverageContract": "resource-stream-row-parity",
+      "coverageStatus": "enforced"
+    },
+    "cluster-events": {
+      "behaviorClass": "event-stream",
+      "scopeContract": {
+        "kind": "event-stream-scope",
+        "clusterPrefix": "required",
+        "parser": "backend/refresh/eventstream/handler.go:parseScope",
+        "frontendBuilder": "frontend/src/core/refresh/clusterScope.ts:buildClusterScope",
+        "acceptedEncodings": ["cluster"]
+      },
+      "singleCluster": true,
+      "payloadOwner": "backend/refresh/eventstream",
+      "cachePolicy": "snapshot-cache",
+      "streamSemantics": ["append-merge"],
+      "coverageContract": "event-resume-merge",
+      "coverageStatus": "enforced"
+    },
+    "cluster-rbac": {
+      "behaviorClass": "resource-stream-table",
+      "scopeContract": {
+        "kind": "resource-stream-selector",
+        "clusterPrefix": "required",
+        "parser": "backend/refresh/resourcestream/selector.go:ParseStreamSelector",
+        "frontendBuilder": "frontend/src/core/refresh/streaming/resourceStreamSubscriptions.ts:ResourceStreamSubscriptionStore:ResourceStreamSubscriptionStore",
+        "acceptedEncodings": [""]
+      },
+      "singleCluster": true,
+      "payloadOwner": "backend/refresh/snapshot.ClusterRBACBuilder",
+      "cachePolicy": "snapshot-cache",
+      "streamSemantics": ["snapshot-replace", "row-update", "complete-resync"],
+      "coverageContract": "resource-stream-row-parity",
+      "coverageStatus": "enforced"
+    },
+    "cluster-storage": {
+      "behaviorClass": "resource-stream-table",
+      "scopeContract": {
+        "kind": "resource-stream-selector",
+        "clusterPrefix": "required",
+        "parser": "backend/refresh/resourcestream/selector.go:ParseStreamSelector",
+        "frontendBuilder": "frontend/src/core/refresh/streaming/resourceStreamSubscriptions.ts:ResourceStreamSubscriptionStore:ResourceStreamSubscriptionStore",
+        "acceptedEncodings": [""]
+      },
+      "singleCluster": true,
+      "payloadOwner": "backend/refresh/snapshot.ClusterStorageBuilder",
+      "cachePolicy": "snapshot-cache",
+      "streamSemantics": ["snapshot-replace", "row-update", "complete-resync"],
+      "coverageContract": "resource-stream-row-parity",
+      "coverageStatus": "enforced"
+    },
+    "namespace-workloads": {
+      "behaviorClass": "resource-stream-table",
+      "scopeContract": {
+        "kind": "resource-stream-selector",
+        "clusterPrefix": "required",
+        "parser": "backend/refresh/resourcestream/selector.go:ParseStreamSelector",
+        "frontendBuilder": "frontend/src/core/refresh/streaming/resourceStreamSubscriptions.ts:ResourceStreamSubscriptionStore:ResourceStreamSubscriptionStore",
+        "acceptedEncodings": ["namespace:<namespace>", "namespace:all"]
+      },
+      "singleCluster": true,
+      "payloadOwner": "backend/refresh/snapshot.NamespaceWorkloadsBuilder",
+      "cachePolicy": "snapshot-cache",
+      "streamSemantics": ["snapshot-replace", "row-update", "complete-resync"],
+      "coverageContract": "resource-stream-row-parity",
+      "coverageStatus": "enforced"
+    },
+    "namespace-autoscaling": {
+      "behaviorClass": "resource-stream-table",
+      "scopeContract": {
+        "kind": "resource-stream-selector",
+        "clusterPrefix": "required",
+        "parser": "backend/refresh/resourcestream/selector.go:ParseStreamSelector",
+        "frontendBuilder": "frontend/src/core/refresh/streaming/resourceStreamSubscriptions.ts:ResourceStreamSubscriptionStore:ResourceStreamSubscriptionStore",
+        "acceptedEncodings": ["namespace:<namespace>", "namespace:all"]
+      },
+      "singleCluster": true,
+      "payloadOwner": "backend/refresh/snapshot.NamespaceAutoscalingBuilder",
+      "cachePolicy": "snapshot-cache",
+      "streamSemantics": ["snapshot-replace", "row-update", "complete-resync"],
+      "coverageContract": "resource-stream-row-parity",
+      "coverageStatus": "enforced"
+    },
+    "namespace-config": {
+      "behaviorClass": "resource-stream-table",
+      "scopeContract": {
+        "kind": "resource-stream-selector",
+        "clusterPrefix": "required",
+        "parser": "backend/refresh/resourcestream/selector.go:ParseStreamSelector",
+        "frontendBuilder": "frontend/src/core/refresh/streaming/resourceStreamSubscriptions.ts:ResourceStreamSubscriptionStore:ResourceStreamSubscriptionStore",
+        "acceptedEncodings": ["namespace:<namespace>", "namespace:all"]
+      },
+      "singleCluster": true,
+      "payloadOwner": "backend/refresh/snapshot.NamespaceConfigBuilder",
+      "cachePolicy": "snapshot-cache",
+      "streamSemantics": ["snapshot-replace", "row-update", "complete-resync"],
+      "coverageContract": "resource-stream-row-parity",
+      "coverageStatus": "enforced"
+    },
+    "namespace-custom": {
+      "behaviorClass": "resource-stream-table",
+      "scopeContract": {
+        "kind": "resource-stream-selector",
+        "clusterPrefix": "required",
+        "parser": "backend/refresh/resourcestream/selector.go:ParseStreamSelector",
+        "frontendBuilder": "frontend/src/core/refresh/streaming/resourceStreamSubscriptions.ts:ResourceStreamSubscriptionStore:ResourceStreamSubscriptionStore",
+        "acceptedEncodings": ["namespace:<namespace>", "namespace:all"]
+      },
+      "singleCluster": true,
+      "payloadOwner": "backend/refresh/snapshot.NamespaceCustomBuilder",
+      "cachePolicy": "snapshot-cache",
+      "streamSemantics": ["snapshot-replace", "row-update", "complete-resync"],
+      "coverageContract": "resource-stream-row-parity",
+      "coverageStatus": "enforced"
+    },
+    "namespace-events": {
+      "behaviorClass": "event-stream",
+      "scopeContract": {
+        "kind": "event-stream-scope",
+        "clusterPrefix": "required",
+        "parser": "backend/refresh/eventstream/handler.go:parseScope",
+        "frontendBuilder": "frontend/src/core/refresh/clusterScope.ts:buildClusterScope",
+        "acceptedEncodings": ["namespace:<namespace>"]
+      },
+      "singleCluster": true,
+      "payloadOwner": "backend/refresh/eventstream",
+      "cachePolicy": "snapshot-cache",
+      "streamSemantics": ["append-merge"],
+      "coverageContract": "event-resume-merge",
+      "coverageStatus": "enforced"
+    },
+    "namespace-helm": {
+      "behaviorClass": "complete-resync-stream",
+      "scopeContract": {
+        "kind": "resource-stream-selector",
+        "clusterPrefix": "required",
+        "parser": "backend/refresh/resourcestream/selector.go:ParseStreamSelector",
+        "frontendBuilder": "frontend/src/core/refresh/streaming/resourceStreamSubscriptions.ts:ResourceStreamSubscriptionStore:ResourceStreamSubscriptionStore",
+        "acceptedEncodings": ["namespace:<namespace>", "namespace:all"]
+      },
+      "singleCluster": true,
+      "payloadOwner": "backend/refresh/snapshot.NamespaceHelmBuilder",
+      "cachePolicy": "snapshot-cache",
+      "streamSemantics": ["snapshot-replace", "complete-resync"],
+      "coverageContract": "complete-resync-only",
+      "coverageStatus": "enforced"
+    },
+    "namespace-network": {
+      "behaviorClass": "resource-stream-table",
+      "scopeContract": {
+        "kind": "resource-stream-selector",
+        "clusterPrefix": "required",
+        "parser": "backend/refresh/resourcestream/selector.go:ParseStreamSelector",
+        "frontendBuilder": "frontend/src/core/refresh/streaming/resourceStreamSubscriptions.ts:ResourceStreamSubscriptionStore:ResourceStreamSubscriptionStore",
+        "acceptedEncodings": ["namespace:<namespace>", "namespace:all"]
+      },
+      "singleCluster": true,
+      "payloadOwner": "backend/refresh/snapshot.NamespaceNetworkBuilder",
+      "cachePolicy": "snapshot-cache",
+      "streamSemantics": ["snapshot-replace", "row-update", "complete-resync"],
+      "coverageContract": "resource-stream-row-parity",
+      "coverageStatus": "enforced"
+    },
+    "namespace-quotas": {
+      "behaviorClass": "resource-stream-table",
+      "scopeContract": {
+        "kind": "resource-stream-selector",
+        "clusterPrefix": "required",
+        "parser": "backend/refresh/resourcestream/selector.go:ParseStreamSelector",
+        "frontendBuilder": "frontend/src/core/refresh/streaming/resourceStreamSubscriptions.ts:ResourceStreamSubscriptionStore:ResourceStreamSubscriptionStore",
+        "acceptedEncodings": ["namespace:<namespace>", "namespace:all"]
+      },
+      "singleCluster": true,
+      "payloadOwner": "backend/refresh/snapshot.NamespaceQuotasBuilder",
+      "cachePolicy": "snapshot-cache",
+      "streamSemantics": ["snapshot-replace", "row-update", "complete-resync"],
+      "coverageContract": "resource-stream-row-parity",
+      "coverageStatus": "enforced"
+    },
+    "namespace-rbac": {
+      "behaviorClass": "resource-stream-table",
+      "scopeContract": {
+        "kind": "resource-stream-selector",
+        "clusterPrefix": "required",
+        "parser": "backend/refresh/resourcestream/selector.go:ParseStreamSelector",
+        "frontendBuilder": "frontend/src/core/refresh/streaming/resourceStreamSubscriptions.ts:ResourceStreamSubscriptionStore:ResourceStreamSubscriptionStore",
+        "acceptedEncodings": ["namespace:<namespace>", "namespace:all"]
+      },
+      "singleCluster": true,
+      "payloadOwner": "backend/refresh/snapshot.NamespaceRBACBuilder",
+      "cachePolicy": "snapshot-cache",
+      "streamSemantics": ["snapshot-replace", "row-update", "complete-resync"],
+      "coverageContract": "resource-stream-row-parity",
+      "coverageStatus": "enforced"
+    },
+    "namespace-storage": {
+      "behaviorClass": "resource-stream-table",
+      "scopeContract": {
+        "kind": "resource-stream-selector",
+        "clusterPrefix": "required",
+        "parser": "backend/refresh/resourcestream/selector.go:ParseStreamSelector",
+        "frontendBuilder": "frontend/src/core/refresh/streaming/resourceStreamSubscriptions.ts:ResourceStreamSubscriptionStore:ResourceStreamSubscriptionStore",
+        "acceptedEncodings": ["namespace:<namespace>", "namespace:all"]
+      },
+      "singleCluster": true,
+      "payloadOwner": "backend/refresh/snapshot.NamespaceStorageBuilder",
+      "cachePolicy": "snapshot-cache",
+      "streamSemantics": ["snapshot-replace", "row-update", "complete-resync"],
+      "coverageContract": "resource-stream-row-parity",
+      "coverageStatus": "enforced"
+    },
+    "pods": {
+      "behaviorClass": "resource-stream-table",
+      "scopeContract": {
+        "kind": "resource-stream-selector",
+        "clusterPrefix": "required",
+        "parser": "backend/refresh/resourcestream/selector.go:ParseStreamSelector",
+        "frontendBuilder": "frontend/src/core/refresh/streaming/resourceStreamSubscriptions.ts:ResourceStreamSubscriptionStore:ResourceStreamSubscriptionStore",
+        "acceptedEncodings": ["namespace:<namespace>", "namespace:all", "node:<node>", "workload:<namespace>:<group>:<version>:<kind>:<name>"]
+      },
+      "singleCluster": true,
+      "payloadOwner": "backend/refresh/snapshot.PodBuilder",
+      "cachePolicy": "snapshot-cache",
+      "streamSemantics": ["snapshot-replace", "row-update", "complete-resync"],
+      "coverageContract": "resource-stream-row-parity",
+      "coverageStatus": "enforced"
+    },
+    "object-details": {
+      "behaviorClass": "detail-payload",
+      "scopeContract": {
+        "kind": "object-ref",
+        "clusterPrefix": "required",
+        "parser": "backend/refresh/object_scope.go:ParseObjectScope",
+        "frontendBuilder": "frontend/src/core/refresh/clusterScope.ts:buildObjectScope",
+        "acceptedEncodings": ["<namespace>:<group>/<version>:<kind>:<name>", "__cluster__:<group>/<version>:<kind>:<name>"]
+      },
+      "singleCluster": true,
+      "payloadOwner": "backend/refresh/snapshot.ObjectDetailsBuilder",
+      "cachePolicy": "snapshot-cache-plus-provider-cache",
+      "streamSemantics": ["snapshot-replace"],
+      "coverageContract": "detail-payload-shape",
+      "coverageStatus": "enforced"
+    },
+    "object-yaml": {
+      "behaviorClass": "detail-payload",
+      "scopeContract": {
+        "kind": "object-ref",
+        "clusterPrefix": "required",
+        "parser": "backend/refresh/object_scope.go:ParseObjectScope",
+        "frontendBuilder": "frontend/src/core/refresh/clusterScope.ts:buildObjectScope",
+        "acceptedEncodings": ["<namespace>:<group>/<version>:<kind>:<name>", "__cluster__:<group>/<version>:<kind>:<name>"]
+      },
+      "singleCluster": true,
+      "payloadOwner": "backend/refresh/snapshot.ObjectYAMLBuilder",
+      "cachePolicy": "snapshot-cache-plus-provider-cache",
+      "streamSemantics": ["snapshot-replace"],
+      "coverageContract": "detail-payload-shape",
+      "coverageStatus": "enforced"
+    },
+    "object-helm-manifest": {
+      "behaviorClass": "helm-content-payload",
+      "scopeContract": {
+        "kind": "helm-release",
+        "clusterPrefix": "required",
+        "parser": "backend/refresh/snapshot/object_content.go:parseHelmScope",
+        "frontendBuilder": "frontend/src/modules/object-panel/components/ObjectPanel/hooks/getObjectPanelKind.ts:getObjectPanelKind",
+        "acceptedEncodings": ["<namespace>:<name>", "__cluster__:<name>"]
+      },
+      "singleCluster": true,
+      "payloadOwner": "backend/refresh/snapshot.ObjectHelmManifestBuilder",
+      "cachePolicy": "snapshot-cache-plus-provider-cache",
+      "streamSemantics": ["snapshot-replace"],
+      "coverageContract": "helm-content-shape",
+      "coverageStatus": "enforced"
+    },
+    "object-helm-values": {
+      "behaviorClass": "helm-content-payload",
+      "scopeContract": {
+        "kind": "helm-release",
+        "clusterPrefix": "required",
+        "parser": "backend/refresh/snapshot/object_content.go:parseHelmScope",
+        "frontendBuilder": "frontend/src/modules/object-panel/components/ObjectPanel/hooks/getObjectPanelKind.ts:getObjectPanelKind",
+        "acceptedEncodings": ["<namespace>:<name>", "__cluster__:<name>"]
+      },
+      "singleCluster": true,
+      "payloadOwner": "backend/refresh/snapshot.ObjectHelmValuesBuilder",
+      "cachePolicy": "snapshot-cache-plus-provider-cache",
+      "streamSemantics": ["snapshot-replace"],
+      "coverageContract": "helm-content-shape",
+      "coverageStatus": "enforced"
+    },
+    "object-events": {
+      "behaviorClass": "event-snapshot",
+      "scopeContract": {
+        "kind": "object-ref",
+        "clusterPrefix": "required",
+        "parser": "backend/refresh/object_scope.go:ParseObjectScope",
+        "frontendBuilder": "frontend/src/core/refresh/clusterScope.ts:buildObjectScope",
+        "acceptedEncodings": ["<namespace>:<group>/<version>:<kind>:<name>", "__cluster__:<group>/<version>:<kind>:<name>"]
+      },
+      "singleCluster": true,
+      "payloadOwner": "backend/refresh/snapshot.ObjectEventsBuilder",
+      "cachePolicy": "snapshot-cache",
+      "streamSemantics": ["snapshot-replace"],
+      "coverageContract": "event-snapshot-payload",
+      "coverageStatus": "enforced"
+    },
+    "object-map": {
+      "behaviorClass": "graph-payload",
+      "scopeContract": {
+        "kind": "object-map",
+        "clusterPrefix": "required",
+        "parser": "backend/refresh/snapshot/object_map.go:parseObjectMapScope",
+        "frontendBuilder": "frontend/src/core/refresh/clusterScope.ts:buildObjectScope",
+        "acceptedEncodings": ["<namespace>:<group>/<version>:<kind>:<name>", "__cluster__:<group>/<version>:<kind>:<name>", "<object-scope>?debug=1"]
+      },
+      "singleCluster": true,
+      "payloadOwner": "backend/refresh/snapshot.ObjectMapBuilder",
+      "cachePolicy": "snapshot-cache",
+      "streamSemantics": ["snapshot-replace"],
+      "coverageContract": "graph-payload-identity",
+      "coverageStatus": "enforced"
+    },
+    "object-maintenance": {
+      "behaviorClass": "operation-state",
+      "scopeContract": {
+        "kind": "node-maintenance",
+        "clusterPrefix": "required",
+        "parser": "backend/nodemaintenance/store.go:ParseScope",
+        "frontendBuilder": "frontend/src/shared/hooks/useNodeMaintenanceActions.tsx:useNodeMaintenanceActions",
+        "acceptedEncodings": ["", "node:<name>", "<name>"]
+      },
+      "singleCluster": true,
+      "payloadOwner": "backend/refresh/snapshot.NodeMaintenanceBuilder",
+      "cachePolicy": "snapshot-cache-bypass",
+      "streamSemantics": ["snapshot-replace"],
+      "coverageContract": "operation-state-transitions",
+      "coverageStatus": "enforced"
+    },
+    "container-logs": {
+      "behaviorClass": "log-stream",
+      "scopeContract": {
+        "kind": "log-stream-selector",
+        "clusterPrefix": "required",
+        "parser": "backend/refresh/containerlogsstream/handler.go:parseOptions",
+        "frontendBuilder": "frontend/src/modules/object-panel/components/ObjectPanel/hooks/getObjectPanelKind.ts:getObjectPanelKind",
+        "acceptedEncodings": ["<namespace>:<group>/<version>:<kind>:<name>?container=<container>&tail=<n>"]
+      },
+      "singleCluster": true,
+      "payloadOwner": "backend/refresh/containerlogsstream",
+      "cachePolicy": "stream-only",
+      "streamSemantics": ["line-stream"],
+      "coverageContract": "log-stream-lifecycle",
+      "coverageStatus": "enforced"
+    }
+  },
+  "resourceStream": {
+    "updateIdentity": {
+      "rowUpdates": "ref",
+      "rowDeletes": "ref",
+      "legacyFieldsDuringMigration": [],
+      "completeSemantics": "scope-level-resync",
+      "completeIdentity": "diagnostic-only"
+    },
+    "domains": {
+      "pods": {
+        "scopeKind": "pod",
+        "metricsDependency": true,
+        "completeIsScopeLevel": true,
+        "primaryResources": [{"group": "", "version": "v1", "kind": "Pod", "resource": "pods"}],
+        "relatedResources": [{"group": "apps", "version": "v1", "kind": "ReplicaSet", "resource": "replicasets"}]
+      },
+      "namespace-workloads": {
+        "scopeKind": "namespace",
+        "metricsDependency": true,
+        "completeIsScopeLevel": true,
+        "primaryResources": [
+          {"group": "apps", "version": "v1", "kind": "Deployment", "resource": "deployments"},
+          {"group": "apps", "version": "v1", "kind": "StatefulSet", "resource": "statefulsets"},
+          {"group": "apps", "version": "v1", "kind": "DaemonSet", "resource": "daemonsets"},
+          {"group": "batch", "version": "v1", "kind": "Job", "resource": "jobs"},
+          {"group": "batch", "version": "v1", "kind": "CronJob", "resource": "cronjobs"},
+          {"group": "", "version": "v1", "kind": "Pod", "resource": "pods"}
+        ],
+        "relatedResources": [
+          {"group": "", "version": "v1", "kind": "Pod", "resource": "pods"},
+          {"group": "apps", "version": "v1", "kind": "ReplicaSet", "resource": "replicasets"},
+          {"group": "autoscaling", "version": "v1", "kind": "HorizontalPodAutoscaler", "resource": "horizontalpodautoscalers"}
+        ]
+      },
+      "namespace-config": {
+        "scopeKind": "namespace",
+        "metricsDependency": false,
+        "completeIsScopeLevel": true,
+        "primaryResources": [
+          {"group": "", "version": "v1", "kind": "ConfigMap", "resource": "configmaps"},
+          {"group": "", "version": "v1", "kind": "Secret", "resource": "secrets"}
+        ],
+        "relatedResources": []
+      },
+      "namespace-network": {
+        "scopeKind": "namespace",
+        "metricsDependency": false,
+        "completeIsScopeLevel": true,
+        "primaryResources": [
+          {"group": "", "version": "v1", "kind": "Service", "resource": "services"},
+          {"group": "discovery.k8s.io", "version": "v1", "kind": "EndpointSlice", "resource": "endpointslices"},
+          {"group": "networking.k8s.io", "version": "v1", "kind": "Ingress", "resource": "ingresses"},
+          {"group": "networking.k8s.io", "version": "v1", "kind": "NetworkPolicy", "resource": "networkpolicies"},
+          {"group": "gateway.networking.k8s.io", "version": "v1", "kind": "Gateway", "resource": "gateways"},
+          {"group": "gateway.networking.k8s.io", "version": "v1", "kind": "HTTPRoute", "resource": "httproutes"},
+          {"group": "gateway.networking.k8s.io", "version": "v1", "kind": "GRPCRoute", "resource": "grpcroutes"},
+          {"group": "gateway.networking.k8s.io", "version": "v1", "kind": "TLSRoute", "resource": "tlsroutes"},
+          {"group": "gateway.networking.k8s.io", "version": "v1", "kind": "ListenerSet", "resource": "listenersets"},
+          {"group": "gateway.networking.k8s.io", "version": "v1", "kind": "ReferenceGrant", "resource": "referencegrants"},
+          {"group": "gateway.networking.k8s.io", "version": "v1", "kind": "BackendTLSPolicy", "resource": "backendtlspolicies"}
+        ],
+        "relatedResources": [{"group": "discovery.k8s.io", "version": "v1", "kind": "EndpointSlice", "resource": "endpointslices"}]
+      },
+      "namespace-rbac": {
+        "scopeKind": "namespace",
+        "metricsDependency": false,
+        "completeIsScopeLevel": true,
+        "primaryResources": [
+          {"group": "rbac.authorization.k8s.io", "version": "v1", "kind": "Role", "resource": "roles"},
+          {"group": "rbac.authorization.k8s.io", "version": "v1", "kind": "RoleBinding", "resource": "rolebindings"},
+          {"group": "", "version": "v1", "kind": "ServiceAccount", "resource": "serviceaccounts"}
+        ],
+        "relatedResources": []
+      },
+      "namespace-custom": {
+        "scopeKind": "namespace",
+        "metricsDependency": false,
+        "completeIsScopeLevel": true,
+        "primaryResources": [],
+        "relatedResources": [{"group": "apiextensions.k8s.io", "version": "v1", "kind": "CustomResourceDefinition", "resource": "customresourcedefinitions"}]
+      },
+      "namespace-helm": {
+        "scopeKind": "namespace",
+        "metricsDependency": false,
+        "completeIsScopeLevel": true,
+        "rowProjection": "scope-level-complete-only",
+        "primaryResources": [
+          {"group": "", "version": "v1", "kind": "Secret", "resource": "secrets"},
+          {"group": "", "version": "v1", "kind": "ConfigMap", "resource": "configmaps"}
+        ],
+        "relatedResources": [
+          {"group": "", "version": "v1", "kind": "Secret", "resource": "secrets"},
+          {"group": "", "version": "v1", "kind": "ConfigMap", "resource": "configmaps"}
+        ],
+        "syntheticRowKind": {"group": "helm.sh", "version": "v3", "kind": "HelmRelease", "resource": "releases"}
+      },
+      "namespace-autoscaling": {
+        "scopeKind": "namespace",
+        "metricsDependency": false,
+        "completeIsScopeLevel": true,
+        "primaryResources": [{"group": "autoscaling", "version": "v1", "kind": "HorizontalPodAutoscaler", "resource": "horizontalpodautoscalers"}],
+        "relatedResources": []
+      },
+      "namespace-quotas": {
+        "scopeKind": "namespace",
+        "metricsDependency": false,
+        "completeIsScopeLevel": true,
+        "primaryResources": [
+          {"group": "", "version": "v1", "kind": "ResourceQuota", "resource": "resourcequotas"},
+          {"group": "", "version": "v1", "kind": "LimitRange", "resource": "limitranges"},
+          {"group": "policy", "version": "v1", "kind": "PodDisruptionBudget", "resource": "poddisruptionbudgets"}
+        ],
+        "relatedResources": []
+      },
+      "namespace-storage": {
+        "scopeKind": "namespace",
+        "metricsDependency": false,
+        "completeIsScopeLevel": true,
+        "primaryResources": [{"group": "", "version": "v1", "kind": "PersistentVolumeClaim", "resource": "persistentvolumeclaims"}],
+        "relatedResources": []
+      },
+      "cluster-rbac": {
+        "scopeKind": "cluster",
+        "metricsDependency": false,
+        "completeIsScopeLevel": true,
+        "primaryResources": [
+          {"group": "rbac.authorization.k8s.io", "version": "v1", "kind": "ClusterRole", "resource": "clusterroles"},
+          {"group": "rbac.authorization.k8s.io", "version": "v1", "kind": "ClusterRoleBinding", "resource": "clusterrolebindings"}
+        ],
+        "relatedResources": []
+      },
+      "cluster-storage": {
+        "scopeKind": "cluster",
+        "metricsDependency": false,
+        "completeIsScopeLevel": true,
+        "primaryResources": [{"group": "", "version": "v1", "kind": "PersistentVolume", "resource": "persistentvolumes"}],
+        "relatedResources": []
+      },
+      "cluster-config": {
+        "scopeKind": "cluster",
+        "metricsDependency": false,
+        "completeIsScopeLevel": true,
+        "primaryResources": [
+          {"group": "storage.k8s.io", "version": "v1", "kind": "StorageClass", "resource": "storageclasses"},
+          {"group": "networking.k8s.io", "version": "v1", "kind": "IngressClass", "resource": "ingressclasses"},
+          {"group": "gateway.networking.k8s.io", "version": "v1", "kind": "GatewayClass", "resource": "gatewayclasses"},
+          {"group": "admissionregistration.k8s.io", "version": "v1", "kind": "ValidatingWebhookConfiguration", "resource": "validatingwebhookconfigurations"},
+          {"group": "admissionregistration.k8s.io", "version": "v1", "kind": "MutatingWebhookConfiguration", "resource": "mutatingwebhookconfigurations"}
+        ],
+        "relatedResources": []
+      },
+      "cluster-crds": {
+        "scopeKind": "cluster",
+        "metricsDependency": false,
+        "completeIsScopeLevel": true,
+        "primaryResources": [{"group": "apiextensions.k8s.io", "version": "v1", "kind": "CustomResourceDefinition", "resource": "customresourcedefinitions"}],
+        "relatedResources": []
+      },
+      "cluster-custom": {
+        "scopeKind": "cluster",
+        "metricsDependency": false,
+        "completeIsScopeLevel": true,
+        "primaryResources": [],
+        "relatedResources": [{"group": "apiextensions.k8s.io", "version": "v1", "kind": "CustomResourceDefinition", "resource": "customresourcedefinitions"}]
+      },
+      "nodes": {
+        "scopeKind": "cluster",
+        "metricsDependency": true,
+        "completeIsScopeLevel": true,
+        "primaryResources": [{"group": "", "version": "v1", "kind": "Node", "resource": "nodes"}],
+        "relatedResources": [{"group": "", "version": "v1", "kind": "Pod", "resource": "pods"}]
+      }
+    }
+  },
   "domains": [
     {
       "domain": "namespaces",

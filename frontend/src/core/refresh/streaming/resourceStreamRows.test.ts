@@ -39,9 +39,14 @@ describe('resource stream row helpers', () => {
         {
           type: 'DELETED',
           clusterId: 'cluster-a',
-          namespace: 'default',
-          kind: 'ConfigMap',
-          name: 'settings',
+          ref: {
+            clusterId: 'cluster-a',
+            group: '',
+            version: 'v1',
+            kind: 'ConfigMap',
+            namespace: 'default',
+            name: 'settings',
+          },
         },
       ],
       'cluster-a',
@@ -68,9 +73,14 @@ describe('resource stream row helpers', () => {
         {
           type: 'MODIFIED',
           clusterId: 'cluster-a',
-          namespace: 'default',
-          kind: 'ConfigMap',
-          name: 'settings',
+          ref: {
+            clusterId: 'cluster-a',
+            group: '',
+            version: 'v1',
+            kind: 'ConfigMap',
+            namespace: 'default',
+            name: 'settings',
+          },
           row: { ...existingRow },
         },
       ],
@@ -88,9 +98,14 @@ describe('resource stream row helpers', () => {
         {
           type: 'MODIFIED',
           clusterId: 'cluster-a',
-          namespace: 'default',
-          kind: 'ConfigMap',
-          name: 'settings',
+          ref: {
+            clusterId: 'cluster-a',
+            group: '',
+            version: 'v1',
+            kind: 'ConfigMap',
+            namespace: 'default',
+            name: 'settings',
+          },
           row: { ...existingRow, details: 'new' },
         },
       ],
@@ -102,6 +117,40 @@ describe('resource stream row helpers', () => {
     expect(changedRows).not.toBe(unchangedRows);
     expect(changedRows[0]).not.toBe(existingRow);
     expect(changedRows[0].details).toBe('new');
+  });
+
+  it('ignores row updates without canonical ref identity', () => {
+    const existingRow = {
+      clusterId: 'cluster-a',
+      namespace: 'default',
+      kind: 'ConfigMap',
+      name: 'settings',
+      details: 'old',
+    };
+    const existingRows = [existingRow];
+
+    const nextRows = applyResourceRowUpdates(
+      existingRows,
+      [
+        {
+          type: 'DELETED',
+          clusterId: 'cluster-a',
+          row: { ...existingRow },
+        },
+        {
+          type: 'MODIFIED',
+          clusterId: 'cluster-a',
+          row: { ...existingRow, details: 'new' },
+        },
+      ],
+      'cluster-a',
+      namespaceConfigCollection,
+      false
+    );
+
+    expect(nextRows).toBe(existingRows);
+    expect(nextRows[0]).toBe(existingRow);
+    expect(nextRows[0].details).toBe('old');
   });
 
   it('replaces snapshot rows only for the target cluster', () => {

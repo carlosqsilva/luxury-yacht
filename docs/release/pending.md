@@ -4,13 +4,17 @@
 
 ### Changed
 
-- HPA-managed workloads now show explicit `Scale to 0` and `Resume from 0`
-  actions instead of a disabled scale placeholder, while regular workloads keep
-  the existing `Scale` action.
-- The workload scale modal now includes a direct `Scale to 0` action.
+- HPA-managed workloads now show state-appropriate `Scale to 0` or
+  `Resume from 0` actions instead of a disabled scale placeholder, while regular
+  workloads keep the existing `Scale` action.
+- The workload scale modal now includes a direct `Scale to 0` action with
+  confirmation before applying the change.
 - Resource refresh and streaming are now more consistently scoped per cluster.
   - Background refresh fans out as separate per-cluster work instead of relying on aggregate refresh scopes.
   - Resource streams now resume, resync, and fall back to snapshots more predictably when connections reset or data drift is detected.
+  - Resource stream row updates now carry full backend object identity and use the same projected row helpers as snapshots to reduce snapshot/stream drift.
+  - Snapshot and stream row construction are now contractually parity-tested for every streamed domain, so a field added to one path cannot silently drop on the other.
+  - Wire payloads for stream updates carry row identity only through `ref` (full `ResourceRef`); the legacy top-level identity fields have been retired now that all consumers read from `ref`.
 - GridTable behavior is more consistent across resource tables.
   - Filtering, CSV export, column sizing, column visibility, keyboard navigation, focus handling, and persisted table state now share the same underlying table logic.
 - Container Logs and Node Logs now share more of the same viewer behavior.

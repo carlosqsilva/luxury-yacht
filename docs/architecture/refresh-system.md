@@ -5,6 +5,7 @@ streaming endpoints, and a frontend orchestrator that scopes every request to
 exactly one relevant cluster.
 
 See [README.md](README.md) for the architecture doc map.
+checks before releases or after high-risk refresh subsystem changes.
 
 ## Quick Model
 
@@ -69,10 +70,43 @@ Frontend domain registrations live in
 `backend/refresh/domain/refresh-domain-contract.json` is the authored metadata
 contract for domain category, frontend refresher name, timing, diagnostics
 stream, orchestrator kind, backend registration kind, runtime permission policy,
-and resource-stream participation. `frontend/src/core/refresh/domainRegistry.ts`
+resource-stream participation, and `domainInventory` behavior metadata.
+`domainInventory` is keyed by the same domain id as `domains[]` and names each
+domain's behavior class, scope contract, cache policy, stream semantics,
+payload owner, and coverage contract. `frontend/src/core/refresh/domainRegistry.ts`
 imports that contract directly and derives the frontend descriptor maps from it.
 Backend and frontend refresh-domain tests validate that explicit registration
 and behavior code still matches the contract.
+
+The domain id is the join key across all refresh contract homes. Do not add
+parallel aliases for renamed domains. If a domain or behavior class changes,
+rename it through the JSON, backend/frontend registrations, and tests in one
+change so stale names fail contract checks.
+
+Behavior classes describe correctness rules, not implementation inheritance:
+
+- `snapshot-table` and `aggregate-snapshot` are whole-payload snapshot domains.
+  `namespaces` is a snapshot-table projection over namespace objects; it carries
+  a full namespace `ref` so typed namespace UI can stay compatible with the
+  object catalog's canonical identity and existence model.
+  `cluster-overview` is an aggregate snapshot; its payload preserves the
+  cluster-prefixed request scope and includes full involved-object links for
+  recent warning event drill-downs when Kubernetes supplies enough identity.
+- `resource-stream-table` domains use snapshot baselines plus row
+  update/delete and scope-level COMPLETE stream semantics.
+- `complete-resync-stream` domains, currently `namespace-helm`, share the
+  resource stream transport but use COMPLETE as a scope-level change detector
+  instead of row updates. The frontend treats any row-style message for these
+  domains as a resync signal and does not apply targeted row mutations.
+- `catalog-stream`, `event-stream`, and `log-stream` use stream-specific
+  reducers on top of catalog/event/log transports.
+- `catalog-snapshot`, `event-snapshot`, `detail-payload`,
+  `helm-content-payload`, `graph-payload`, and `operation-state` are scoped
+  snapshot payloads with class-specific payload and cache rules.
+
+Keep shared lifecycle plumbing consolidated where behavior allows it, but do
+not collapse class-specific reducers into a generic stream or snapshot handler
+when their identity, merge, cache, or recovery semantics differ.
 
 Current frontend domains are fully scoped and single-cluster by contract. The
 orchestrator normalizes every scope with `buildClusterScope` from
@@ -253,9 +287,26 @@ Streaming behavior is registered per domain in the orchestrator:
 - `catalog` uses SSE snapshots from the object catalog and also supports normal
   snapshot fetches for startup, filtering, pagination, and manual requests.
 - `cluster-events` and `namespace-events` use SSE and keep an in-memory sorted
-  event list with merge-by-UID behavior.
-- `container-logs` streams object-panel log lines and has a log-viewer fallback
-  path when streaming is unavailable.
+  event list with merge-by-UID behavior. Event SSE payloads use monotonic
+  per-scope sequence IDs; reconnects send `since=<sequence>` and the backend
+  replays buffered events when the token is still inside the resume window. If
+  the token is older than the buffer, the handler falls back to a fresh
+  snapshot reset.
+- `object-events` is a snapshot-only event payload for one fully identified
+  object scope. It carries event identity (`name`, `uid`, `resourceVersion`),
+  display fields for the involved object, and a separate openable
+  `involvedObject` `ResourceLink` when Kubernetes supplied enough GVK identity.
+  It does not use event SSE resume semantics.
+- `container-logs` is a stream-only log domain for object-panel scopes. Its
+  scope is the cluster-prefixed, namespaced object scope
+  `<cluster>|<namespace>:<group>/<version>:<kind>:<name>` plus log query
+  filters such as container and selected pod/container targets. The backend
+  sends an empty `reset=true` connection frame, then a timestamp-sorted initial
+  tail, then line append frames. Reconnect dedupe is server-side using
+  Kubernetes `SinceTime` plus the set of lines seen at the last timestamp; the
+  frontend keeps its buffer across empty reset frames and uses fallback polling
+  through `FetchContainerLogs` only when streaming is unavailable. Log rows do
+  not join resource-stream table contracts.
 
 `fetchScopedDomain` behavior for streaming domains:
 
@@ -272,11 +323,75 @@ Streaming behavior is registered per domain in the orchestrator:
 - If a stream is inactive, unhealthy, blocked by drift detection, or disabled by
   the current view/context, snapshot polling remains the fallback.
 
+Frontend SSE streams share transport primitives in
+`frontend/src/core/refresh/streaming/sseStreamTransport.ts`. Event, catalog, and
+container-log managers use that helper for EventSource URL creation and
+listener cleanup. They share reconnect delay calculation through
+`streamTiming.ts` and visibility suspend/resume through
+`streamVisibilityController.ts`. The resource WebSocket path uses the same
+reconnect timing helper and visibility controller for
+pause/resume and resync after the app becomes visible again. Stream error
+notification and short kubeconfig-change suppression are centralized in
+`streamErrorNotifier.ts`; the resource WebSocket path uses the same notifier for
+terminal stream errors. Keep reducers separate: event streams own
+ordering/dedupe/resume tokens, catalog streams own snapshot-shaped
+merge/fallback behavior, log streams own line buffers, warnings, filters, and
+fallback polling, and resource streams own row update/delete/COMPLETE resync
+semantics.
+
 Resource stream safety rules:
 
 - Descriptors in `resourceStreamDomains.ts` describe row behavior only: scope
   kind, row collection access, row identity, drift keys, sorting, and metrics
   preservation. They must not encode multi-cluster capability flags.
+- `ResourceStreamManager` applies ready/resync/error store status transitions
+  through one domain-id path. Do not reintroduce copied branches for each
+  resource-stream domain; per-domain differences belong in descriptors,
+  snapshot builders, or row projectors.
+- Row updates and row deletes carry a top-level `ref` with the full
+  `resourcemodel.ResourceRef` identity. Row identity flows only through `ref`;
+  the legacy top-level fields (`uid`, `name`, `namespace`, `kind`, `apiGroup`,
+  `apiVersion`) have been removed from the wire payload. `clusterId` /
+  `clusterName` remain on the envelope as routing metadata that applies to
+  every message type (including control messages without a row `ref`).
+  Frontend row update/delete keys are built only from `ref`; an update without
+  a complete row `ref` is ignored instead of being guessed from row fields.
+- `COMPLETE` remains a scope-level control message that triggers a full
+  subscription resync. Any identity carried on `COMPLETE` is diagnostic context,
+  not a targeted row invalidation contract. CRD signature changes and Helm
+  release identity churn both fan out as scope-level `COMPLETE` messages and
+  attach the originating object's `ref` for diagnostic visibility only.
+- Stream selectors are typed: `resourcestream.StreamSelector` carries
+  `ClusterID`, `Domain`, `ScopeKind` and the scope-kind-specific fields
+  (`Namespace`, `Node`, or full-GVK `Workload`). Transport scope strings are
+  validated and canonicalized at the WebSocket boundary via
+  `ParseStreamSelector`; the canonical selector string remains the subscription
+  key. Selectors become a concrete `ResourceRef` only when resolving a specific
+  affected row.
+- Snapshot vs stream row parity is enforced by
+  `backend/refresh/snapshot/parity_test.go`. For every domain returned by
+  `resourcestream.SupportedDomains()` the harness runs the canonical snapshot
+  builder and the per-row `Build*Summary` projector against the same fixture
+  inputs and asserts byte-equality on the JSON. The sister test
+  `TestSnapshotStreamRowParityCoversAllSupportedDomains` locks the harness to
+  the registry so a new domain cannot ship without a parity case (or an
+  explicit, documented exclusion — `namespace-helm` is the only excluded
+  domain because its stream contract is scope-level COMPLETE only).
+- Per-domain stream projection metadata (scope kind, primary/related
+  resources, metrics dependency, complete-is-scope-level) is authored in the
+  `resourceStream.domains` block of
+  `backend/refresh/domain/refresh-domain-contract.json`. The backend test
+  `TestResourceStreamDomainsMatchProjectionDescriptors` locks the JSON to
+  `resourcestream.ProjectionDescriptors()`; the frontend test
+  `resource stream domain descriptors > matches the backend-authored projection
+contract` locks `resourceStreamDomainDescriptors.scopeKind` /
+  `.preserveMetrics` / `.isClusterScoped` to the same JSON.
+- Metric-bearing projectors (`BuildPodSummary`, `BuildWorkloadSummary`,
+  `BuildNodeSummary`) accept the latest usage snapshot as parameters rather
+  than reading from a `metrics.Provider` internally. Stream handlers fetch
+  usage once per event via `Manager.podMetricsSnapshot()` /
+  `Manager.nodeMetricsSnapshot()` and pass it in, so parity tests can drive
+  both the snapshot and stream paths with the same fixture.
 - Keep implementation ownership split: `resourceStreamRows.ts` owns pure row
   math; `ResourceStreamManager` owns store mutation, resync, drift, health,
   telemetry, and fallback decisions; `ResourceStreamConnection` owns WebSocket
@@ -308,9 +423,12 @@ Resource stream safety rules:
 
 ## Catalog Integration
 
-The object catalog owns discovery, canonical object identity, namespace
-metadata, and browse query semantics. See [catalog.md](catalog.md) for service
-lifecycle, lookup/query APIs, freshness, and Browse ownership.
+The object catalog owns discovery, canonical object identity, object existence,
+namespace and cluster listing metadata, and browse query semantics. See
+[catalog.md](catalog.md) for service lifecycle, lookup/query APIs, freshness,
+and Browse ownership. Refresh domains that need to answer "what objects exist?"
+or "which namespaces/clusters can be browsed?" must query or project from the
+catalog instead of rebuilding those inventories locally.
 
 Refresh-specific integration points:
 
@@ -321,6 +439,9 @@ Refresh-specific integration points:
 - Catalog stream events are snapshot-shaped and apply through the refresh store.
 - Manual/filter/pagination requests still use snapshot fetches; SSE is not a
   replacement for query-specific fetches.
+- The `catalog-diff` domain reuses the catalog snapshot/query payload for object
+  diff workflows through the snapshot orchestrator. It does not participate in
+  catalog stream diagnostics, resume, or stream-health contracts.
 - `snapshotMode: full|partial` describes backend batching of snapshot payloads,
   not a separate UI pagination model.
 
@@ -346,6 +467,13 @@ Regression guards live in
 `backend/refresh/snapshot/streaming_helpers_test.go`. When adding a field, add or
 extend the matching `TestBuild*SummaryPopulatesAllFields` assertion.
 
+Resource stream handlers must not construct row payloads by assigning `Row`
+directly. The backend guardrail in
+`backend/refresh/resourcestream/update_guardrail_test.go` allows row assignment
+only inside shared update/projection helpers, so stream handlers resolve changed
+objects and call the canonical snapshot projection helper instead of building a
+parallel DTO.
+
 Exceptions still have one constructor path:
 
 - `PodSummary` delegates through the internal `buildPodSummary`.
@@ -367,10 +495,22 @@ Kubeconfig changes are a full refresh lifecycle reset:
 uses an informer-based builder when nodes/pods/namespaces list/watch permissions
 exist and falls back to list-only behavior when required.
 
-Object-panel refresh scopes must use canonical object identity. `object-details`,
-`object-events`, `object-yaml`, Helm manifest/value domains, and `object-map`
-use cluster-prefixed object scopes; logs use `container-logs` streaming with
-fallback polling in the log viewer.
+Object-panel refresh scopes must use canonical identity for the payload they
+load. `object-details`, `object-events`, and `object-yaml` use cluster-prefixed
+full object scopes parsed by `ParseObjectScope`. Helm manifest/value domains use
+cluster-prefixed Helm release scopes in `namespace:name` form and keep rendered
+manifest resource links as full `ResourceLink` values when the target kind is
+openable. `object-map` uses cluster-prefixed object-map scopes and must return
+nodes and edges whose ids resolve to full object references. `object-maintenance`
+uses cluster-prefixed `aggregate` or `node:<name>` scopes, bypasses the snapshot
+cache/singleflight path, and filters drain state by `clusterId`. Logs use
+`container-logs` streaming with fallback polling in the log viewer.
+
+Polling snapshot merge reuse is centralized in
+`frontend/src/core/refresh/snapshotMerge.ts` as a domain-keyed descriptor table.
+A domain may opt in only when it can name a collection field and a stable
+full-identity key without hiding payload-specific semantics. Current opt-ins are
+`namespaces`, `catalog-diff`, and `object-maintenance`.
 
 ## Adding Or Updating Domains
 

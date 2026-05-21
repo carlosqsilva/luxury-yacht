@@ -744,7 +744,13 @@ func BuildPodDisruptionBudgetSummary(meta ClusterMeta, pdb *policyv1.PodDisrupti
 }
 
 // BuildWorkloadSummary builds a workload row payload for a single workload object.
-func BuildWorkloadSummary(meta ClusterMeta, obj interface{}, pods []*corev1.Pod, usage map[string]metrics.PodUsage) (WorkloadSummary, error) {
+func BuildWorkloadSummary(
+	meta ClusterMeta,
+	obj interface{},
+	pods []*corev1.Pod,
+	usage map[string]metrics.PodUsage,
+	hpas ...*autoscalingv1.HorizontalPodAutoscaler,
+) (WorkloadSummary, error) {
 	podsByOwner := make(map[string][]*corev1.Pod)
 	for _, pod := range pods {
 		if pod == nil {
@@ -774,23 +780,44 @@ func BuildWorkloadSummary(meta ClusterMeta, obj interface{}, pods []*corev1.Pod,
 	}
 
 	summary.ClusterMeta = meta
+	managed := false
+	if _, ok := buildHPATargetSet(hpas)[workloadHPATargetKey(summary)]; ok {
+		managed = true
+	}
+	summary.HPAManaged = &managed
 	return summary, nil
 }
 
 // BuildStandalonePodWorkloadSummary builds a workload row payload for a standalone pod entry.
-func BuildStandalonePodWorkloadSummary(meta ClusterMeta, pod *corev1.Pod, usage map[string]metrics.PodUsage) WorkloadSummary {
+func BuildStandalonePodWorkloadSummary(
+	meta ClusterMeta,
+	pod *corev1.Pod,
+	usage map[string]metrics.PodUsage,
+	hpas ...*autoscalingv1.HorizontalPodAutoscaler,
+) WorkloadSummary {
 	summary := buildStandalonePodSummary(meta.ClusterID, pod, usage)
 	summary.ClusterMeta = meta
+	managed := false
+	if _, ok := buildHPATargetSet(hpas)[workloadHPATargetKey(summary)]; ok {
+		managed = true
+	}
+	summary.HPAManaged = &managed
 	return summary
 }
 
-// BuildNodeSummary builds a node row payload from the supplied node and pod list.
-func BuildNodeSummary(meta ClusterMeta, node *corev1.Node, pods []*corev1.Pod, provider metrics.Provider) (NodeSummary, error) {
+// BuildNodeSummary builds a node row payload from the supplied node, pod
+// list, and pre-resolved metrics maps. The metrics-as-parameter contract
+// (see resource-stream projection plan, Phase 5) keeps the projector
+// deterministic: stream handlers fetch the latest usage snapshot once
+// per event and pass it in, so parity tests can drive snapshot and
+// stream paths with the same fixtures. Pass nil maps to render a node
+// row without metrics — both maps are treated as empty.
+func BuildNodeSummary(meta ClusterMeta, node *corev1.Node, pods []*corev1.Pod, nodeUsage map[string]metrics.NodeUsage, podUsage map[string]metrics.PodUsage) (NodeSummary, error) {
 	if node == nil {
 		return NodeSummary{}, errors.New("node is nil")
 	}
 	ctx := WithClusterMeta(context.Background(), meta)
-	snap := buildNodeSnapshot(ctx, []*corev1.Node{node}, pods, provider)
+	snap := buildNodeSnapshotFromUsage(ctx, []*corev1.Node{node}, pods, nodeUsageOrEmpty(nodeUsage), podUsageOrEmpty(podUsage), metrics.Metadata{})
 	if snap == nil {
 		return NodeSummary{}, errors.New("node snapshot unavailable")
 	}

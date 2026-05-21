@@ -15,6 +15,7 @@ import Tooltip from '@shared/components/Tooltip';
 import { Dropdown } from '@shared/components/dropdowns/Dropdown';
 import type { DropdownOption } from '@shared/components/dropdowns/Dropdown';
 import { useObjectActionController } from '@shared/hooks/useObjectActionController';
+import type { ObjectActionData } from '@shared/hooks/useObjectActions';
 import { OBJECT_MAP_EDGE_FAMILY_LABELS, objectMapEdgeClass } from './objectMapEdgeStyle';
 import type { EdgeKindMeta } from './objectMapEdgeStyle';
 import type { ObjectMapContextMenuRequest } from './objectMapRendererTypes';
@@ -58,6 +59,17 @@ type ObjectMapLegendGroup = {
   label: string;
   entries: EdgeKindMeta[];
 };
+
+const objectMapReferenceKey = (ref: ObjectMapReference): string =>
+  [
+    ref.clusterId,
+    ref.group,
+    ref.version,
+    ref.kind,
+    ref.namespace ?? '',
+    ref.name,
+    ref.uid ?? '',
+  ].join('\u0000');
 
 export interface ObjectMapProps {
   payload: ObjectMapSnapshotPayload;
@@ -309,7 +321,25 @@ const ObjectMap: React.FC<ObjectMapProps> = ({
     visibleState.visibleLayout.nodes.length,
   ]);
 
-  const contextMenuObject = contextMenu?.type === 'object' ? contextMenu.request.ref : null;
+  const nodeByReference = useMemo(
+    () => new Map(payload.nodes.map((node) => [objectMapReferenceKey(node.ref), node])),
+    [payload.nodes]
+  );
+  const contextMenuObject = useMemo<ObjectActionData | null>(() => {
+    if (contextMenu?.type !== 'object') return null;
+    const ref = contextMenu.request.ref;
+    const node = nodeByReference.get(objectMapReferenceKey(ref));
+    const actionFacts = node?.actionFacts;
+    return {
+      ...ref,
+      status: actionFacts?.status,
+      unschedulable: actionFacts?.unschedulable,
+      portForwardAvailable: actionFacts?.portForwardAvailable,
+      hpaManaged:
+        actionFacts?.hpaManaged === true ? true : actionFacts?.hpaManaged === false ? false : null,
+      desiredReplicas: actionFacts?.desiredReplicas,
+    };
+  }, [contextMenu, nodeByReference]);
   const objectActions = useObjectActionController({
     context: 'object-map',
     onOpen: onOpenPanel ? (object) => onOpenPanel(object as ObjectMapReference) : undefined,

@@ -8,6 +8,10 @@ import type {
   RefreshDomain,
 } from './types';
 
+type NamespaceRow = NamespaceSnapshotPayload['namespaces'][number];
+type CatalogRow = CatalogSnapshotPayload['items'][number];
+type NodeMaintenanceRow = NodeMaintenanceSnapshotPayload['drains'][number];
+
 const shallowEqualRecord = (left: Record<string, unknown>, right: Record<string, unknown>) => {
   if (left === right) {
     return true;
@@ -100,77 +104,90 @@ export const mergeWorkloadMetricRows = (
 };
 
 // Incrementally reuse row objects for polling-only list payloads.
+type PollingListMergeDescriptor<P extends object, R extends object> = {
+  previous: (scope?: string) => P | null;
+  rows: (payload: P) => R[];
+  withRows: (payload: P, rows: R[]) => P;
+  key: (row: R, payload: P) => string;
+};
+
+const mergePollingPayloadWithDescriptor = <P extends object, R extends object>(
+  payload: P,
+  scope: string | undefined,
+  descriptor: PollingListMergeDescriptor<P, R>
+): P => {
+  const previous = descriptor.previous(scope);
+  if (!previous) {
+    return payload;
+  }
+  const previousRows = descriptor.rows(previous);
+  if (previousRows.length === 0) {
+    return payload;
+  }
+  const incomingRows = descriptor.rows(payload);
+  const merged = mergeListByKey(incomingRows, previousRows, (entry) =>
+    descriptor.key(entry, payload)
+  );
+  return merged === incomingRows ? payload : descriptor.withRows(payload, merged);
+};
+
+const pollingListMergeDescriptors = {
+  namespaces: {
+    previous: (scope?: string) =>
+      getScopedDomainState('namespaces', scope!).data as NamespaceSnapshotPayload | null,
+    rows: (payload: NamespaceSnapshotPayload) => payload.namespaces ?? [],
+    withRows: (payload: NamespaceSnapshotPayload, rows: NamespaceRow[]) => ({
+      ...payload,
+      namespaces: rows,
+    }),
+    // payload.clusterId is required on ClusterMeta-derived payloads, so the
+    // merge-key fallback does not need a blank-cluster guard.
+    key: (entry: NamespaceRow, payload: NamespaceSnapshotPayload) =>
+      `${entry.clusterId ?? payload.clusterId}::${entry.name}`,
+  },
+  'object-maintenance': {
+    previous: (scope?: string) =>
+      scope
+        ? (getScopedDomainState('object-maintenance', scope)
+            .data as NodeMaintenanceSnapshotPayload | null)
+        : null,
+    rows: (payload: NodeMaintenanceSnapshotPayload) => payload.drains ?? [],
+    withRows: (payload: NodeMaintenanceSnapshotPayload, rows: NodeMaintenanceRow[]) => ({
+      ...payload,
+      drains: rows,
+    }),
+    key: (entry: NodeMaintenanceRow, payload: NodeMaintenanceSnapshotPayload) =>
+      `${entry.clusterId ?? payload.clusterId}::${entry.id}`,
+  },
+  'catalog-diff': {
+    previous: (scope?: string) =>
+      scope
+        ? (getScopedDomainState('catalog-diff', scope).data as CatalogSnapshotPayload | null)
+        : null,
+    rows: (payload: CatalogSnapshotPayload) => payload.items ?? [],
+    withRows: (payload: CatalogSnapshotPayload, rows: CatalogRow[]) => ({
+      ...payload,
+      items: rows,
+    }),
+    key: (entry: CatalogRow, payload: CatalogSnapshotPayload) => {
+      const clusterId = entry.clusterId ?? payload.clusterId;
+      if (entry.uid) {
+        return `${clusterId}::${entry.uid}`;
+      }
+      return `${clusterId}::${entry.group}::${entry.version}::${entry.resource}::${entry.namespace ?? ''}::${entry.name}`;
+    },
+  },
+};
+
+type PollingListMergeDomain = keyof typeof pollingListMergeDescriptors;
+
 export const mergePollingListPayload = <K extends RefreshDomain>(
   domain: K,
   payload: DomainPayloadMap[K],
   scope?: string
 ): DomainPayloadMap[K] => {
-  if (domain === 'namespaces') {
-    const previous = getScopedDomainState('namespaces', scope!)
-      .data as NamespaceSnapshotPayload | null;
-    if (!previous?.namespaces?.length) {
-      return payload;
-    }
-    const incoming = payload as NamespaceSnapshotPayload;
-    // incoming.clusterId is now a required field on ClusterMeta-derived
-    // payloads, so the merge-key fallback doesn't need a `?? ''` guard.
-    const fallbackClusterId = incoming.clusterId;
-    const merged = mergeListByKey(
-      incoming.namespaces ?? [],
-      previous.namespaces ?? [],
-      (entry) => `${entry.clusterId ?? fallbackClusterId}::${entry.name}`
-    );
-    if (merged === incoming.namespaces) {
-      return payload;
-    }
-    return { ...incoming, namespaces: merged } as DomainPayloadMap[K];
-  }
-
-  if (domain === 'object-maintenance') {
-    if (!scope) {
-      return payload;
-    }
-    const previous = getScopedDomainState('object-maintenance', scope)
-      .data as NodeMaintenanceSnapshotPayload | null;
-    if (!previous?.drains?.length) {
-      return payload;
-    }
-    const incoming = payload as NodeMaintenanceSnapshotPayload;
-    const fallbackClusterId = incoming.clusterId;
-    const merged = mergeListByKey(
-      incoming.drains ?? [],
-      previous.drains ?? [],
-      (entry) => `${entry.clusterId ?? fallbackClusterId}::${entry.id}`
-    );
-    if (merged === incoming.drains) {
-      return payload;
-    }
-    return { ...incoming, drains: merged } as DomainPayloadMap[K];
-  }
-
-  if (domain === 'catalog-diff') {
-    if (!scope) {
-      return payload;
-    }
-    const previous = getScopedDomainState('catalog-diff', scope)
-      .data as CatalogSnapshotPayload | null;
-    if (!previous?.items?.length) {
-      return payload;
-    }
-    const incoming = payload as CatalogSnapshotPayload;
-    const fallbackClusterId = incoming.clusterId;
-    const merged = mergeListByKey(incoming.items ?? [], previous.items ?? [], (entry) => {
-      const clusterId = entry.clusterId ?? fallbackClusterId;
-      if (entry.uid) {
-        return `${clusterId}::${entry.uid}`;
-      }
-      return `${clusterId}::${entry.group}::${entry.version}::${entry.resource}::${entry.namespace ?? ''}::${entry.name}`;
-    });
-    if (merged === incoming.items) {
-      return payload;
-    }
-    return { ...incoming, items: merged } as DomainPayloadMap[K];
-  }
-
-  return payload;
+  const descriptor = pollingListMergeDescriptors[domain as PollingListMergeDomain] as unknown as
+    | PollingListMergeDescriptor<DomainPayloadMap[K] & object, object>
+    | undefined;
+  return descriptor ? mergePollingPayloadWithDescriptor(payload, scope, descriptor) : payload;
 };
