@@ -5,7 +5,6 @@
  * Implements eventStreamManager logic for the core layer.
  */
 
-import { ensureRefreshBaseURL } from '../client';
 import type { SnapshotStats } from '../client';
 import { parseClusterScope } from '../clusterScope';
 import { setScopedDomainState, resetScopedDomainState } from '../store';
@@ -19,8 +18,11 @@ import type {
 } from '../types';
 import { isPermissionDeniedStatus, resolvePermissionDeniedMessage } from '../permissionErrors';
 import { formatAge } from '@/utils/ageFormatter';
-import { errorHandler } from '@utils/errorHandler';
 import { eventBus } from '@/core/events';
+import { closeRefreshEventSource, openRefreshEventSource } from './sseStreamTransport';
+import { StreamErrorNotifier } from './streamErrorNotifier';
+import { streamReconnectDelay } from './streamTiming';
+import { StreamVisibilityController } from './streamVisibilityController';
 
 interface StreamEventPayload {
   domain: string;
@@ -144,33 +146,34 @@ class EventStreamConnection {
   }
 
   private closeEventSource(): void {
-    if (!this.eventSource) {
-      return;
-    }
-    this.eventSource.removeEventListener('event', this.handleEvent as EventListener);
-    this.eventSource.removeEventListener('error', this.handleError as EventListener);
-    this.eventSource.close();
+    closeRefreshEventSource(this.eventSource, {
+      event: this.handleEvent as EventListener,
+      error: this.handleError as EventListener,
+    });
     this.eventSource = null;
   }
 
   private async openStream(): Promise<void> {
     try {
-      const baseURL = await ensureRefreshBaseURL();
+      const handle = await openRefreshEventSource({
+        path: '/api/v2/stream/events',
+        configureURL: (url) => {
+          url.searchParams.set('scope', this.scope);
+          const resumeId = this.getResumeId();
+          if (resumeId) {
+            url.searchParams.set('since', resumeId);
+          }
+        },
+        listeners: {
+          event: this.handleEvent as EventListener,
+          error: this.handleError as EventListener,
+        },
+      });
       if (this.closed) {
+        handle.close();
         return;
       }
-
-      const url = new URL('/api/v2/stream/events', baseURL);
-      url.searchParams.set('scope', this.scope);
-      const resumeId = this.getResumeId();
-      if (resumeId) {
-        url.searchParams.set('since', resumeId);
-      }
-
-      const eventSource = new EventSource(url.toString());
-      this.eventSource = eventSource;
-      eventSource.addEventListener('event', this.handleEvent as EventListener);
-      eventSource.addEventListener('error', this.handleError as EventListener);
+      this.eventSource = handle.source;
       this.manager.markConnected(this.domain, this.scope);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to open event stream';
@@ -184,7 +187,7 @@ class EventStreamConnection {
       return;
     }
     this.closeEventSource();
-    const delay = Math.min(30_000, 1_000 * Math.pow(2, this.attempt));
+    const delay = streamReconnectDelay(this.attempt);
     this.attempt += 1;
     this.manager.handleStreamError(
       this.domain,
@@ -287,82 +290,67 @@ export class EventStreamManager {
     { generatedAt: number; error: string | null; total: number; truncated: boolean }
   >();
   private namespaceEventMeta = new Map<string, { total: number; truncated: boolean }>();
-  private lastNotifiedErrors = new Map<string, string>();
   private consecutiveErrors = new Map<string, number>();
-  private suspendedForVisibility = false;
-  private suspendedClusterScope: string | null = null;
-  private suspendedNamespaceScope: string | null = null;
+  private errorNotifier = new StreamErrorNotifier();
+  private visibility = new StreamVisibilityController<{
+    domain: typeof CLUSTER_DOMAIN | typeof NAMESPACE_DOMAIN;
+    scope: string;
+  }>({
+    captureActive: () => {
+      const active: Array<{
+        domain: typeof CLUSTER_DOMAIN | typeof NAMESPACE_DOMAIN;
+        scope: string;
+      }> = [];
+      if (this.clusterConnection && this.clusterScope) {
+        active.push({ domain: CLUSTER_DOMAIN, scope: this.clusterScope });
+      }
+      if (this.namespaceConnection && this.namespaceScope) {
+        active.push({ domain: NAMESPACE_DOMAIN, scope: this.namespaceScope });
+      }
+      return active;
+    },
+    suspendActive: () => {
+      if (this.clusterConnection) {
+        this.clusterConnection.stop(false);
+        this.clusterConnection = null;
+      }
+      if (this.namespaceConnection) {
+        this.namespaceConnection.stop(false);
+        this.namespaceConnection = null;
+      }
+    },
+    resumeItem: (item) => {
+      if (item.domain === CLUSTER_DOMAIN) {
+        void this.startCluster(item.scope);
+      } else {
+        void this.startNamespace(item.scope);
+      }
+    },
+  });
 
   constructor() {
     eventBus.on('kubeconfig:changing', () => this.stopAll(true));
     eventBus.on('view:reset', () => this.stopAll(false));
-    eventBus.on('app:visibility-hidden', () => this.suspendForVisibility());
-    eventBus.on('app:visibility-visible', () => this.resumeFromVisibility());
+    eventBus.on('app:visibility-hidden', this.visibility.suspend);
+    eventBus.on('app:visibility-visible', this.visibility.resume);
   }
 
-  private suspendForVisibility(): void {
-    if (this.suspendedForVisibility) {
-      return;
-    }
-    this.suspendedForVisibility = true;
-
-    // Store active scopes before stopping
-    this.suspendedClusterScope = this.clusterScope;
-    this.suspendedNamespaceScope = this.namespaceScope;
-
-    // Stop connections without resetting data
-    if (this.clusterConnection) {
-      this.clusterConnection.stop(false);
-      this.clusterConnection = null;
-    }
-    if (this.namespaceConnection) {
-      this.namespaceConnection.stop(false);
-      this.namespaceConnection = null;
-    }
-  }
-
-  private resumeFromVisibility(): void {
-    if (!this.suspendedForVisibility) {
-      return;
-    }
-    this.suspendedForVisibility = false;
-
-    // Restore cluster stream if it was active
-    if (this.suspendedClusterScope) {
-      void this.startCluster(this.suspendedClusterScope);
-    }
-    this.suspendedClusterScope = null;
-
-    // Restore namespace stream if it was active
-    if (this.suspendedNamespaceScope) {
-      void this.startNamespace(this.suspendedNamespaceScope);
-    }
-    this.suspendedNamespaceScope = null;
-  }
-
-  private getNotificationKey(domain: string, scope?: string): string {
+  private streamKey(domain: string, scope?: string): string {
     return `${domain}::${scope ?? '__global__'}`;
   }
 
   private notifyStreamError(domain: string, scope: string | undefined, message: string): void {
-    const key = this.getNotificationKey(domain, scope);
-    if (this.lastNotifiedErrors.get(key) === message) {
-      return;
-    }
-    this.lastNotifiedErrors.set(key, message);
-    errorHandler.handle(new Error(message), {
+    this.errorNotifier.notify({
       source: 'refresh-event-stream',
       domain,
       scope: scope ?? 'global',
+      message,
     });
   }
 
   private clearStreamError(domain: string, scope?: string): void {
-    const key = this.getNotificationKey(domain, scope);
-    if (this.lastNotifiedErrors.has(key)) {
-      this.lastNotifiedErrors.delete(key);
-    }
-    this.consecutiveErrors.delete(key);
+    this.errorNotifier.clear(domain, scope);
+    this.consecutiveErrors.delete(this.streamKey(domain, scope));
   }
 
   async startCluster(scope: string = CLUSTER_SCOPE): Promise<void> {
@@ -492,7 +480,7 @@ export class EventStreamManager {
   }
 
   handleStreamError(domain: string, scope: string, message: string): void {
-    const key = this.getNotificationKey(domain, scope);
+    const key = this.streamKey(domain, scope);
     const attempts = (this.consecutiveErrors.get(key) ?? 0) + 1;
     this.consecutiveErrors.set(key, attempts);
     const isTerminal = attempts >= STREAM_ERROR_NOTIFY_THRESHOLD;

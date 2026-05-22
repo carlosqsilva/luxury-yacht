@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/luxury-yacht/app/backend/refresh/snapshot"
+	"github.com/luxury-yacht/app/backend/resourcemodel"
 )
 
 func TestManagerNewObjectUpdateCopiesClusterAndObjectMetadata(t *testing.T) {
@@ -24,18 +25,51 @@ func TestManagerNewObjectUpdateCopiesClusterAndObjectMetadata(t *testing.T) {
 		},
 	}
 
-	update := manager.newObjectUpdate(MessageTypeModified, domainNamespaceConfig, configMap, "ConfigMap")
+	ref := manager.resourceRefForObject(configMap, "", "v1", "ConfigMap", "configmaps")
+	update := manager.newObjectUpdate(MessageTypeModified, domainNamespaceConfig, configMap, ref)
 
 	require.Equal(t, MessageTypeModified, update.Type)
 	require.Equal(t, domainNamespaceConfig, update.Domain)
 	require.Equal(t, "cluster-id", update.ClusterID)
 	require.Equal(t, "cluster-name", update.ClusterName)
 	require.Equal(t, "42", update.ResourceVersion)
-	require.Equal(t, "cfg-uid", update.UID)
-	require.Equal(t, "cfg", update.Name)
-	require.Equal(t, "default", update.Namespace)
-	require.Equal(t, "ConfigMap", update.Kind)
+	require.Equal(t, "cfg-uid", update.Ref.UID)
+	require.Equal(t, "cfg", update.Ref.Name)
+	require.Equal(t, "default", update.Ref.Namespace)
+	require.Equal(t, "ConfigMap", update.Ref.Kind)
+	require.Equal(t, "", update.Ref.Group)
+	require.Equal(t, "v1", update.Ref.Version)
+	require.Equal(t, ref, *update.Ref)
 	require.Nil(t, update.Row)
+}
+
+func TestManagerResourceRefForObjectBuildsValidatedIdentity(t *testing.T) {
+	manager := &Manager{
+		clusterMeta: snapshot.ClusterMeta{ClusterID: "cluster-id", ClusterName: "cluster-name"},
+	}
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cfg",
+			Namespace: "default",
+			UID:       "cfg-uid",
+		},
+	}
+
+	ref := manager.resourceRefForObject(configMap, "", "v1", "ConfigMap", "configmaps")
+
+	require.NoError(t, resourcemodel.ValidateResourceRef(ref))
+	require.Equal(t, "cluster-id", ref.ClusterID)
+	require.Equal(t, "configmaps", ref.Resource)
+}
+
+func TestManagerResourceRefForObjectValidationRejectsIncompleteIdentity(t *testing.T) {
+	manager := &Manager{
+		clusterMeta: snapshot.ClusterMeta{ClusterID: "cluster-id", ClusterName: "cluster-name"},
+	}
+	configMap := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "cfg"}}
+
+	require.Error(t, resourcemodel.ValidateResourceRef(manager.resourceRefForObject(configMap, "", "", "ConfigMap", "configmaps")))
+	require.Error(t, resourcemodel.ValidateResourceRef(manager.resourceRefForObject(configMap, "", "v1", "Deployment", "deployments")))
 }
 
 func TestManagerNewObjectRowUpdateOmitsRowsForDeletes(t *testing.T) {
@@ -52,16 +86,18 @@ func TestManagerNewObjectRowUpdateOmitsRowsForDeletes(t *testing.T) {
 	}
 	row := map[string]string{"name": "secret"}
 
-	added := manager.newObjectRowUpdate(MessageTypeAdded, domainNamespaceConfig, secret, "Secret", row)
+	ref := manager.resourceRefForObject(secret, "", "v1", "Secret", "secrets")
+	added := manager.newObjectRowUpdate(MessageTypeAdded, domainNamespaceConfig, secret, ref, row)
 	require.Equal(t, row, added.Row)
 
-	deleted := manager.newObjectRowUpdate(MessageTypeDeleted, domainNamespaceConfig, secret, "Secret", row)
+	deleted := manager.newObjectRowUpdate(MessageTypeDeleted, domainNamespaceConfig, secret, ref, row)
 	require.Nil(t, deleted.Row)
-	require.Equal(t, "secret", deleted.Name)
-	require.Equal(t, "default", deleted.Namespace)
+	require.Equal(t, "secret", deleted.Ref.Name)
+	require.Equal(t, "default", deleted.Ref.Namespace)
+	require.Equal(t, ref, *deleted.Ref)
 }
 
-func TestManagerNewObjectRowUpdateCarriesMetadataForStreamedBuiltInKinds(t *testing.T) {
+func TestManagerNewObjectRowUpdateCarriesMetadataFromResourceRef(t *testing.T) {
 	manager := &Manager{
 		clusterMeta: snapshot.ClusterMeta{ClusterID: "cluster-id", ClusterName: "cluster-name"},
 	}
@@ -70,36 +106,13 @@ func TestManagerNewObjectRowUpdateCarriesMetadataForStreamedBuiltInKinds(t *test
 		domain    string
 		kind      string
 		namespace string
+		group     string
+		version   string
+		resource  string
 	}{
-		{name: "configmaps", domain: domainNamespaceConfig, kind: "ConfigMap", namespace: "default"},
-		{name: "secrets", domain: domainNamespaceConfig, kind: "Secret", namespace: "default"},
-		{name: "services", domain: domainNamespaceNetwork, kind: "Service", namespace: "default"},
-		{name: "endpoint slices", domain: domainNamespaceNetwork, kind: "EndpointSlice", namespace: "default"},
-		{name: "ingresses", domain: domainNamespaceNetwork, kind: "Ingress", namespace: "default"},
-		{name: "network policies", domain: domainNamespaceNetwork, kind: "NetworkPolicy", namespace: "default"},
-		{name: "gateways", domain: domainNamespaceNetwork, kind: "Gateway", namespace: "default"},
-		{name: "http routes", domain: domainNamespaceNetwork, kind: "HTTPRoute", namespace: "default"},
-		{name: "grpc routes", domain: domainNamespaceNetwork, kind: "GRPCRoute", namespace: "default"},
-		{name: "tls routes", domain: domainNamespaceNetwork, kind: "TLSRoute", namespace: "default"},
-		{name: "listener sets", domain: domainNamespaceNetwork, kind: "ListenerSet", namespace: "default"},
-		{name: "reference grants", domain: domainNamespaceNetwork, kind: "ReferenceGrant", namespace: "default"},
-		{name: "backend tls policies", domain: domainNamespaceNetwork, kind: "BackendTLSPolicy", namespace: "default"},
-		{name: "persistent volume claims", domain: domainNamespaceStorage, kind: "PersistentVolumeClaim", namespace: "default"},
-		{name: "horizontal pod autoscalers", domain: domainNamespaceAutoscaling, kind: "HorizontalPodAutoscaler", namespace: "default"},
-		{name: "resource quotas", domain: domainNamespaceQuotas, kind: "ResourceQuota", namespace: "default"},
-		{name: "limit ranges", domain: domainNamespaceQuotas, kind: "LimitRange", namespace: "default"},
-		{name: "pod disruption budgets", domain: domainNamespaceQuotas, kind: "PodDisruptionBudget", namespace: "default"},
-		{name: "roles", domain: domainNamespaceRBAC, kind: "Role", namespace: "default"},
-		{name: "role bindings", domain: domainNamespaceRBAC, kind: "RoleBinding", namespace: "default"},
-		{name: "service accounts", domain: domainNamespaceRBAC, kind: "ServiceAccount", namespace: "default"},
-		{name: "persistent volumes", domain: domainClusterStorage, kind: "PersistentVolume"},
-		{name: "storage classes", domain: domainClusterConfig, kind: "StorageClass"},
-		{name: "ingress classes", domain: domainClusterConfig, kind: "IngressClass"},
-		{name: "gateway classes", domain: domainClusterConfig, kind: "GatewayClass"},
-		{name: "validating webhooks", domain: domainClusterConfig, kind: "ValidatingWebhookConfiguration"},
-		{name: "mutating webhooks", domain: domainClusterConfig, kind: "MutatingWebhookConfiguration"},
-		{name: "cluster roles", domain: domainClusterRBAC, kind: "ClusterRole"},
-		{name: "cluster role bindings", domain: domainClusterRBAC, kind: "ClusterRoleBinding"},
+		{name: "configmaps", domain: domainNamespaceConfig, kind: "ConfigMap", namespace: "default", version: "v1", resource: "configmaps"},
+		{name: "endpoint slices", domain: domainNamespaceNetwork, kind: "EndpointSlice", namespace: "default", group: "discovery.k8s.io", version: "v1", resource: "endpointslices"},
+		{name: "cluster roles", domain: domainClusterRBAC, kind: "ClusterRole", group: "rbac.authorization.k8s.io", version: "v1", resource: "clusterroles"},
 	}
 
 	for _, tt := range tests {
@@ -119,16 +132,21 @@ func TestManagerNewObjectRowUpdateCarriesMetadataForStreamedBuiltInKinds(t *test
 				row["namespace"] = tt.namespace
 			}
 
-			update := manager.newObjectRowUpdate(MessageTypeAdded, tt.domain, object, tt.kind, row)
+			ref := manager.resourceRefForObject(object, tt.group, tt.version, tt.kind, tt.resource)
+			update := manager.newObjectRowUpdate(MessageTypeAdded, tt.domain, object, ref, row)
 
 			require.Equal(t, tt.domain, update.Domain)
 			require.Equal(t, "cluster-id", update.ClusterID)
 			require.Equal(t, "cluster-name", update.ClusterName)
 			require.Equal(t, "123", update.ResourceVersion)
-			require.Equal(t, "resource-uid", update.UID)
-			require.Equal(t, "resource-name", update.Name)
-			require.Equal(t, tt.namespace, update.Namespace)
-			require.Equal(t, tt.kind, update.Kind)
+			require.Equal(t, "resource-uid", update.Ref.UID)
+			require.Equal(t, "resource-name", update.Ref.Name)
+			require.Equal(t, tt.namespace, update.Ref.Namespace)
+			require.Equal(t, tt.kind, update.Ref.Kind)
+			require.Equal(t, tt.group, update.Ref.Group)
+			require.Equal(t, tt.version, update.Ref.Version)
+			require.Equal(t, tt.resource, update.Ref.Resource)
+			require.Equal(t, ref, *update.Ref)
 			require.Equal(t, row, update.Row)
 		})
 	}

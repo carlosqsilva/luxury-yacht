@@ -32,6 +32,7 @@ vi.mock('../RefreshManager', () => ({
 }));
 
 import { getScopedDomainState, resetAllScopedDomainStates, setScopedDomainState } from '../store';
+import { eventBus } from '@/core/events';
 
 class MockEventSource {
   static instances: MockEventSource[] = [];
@@ -270,6 +271,55 @@ describe('catalogStreamManager', () => {
     expect(state.status).toBe('updating');
   });
 
+  it('replaces stale catalog items when a full stream snapshot arrives', async () => {
+    vi.useFakeTimers();
+    const manager = await importManager();
+    await manager.start('limit=50');
+
+    const initialSnapshot = createSnapshot();
+    const staleItem = {
+      kind: 'Service',
+      group: '',
+      version: 'v1',
+      resource: 'services',
+      namespace: 'team-a',
+      name: 'stale-service',
+      uid: 'uid-stale',
+      resourceVersion: '2',
+      creationTimestamp: '2024-01-02T00:00:00Z',
+      scope: 'Namespace' as const,
+      clusterId: 'test-cluster',
+    };
+    const fullSnapshot = {
+      ...initialSnapshot,
+      items: [...initialSnapshot.items, staleItem],
+      total: 2,
+      resourceCount: 2,
+      batchSize: 2,
+    };
+    const replacementSnapshot = {
+      ...initialSnapshot,
+      items: [initialSnapshot.items[0]],
+      total: 1,
+      resourceCount: 1,
+      batchSize: 1,
+    };
+
+    MockEventSource.instances[0].onmessage?.({
+      data: JSON.stringify(createStreamEvent({ snapshot: fullSnapshot, sequence: 1 })),
+    } as MessageEvent);
+    MockEventSource.instances[0].onmessage?.({
+      data: JSON.stringify(createStreamEvent({ snapshot: replacementSnapshot, sequence: 2 })),
+    } as MessageEvent);
+
+    await vi.advanceTimersByTimeAsync(FLUSH_DELAY_MS);
+
+    const state = getScopedDomainState('catalog', 'limit=50');
+    expect(state.status).toBe('ready');
+    expect(state.data?.items.map((item) => item.uid)).toEqual(['uid-1']);
+    expect(state.data?.total).toBe(1);
+  });
+
   it('retries with backoff when EventSource fails to initialise', async () => {
     vi.useFakeTimers();
     vi.spyOn(Math, 'random').mockReturnValue(0);
@@ -464,7 +514,7 @@ describe('catalogStreamManager', () => {
     await manager.start('limit=25');
 
     errorHandlerMock.handle.mockReset();
-    (manager as unknown as { suppressErrorsUntil: number }).suppressErrorsUntil = Date.now() + 5000;
+    eventBus.emit('kubeconfig:changing', 'test-config');
 
     MockEventSource.instances[0].onerror?.(new Event('error'));
     expect(errorHandlerMock.handle).not.toHaveBeenCalled();

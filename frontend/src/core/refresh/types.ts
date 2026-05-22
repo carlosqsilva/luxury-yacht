@@ -57,6 +57,44 @@ export interface ResourceLink {
   display?: DisplayRef;
 }
 
+export interface ResourceStatusPresentation {
+  label: string;
+  state: string;
+  presentation?: string;
+  reason?: string;
+  message?: string;
+  signals?: Array<{
+    type: string;
+    name: string;
+    status: string;
+    reason?: string;
+    message?: string;
+  }>;
+  badges?: Array<{
+    text: string;
+    status: string;
+  }>;
+  lifecycle?: {
+    deleting: boolean;
+    finalizerBlocked: boolean;
+  };
+}
+
+export interface ResourceModel {
+  ref: ResourceRef;
+  source: string;
+  scope: string;
+  metadata?: {
+    labels?: Record<string, string>;
+    annotations?: Record<string, string>;
+    creationTimestamp?: string;
+    resourceVersion?: string;
+    finalizers?: string[];
+  };
+  status: ResourceStatusPresentation;
+  facts?: Record<string, unknown>;
+}
+
 export interface ConditionFacts {
   type: string;
   status: string;
@@ -87,6 +125,7 @@ export interface ClusterMeta {
 }
 
 export interface NamespaceSummary extends ClusterMeta {
+  ref: ResourceRef;
   name: string;
   phase: string;
   status?: string;
@@ -263,6 +302,7 @@ export interface ClusterOverviewPayload {
 export interface RecentEventEntry {
   clusterId?: string;
   clusterName?: string;
+  involvedObject?: ResourceLink;
   eventUid: string;
   reason: string;
   message: string;
@@ -428,6 +468,13 @@ export interface CatalogItem extends ClusterMeta {
   creationTimestamp: string;
   scope: CatalogItemScope;
   labelsDigest?: string;
+  actionFacts?: {
+    status?: string;
+    unschedulable?: boolean;
+    portForwardAvailable?: boolean;
+    hpaManaged?: boolean;
+    desiredReplicas?: number;
+  };
 }
 
 export interface CatalogParity {
@@ -520,10 +567,14 @@ export interface PodSnapshotPayload extends ClusterMeta {
 
 export interface ObjectDetailsSnapshotPayload extends ClusterMeta {
   details: any;
+  resourceModel?: ResourceModel;
 }
 
 export interface ObjectEventSummary extends ClusterMeta {
   kind: string;
+  name?: string;
+  uid?: string;
+  resourceVersion?: string;
   eventType: string;
   reason: string;
   message: string;
@@ -576,6 +627,13 @@ export interface ObjectMapNode {
   ref: ObjectMapReference;
   creationTimestamp?: string;
   status?: ObjectMapStatus;
+  actionFacts?: {
+    status?: string;
+    unschedulable?: boolean;
+    portForwardAvailable?: boolean;
+    hpaManaged?: boolean;
+    desiredReplicas?: number;
+  };
 }
 
 export interface ObjectMapStatus {
@@ -635,6 +693,7 @@ export interface NamespaceWorkloadSummary extends ClusterMeta {
   restarts: number;
   age: string;
   portForwardAvailable?: boolean;
+  hpaManaged?: boolean | null;
   cpuUsage?: string;
   cpuRequest?: string;
   cpuLimit?: string;

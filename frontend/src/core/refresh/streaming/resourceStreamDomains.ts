@@ -5,6 +5,7 @@
  */
 
 import type { AppEvents } from '@/core/events';
+import { refreshDomainContract } from '../domainRegistry';
 import type {
   ClusterConfigEntry,
   ClusterConfigSnapshotPayload,
@@ -43,6 +44,7 @@ import {
   mergeNodeMetricsRow,
   mergePodMetricsRow,
   mergeWorkloadMetricsRow,
+  type ResourceRef,
   type ResourceStreamRowCollection,
   type ResourceStreamRowUpdate,
 } from './resourceStreamRows';
@@ -119,14 +121,15 @@ const normalizePodScope = (scope: string): string => {
       .replace(/^workload:/, '')
       .replace(/^:/, '')
       .trim();
-    const parts = value
-      .split(':')
-      .map((part) => part.trim())
-      .filter(Boolean);
-    if (parts.length !== 3) {
-      throw new Error('pods workload scope requires namespace:kind:name');
+    const parts = value.split(':').map((part) => part.trim());
+    if (parts.length !== 5) {
+      throw new Error('pods workload scope requires namespace:group:version:kind:name');
     }
-    return `workload:${parts[0]}:${parts[1]}:${parts[2]}`;
+    const [namespace, group, version, kind, name] = parts;
+    if (!namespace || !version || !kind || !name) {
+      throw new Error('pods workload scope requires namespace:group:version:kind:name');
+    }
+    return `workload:${namespace}:${group}:${version}:${kind}:${name}`;
   }
   throw new Error(`unsupported pods scope ${scope}`);
 };
@@ -334,8 +337,14 @@ const buildNetworkKey = (
   name: string
 ): string => `${clusterId}::${namespace}::${kind}::${name}`;
 
-const buildCustomKey = (clusterId: string, namespace: string, kind: string, name: string): string =>
-  `${clusterId}::${namespace}::${kind}::${name}`;
+const buildCustomKey = (
+  clusterId: string,
+  namespace: string,
+  apiGroup: string,
+  apiVersion: string,
+  kind: string,
+  name: string
+): string => `${clusterId}::${namespace}::${apiGroup}::${apiVersion}::${kind}::${name}`;
 
 const buildHelmKey = (clusterId: string, namespace: string, name: string): string =>
   `${clusterId}::${namespace}::${name}`;
@@ -367,16 +376,37 @@ const buildClusterConfigKey = (clusterId: string, kind: string, name: string): s
 
 const buildClusterCRDKey = (clusterId: string, name: string): string => `${clusterId}::${name}`;
 
-const buildClusterCustomKey = (clusterId: string, kind: string, name: string): string =>
-  `${clusterId}::${kind}::${name}`;
+const buildClusterCustomKey = (
+  clusterId: string,
+  apiGroup: string,
+  apiVersion: string,
+  kind: string,
+  name: string
+): string => `${clusterId}::${apiGroup}::${apiVersion}::${kind}::${name}`;
 
 const buildNodeKey = (clusterId: string, name: string): string => `${clusterId}::${name}`;
 
-const updateClusterId = (update: ResourceStreamRowUpdate, fallbackClusterId: string): string =>
-  update.clusterId ?? fallbackClusterId;
+// Stream update/delete identity is only accepted through update.ref. Snapshot
+// rows still derive keys from row fields because rows are the snapshot payload.
+const updateRef = (update: ResourceStreamRowUpdate): ResourceRef | undefined => {
+  const ref = update.ref;
+  if (!ref?.clusterId || !ref.version || !ref.kind || !ref.name) {
+    return undefined;
+  }
+  return ref;
+};
 
-const updateRow = <T>(update: ResourceStreamRowUpdate): T | undefined =>
-  update.row as T | undefined;
+const updateClusterId = (ref: ResourceRef): string => ref.clusterId;
+
+const updateNamespace = (ref: ResourceRef): string => ref.namespace ?? '';
+
+const updateName = (ref: ResourceRef): string => ref.name ?? '';
+
+const updateKind = (ref: ResourceRef): string => ref.kind;
+
+const updateAPIGroup = (ref: ResourceRef): string => ref.group;
+
+const updateAPIVersion = (ref: ResourceRef): string => ref.version;
 
 const buildPodKeySet = (
   payload: PodSnapshotPayload | null | undefined,
@@ -449,7 +479,16 @@ const buildCustomKeySet = (
   const rows = payload?.resources ?? [];
   const keys = new Set<string>();
   rows.forEach((row) => {
-    keys.add(buildCustomKey(row.clusterId ?? fallbackClusterId, row.namespace, row.kind, row.name));
+    keys.add(
+      buildCustomKey(
+        row.clusterId ?? fallbackClusterId,
+        row.namespace,
+        row.apiGroup,
+        row.apiVersion,
+        row.kind,
+        row.name
+      )
+    );
   });
   return keys;
 };
@@ -561,7 +600,15 @@ const buildClusterCustomKeySet = (
   const rows = payload?.resources ?? [];
   const keys = new Set<string>();
   rows.forEach((row) => {
-    keys.add(buildClusterCustomKey(row.clusterId ?? fallbackClusterId, row.kind, row.name));
+    keys.add(
+      buildClusterCustomKey(
+        row.clusterId ?? fallbackClusterId,
+        row.apiGroup,
+        row.apiVersion,
+        row.kind,
+        row.name
+      )
+    );
   });
   return keys;
 };
@@ -597,13 +644,11 @@ const podCollection = {
   emptyPayload: (clusterId: string): PodSnapshotPayload => ({ pods: [], clusterId }),
   buildRowKey: (row: PodSnapshotEntry, fallbackClusterId: string) =>
     buildPodKey(row.clusterId ?? fallbackClusterId, row.namespace, row.name),
-  buildUpdateKey: (update: ResourceStreamRowUpdate, fallbackClusterId: string) => {
-    const row = updateRow<PodSnapshotEntry>(update);
-    return buildPodKey(
-      updateClusterId(update, fallbackClusterId),
-      update.namespace ?? row?.namespace ?? '',
-      update.name ?? row?.name ?? ''
-    );
+  buildUpdateKey: (update: ResourceStreamRowUpdate, _fallbackClusterId: string) => {
+    const ref = updateRef(update);
+    return ref?.namespace
+      ? buildPodKey(updateClusterId(ref), updateNamespace(ref), updateName(ref))
+      : '';
   },
   sortRows: sortPodRows,
   mergeRow: mergePodMetricsRow,
@@ -621,14 +666,16 @@ const workloadCollection = {
   }),
   buildRowKey: (row: NamespaceWorkloadSummary, fallbackClusterId: string) =>
     buildWorkloadKey(row.clusterId ?? fallbackClusterId, row.namespace, row.kind, row.name),
-  buildUpdateKey: (update: ResourceStreamRowUpdate, fallbackClusterId: string) => {
-    const row = updateRow<NamespaceWorkloadSummary>(update);
-    return buildWorkloadKey(
-      updateClusterId(update, fallbackClusterId),
-      update.namespace ?? row?.namespace ?? '',
-      update.kind ?? row?.kind ?? '',
-      update.name ?? row?.name ?? ''
-    );
+  buildUpdateKey: (update: ResourceStreamRowUpdate, _fallbackClusterId: string) => {
+    const ref = updateRef(update);
+    return ref?.namespace
+      ? buildWorkloadKey(
+          updateClusterId(ref),
+          updateNamespace(ref),
+          updateKind(ref),
+          updateName(ref)
+        )
+      : '';
   },
   sortRows: sortWorkloadRows,
   mergeRow: mergeWorkloadMetricsRow,
@@ -646,14 +693,11 @@ const namespaceConfigCollection = {
   }),
   buildRowKey: (row: NamespaceConfigSummary, fallbackClusterId: string) =>
     buildConfigKey(row.clusterId ?? fallbackClusterId, row.namespace, row.kind, row.name),
-  buildUpdateKey: (update: ResourceStreamRowUpdate, fallbackClusterId: string) => {
-    const row = updateRow<NamespaceConfigSummary>(update);
-    return buildConfigKey(
-      updateClusterId(update, fallbackClusterId),
-      update.namespace ?? row?.namespace ?? '',
-      update.kind ?? row?.kind ?? '',
-      update.name ?? row?.name ?? ''
-    );
+  buildUpdateKey: (update: ResourceStreamRowUpdate, _fallbackClusterId: string) => {
+    const ref = updateRef(update);
+    return ref?.namespace
+      ? buildConfigKey(updateClusterId(ref), updateNamespace(ref), updateKind(ref), updateName(ref))
+      : '';
   },
   sortRows: sortConfigRows,
 } satisfies ResourceStreamRowCollection<NamespaceConfigSummary, NamespaceConfigSnapshotPayload>;
@@ -670,14 +714,16 @@ const namespaceNetworkCollection = {
   }),
   buildRowKey: (row: NamespaceNetworkSummary, fallbackClusterId: string) =>
     buildNetworkKey(row.clusterId ?? fallbackClusterId, row.namespace, row.kind, row.name),
-  buildUpdateKey: (update: ResourceStreamRowUpdate, fallbackClusterId: string) => {
-    const row = updateRow<NamespaceNetworkSummary>(update);
-    return buildNetworkKey(
-      updateClusterId(update, fallbackClusterId),
-      update.namespace ?? row?.namespace ?? '',
-      update.kind ?? row?.kind ?? '',
-      update.name ?? row?.name ?? ''
-    );
+  buildUpdateKey: (update: ResourceStreamRowUpdate, _fallbackClusterId: string) => {
+    const ref = updateRef(update);
+    return ref?.namespace
+      ? buildNetworkKey(
+          updateClusterId(ref),
+          updateNamespace(ref),
+          updateKind(ref),
+          updateName(ref)
+        )
+      : '';
   },
   sortRows: sortNetworkRows,
 } satisfies ResourceStreamRowCollection<NamespaceNetworkSummary, NamespaceNetworkSnapshotPayload>;
@@ -694,14 +740,11 @@ const namespaceRBACCollection = {
   }),
   buildRowKey: (row: NamespaceRBACSummary, fallbackClusterId: string) =>
     buildRBACKey(row.clusterId ?? fallbackClusterId, row.namespace, row.kind, row.name),
-  buildUpdateKey: (update: ResourceStreamRowUpdate, fallbackClusterId: string) => {
-    const row = updateRow<NamespaceRBACSummary>(update);
-    return buildRBACKey(
-      updateClusterId(update, fallbackClusterId),
-      update.namespace ?? row?.namespace ?? '',
-      update.kind ?? row?.kind ?? '',
-      update.name ?? row?.name ?? ''
-    );
+  buildUpdateKey: (update: ResourceStreamRowUpdate, _fallbackClusterId: string) => {
+    const ref = updateRef(update);
+    return ref?.namespace
+      ? buildRBACKey(updateClusterId(ref), updateNamespace(ref), updateKind(ref), updateName(ref))
+      : '';
   },
   sortRows: sortRBACRows,
 } satisfies ResourceStreamRowCollection<NamespaceRBACSummary, NamespaceRBACSnapshotPayload>;
@@ -717,15 +760,26 @@ const namespaceCustomCollection = {
     clusterId,
   }),
   buildRowKey: (row: NamespaceCustomSummary, fallbackClusterId: string) =>
-    buildCustomKey(row.clusterId ?? fallbackClusterId, row.namespace, row.kind, row.name),
-  buildUpdateKey: (update: ResourceStreamRowUpdate, fallbackClusterId: string) => {
-    const row = updateRow<NamespaceCustomSummary>(update);
-    return buildCustomKey(
-      updateClusterId(update, fallbackClusterId),
-      update.namespace ?? row?.namespace ?? '',
-      update.kind ?? row?.kind ?? '',
-      update.name ?? row?.name ?? ''
-    );
+    buildCustomKey(
+      row.clusterId ?? fallbackClusterId,
+      row.namespace,
+      row.apiGroup,
+      row.apiVersion,
+      row.kind,
+      row.name
+    ),
+  buildUpdateKey: (update: ResourceStreamRowUpdate, _fallbackClusterId: string) => {
+    const ref = updateRef(update);
+    return ref?.namespace
+      ? buildCustomKey(
+          updateClusterId(ref),
+          updateNamespace(ref),
+          updateAPIGroup(ref),
+          updateAPIVersion(ref),
+          updateKind(ref),
+          updateName(ref)
+        )
+      : '';
   },
   sortRows: sortCustomRows,
 } satisfies ResourceStreamRowCollection<NamespaceCustomSummary, NamespaceCustomSnapshotPayload>;
@@ -742,13 +796,11 @@ const namespaceHelmCollection = {
   }),
   buildRowKey: (row: NamespaceHelmSummary, fallbackClusterId: string) =>
     buildHelmKey(row.clusterId ?? fallbackClusterId, row.namespace, row.name),
-  buildUpdateKey: (update: ResourceStreamRowUpdate, fallbackClusterId: string) => {
-    const row = updateRow<NamespaceHelmSummary>(update);
-    return buildHelmKey(
-      updateClusterId(update, fallbackClusterId),
-      update.namespace ?? row?.namespace ?? '',
-      update.name ?? row?.name ?? ''
-    );
+  buildUpdateKey: (update: ResourceStreamRowUpdate, _fallbackClusterId: string) => {
+    const ref = updateRef(update);
+    return ref?.namespace
+      ? buildHelmKey(updateClusterId(ref), updateNamespace(ref), updateName(ref))
+      : '';
   },
   sortRows: sortHelmRows,
 } satisfies ResourceStreamRowCollection<NamespaceHelmSummary, NamespaceHelmSnapshotPayload>;
@@ -768,14 +820,16 @@ const namespaceAutoscalingCollection = {
   }),
   buildRowKey: (row: NamespaceAutoscalingSummary, fallbackClusterId: string) =>
     buildAutoscalingKey(row.clusterId ?? fallbackClusterId, row.namespace, row.kind, row.name),
-  buildUpdateKey: (update: ResourceStreamRowUpdate, fallbackClusterId: string) => {
-    const row = updateRow<NamespaceAutoscalingSummary>(update);
-    return buildAutoscalingKey(
-      updateClusterId(update, fallbackClusterId),
-      update.namespace ?? row?.namespace ?? '',
-      update.kind ?? row?.kind ?? '',
-      update.name ?? row?.name ?? ''
-    );
+  buildUpdateKey: (update: ResourceStreamRowUpdate, _fallbackClusterId: string) => {
+    const ref = updateRef(update);
+    return ref?.namespace
+      ? buildAutoscalingKey(
+          updateClusterId(ref),
+          updateNamespace(ref),
+          updateKind(ref),
+          updateName(ref)
+        )
+      : '';
   },
   sortRows: sortAutoscalingRows,
 } satisfies ResourceStreamRowCollection<
@@ -795,14 +849,11 @@ const namespaceQuotaCollection = {
   }),
   buildRowKey: (row: NamespaceQuotaSummary, fallbackClusterId: string) =>
     buildQuotaKey(row.clusterId ?? fallbackClusterId, row.namespace, row.kind, row.name),
-  buildUpdateKey: (update: ResourceStreamRowUpdate, fallbackClusterId: string) => {
-    const row = updateRow<NamespaceQuotaSummary>(update);
-    return buildQuotaKey(
-      updateClusterId(update, fallbackClusterId),
-      update.namespace ?? row?.namespace ?? '',
-      update.kind ?? row?.kind ?? '',
-      update.name ?? row?.name ?? ''
-    );
+  buildUpdateKey: (update: ResourceStreamRowUpdate, _fallbackClusterId: string) => {
+    const ref = updateRef(update);
+    return ref?.namespace
+      ? buildQuotaKey(updateClusterId(ref), updateNamespace(ref), updateKind(ref), updateName(ref))
+      : '';
   },
   sortRows: sortQuotaRows,
 } satisfies ResourceStreamRowCollection<NamespaceQuotaSummary, NamespaceQuotasSnapshotPayload>;
@@ -819,14 +870,16 @@ const namespaceStorageCollection = {
   }),
   buildRowKey: (row: NamespaceStorageSummary, fallbackClusterId: string) =>
     buildStorageKey(row.clusterId ?? fallbackClusterId, row.namespace, row.kind, row.name),
-  buildUpdateKey: (update: ResourceStreamRowUpdate, fallbackClusterId: string) => {
-    const row = updateRow<NamespaceStorageSummary>(update);
-    return buildStorageKey(
-      updateClusterId(update, fallbackClusterId),
-      update.namespace ?? row?.namespace ?? '',
-      update.kind ?? row?.kind ?? '',
-      update.name ?? row?.name ?? ''
-    );
+  buildUpdateKey: (update: ResourceStreamRowUpdate, _fallbackClusterId: string) => {
+    const ref = updateRef(update);
+    return ref?.namespace
+      ? buildStorageKey(
+          updateClusterId(ref),
+          updateNamespace(ref),
+          updateKind(ref),
+          updateName(ref)
+        )
+      : '';
   },
   sortRows: sortStorageRows,
 } satisfies ResourceStreamRowCollection<NamespaceStorageSummary, NamespaceStorageSnapshotPayload>;
@@ -843,13 +896,9 @@ const clusterRBACCollection = {
   }),
   buildRowKey: (row: ClusterRBACEntry, fallbackClusterId: string) =>
     buildClusterRBACKey(row.clusterId ?? fallbackClusterId, row.kind, row.name),
-  buildUpdateKey: (update: ResourceStreamRowUpdate, fallbackClusterId: string) => {
-    const row = updateRow<ClusterRBACEntry>(update);
-    return buildClusterRBACKey(
-      updateClusterId(update, fallbackClusterId),
-      update.kind ?? row?.kind ?? '',
-      update.name ?? row?.name ?? ''
-    );
+  buildUpdateKey: (update: ResourceStreamRowUpdate, _fallbackClusterId: string) => {
+    const ref = updateRef(update);
+    return ref ? buildClusterRBACKey(updateClusterId(ref), updateKind(ref), updateName(ref)) : '';
   },
   sortRows: sortClusterRBACRows,
 } satisfies ResourceStreamRowCollection<ClusterRBACEntry, ClusterRBACSnapshotPayload>;
@@ -866,12 +915,9 @@ const clusterStorageCollection = {
   }),
   buildRowKey: (row: ClusterStorageEntry, fallbackClusterId: string) =>
     buildClusterStorageKey(row.clusterId ?? fallbackClusterId, row.name),
-  buildUpdateKey: (update: ResourceStreamRowUpdate, fallbackClusterId: string) => {
-    const row = updateRow<ClusterStorageEntry>(update);
-    return buildClusterStorageKey(
-      updateClusterId(update, fallbackClusterId),
-      update.name ?? row?.name ?? ''
-    );
+  buildUpdateKey: (update: ResourceStreamRowUpdate, _fallbackClusterId: string) => {
+    const ref = updateRef(update);
+    return ref ? buildClusterStorageKey(updateClusterId(ref), updateName(ref)) : '';
   },
   sortRows: sortClusterStorageRows,
 } satisfies ResourceStreamRowCollection<ClusterStorageEntry, ClusterStorageSnapshotPayload>;
@@ -888,13 +934,9 @@ const clusterConfigCollection = {
   }),
   buildRowKey: (row: ClusterConfigEntry, fallbackClusterId: string) =>
     buildClusterConfigKey(row.clusterId ?? fallbackClusterId, row.kind, row.name),
-  buildUpdateKey: (update: ResourceStreamRowUpdate, fallbackClusterId: string) => {
-    const row = updateRow<ClusterConfigEntry>(update);
-    return buildClusterConfigKey(
-      updateClusterId(update, fallbackClusterId),
-      update.kind ?? row?.kind ?? '',
-      update.name ?? row?.name ?? ''
-    );
+  buildUpdateKey: (update: ResourceStreamRowUpdate, _fallbackClusterId: string) => {
+    const ref = updateRef(update);
+    return ref ? buildClusterConfigKey(updateClusterId(ref), updateKind(ref), updateName(ref)) : '';
   },
   sortRows: sortClusterConfigRows,
 } satisfies ResourceStreamRowCollection<ClusterConfigEntry, ClusterConfigSnapshotPayload>;
@@ -911,12 +953,9 @@ const clusterCRDCollection = {
   }),
   buildRowKey: (row: ClusterCRDEntry, fallbackClusterId: string) =>
     buildClusterCRDKey(row.clusterId ?? fallbackClusterId, row.name),
-  buildUpdateKey: (update: ResourceStreamRowUpdate, fallbackClusterId: string) => {
-    const row = updateRow<ClusterCRDEntry>(update);
-    return buildClusterCRDKey(
-      updateClusterId(update, fallbackClusterId),
-      update.name ?? row?.name ?? ''
-    );
+  buildUpdateKey: (update: ResourceStreamRowUpdate, _fallbackClusterId: string) => {
+    const ref = updateRef(update);
+    return ref ? buildClusterCRDKey(updateClusterId(ref), updateName(ref)) : '';
   },
   sortRows: sortClusterCRDRows,
 } satisfies ResourceStreamRowCollection<ClusterCRDEntry, ClusterCRDSnapshotPayload>;
@@ -932,14 +971,24 @@ const clusterCustomCollection = {
     clusterId,
   }),
   buildRowKey: (row: ClusterCustomEntry, fallbackClusterId: string) =>
-    buildClusterCustomKey(row.clusterId ?? fallbackClusterId, row.kind, row.name),
-  buildUpdateKey: (update: ResourceStreamRowUpdate, fallbackClusterId: string) => {
-    const row = updateRow<ClusterCustomEntry>(update);
-    return buildClusterCustomKey(
-      updateClusterId(update, fallbackClusterId),
-      update.kind ?? row?.kind ?? '',
-      update.name ?? row?.name ?? ''
-    );
+    buildClusterCustomKey(
+      row.clusterId ?? fallbackClusterId,
+      row.apiGroup,
+      row.apiVersion,
+      row.kind,
+      row.name
+    ),
+  buildUpdateKey: (update: ResourceStreamRowUpdate, _fallbackClusterId: string) => {
+    const ref = updateRef(update);
+    return ref
+      ? buildClusterCustomKey(
+          updateClusterId(ref),
+          updateAPIGroup(ref),
+          updateAPIVersion(ref),
+          updateKind(ref),
+          updateName(ref)
+        )
+      : '';
   },
   sortRows: sortClusterCustomRows,
 } satisfies ResourceStreamRowCollection<ClusterCustomEntry, ClusterCustomSnapshotPayload>;
@@ -953,9 +1002,9 @@ const nodeCollection = {
   emptyPayload: (clusterId: string): ClusterNodeSnapshotPayload => ({ nodes: [], clusterId }),
   buildRowKey: (row: ClusterNodeSnapshotEntry, fallbackClusterId: string) =>
     buildNodeKey(row.clusterId ?? fallbackClusterId, row.name),
-  buildUpdateKey: (update: ResourceStreamRowUpdate, fallbackClusterId: string) => {
-    const row = updateRow<ClusterNodeSnapshotEntry>(update);
-    return buildNodeKey(updateClusterId(update, fallbackClusterId), update.name ?? row?.name ?? '');
+  buildUpdateKey: (update: ResourceStreamRowUpdate, _fallbackClusterId: string) => {
+    const ref = updateRef(update);
+    return ref ? buildNodeKey(updateClusterId(ref), updateName(ref)) : '';
   },
   sortRows: sortNodeRows,
   mergeRow: mergeNodeMetricsRow,
@@ -1125,6 +1174,18 @@ export const getResourceStreamDomainDescriptor = (
 
 export const isClusterScopedDomain = (domain: ResourceDomain): boolean =>
   getResourceStreamDomainDescriptor(domain).isClusterScoped;
+
+export const COMPLETE_RESYNC_STREAM_DOMAINS = new Set<ResourceDomain>(
+  Object.entries(refreshDomainContract.domainInventory)
+    .filter(
+      ([domain, inventory]) =>
+        inventory.behaviorClass === 'complete-resync-stream' && isSupportedDomain(domain)
+    )
+    .map(([domain]) => domain as ResourceDomain)
+);
+
+export const isCompleteResyncStreamDomain = (domain: ResourceDomain): boolean =>
+  COMPLETE_RESYNC_STREAM_DOMAINS.has(domain);
 
 export const normalizeResourceScope = (domain: ResourceDomain, scope: string): string => {
   const descriptor = getResourceStreamDomainDescriptor(domain);
