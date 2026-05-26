@@ -1,29 +1,16 @@
-This release is primarily refactoring and hardening, with just a few new convenience features.
-
 ### Added
-
-- HPA-managed workloads now have "Scale to 0" and "Resume from 0" actions, replacing the previous disabled "Scale" placeholder.
-- The Scale modal now includes a "Scale to 0" button, so you don't have to open the Scale modal and manually type 0 first.
-- App logs panel updates:
-  - Column-based layout with header.
-  - Logs now include the source (cluster name or "Global").
 
 ### Changed
 
-- Object panel and table actions are gated by an explicit per-action permission matrix (objectActionPermissionMatrix) derived from effective RBAC capabilities.
-- App preferences: the backend now owns the authoritative settings schema (defaults, validation, integer bounds, enum options); the Appearance / Advanced / Object Panel settings sections
-  derive slider ranges, enum lists, and clamps from that schema instead of hard-coded frontend constants.
-- Refresh subsystem: the refresh-domain registry now derives from a single JSON contract (backend/refresh/domain/refresh-domain-contract.json) shared by backend registrations and frontend
-  descriptors.
-- Resource stream row updates carry full backend object identity through ref (`ResourceRef`); the legacy top-level identity fields on the wire have been retired now that all consumers read
-  from ref.
-- Snapshot and stream row construction now share projected-row helpers and are parity-tested for every streamed domain, so a field added to one path cannot silently drop on the other.
-- Shell sessions, port-forwards, and node drains are tracked through a unified backend runtime-operation registry; SessionsStatus now sources its state from a single runtimeOperationStatus
-  reducer. (Internal refactor — the popover still surfaces shell sessions and port-forwards as before.)
-- Backend SIGSEGV sigstack workaround for Linux removed; no longer required under Wails 2.12.0.
+- Made Browse more reliable for large clusters by keeping loaded pages, refresh updates, namespace-scoped results, and filter options aligned as the catalog changes.
+- Improved Browse catalog consistency so initial loads, manual refreshes, and live updates stay aligned on rows, counts, filters, and loading progress.
+- Improved multi-cluster refresh reliability by keeping each cluster's enabled scopes, stream startup, cleanup, and in-flight refresh state isolated in its own runtime.
+- Improved Kubernetes resource identity resolution so YAML, permissions, cache checks, and object actions use the catalog-backed full GVK/GVR contract consistently.
+- Improved port-forward reliability so stopped sessions, failed starts, and cluster disconnects update the session list and status indicators consistently.
+- Improved shell session reliability so terminal sessions close cleanly, disappear from session indicators promptly, and do not report duplicate close events after user or cluster cleanup.
+- Improved the Sessions indicator so shell sessions and port forwards stay visible while startup data loads, then clear stale rows consistently after sessions stop or clusters disconnect.
+- Improved cluster disconnect cleanup so closing or clearing clusters more reliably removes the right sessions and port forwards without affecting other active clusters.
 
 ### Fixed
 
-- Shell-jump from the sessions status now verifies that the requested object-panel tab actually changed, surfacing dispatch failures instead of silently no-op'ing.
-- Shell session close paths routed through a single `closeShellSessionByID` helper and the runtime registry, fixing inconsistent status events when sessions were closed by user action vs.
-  cluster disconnect.
+- Fixed custom resource handling when Kubernetes discovery is degraded by falling back to the CRD API for catalog-backed identity resolution.
