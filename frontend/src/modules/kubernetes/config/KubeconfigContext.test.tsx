@@ -377,7 +377,7 @@ describe('KubeconfigContext', () => {
     unmount();
   });
 
-  it('keeps cluster-data identity on the committed selection until backend activation completes', async () => {
+  it('exposes the pending active tab identity while keeping refresh context committed until activation completes', async () => {
     const kubeconfigs: types.KubeconfigInfo[] = [
       {
         name: 'alpha',
@@ -413,8 +413,8 @@ describe('KubeconfigContext', () => {
 
     expect(getContext().selectedKubeconfig).toBe('/kube/beta:prod');
     expect(getContext().selectedKubeconfigs).toEqual(['/kube/alpha:dev', '/kube/beta:prod']);
-    expect(getContext().selectedClusterId).toBe('alpha:dev');
-    expect(getContext().selectedClusterIds).toEqual(['alpha:dev']);
+    expect(getContext().selectedClusterId).toBe('beta:prod');
+    expect(getContext().selectedClusterIds).toEqual(['alpha:dev', 'beta:prod']);
     expect(mocks.refreshOrchestrator.updateContext).toHaveBeenLastCalledWith({
       selectedClusterId: 'alpha:dev',
       selectedClusterName: 'dev',

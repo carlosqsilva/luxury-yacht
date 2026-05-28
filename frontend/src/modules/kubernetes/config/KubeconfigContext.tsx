@@ -146,7 +146,14 @@ export const KubeconfigProvider: React.FC<KubeconfigProviderProps> = ({ children
     return { id: `${filename}:${context}`, name: context };
   }, []);
 
+  // Public selection follows the active tab immediately; refresh context below
+  // stays on committed backend selections until cluster activation completes.
   const selectedClusterMeta = useMemo(
+    () => resolveClusterMeta(selectedKubeconfig, kubeconfigs),
+    [resolveClusterMeta, selectedKubeconfig, kubeconfigs]
+  );
+
+  const committedSelectedClusterMeta = useMemo(
     () => resolveClusterMeta(committedSelectedKubeconfig, kubeconfigs),
     [resolveClusterMeta, committedSelectedKubeconfig, kubeconfigs]
   );
@@ -193,6 +200,17 @@ export const KubeconfigProvider: React.FC<KubeconfigProviderProps> = ({ children
 
   const selectedClusterIds = useMemo(() => {
     const ids = new Set<string>();
+    selectedKubeconfigs.forEach((selection) => {
+      const id = resolveClusterMeta(selection, kubeconfigs).id;
+      if (id) {
+        ids.add(id);
+      }
+    });
+    return Array.from(ids);
+  }, [kubeconfigs, resolveClusterMeta, selectedKubeconfigs]);
+
+  const committedSelectedClusterIds = useMemo(() => {
+    const ids = new Set<string>();
     committedSelectedKubeconfigs.forEach((selection) => {
       const id = resolveClusterMeta(selection, kubeconfigs).id;
       if (id) {
@@ -226,8 +244,8 @@ export const KubeconfigProvider: React.FC<KubeconfigProviderProps> = ({ children
     if (selectionPendingRef.current) {
       return;
     }
-    updateRefreshContext(selectedClusterMeta, selectedClusterIds);
-  }, [selectedClusterIds, selectedClusterMeta, updateRefreshContext]);
+    updateRefreshContext(committedSelectedClusterMeta, committedSelectedClusterIds);
+  }, [committedSelectedClusterIds, committedSelectedClusterMeta, updateRefreshContext]);
 
   const loadKubeconfigs = useCallback(async () => {
     setKubeconfigsLoading(true);
