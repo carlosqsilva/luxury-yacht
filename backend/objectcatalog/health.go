@@ -6,10 +6,7 @@
 
 package objectcatalog
 
-import (
-	"sort"
-	"time"
-)
+import "time"
 
 type healthStatus struct {
 	State               HealthState
@@ -19,6 +16,28 @@ type healthStatus struct {
 	LastError           string
 	Stale               bool
 	FailedResources     int
+	// DeniedResources tracks RBAC-forbidden list targets for the current sync.
+	DeniedResources map[string]struct{}
+}
+
+// recordDeniedResource notes that listing the resource type was RBAC-forbidden.
+// Per-namespace collection workers can report the same type repeatedly; the
+// set dedupes.
+func (s *Service) recordDeniedResource(resource string) {
+	s.healthMu.Lock()
+	defer s.healthMu.Unlock()
+	if s.health.DeniedResources == nil {
+		s.health.DeniedResources = make(map[string]struct{})
+	}
+	s.health.DeniedResources[resource] = struct{}{}
+}
+
+// resetDeniedResources clears the denial set at the start of a sync so a
+// permission grant clears the warning on the next pass.
+func (s *Service) resetDeniedResources() {
+	s.healthMu.Lock()
+	defer s.healthMu.Unlock()
+	s.health.DeniedResources = nil
 }
 
 func (s *Service) updateHealth(success bool, stale bool, err error, failedCount int) {
@@ -88,35 +107,7 @@ func (s *Service) logDebug(msg string) {
 }
 
 func (s *Service) rebuildCacheFromItems(items map[string]Summary, descriptors []Descriptor) {
-	kindSet := make(map[string]bool)
-	namespaceSet := make(map[string]struct{})
-	chunks := make([]*summaryChunk, 0, 1)
-
-	if len(items) > 0 {
-		summaries := make([]Summary, 0, len(items))
-		for _, summary := range items {
-			summaries = append(summaries, summary)
-			if summary.Kind != "" {
-				// Track whether the kind is namespaced (Scope == ScopeNamespace)
-				kindSet[summary.Kind] = summary.Scope == ScopeNamespace
-			}
-			if summary.Namespace != "" {
-				namespaceSet[summary.Namespace] = struct{}{}
-			}
-		}
-		sort.Slice(summaries, func(i, j int) bool {
-			if summaries[i].Kind != summaries[j].Kind {
-				return summaries[i].Kind < summaries[j].Kind
-			}
-			if summaries[i].Namespace != summaries[j].Namespace {
-				return summaries[i].Namespace < summaries[j].Namespace
-			}
-			return summaries[i].Name < summaries[j].Name
-		})
-		chunkCopy := make([]Summary, len(summaries))
-		copy(chunkCopy, summaries)
-		chunks = append(chunks, &summaryChunk{items: chunkCopy})
-	}
-
-	s.publishStreamingState(chunks, kindSet, namespaceSet, descriptors, true)
+	s.mu.Lock()
+	s.catalogIndex.rebuildCacheFromItems(items, descriptors)
+	s.mu.Unlock()
 }

@@ -1,293 +1,186 @@
-# GridTable
-
-`GridTable` is the shared table system for resource and app data. Use it
-instead of creating feature-specific tables unless there is a documented reason
-the shared table contract cannot fit the workflow.
-
-## Source Layout
-
-Primary files live under `frontend/src/shared/components/tables/`:
-
-| File or folder                      | Responsibility                                               |
-| ----------------------------------- | ------------------------------------------------------------ |
-| `GridTable.tsx`                     | Thin render shell around `useGridTableController`            |
-| `GridTable.types.ts`                | Public props, column definitions, filter and width types     |
-| `GridTableBody.tsx`                 | Body viewport, empty state, virtualization spacer, paging UI |
-| `GridTableHeader.tsx`               | Header rendering and trailing boundary                       |
-| `GridTableFiltersBar.tsx`           | Shared filter/search/export controls                         |
-| `columnFactories.tsx`               | Common Kubernetes/resource column builders                   |
-| `gridTableFilterEngine.ts`          | Pure local filter/search matching                            |
-| `gridTableFilterState.ts`           | Default filter state and narrowing checks                    |
-| `hooks/gridTableColumnWidthMath.ts` | Pure width clamping, reconciliation, and initialization math |
-| `hooks/`                            | Focus, keyboard, sizing, virtualization, filters, rendering  |
-| `persistence/`                      | Persisted sort, filters, widths, visibility, and resets      |
-| `performance/`                      | Diagnostics samples and mode-specific labels                 |
-| `@styles/components/gridtables.css` | Shared GridTable styling                                     |
-
-`GridTable.tsx` should stay a render shell. Put orchestration in
-`useGridTableController` or a focused hook. Put pure transforms in standalone
-helpers that can be tested without React.
-
-## Consumer Contract
-
-Every table needs:
-
-- `data`: the rows to render.
-- `columns`: `GridColumnDefinition<T>[]`.
-- `keyExtractor`: a stable key for the row inside the table.
-
-For cluster data, row keys must include cluster identity. Use the shared key
-helpers instead of composing ad-hoc keys, and do not drop `clusterId` when data
-crosses module, cache, event, action, or navigation boundaries.
-
-Column keys are part of persistence, keyboard behavior, CSV export, and DOM
-metadata. Treat them as durable identifiers. Renaming a column key is a persisted
-state migration, not a cosmetic change.
-
-Prefer shared column factories from `columnFactories.tsx` for common resource
-fields. Add a factory when multiple views need the same rendering, sort value,
-or object-link behavior.
-
-## Rendering And Controller Split
-
-`useGridTableController` owns the cross-cutting wiring:
-
-- filtering and filter bar actions
-- sort header behavior
-- focus, hover, keyboard navigation, and shortcuts
-- context menus
-- row and cell rendering
-- column layout, resizing, visibility, and auto-width measurement
-- row and column virtualization
-- load-more pagination
-- diagnostics/profiling
-
-Keep new behavior in the smallest focused hook that owns the state transition.
-Avoid adding unrelated state directly to `GridTable.tsx`; that makes the render
-surface hard to reason about and harder to test.
-
-## Hook Inventory
-
-The hooks folder is intentionally split by subsystem. Use this inventory before
-adding another hook or placing new state in the controller.
-
-### Orchestration
-
-| File                               | Responsibility                                                                   |
-| ---------------------------------- | -------------------------------------------------------------------------------- |
-| `useGridTableController.tsx`       | Composes the table subsystems and returns the render shell contract.             |
-| `useGridTableFiltersWiring.tsx`    | Connects filter state, filter bar props, CSV export, and filter reset actions.   |
-| `useGridTableInteractionWiring.ts` | Connects focus, hover, row click, context menu, and row-level interaction props. |
-| `useGridTableHeaderActions.tsx`    | Owns header sort clicks, header context menu state, and header menu actions.     |
-| `useGridTableHeaderSyncEffects.ts` | Synchronizes header scroll/width measurements with the body viewport.            |
-
-### Filtering And Export
-
-| File                        | Responsibility                                                       |
-| --------------------------- | -------------------------------------------------------------------- |
-| `useKindFilterOptions.ts`   | Builds kind dropdown options from rows and configured filter values. |
-| `useMetadataSearch.tsx`     | Builds metadata-aware search text for resource rows.                 |
-| `useGridTableCsvExport.tsx` | Builds the CSV export action from visible columns and filtered rows. |
-
-### Columns, Widths, And Layout
-
-| File                                       | Responsibility                                                                |
-| ------------------------------------------ | ----------------------------------------------------------------------------- |
-| `useGridTableColumnLayout.ts`              | Resolves visible columns, locked columns, width state, and layout totals.     |
-| `useGridTableColumnWidths.ts`              | Owns column width state, default widths, resize events, auto-size, and reset. |
-| `useGridTableColumnWidths.helpers.ts`      | Helper hooks for width state sync, measurement, and notifications.            |
-| `gridTableColumnWidthMath.ts`              | Pure width clamping, flex distribution, reconciliation, and initial planning. |
-| `useColumnResizeController.ts`             | Handles resize drag lifecycle and emits width changes.                        |
-| `useColumnVisibilityController.ts`         | Applies column visibility changes while respecting non-hideable columns.      |
-| `useGridTableExternalWidths.ts`            | Normalizes externally controlled width state into table width inputs.         |
-| `useGridTableAutoWidthMeasurementQueue.ts` | Debounces auto-width remeasurement and protects user-resized columns.         |
-| `useGridTableColumnMeasurer.ts`            | Measures rendered/static column content to produce natural widths.            |
-| `useGridTableColumnsDropdown.ts`           | Builds the header column visibility dropdown.                                 |
-| `useContainerWidthObserver.ts`             | Observes table container width changes.                                       |
-| `useGridTableAutoGrow.ts`                  | Tracks auto-grow sizing behavior for the table viewport.                      |
-
-### Virtualization And Rendering
-
-| File                                  | Responsibility                                                                  |
-| ------------------------------------- | ------------------------------------------------------------------------------- |
-| `useGridTableVirtualization.ts`       | Computes virtual row windows from scroll position and row estimates.            |
-| `useGridTableColumnVirtualization.ts` | Computes rendered column windows while preserving sticky start/end columns.     |
-| `useGridTableRowRenderer.tsx`         | Builds row and cell render output, row ids, classes, styles, and cell metadata. |
-| `useGridTableHeaderRow.tsx`           | Builds header cells, resize handles, sort UI, and header actions.               |
-| `useGridTableCellCache.tsx`           | Caches rendered cell content to reduce repeated render work.                    |
-| `useGridTablePagination.ts`           | Owns load-more state, status text, sentinel behavior, and manual load-more.     |
-
-### Focus, Keyboard, Hover, And Shortcuts
-
-| File                                | Responsibility                                                               |
-| ----------------------------------- | ---------------------------------------------------------------------------- |
-| `useGridTableFocusNavigation.ts`    | Owns focused row key/index state and wrapper focus/blur behavior.            |
-| `useGridTableKeyboardNavigation.ts` | Handles Arrow/Home/End/Page navigation and scrolls focused rows into view.   |
-| `useGridTableExternalFocus.ts`      | Applies focus requests from external table/object navigation events.         |
-| `gridTableFocusRequest.ts`          | Builds and matches cluster-aware external focus request identities.          |
-| `useGridTableHoverSync.ts`          | Synchronizes hover state from pointer and focused row elements.              |
-| `useGridTableHoverFallback.ts`      | Recovers hover state when pointer leave/DOM transitions miss a normal event. |
-| `useGridTableShortcuts.ts`          | Registers table-specific shortcuts inside the active keyboard scope.         |
-
-### Context Menus And Diagnostics
-
-| File                                | Responsibility                                                       |
-| ----------------------------------- | -------------------------------------------------------------------- |
-| `useGridTableContextMenu.ts`        | Owns body context menu position, selected row, and selected column.  |
-| `useGridTableContextMenuItems.tsx`  | Builds row context menu actions from built-ins and consumer actions. |
-| `useGridTableContextMenuWiring.tsx` | Connects context menu state to rendered menu nodes and row handlers. |
-| `useGridTableProfiler.tsx`          | Wraps table renders and records diagnostics samples.                 |
-| `useFrameSampler.ts`                | Samples animation frames for scroll/render diagnostics.              |
-
-## Identity And DOM Lookup Rules
-
-Rows render with `data-row-key`; cells render with `data-column`. Those values
-are data, not CSS selector fragments. Keys can contain characters such as `|`,
-`"`, `]`, `/`, and `:` because cluster-scoped Kubernetes object identities are
-not CSS-safe.
-
-When looking up a row by key, use `findGridTableRowByKey` from
-`GridTable.utils.ts`. Do not build a selector like:
-
-```ts
-wrapper.querySelector(`.gridtable-row[data-row-key="${key}"]`);
-```
-
-When matching a column by key, query a broad safe selector and compare
-`element.dataset.column` in code. Do not depend on `CSS.escape` availability for
-table correctness.
-
-DOM ids should be derived with `getStableRowId`; do not use lossy replacement
-logic that can collapse distinct row keys into the same id.
-
-## Filtering
-
-Filtering is split between:
-
-- `useGridTableFilters` for state and derived filtered rows.
-- `gridTableFilterEngine.ts` for pure local matching.
-- `useGridTableFiltersWiring` for filter bar props and CSV export actions.
-
-Use `searchBehavior: "local"` when the table owns all searchable rows. Use
-`searchBehavior: "query"` when upstream query parameters shape the dataset
-before rows reach the table.
-
-Provide filter accessors when default row fields are not enough:
-
-- `getSearchText`
-- `getKind`
-- `getNamespace`
-
-Namespace filters must preserve cluster-scoped resources. If a namespace filter
-should include synthetic cluster-scoped entries, use the filter options instead
-of special-casing the consumer.
-
-## Column Widths And Virtualization
-
-GridTable supports explicit widths, min/max widths, user resizing, auto-width
-columns, and column virtualization. These paths are coupled: a change to one can
-affect measured widths, rendered cells, header sync, and persisted state.
-
-Width-related behavior is owned by:
-
-- `useGridTableColumnLayout`
-- `useGridTableColumnWidths`
-- `useColumnResizeController`
-- `useGridTableAutoWidthMeasurementQueue`
-- `useGridTableColumnMeasurer`
-- `useGridTableColumnVirtualization`
-- `useGridTableExternalWidths`
-
-Auto-width measurement must ignore stale or non-rendered cells and must not
-overwrite user-resized widths. If a column key is used for DOM matching, compare
-against `dataset.column`; do not interpolate the key into a selector.
-
-Virtualization defaults live in `GRIDTABLE_VIRTUALIZATION_DEFAULT`. Override
-them per table only when the table has a measured behavior difference. Do not
-disable virtualization to work around focus, hover, or width bugs; fix the
-shared table behavior.
-
-## Focus, Keyboard, And Hover
-
-GridTable focus state is row-key based. The relevant hooks are:
-
-- `useGridTableFocusNavigation`
-- `useGridTableKeyboardNavigation`
-- `useGridTableExternalFocus`
-- `useGridTableHoverSync`
-- `useGridTableHoverFallback`
-- `useGridTableInteractionWiring`
-- `GridTableKeys.ts`
-
-Keyboard navigation should update row focus without depending on the current
-virtual viewport. If the row is not rendered yet, scroll first and retry after
-the virtual viewport updates.
-
-External focus requests must include enough identity to avoid cross-cluster
-matches. For Kubernetes objects, references crossing boundaries need
-`clusterId`, `group`, `version`, `kind`, and, for concrete objects,
-`namespace` and `name`.
-
-See `docs/frontend/keyboard.md` for global shortcut and focus-surface rules.
-
-## Persistence
-
-GridTable persistence stores:
-
-- sort state
-- column visibility
-- column widths
-- filter state
-
-The storage key is built from view identity, cluster identity, namespace scope,
-and persistence mode. Use `useGridTablePersistence` or a feature wrapper around
-it; do not write parallel local-storage code for table preferences.
-
-Persistence must be pruned against the current columns and rows so removed
-columns, invalid filters, and stale row-dependent state do not survive forever.
-When adding persisted state, update the persistence tests and the reset path.
-
-## Diagnostics
-
-Tables should set `diagnosticsLabel` when the default label would be ambiguous.
-Use `diagnosticsMode` to describe how counts and churn should be interpreted:
-
-- `local`: all rows are loaded locally, then GridTable filters/sorts them.
-- `query`: upstream query/filtering has already shaped the dataset.
-- `live`: frequent row updates are expected.
-
-Diagnostics mode labels and churn rules live in
-`performance/gridTableDiagnosticsMode.ts`.
-
-## Testing Expectations
-
-Prefer focused hook/helper tests for state-heavy behavior and a small number of
-component tests for integration behavior. Update the adjacent test when changing
-one of these areas:
-
-| Change area            | Tests to start with                                                |
-| ---------------------- | ------------------------------------------------------------------ |
-| Row rendering          | `GridTable.test.tsx`, `GridTableBody.test.tsx`, row renderer tests |
-| Filters/search/export  | `useGridTableFilters.test.tsx`, `gridTableFilterEngine.test.ts`    |
-| Keyboard/focus/hover   | `useGridTableKeyboardNavigation.test.tsx`, focus and hover tests   |
-| Widths/resizing/layout | column width, resize, layout, measurer, and auto-width tests       |
-| Virtualization         | `useGridTableColumnVirtualization.test.tsx`, GridTable tests       |
-| Persistence            | tests under `persistence/`                                         |
-| Context menus          | context menu and wiring tests                                      |
-
-Regression tests for keys must include selector-sensitive characters. Simple
-alphanumeric keys do not prove the multi-cluster/resource identity path is safe.
+# GridTable Contract
+
+`GridTable` is the shared table system for resource and app data. Do not create
+feature-specific table systems unless the shared contract cannot fit the
+workflow and that exception is documented.
+
+## Agent Contract
+
+- Use `GridTable` for sortable/filterable resource tables.
+- Every row needs a stable `keyExtractor`; cluster data row keys must include
+  cluster identity.
+- Column keys are durable persistence identifiers. Renaming one is a migration,
+  not cosmetic cleanup.
+- Prefer shared column factories for common Kubernetes/resource fields.
+- Keep rendering, filtering, sorting, focus, keyboard, context menus,
+  persistence, and virtualization in the shared table system.
+- Do not disable virtualization to work around focus, hover, width, or context
+  menu bugs.
+- Do not build CSS selectors from raw row or column keys; keys may contain
+  characters that are not selector-safe.
+- Do not split pagination controls across unrelated parts of the view. For
+  query-backed tables, the control group belongs with the table footer and must
+  show page size, visible range, and honest total/page-count state.
+- Rows-per-page is persisted table state. Store it with the same
+  cluster/view/namespace persistence key as sort, filters, widths, and column
+  visibility, and validate it against the table's supported page-size options.
+- Filter inputs and pagination dropdowns are interaction contracts, not just
+  rendering details. Changes to them need tests proving controlled search keeps
+  focus across updates and rows-per-page menus open and dispatch supported
+  values.
+
+## Ownership
+
+- Shared table component and types:
+  `frontend/src/shared/components/tables/GridTable.tsx`,
+  `frontend/src/shared/components/tables/GridTable.types.ts`
+- Shared resource columns:
+  `frontend/src/shared/components/tables/columnFactories.tsx`
+- Filtering, persistence, virtualization, focus, and sizing:
+  `frontend/src/shared/components/tables`
+- Global table CSS: `frontend/styles/components/gridtables.css`
+- Keyboard/focus rules: [keyboard.md](keyboard.md)
+
+## DOM And Identity Rules
+
+Rows render with `data-row-key`; cells render with `data-column`. Treat these as
+data. For lookup, use shared helpers or compare `dataset` values in code instead
+of interpolating keys into selectors.
+
+DOM ids must use stable helper functions that cannot collapse distinct
+cluster-scoped row keys.
+
+## Filtering And Search
+
+- Use local search only when the table owns the complete searchable row set.
+- Use query-backed search when upstream query parameters shape the dataset.
+- Namespace filters must preserve cluster-scoped resources where the table
+  includes them.
+- Metadata filters that describe the object universe should come from catalog or
+  query metadata, not a capped row slice.
+
+## Sorting
+
+- Sort keys emitted by `GridTable` must be visible column keys. Hidden data
+  fields such as timestamps may be used by a column `sortValue`, but must not be
+  published as active table sort keys.
+- Query-backed table columns may be `sortable: true` only when the backend
+  adapter supports that exact column key, or a documented alias for it, as a
+  global query sort.
+- Do not expose hydrated post-page fields as sortable query columns. If the
+  backend cannot sort the complete matching dataset by a field, the column must
+  be non-sortable or the backend contract must be expanded first.
+- Production query-backed resource views should be covered by a rendered-column
+  contract test that compares their sortable keys against the supported query
+  sort contract.
+
+## Table Modes And User Claims
+
+- `Local Complete` means the loaded rows are the complete bounded dataset for
+  this table scope.
+- `Local Partial` means the loaded rows are only a recent, capped, buffered, or
+  degraded window. UI text, counts, filters, export, selection, and object
+  actions must be scoped to that window.
+- `Query Backed Static` and `Query Backed Dynamic` mean the backend owns global
+  search, filters, sort, counts, facets, and pagination. `GridTable` renders the
+  current page/window and emits query changes.
+- A classified table is not automatically production-ready. The UI and actions
+  must match the mode.
+
+## Resource Inventory Tables
+
+Every production resource inventory table — cluster, namespace, Browse/catalog,
+and object-panel related-resource lists — renders through one controller, never a
+bespoke display path:
+
+- `ResourceInventoryTable`
+  (`frontend/src/modules/resource-grid/ResourceInventoryTable.tsx`) is the single
+  wrapper. It takes a normalized `source` plus `gridTableProps` and owns the
+  loading boundary, refresh overlay, settled-empty state, and partial banner. It
+  is the only sanctioned direct `GridTable` consumer for resource data.
+- `useResourceInventoryTable` / `deriveResourceInventoryRenderState`
+  (`useResourceInventoryTable.ts`) is the pure controller: it projects a source's
+  lifecycle into a display status (`initializing`, `loading`, `refreshing`,
+  `ready`, `empty`, `blocked`, `error`). **Empty is decided from lifecycle, never
+  from raw `rows.length`.** A refresh that transiently reports zero rows resolves
+  to `loading`, not empty — this is the structural fix for the "No X found"
+  false-empty flash, and it must not be reintroduced by checking `rows.length` in
+  a view.
+
+### Source adapters
+
+A table's `source` (`ResourceInventorySourceState`) comes from exactly one of two
+adapters; there is no third shape:
+
+- `boundedRowsSource` — bounded local data (a fully-resident `Local Complete`
+  set, or an explicitly `Local Partial` window). It never paginates, so a bounded
+  table cannot silently fan out to query scale; it carries `completeness` and an
+  optional `partialLabel`.
+- `backendQuerySource` — catalog/explicit backend query results (Browse, Custom).
+  The typed-resource query wrappers build their source inline from the same
+  `ResourceInventorySourceState` shape.
+
+The wrapper hooks (`useQueryBackedClusterResourceGridTable` /
+`useQueryBackedNamespaceResourceGridTable`) return `{ source, gridTableProps,
+favModal }`. Read rows/loading/error from `source` — there are no separate
+wrapper-level lifecycle fields.
+
+**Kind vocabulary is backend-owned:** the Kinds dropdown's option list is the
+family's `capabilities.kindVocabulary`, published on every query payload
+(`ResourceQueryCapabilities` in `backend/refresh/snapshot/resource_query_contract.go`,
+pinned per family by `TestTypedResourceProvidersPublishKindVocabulary`). Builders
+narrow it to the kinds whose backing resource can currently produce rows
+(`capabilitiesWithAvailableKinds` over the same source lists the issues channel
+uses), so e.g. Gateway API kinds are only offered on clusters that serve them.
+The kind FACETS on a result collapse to the active selection by design — they
+describe the matched rows and must never feed the dropdown. Do not reintroduce
+frontend kind lists or thread `availableKinds` from snapshot meta; the query
+wrapper supplies the vocabulary to the binding itself.
+
+**Quiet-refresh contract:** a server-backed source reports `loading: true` only
+before its first applied result for the current scope (cluster/namespace/base
+scope — the points where its rows reset). Filter, sort, page-size, manual, and
+background refetches must NOT raise `loading`: the table keeps the last applied
+rows (or the settled "no matches" state) until the new result lands. Raising
+`loading` mid-session dims the table (`refreshing`) or, with zero rows, swaps
+the whole surface — filter bar included — for the loading boundary, which
+unmounts the filter input and steals focus while the user is typing.
+
+### Building a new resource table
+
+1. Pick the source adapter: bounded local → `boundedRowsSource`; backend-owned
+   query → `backendQuerySource` or a typed-query wrapper. If neither fits, stop
+   and extend the backend contract rather than adding a new source shape.
+2. Render `<ResourceInventoryTable source={source} gridTableProps={gridTableProps} />`.
+   Do not hand-roll loading/empty/partial booleans, and do not call `GridTable`
+   directly.
+3. A producer-reported truncation must surface as `Local Partial` (completeness +
+   label) so it can never render as a complete table.
+
+### Enforcement
+
+`shared/components/tables/persistence/gridTableViewRegistry.contract.test.ts`
+rejects: any un-allowlisted direct `<GridTable>`, any resource-grid call missing a
+table mode, any `source` produced outside the sanctioned adapters, and any stale
+allowlist entry. The only classified non-resource exceptions are object-scoped
+events (`EventsTab`, whose display lifecycle is still controller-driven through
+`boundedRowsSource`) and parsed logs (`ParsedLogTable`).
 
 ## Change Checklist
 
-Before changing GridTable behavior:
+When changing table behavior:
 
-1. Identify whether the change belongs in the public props, controller wiring,
-   a focused hook, a pure helper, or a consumer.
-2. Preserve cluster-aware row identity and object references.
-3. Keep column keys stable unless intentionally migrating persisted state.
-4. Check virtualization, keyboard focus, column widths, and persistence for
-   side effects.
-5. Add or update the focused tests for the affected subsystem.
-6. Run the relevant frontend tests, then the project-required final checks for
-   non-documentation changes.
+1. Check row key, column key, and persisted-state compatibility.
+2. Verify virtualization, keyboard focus, hover, context menu, and empty states.
+3. Verify pagination placement, page-size behavior, visible range, and total
+   exactness for query-backed tables.
+4. Verify partial/degraded copy and action limits for Local Partial tables.
+5. Keep shared behavior in focused table hooks rather than feature components.
+6. Add tests with enough rows and columns to exercise the shared path.
+7. For filter or footer changes, add interaction tests for focus retention,
+   dropdown opening, and button disabled/loading behavior.
+
+## Validation
+
+Run targeted GridTable/consumer Vitest tests and `npm run typecheck --prefix
+frontend`. For visual or interaction changes, verify in the app or Storybook.

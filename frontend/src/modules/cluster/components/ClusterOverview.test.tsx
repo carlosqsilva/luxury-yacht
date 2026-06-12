@@ -77,9 +77,8 @@ let mockAuthState = {
   reason: '',
   clusterName: '',
   isRecovering: false,
-  currentAttempt: 0,
-  maxAttempts: 0,
   secondsUntilRetry: 0,
+  errorClass: '' as const,
 };
 
 vi.mock('@/core/refresh', () => ({
@@ -215,10 +214,10 @@ vi.mock('@modules/object-panel/hooks/useObjectPanel', () => ({
   }),
 }));
 
-vi.mock('@/core/contexts/ObjectPanelStateContext', async () => {
-  const actual = await vi.importActual<typeof import('@/core/contexts/ObjectPanelStateContext')>(
-    '@/core/contexts/ObjectPanelStateContext'
-  );
+vi.mock('@modules/object-panel/contexts/ObjectPanelStateContext', async () => {
+  const actual = await vi.importActual<
+    typeof import('@modules/object-panel/contexts/ObjectPanelStateContext')
+  >('@modules/object-panel/contexts/ObjectPanelStateContext');
   return {
     ...actual,
     useObjectPanelState: () => ({
@@ -269,9 +268,8 @@ describe('ClusterOverview', () => {
       reason: '',
       clusterName: '',
       isRecovering: false,
-      currentAttempt: 0,
-      maxAttempts: 0,
       secondsUntilRetry: 0,
+      errorClass: '' as const,
     };
     getAppInfoMock.mockResolvedValue({
       version: '1.0.0',

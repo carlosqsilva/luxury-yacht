@@ -1,3 +1,10 @@
+/**
+ * frontend/vite.config.ts
+ *
+ * Configures the Vite dev/test build and frontend aliases, including
+ * backend-owned JSON contracts consumed by TypeScript.
+ */
+
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
@@ -60,6 +67,10 @@ export default defineConfig({
       '@yaml-field-policy-contract': path.resolve(
         __dirname,
         '../backend/objectyaml/field-policy-contract.json'
+      ),
+      '@builtin-resource-identities': path.resolve(
+        __dirname,
+        '../backend/resourcecontract/builtin-resource-identities.json'
       ),
     },
   },

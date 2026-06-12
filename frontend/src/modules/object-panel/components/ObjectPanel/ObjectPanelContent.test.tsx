@@ -8,6 +8,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 
 import { ObjectPanelContent } from '@modules/object-panel/components/ObjectPanel/ObjectPanelContent';
 import type { DetailsTabProps } from '@modules/object-panel/components/ObjectPanel/Details/DetailsTab';
+import { buildObjectDetailModel } from '@modules/object-panel/components/ObjectPanel/Details/objectDetailModel';
 
 const hoistedRefs = vi.hoisted(() => ({
   detailsTabProps: { current: null as DetailsTabProps | null },
@@ -19,6 +20,13 @@ const hoistedRefs = vi.hoisted(() => ({
   shellTabProps: { current: null as any },
   nodeLogsTabProps: { current: null as any },
   podsTabProps: { current: null as any },
+  setScopedDomainEnabled: vi.fn(),
+}));
+
+vi.mock('@/core/refresh', () => ({
+  refreshOrchestrator: {
+    setScopedDomainEnabled: (...args: unknown[]) => hoistedRefs.setScopedDomainEnabled(...args),
+  },
 }));
 
 vi.mock('@modules/object-panel/components/ObjectPanel/Details/DetailsTab', () => ({
@@ -87,11 +95,13 @@ vi.mock('@modules/object-panel/components/ObjectPanel/Pods/PodsTab', () => ({
 describe('ObjectPanelContent', () => {
   let container: HTMLDivElement;
   let root: ReactDOM.Root;
+  const objectData = { kind: 'Deployment', name: 'api', namespace: 'team-a' };
 
   const baseProps: React.ComponentProps<typeof ObjectPanelContent> = {
     activeTab: 'details',
     detailTabProps: {
-      objectData: { kind: 'Deployment', name: 'api', namespace: 'team-a' },
+      objectData,
+      detailModel: buildObjectDetailModel(objectData, 'deployment', null),
       isActive: true,
       detailsLoading: false,
       detailsError: null,
@@ -113,38 +123,6 @@ describe('ObjectPanelContent', () => {
       onScaleCancel: vi.fn(),
       onScaleReplicasChange: vi.fn(),
       onShowScaleInput: vi.fn(),
-      podDetails: null,
-      deploymentDetails: null,
-      replicaSetDetails: null,
-      daemonSetDetails: null,
-      statefulSetDetails: null,
-      jobDetails: null,
-      cronJobDetails: null,
-      configMapDetails: null,
-      secretDetails: null,
-      helmReleaseDetails: null,
-      serviceDetails: null,
-      ingressDetails: null,
-      networkPolicyDetails: null,
-      endpointSliceDetails: null,
-      pvcDetails: null,
-      pvDetails: null,
-      storageClassDetails: null,
-      serviceAccountDetails: null,
-      roleDetails: null,
-      roleBindingDetails: null,
-      clusterRoleDetails: null,
-      clusterRoleBindingDetails: null,
-      hpaDetails: null,
-      pdbDetails: null,
-      resourceQuotaDetails: null,
-      limitRangeDetails: null,
-      nodeDetails: null,
-      namespaceDetails: null,
-      ingressClassDetails: null,
-      crdDetails: null,
-      mutatingWebhookDetails: null,
-      validatingWebhookDetails: null,
     },
     isPanelOpen: true,
     capabilities: {
@@ -174,13 +152,6 @@ describe('ObjectPanelContent', () => {
     deletedResourceName: '',
     onClosePanel: vi.fn(),
     onRefreshDetails: vi.fn(),
-    podsState: {
-      pods: [],
-      metrics: null,
-      loading: false,
-      error: null,
-      scope: null,
-    },
     panelId: 'obj:test:deployment:team-a:api',
   };
 
@@ -193,8 +164,11 @@ describe('ObjectPanelContent', () => {
     document.body.appendChild(container);
     root = ReactDOM.createRoot(container);
     Object.values(hoistedRefs).forEach((ref) => {
-      ref.current = null;
+      if ('current' in ref) {
+        ref.current = null;
+      }
     });
+    hoistedRefs.setScopedDomainEnabled.mockClear();
   });
 
   afterEach(() => {
@@ -313,8 +287,6 @@ describe('ObjectPanelContent', () => {
   it('renders pods tab when active', () => {
     renderContent({ activeTab: 'pods' });
     expect(hoistedRefs.podsTabProps.current).toMatchObject({
-      pods: [],
-      loading: false,
       isActive: true,
     });
   });
@@ -337,5 +309,56 @@ describe('ObjectPanelContent', () => {
     expect(onClosePanel).toHaveBeenCalledTimes(1);
     expect(container.textContent).toContain('Object not found');
     expect(container.textContent).toContain('api is no longer available.');
+  });
+
+  it('disables panel-scoped refresh domains with preserveState and exact scope identity', () => {
+    renderContent({
+      detailScope: 'cluster-a|default:apps/v1:Deployment:api',
+      eventsScope: 'cluster-a|default:apps/v1:Deployment:api|events',
+      containerLogsScope: 'cluster-a|default:apps/v1:Deployment:api|logs',
+      mapScope: 'cluster-a|default:apps/v1:Deployment:api|map',
+      helmScope: 'cluster-a|default:helm:team-a:api',
+    });
+
+    hoistedRefs.setScopedDomainEnabled.mockClear();
+
+    renderContent({ isPanelOpen: false });
+
+    expect(hoistedRefs.setScopedDomainEnabled).toHaveBeenCalledWith(
+      'object-events',
+      'cluster-a|default:apps/v1:Deployment:api|events',
+      false,
+      { preserveState: true }
+    );
+    expect(hoistedRefs.setScopedDomainEnabled).toHaveBeenCalledWith(
+      'object-yaml',
+      'cluster-a|default:apps/v1:Deployment:api',
+      false,
+      { preserveState: true }
+    );
+    expect(hoistedRefs.setScopedDomainEnabled).toHaveBeenCalledWith(
+      'object-helm-manifest',
+      'cluster-a|default:helm:team-a:api',
+      false,
+      { preserveState: true }
+    );
+    expect(hoistedRefs.setScopedDomainEnabled).toHaveBeenCalledWith(
+      'object-helm-values',
+      'cluster-a|default:helm:team-a:api',
+      false,
+      { preserveState: true }
+    );
+    expect(hoistedRefs.setScopedDomainEnabled).toHaveBeenCalledWith(
+      'container-logs',
+      'cluster-a|default:apps/v1:Deployment:api|logs',
+      false,
+      { preserveState: true }
+    );
+    expect(hoistedRefs.setScopedDomainEnabled).toHaveBeenCalledWith(
+      'object-map',
+      'cluster-a|default:apps/v1:Deployment:api|map',
+      false,
+      { preserveState: true }
+    );
   });
 });

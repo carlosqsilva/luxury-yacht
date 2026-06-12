@@ -34,11 +34,14 @@ func (s *Service) collectResource(ctx context.Context, index int, desc resourceD
 	if summaries, handled, err := s.collectViaSharedInformer(index, desc, namespaces, agg); handled {
 		return summaries, err
 	}
-	if promoted := s.getPromotedDescriptor(desc.GVR.String()); promoted != nil {
-		if summaries, err := s.collectFromInformer(index, desc, promoted, agg); err == nil {
-			return summaries, nil
-		} else if !errors.Is(err, errInformerNotSynced) {
-			s.logWarn(fmt.Sprintf("catalog informer for %s unavailable (%v); falling back to list", desc.GVR.String(), err))
+	plan := planCollectionSource(desc)
+	if plan.promotable {
+		if promoted := s.getPromotedDescriptor(desc.GVR.String()); promoted != nil {
+			if summaries, err := s.collectFromInformer(index, desc, promoted, agg); err == nil {
+				return summaries, nil
+			} else if !errors.Is(err, errInformerNotSynced) {
+				s.logWarn(fmt.Sprintf("catalog informer for %s unavailable (%v); falling back to list", desc.GVR.String(), err))
+			}
 		}
 	}
 
@@ -46,32 +49,21 @@ func (s *Service) collectResource(ctx context.Context, index int, desc resourceD
 	if err != nil {
 		return nil, err
 	}
-	s.maybePromote(ctx, desc, len(summaries))
+	if plan.promotable {
+		s.maybePromote(ctx, desc, len(summaries))
+	}
 	return summaries, nil
 }
 
 func (s *Service) collectViaSharedInformer(index int, desc resourceDescriptor, namespaces []string, agg *streamingAggregator) ([]Summary, bool, error) {
-	factory := s.deps.InformerFactory
-	if factory == nil {
-		return emitSummaries(index, agg, nil, nil, false)
-	}
-
-	gr := desc.GVR.GroupResource()
-	if gr == (schema.GroupResource{Group: "", Resource: "endpoints"}) {
+	plan := planCollectionSource(desc)
+	switch plan.source {
+	case collectionSourceSkip:
 		if agg != nil {
 			agg.complete(index)
 		}
 		return nil, true, nil
-	}
-
-	// Check permissions before accessing shared informer listers to avoid triggering
-	// lazy informer creation for resources the user cannot list/watch.
-	if s.deps.PermissionChecker != nil && !s.deps.PermissionChecker.CanListWatch(gr.Group, gr.Resource) {
-		// No permission - fall back to listResource which handles 403 gracefully
-		return emitSummaries(index, agg, nil, nil, false)
-	}
-
-	if gr == (schema.GroupResource{Group: "apiextensions.k8s.io", Resource: "customresourcedefinitions"}) {
+	case collectionSourceAPIExtensionsInformer:
 		if s.deps.APIExtensionsInformerFactory == nil {
 			return emitSummaries(index, agg, nil, nil, false)
 		}
@@ -81,30 +73,39 @@ func (s *Service) collectViaSharedInformer(index int, desc resourceDescriptor, n
 			return emitSummaries(index, agg, nil, err, true)
 		}
 		return emitSummaries(index, agg, s.summariesFromObjects(desc, toMetaObjects(items)), nil, true)
-	}
-
-	builder, ok := sharedInformerListers[gr]
-	if !ok {
-		if s.deps.GatewayInformerFactory == nil {
+	case collectionSourceSharedInformer:
+		factory := s.deps.InformerFactory
+		if factory == nil {
 			return emitSummaries(index, agg, nil, nil, false)
 		}
-		gatewayBuilder, gatewayOK := gatewayInformerListers[gr]
-		if !gatewayOK {
+		gr := plan.groupResource
+		// Check permissions before accessing shared informer listers to avoid triggering
+		// lazy informer creation for resources the user cannot list/watch.
+		if s.deps.PermissionChecker != nil && !s.deps.PermissionChecker.CanListWatch(gr.Group, gr.Resource) {
+			// No permission - fall back to listResource which handles 403 gracefully
 			return emitSummaries(index, agg, nil, nil, false)
 		}
-		listFn := gatewayBuilder(s.deps.GatewayInformerFactory)
+		builder := sharedInformerListers[gr]
+		listFn := builder(factory)
 		if listFn == nil {
 			return emitSummaries(index, agg, nil, nil, false)
 		}
 		summaries, err := s.collectFromNamespacedLister(desc, namespaces, listFn)
 		return emitSummaries(index, agg, summaries, err, true)
-	}
-	listFn := builder(factory)
-	if listFn == nil {
+	case collectionSourceGatewayInformer:
+		if s.deps.GatewayInformerFactory == nil {
+			return emitSummaries(index, agg, nil, nil, false)
+		}
+		builder := gatewayInformerListers[plan.groupResource]
+		listFn := builder(s.deps.GatewayInformerFactory)
+		if listFn == nil {
+			return emitSummaries(index, agg, nil, nil, false)
+		}
+		summaries, err := s.collectFromNamespacedLister(desc, namespaces, listFn)
+		return emitSummaries(index, agg, summaries, err, true)
+	default:
 		return emitSummaries(index, agg, nil, nil, false)
 	}
-	summaries, err := s.collectFromNamespacedLister(desc, namespaces, listFn)
-	return emitSummaries(index, agg, summaries, err, true)
 }
 
 func (s *Service) collectFromNamespacedLister(desc resourceDescriptor, namespaces []string, list func(namespace string) ([]metav1.Object, error)) ([]Summary, error) {
@@ -242,6 +243,10 @@ func (s *Service) listNamespaceItems(ctx context.Context, index int, desc resour
 				break
 			}
 			if apierrors.IsForbidden(err) {
+				// Record the denial so the catalog can report WHY the type is
+				// missing — an RBAC-blocked catalog must not look like an
+				// empty cluster.
+				s.recordDeniedResource(deniedResourceName(desc))
 				s.logDebug(fmt.Sprintf("permission denied listing %s, skipping", desc.GVR.String()))
 				return results, nil
 			}
@@ -277,6 +282,15 @@ func (s *Service) listNamespaceItems(ctx context.Context, index int, desc resour
 		options.Continue = cont
 	}
 	return results, nil
+}
+
+// deniedResourceName renders a kubectl-style resource name (`resource[.group]`)
+// for permission diagnostics.
+func deniedResourceName(desc resourceDescriptor) string {
+	if desc.Group != "" {
+		return desc.Resource + "." + desc.Group
+	}
+	return desc.Resource
 }
 
 func (s *Service) namespaceWorkerLimit(targetCount int) int {

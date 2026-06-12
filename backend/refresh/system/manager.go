@@ -57,7 +57,6 @@ type Config struct {
 	GatewayInformerFactory     gatewayinformers.SharedInformerFactory   // Informers for Gateway API resources.
 	GatewayAPIPresence         common.GatewayAPIPresence                // Installed Gateway API kind set.
 	DynamicClient              dynamic.Interface                        // Dynamic client for interacting with Kubernetes resources.
-	HelmFactory                snapshot.HelmActionFactory               // Factory for creating Helm actions.
 	ObjectDetailsProvider      snapshot.ObjectDetailProvider            // Provider for detailed object information.
 	Logger                     containerlogsstream.Logger               // Logger for recording refresh operations.
 	ObjectCatalogEnabled       func() bool                              // Function to check if the object catalog is enabled.
@@ -206,14 +205,21 @@ func NewSubsystemWithServices(cfg Config) (*Subsystem, error) {
 
 	// PrimePermissions checks the initial set of permissions required for the subsystem.
 	ctx, cancel := context.WithTimeout(context.Background(), config.PermissionPreflightTimeout)
+	defer cancel()
 	_ = informerFactory.PrimePermissions(ctx, preflight)
-	cancel()
 
-	if err := registerDomains(gate, runtimePerms, registrations); err != nil {
+	// Registration reuses the preflight deadline; runtime checks should hit the
+	// just-primed permission cache instead of extending startup indefinitely.
+	if err := registerDomains(ctx, gate, runtimePerms, registrations); err != nil {
 		return nil, err
 	}
 
-	snapshotService := snapshot.NewServiceWithPermissions(registry, telemetryRecorder, clusterMeta, runtimePerms)
+	snapshotService := snapshot.NewServiceWithPermissions(
+		registry,
+		telemetryRecorder,
+		clusterMeta,
+		runtimePerms,
+	).WithInformerHub(informerFactory)
 	queue := refresh.NewInMemoryQueue()
 
 	manager := refresh.NewManager(registry, informerFactory, snapshotService, metricsPoller, queue)

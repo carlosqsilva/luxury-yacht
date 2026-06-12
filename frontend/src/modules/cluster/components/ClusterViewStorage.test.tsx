@@ -9,7 +9,7 @@ import ReactDOM from 'react-dom/client';
 import { act } from 'react';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import ClusterViewStorage from '@modules/cluster/components/ClusterViewStorage';
-import { OBJECT_ACTION_IDS } from '@shared/actions/objectActionDescriptors';
+import { OBJECT_ACTION_IDS } from '@shared/actions/objectActionContract';
 
 vi.mock('@core/contexts/FavoritesContext', () => ({
   useFavorites: () => ({
@@ -138,7 +138,7 @@ describe('ClusterViewStorage', () => {
 
   it('passes persisted state to GridTable', async () => {
     await act(async () => {
-      root.render(<ClusterViewStorage data={[basePV]} loaded={true} />);
+      root.render(<ClusterViewStorage />);
       await Promise.resolve();
     });
 
@@ -157,9 +157,7 @@ describe('ClusterViewStorage', () => {
 
   it('uses canonical object identity for row keys', async () => {
     await act(async () => {
-      root.render(
-        <ClusterViewStorage data={[{ ...basePV, clusterId: 'alpha:ctx' }]} loaded={true} />
-      );
+      root.render(<ClusterViewStorage />);
       await Promise.resolve();
     });
 
@@ -169,31 +167,23 @@ describe('ClusterViewStorage', () => {
     );
   });
 
-  it('uses explicit kind metadata instead of deriving kinds from rows', async () => {
+  it('leaves the kind options to the backend-published vocabulary (no frontend list)', async () => {
     await act(async () => {
-      root.render(<ClusterViewStorage data={[]} loaded={true} />);
+      root.render(<ClusterViewStorage />);
       await Promise.resolve();
     });
 
+    // No query payload applies in this harness, so there is no vocabulary yet
+    // (only the empty row-derived fallback): the kind options come ONLY from
+    // the backend capabilities on the payload (see the NsViewWorkloads
+    // end-to-end pin), never from a frontend constant.
     const props = gridTablePropsRef.current;
-    expect(props.filters?.options?.kinds).toEqual(['PersistentVolume']);
+    expect(props.filters?.options?.kinds).toEqual([]);
   });
 
   it('uses backend statusPresentation for PersistentVolume status styling', async () => {
     await act(async () => {
-      root.render(
-        <ClusterViewStorage
-          data={[
-            {
-              ...basePV,
-              status: 'Released',
-              statusState: 'Released',
-              statusPresentation: 'warning',
-            },
-          ]}
-          loaded={true}
-        />
-      );
+      root.render(<ClusterViewStorage />);
       await Promise.resolve();
     });
 
@@ -211,7 +201,7 @@ describe('ClusterViewStorage', () => {
 
   it('opens the Map for PersistentVolume rows', async () => {
     await act(async () => {
-      root.render(<ClusterViewStorage data={[basePV]} loaded={true} />);
+      root.render(<ClusterViewStorage />);
       await Promise.resolve();
     });
 

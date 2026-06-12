@@ -14,8 +14,8 @@ import {
   formatMemoryValue,
 } from '@shared/utils/resourceCalculations';
 import { readAppInfo, requestAppState } from '@/core/app-state-access';
-import { requestRefreshDomain } from '@/core/data-access';
-import { refreshOrchestrator, useRefreshScopedDomain } from '@/core/refresh';
+import { requestRefreshDomain, setRefreshDomainEnabled } from '@/core/data-access';
+import { useRefreshScopedDomain } from '@/core/refresh';
 import { buildClusterScope } from '@/core/refresh/clusterScope';
 import {
   canActivateClusterOverviewRefresh,
@@ -44,7 +44,10 @@ import { buildConnectivityPresentation } from '@/core/connection/connectivityPre
 import { useAutoRefreshLoadingState } from '@/core/refresh/hooks/useAutoRefreshLoadingState';
 import { formatAge } from '@/utils/ageFormatter';
 import { useObjectPanel } from '@modules/object-panel/hooks/useObjectPanel';
-import { objectPanelId, useObjectPanelState } from '@/core/contexts/ObjectPanelStateContext';
+import {
+  objectPanelId,
+  useObjectPanelState,
+} from '@modules/object-panel/contexts/ObjectPanelStateContext';
 import type { RecentEventEntry } from '@/core/refresh/types';
 import {
   canResolveEventObjectReference,
@@ -319,11 +322,11 @@ const ClusterOverview: React.FC<ClusterOverviewProps> = ({ clusterContext }) => 
     }
 
     const enableOverview = () => {
-      refreshOrchestrator.setScopedDomainEnabled(
-        'cluster-overview',
-        overviewScope,
-        canActivateOverviewRefresh
-      );
+      setRefreshDomainEnabled({
+        domain: 'cluster-overview',
+        scope: overviewScope,
+        enabled: canActivateOverviewRefresh,
+      });
       if (!canActivateOverviewRefresh) {
         return;
       }

@@ -1,8 +1,12 @@
+// backend/refresh/snapshot/streaming_helpers_test.go
+//
+// Verifies stream row projection helpers keep parity with snapshot builders.
 package snapshot
 
 import (
 	"context"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
@@ -121,6 +125,8 @@ func TestBuildWorkloadSummaryDeployment(t *testing.T) {
 	require.Equal(t, "2/3", summary.StatusState)
 	require.Equal(t, "warning", summary.StatusPresentation)
 	require.True(t, summary.PortForwardAvailable)
+	require.NotNil(t, summary.DesiredReplicas)
+	require.Equal(t, int32(3), *summary.DesiredReplicas)
 }
 
 func TestBuildWorkloadSummaryMatchesSnapshotHPAContext(t *testing.T) {
@@ -160,11 +166,11 @@ func TestBuildWorkloadSummaryMatchesSnapshotHPAContext(t *testing.T) {
 	snap, err := builder.Build(context.Background(), "namespace:default")
 	require.NoError(t, err)
 	payload := snap.Payload.(NamespaceWorkloadsSnapshot)
-	require.Len(t, payload.Workloads, 1)
+	require.Len(t, payload.Rows, 1)
 
 	streamRow, err := BuildWorkloadSummary(ClusterMeta{}, deployment, nil, nil, hpa)
 	require.NoError(t, err)
-	require.Equal(t, payload.Workloads[0], streamRow)
+	require.Equal(t, payload.Rows[0], streamRow)
 	require.NotNil(t, streamRow.HPAManaged)
 	require.True(t, *streamRow.HPAManaged)
 }
@@ -444,7 +450,8 @@ func TestBuildGatewayAPISummariesUseSharedGatewayFacts(t *testing.T) {
 func TestBuildNodeSummary(t *testing.T) {
 	node := &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "node-1",
+			Name:              "node-1",
+			CreationTimestamp: metav1.NewTime(time.UnixMilli(1_700_000_000_000)),
 		},
 		Spec: corev1.NodeSpec{
 			Unschedulable: true,
@@ -474,6 +481,7 @@ func TestBuildNodeSummary(t *testing.T) {
 	require.Equal(t, "Ready (Cordoned)", summary.Status)
 	require.Equal(t, "True", summary.StatusState)
 	require.Equal(t, "cordoned", summary.StatusPresentation)
+	require.Equal(t, int64(1_700_000_000_000), summary.AgeTimestamp)
 }
 
 func ptrBool(value bool) *bool {

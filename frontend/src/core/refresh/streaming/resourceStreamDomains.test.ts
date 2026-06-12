@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 
+import { refreshDomainContract } from '../domainRegistry';
 import {
   COMPLETE_RESYNC_STREAM_DOMAINS,
   RESOURCE_STREAM_DOMAINS,
@@ -47,23 +48,27 @@ const CLUSTER_SCOPED_DOMAINS = new Set<ResourceDomain>([
   'nodes',
 ]);
 
+const REPRESENTATIVE_DOMAIN_BY_SCOPE_KIND = {
+  pod: 'pods',
+  namespace: 'namespace-workloads',
+  cluster: 'nodes',
+} satisfies Record<'pod' | 'namespace' | 'cluster', ResourceDomain>;
+
 const samplePayloads: Record<ResourceDomain, unknown> = {
   pods: {
-    pods: [{ clusterId: 'cluster-a', namespace: 'default', name: 'pod-a' }],
+    rows: [{ clusterId: 'cluster-a', namespace: 'default', name: 'pod-a' }],
   },
   'namespace-workloads': {
-    workloads: [{ clusterId: 'cluster-a', namespace: 'default', kind: 'Deployment', name: 'web' }],
+    rows: [{ clusterId: 'cluster-a', namespace: 'default', kind: 'Deployment', name: 'web' }],
   },
   'namespace-config': {
-    resources: [
-      { clusterId: 'cluster-a', namespace: 'default', kind: 'ConfigMap', name: 'config-a' },
-    ],
+    rows: [{ clusterId: 'cluster-a', namespace: 'default', kind: 'ConfigMap', name: 'config-a' }],
   },
   'namespace-network': {
-    resources: [{ clusterId: 'cluster-a', namespace: 'default', kind: 'Service', name: 'svc-a' }],
+    rows: [{ clusterId: 'cluster-a', namespace: 'default', kind: 'Service', name: 'svc-a' }],
   },
   'namespace-rbac': {
-    resources: [{ clusterId: 'cluster-a', namespace: 'default', kind: 'Role', name: 'role-a' }],
+    rows: [{ clusterId: 'cluster-a', namespace: 'default', kind: 'Role', name: 'role-a' }],
   },
   'namespace-custom': {
     resources: [
@@ -78,10 +83,10 @@ const samplePayloads: Record<ResourceDomain, unknown> = {
     ],
   },
   'namespace-helm': {
-    releases: [{ clusterId: 'cluster-a', namespace: 'default', name: 'release-a' }],
+    rows: [{ clusterId: 'cluster-a', namespace: 'default', name: 'release-a' }],
   },
   'namespace-autoscaling': {
-    resources: [
+    rows: [
       {
         clusterId: 'cluster-a',
         namespace: 'default',
@@ -91,12 +96,12 @@ const samplePayloads: Record<ResourceDomain, unknown> = {
     ],
   },
   'namespace-quotas': {
-    resources: [
+    rows: [
       { clusterId: 'cluster-a', namespace: 'default', kind: 'ResourceQuota', name: 'quota-a' },
     ],
   },
   'namespace-storage': {
-    resources: [
+    rows: [
       {
         clusterId: 'cluster-a',
         namespace: 'default',
@@ -106,16 +111,16 @@ const samplePayloads: Record<ResourceDomain, unknown> = {
     ],
   },
   'cluster-rbac': {
-    resources: [{ clusterId: 'cluster-a', kind: 'ClusterRole', name: 'role-a' }],
+    rows: [{ clusterId: 'cluster-a', kind: 'ClusterRole', name: 'role-a' }],
   },
   'cluster-storage': {
-    volumes: [{ clusterId: 'cluster-a', name: 'pv-a' }],
+    rows: [{ clusterId: 'cluster-a', name: 'pv-a' }],
   },
   'cluster-config': {
-    resources: [{ clusterId: 'cluster-a', kind: 'StorageClass', name: 'standard' }],
+    rows: [{ clusterId: 'cluster-a', kind: 'StorageClass', name: 'standard' }],
   },
   'cluster-crds': {
-    definitions: [{ clusterId: 'cluster-a', name: 'widgets.example.com' }],
+    rows: [{ clusterId: 'cluster-a', name: 'widgets.example.com' }],
   },
   'cluster-custom': {
     resources: [
@@ -129,7 +134,7 @@ const samplePayloads: Record<ResourceDomain, unknown> = {
     ],
   },
   nodes: {
-    nodes: [{ clusterId: 'cluster-a', name: 'node-a' }],
+    rows: [{ clusterId: 'cluster-a', name: 'node-a' }],
   },
 };
 
@@ -495,6 +500,24 @@ describe('resource stream domain descriptors', () => {
       expect(descriptor.isClusterScoped, `${descriptor.domain} isClusterScoped`).toBe(
         clusterScoped
       );
+    }
+  });
+
+  it('normalizes scopes from the backend-authored executable examples', () => {
+    const examples = refreshDomainContract.resourceStream.scopeExamples;
+
+    for (const [scopeKind, cases] of Object.entries(examples) as Array<
+      [keyof typeof REPRESENTATIVE_DOMAIN_BY_SCOPE_KIND, (typeof examples)[keyof typeof examples]]
+    >) {
+      const domain = REPRESENTATIVE_DOMAIN_BY_SCOPE_KIND[scopeKind];
+
+      for (const example of cases.valid) {
+        expect(normalizeResourceScope(domain, example.scope)).toBe(example.canonical);
+      }
+
+      for (const example of cases.invalid) {
+        expect(() => normalizeResourceScope(domain, example.scope)).toThrow(example.errorContains);
+      }
     }
   });
 });

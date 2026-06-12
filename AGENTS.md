@@ -34,6 +34,14 @@ You MUST follow these at all times.
   level, and free of dead code or temporary compatibility paths. Do not expand
   scope into unrelated cleanup unless it is required for a correct fix. If the
   correct fix is materially larger than requested, explain the tradeoff and ask.
+- **PRACTICE RED/GREEN/REFACTOR TDD FOR EVERY BEHAVIOR CHANGE.** Write a
+  failing test that specifies the behavior first, run it, and confirm it fails
+  for the right reason (red) — a test that passes before the change is written
+  is invalid. Then write the minimum code to make it pass (green), then
+  refactor under green. Work in tight cycles, one behavior at a time. Never
+  change logic from a mental model and defer verification to the user or a
+  later manual check; the test must prove the behavior before anyone reviews
+  it. Documentation-only, comment-only, and trivial mechanical edits are exempt.
 - **NEVER RUN STATE-MODIFYING GIT COMMANDS OR CREATE PRS UNLESS EXPLICITLY
   DIRECTED.** Read-only git commands are fine.
 
@@ -80,12 +88,13 @@ You MUST follow these at all times.
 - Add comments where the logic is not self-evident, using plain language.
 - Treat the object catalog as the source of truth for namespace and cluster
   listings. See `backend/AGENTS.md#Object-Catalog`.
-- Before presenting non-documentation work as complete, run `mage qc:prerelease`
+- Before presenting non-documentation, non-comment-only work as complete, run
+  `mage qc:prerelease`
 - You do not need to rerun these checks after every edit during a task, but the
   final reported state must be based on the latest code in the worktree.
 - If a check cannot be run, or fails because of pre-existing unrelated changes,
   state that clearly and include the command and failure.
-- Skip these checks only when the change is documentation-only.
+- Skip these checks only when the change is documentation-only or comment-only.
 - Aim for at least 80% test coverage. Note gaps and ask for guidance if that is
   not feasible.
 

@@ -1,8 +1,16 @@
+/*
+ * backend/refresh/snapshot/service.go
+ *
+ * Coordinates refresh-domain snapshot builds, permission checks, caching, and
+ * cluster metadata injection for the snapshot subsystem.
+ */
+
 package snapshot
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -13,33 +21,48 @@ import (
 	"github.com/luxury-yacht/app/backend/internal/config"
 	"github.com/luxury-yacht/app/backend/refresh"
 	"github.com/luxury-yacht/app/backend/refresh/domain"
+	"github.com/luxury-yacht/app/backend/refresh/domainpermissions"
 	"github.com/luxury-yacht/app/backend/refresh/permissions"
 	"github.com/luxury-yacht/app/backend/refresh/telemetry"
 )
 
 // Service builds snapshots through registered domain builders and applies short-lived caching via singleflight.
 type Service struct {
-	registry          *domain.Registry
-	telemetry         *telemetry.Recorder
-	group             singleflight.Group
-	sequence          uint64
-	cluster           ClusterMeta
-	cacheMu           sync.RWMutex
-	cache             map[string]cacheEntry
-	cacheTTL          time.Duration
-	permissionChecker *permissions.Checker
-	permissionChecks  map[string]permissionCheck
-	requestSerial     uint64
+	registry            *domain.Registry
+	telemetry           *telemetry.Recorder
+	group               singleflight.Group
+	sequence            uint64
+	cluster             ClusterMeta
+	informerHub         refresh.InformerHub
+	informerSyncTimeout time.Duration
+	cacheMu             sync.RWMutex
+	cache               map[string]cacheEntry
+	cacheTTL            time.Duration
+	permissionChecker   *permissions.Checker
+	runtimeAccess       domainpermissions.RuntimeAccess
+	requestSerial       uint64
 }
+
+// errInformerSyncTimeout marks snapshot builds rejected because the refresh
+// informer caches never reported synced within the configured deadline — for
+// example when one informer's watch is RBAC-forbidden and can never complete.
+var errInformerSyncTimeout = errors.New("refresh informer caches not synced")
 
 type cacheEntry struct {
 	snapshot  *refresh.Snapshot
 	expiresAt time.Time
 }
 
+type BuildRequest struct {
+	Context context.Context
+	Domain  string
+	Scope   string
+	Cluster ClusterMeta
+}
+
 // NewService returns a Service for the provided registry.
 func NewService(reg *domain.Registry, recorder *telemetry.Recorder, meta ClusterMeta) *Service {
-	return newService(reg, recorder, meta, nil, nil)
+	return newService(reg, recorder, meta, nil, domainpermissions.RuntimeAccess{})
 }
 
 // NewServiceWithPermissions returns a Service that validates runtime permissions per snapshot request.
@@ -49,7 +72,7 @@ func NewServiceWithPermissions(
 	meta ClusterMeta,
 	checker *permissions.Checker,
 ) *Service {
-	return newService(reg, recorder, meta, checker, nil)
+	return newService(reg, recorder, meta, checker, domainpermissions.RuntimeAccess{})
 }
 
 func newService(
@@ -57,32 +80,67 @@ func newService(
 	recorder *telemetry.Recorder,
 	meta ClusterMeta,
 	checker *permissions.Checker,
-	checks map[string]permissionCheck,
+	access domainpermissions.RuntimeAccess,
 ) *Service {
-	if checker == nil {
-		checks = nil
-	}
-	if checker != nil && checks == nil {
-		checks = defaultPermissionChecks()
+	if checker != nil && access.IsEmpty() {
+		access = domainpermissions.NewRuntimeAccess()
 	}
 	return &Service{
-		registry:          reg,
-		telemetry:         recorder,
-		cluster:           meta,
-		cache:             make(map[string]cacheEntry),
-		cacheTTL:          config.SnapshotCacheTTL,
-		permissionChecker: checker,
-		permissionChecks:  checks,
+		registry:            reg,
+		telemetry:           recorder,
+		cluster:             meta,
+		cache:               make(map[string]cacheEntry),
+		cacheTTL:            config.SnapshotCacheTTL,
+		informerSyncTimeout: config.RefreshInformerSyncTimeout,
+		permissionChecker:   checker,
+		runtimeAccess:       access,
 	}
+}
+
+// WithInformerHub makes snapshot builds wait until the refresh informer caches
+// are synced. Without this guard, early table requests can cache empty lister
+// results before the first authoritative Kubernetes list has completed.
+func (s *Service) WithInformerHub(hub refresh.InformerHub) *Service {
+	if s == nil {
+		return s
+	}
+	s.informerHub = hub
+	return s
 }
 
 // Build returns a snapshot for the requested domain/scope.
 func (s *Service) Build(ctx context.Context, domainName, scope string) (*refresh.Snapshot, error) {
-	ctx = WithClusterMeta(ctx, s.cluster)
-	if err := s.ensurePermissions(ctx, domainName, scope); err != nil {
+	return s.BuildRequest(BuildRequest{
+		Context: ctx,
+		Domain:  domainName,
+		Scope:   scope,
+		Cluster: s.cluster,
+	})
+}
+
+func (s *Service) BuildRequest(req BuildRequest) (*refresh.Snapshot, error) {
+	if err := req.Cluster.Validate(); err != nil {
+		return nil, err
+	}
+	ctx := WithClusterMeta(req.Context, req.Cluster)
+	domainName := req.Domain
+	scope := req.Scope
+	permissionCacheKey := ""
+	var err error
+	ctx, permissionCacheKey, err = s.ensurePermissions(ctx, domainName, scope)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.waitForInformerSync(ctx); err != nil {
+		if errors.Is(err, errInformerSyncTimeout) {
+			s.recordTelemetry(domainName, scope, 0, err, false, 0, nil, 0, 0, 0, true, 0)
+		}
 		return nil, err
 	}
 	cacheKey := s.cacheKey(domainName, scope)
+	if permissionCacheKey != "" {
+		cacheKey += ":permissions:" + permissionCacheKey
+	}
 	groupKey := cacheKey
 	if refresh.HasCacheBypass(ctx) {
 		// Keep cache-bypass builds isolated from cached singleflight requests.
@@ -157,24 +215,53 @@ func (s *Service) Build(ctx context.Context, domainName, scope string) (*refresh
 	return value.(*refresh.Snapshot), nil
 }
 
+func (s *Service) waitForInformerSync(ctx context.Context) error {
+	if s == nil || s.informerHub == nil || s.informerHub.HasSynced(ctx) {
+		return nil
+	}
+	timeout := s.informerSyncTimeout
+	if timeout <= 0 {
+		timeout = config.RefreshInformerSyncTimeout
+	}
+	// Bound the wait: a single informer whose watch can never complete (for
+	// example an RBAC-forbidden resource) keeps the factory-wide sync flag
+	// false forever, and the caller's context may carry no deadline.
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(config.RefreshInformerSyncPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("refresh informer caches not synced: %w", ctx.Err())
+		case <-deadline.C:
+			return fmt.Errorf("%w after %s; the cluster API may be unreachable or a watch may be unauthorized", errInformerSyncTimeout, timeout)
+		case <-ticker.C:
+			if s.informerHub.HasSynced(ctx) {
+				return nil
+			}
+		}
+	}
+}
+
 // ensurePermissions blocks snapshot builds when the current identity no longer has list access.
 // Permission-denied placeholder domains are skipped — their BuildSnapshot stub already
 // returns the correct PermissionDeniedError, so firing SSAR calls is redundant.
-func (s *Service) ensurePermissions(ctx context.Context, domainName, scope string) error {
-	if s == nil || s.permissionChecker == nil || len(s.permissionChecks) == 0 {
-		return nil
+func (s *Service) ensurePermissions(ctx context.Context, domainName, scope string) (context.Context, string, error) {
+	if s == nil || s.permissionChecker == nil {
+		return ctx, "", nil
 	}
 	// Skip SSAR checks for domains already registered as permission-denied placeholders.
 	// The domain's BuildSnapshot will return a PermissionDeniedError on its own.
 	if s.registry != nil && s.registry.IsPermissionDenied(domainName) {
-		return nil
-	}
-	check, ok := s.permissionChecks[domainName]
-	if !ok {
-		return nil
+		return ctx, "", nil
 	}
 	start := time.Now()
-	allowed, err := check.allows(ctx, s.permissionChecker)
+	decision, err := s.runtimeAccess.Check(ctx, domainName, s.permissionChecker)
+	permissionCacheKey := domainpermissions.AllowedResourcesFingerprint(decision.AllowedResources)
+	if len(decision.AllowedResources) > 0 {
+		ctx = domainpermissions.WithAllowedResources(ctx, domainName, decision.AllowedResources)
+	}
 	if err != nil {
 		duration := time.Since(start)
 		s.recordTelemetry(
@@ -191,12 +278,12 @@ func (s *Service) ensurePermissions(ctx context.Context, domainName, scope strin
 			true,
 			duration.Milliseconds(),
 		)
-		return err
+		return ctx, permissionCacheKey, err
 	}
-	if allowed {
-		return nil
+	if decision.Allowed {
+		return ctx, permissionCacheKey, nil
 	}
-	denied := refresh.NewPermissionDeniedError(domainName, check.resource)
+	denied := refresh.NewPermissionDeniedError(domainName, decision.DeniedReason)
 	duration := time.Since(start)
 	s.recordTelemetry(
 		domainName,
@@ -212,7 +299,7 @@ func (s *Service) ensurePermissions(ctx context.Context, domainName, scope strin
 		true,
 		duration.Milliseconds(),
 	)
-	return denied
+	return ctx, permissionCacheKey, denied
 }
 
 func (s *Service) recordTelemetry(

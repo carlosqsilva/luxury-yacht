@@ -2,7 +2,6 @@ package snapshot
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -30,7 +29,17 @@ type NamespaceStorageBuilder struct {
 // NamespaceStorageSnapshot payload for storage tab.
 type NamespaceStorageSnapshot struct {
 	ClusterMeta
-	Resources []StorageSummary `json:"resources"`
+	ResourceQueryEnvelope
+	Rows []StorageSummary `json:"rows"`
+}
+
+func namespaceStorageQueryCapabilities() ResourceQueryCapabilities {
+	return newTypedResourceCapabilities(
+		[]string{"name", "kind", "namespace", "capacity", "status", "storageClass", "age"},
+		[]string{"kinds", "namespaces"},
+		[]string{"kind", "name", "namespace", "capacity", "status", "storageClass"},
+		[]string{"PersistentVolumeClaim"},
+	)
 }
 
 // StorageSummary captures PVC info for UI consumption.
@@ -46,6 +55,7 @@ type StorageSummary struct {
 	StatusReason       string `json:"statusReason,omitempty"`
 	StorageClass       string `json:"storageClass"`
 	Age                string `json:"age"`
+	AgeTimestamp       int64  `json:"ageTimestamp,omitempty"`
 }
 
 // RegisterNamespaceStorageDomain registers the storage domain.
@@ -69,33 +79,21 @@ func RegisterNamespaceStorageDomain(
 func (b *NamespaceStorageBuilder) Build(ctx context.Context, scope string) (*refresh.Snapshot, error) {
 	meta := ClusterMetaFromContext(ctx)
 	clusterID, trimmed := refresh.SplitClusterScope(scope)
-	trimmed = strings.TrimSpace(trimmed)
-	if trimmed == "" {
-		return nil, errors.New(errNamespaceStorageScopeRequired)
+	baseScope, query, err := parseTypedTableQueryScope(clusterID, strings.TrimSpace(trimmed), namespaceStorageDomainName, "")
+	if err != nil {
+		return nil, err
+	}
+	parsedScope, err := parseNamespaceSnapshotScope(refresh.JoinClusterScope(clusterID, baseScope), errNamespaceStorageScopeRequired)
+	if err != nil {
+		return nil, err
 	}
 
-	isAll := isAllNamespaceScope(trimmed)
-	var (
-		namespace  string
-		err        error
-		scopeLabel string
-	)
-	if isAll {
-		scopeLabel = refresh.JoinClusterScope(clusterID, "namespace:all")
-	} else {
-		namespace, err = parseAutoscalingNamespace(trimmed)
-		if err != nil {
-			return nil, errors.New(errNamespaceStorageScopeRequired)
-		}
-		scopeLabel = refresh.JoinClusterScope(clusterID, trimmed)
-	}
-
-	pvcs, err := b.listPVCs(namespace)
+	pvcs, err := b.listPVCs(parsedScope.Namespace)
 	if err != nil {
 		return nil, fmt.Errorf("namespace storage: failed to list pvcs: %w", err)
 	}
 
-	return b.buildSnapshot(meta, scopeLabel, pvcs)
+	return b.buildSnapshot(meta, refresh.JoinClusterScope(clusterID, strings.TrimSpace(trimmed)), query, pvcs)
 }
 
 func (b *NamespaceStorageBuilder) listPVCs(namespace string) ([]*corev1.PersistentVolumeClaim, error) {
@@ -108,6 +106,7 @@ func (b *NamespaceStorageBuilder) listPVCs(namespace string) ([]*corev1.Persiste
 func (b *NamespaceStorageBuilder) buildSnapshot(
 	meta ClusterMeta,
 	namespace string,
+	query typedTableQuery,
 	pvcs []*corev1.PersistentVolumeClaim,
 ) (*refresh.Snapshot, error) {
 	resources := make([]StorageSummary, 0, len(pvcs))
@@ -133,16 +132,27 @@ func (b *NamespaceStorageBuilder) buildSnapshot(
 		return resources[i].Namespace < resources[j].Namespace
 	})
 
-	if len(resources) > config.SnapshotNamespaceStorageEntryLimit {
-		resources = resources[:config.SnapshotNamespaceStorageEntryLimit]
-	}
-
+	resolved := resolveTypedSnapshotPage(
+		namespaceStorageDomainName,
+		resources,
+		query,
+		storageTableQueryAdapter(),
+		namespaceStorageQueryCapabilities(),
+		config.SnapshotNamespaceStorageEntryLimit,
+		"storage resources",
+		func(resource StorageSummary) string { return resource.Kind },
+		nil,
+	)
 	return &refresh.Snapshot{
 		Domain:  namespaceStorageDomainName,
 		Scope:   namespace,
 		Version: version,
-		Payload: NamespaceStorageSnapshot{ClusterMeta: meta, Resources: resources},
-		Stats:   refresh.SnapshotStats{ItemCount: len(resources)},
+		Payload: NamespaceStorageSnapshot{
+			ClusterMeta:           meta,
+			ResourceQueryEnvelope: resolved.Envelope,
+			Rows:                  resolved.Rows,
+		},
+		Stats: resolved.Stats,
 	}, nil
 }
 

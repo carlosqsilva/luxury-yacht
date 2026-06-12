@@ -1,15 +1,16 @@
 /**
  * frontend/src/modules/object-panel/components/ObjectPanel/Logs/LogViewer.tsx
  *
- * Component for viewing Object Panel Logs Tab with filtering, parsing, and keyboard shortcuts.
- * Extracts logic into hooks for clarity.
- * Uses a reducer for state management.
+ * Renders the object-panel Logs tab. It coordinates container-log stream
+ * lifecycle, fallback reads, filtering, parsing, keyboard shortcuts, and viewer
+ * preference persistence.
  */
 import React, { useReducer, useEffect, useRef, useMemo, useCallback } from 'react';
 import {
   readContainerLogs,
   readContainerLogsScopeContainers,
   requestData,
+  setRefreshDomainEnabled,
 } from '@/core/data-access';
 import ClusterDataPausedState from '@shared/components/ClusterDataPausedState';
 import type { GridColumnDefinition } from '@shared/components/tables/GridTable';
@@ -94,7 +95,7 @@ interface LogViewerProps {
   resourceKind: string;
   /**
    * Refresh-domain scope string for the container-logs producer. Owned by
-   * ObjectPanel via getObjectPanelKind so this component and the panel-
+   * ObjectPanel via getObjectPanelScopes so this component and the panel-
    * level cleanup effect in ObjectPanelContent consume the same value.
    * They used to compute it independently and could drift apart.
    */
@@ -941,7 +942,11 @@ const LogViewerInner: React.FC<LogViewerProps> = ({
     refreshOrchestrator.stopStreamingDomain(CONTAINER_LOGS_DOMAIN, containerLogsScope, {
       reset: false,
     });
-    refreshOrchestrator.setScopedDomainEnabled(CONTAINER_LOGS_DOMAIN, containerLogsScope, false);
+    setRefreshDomainEnabled({
+      domain: CONTAINER_LOGS_DOMAIN,
+      scope: containerLogsScope,
+      enabled: false,
+    });
 
     setScopedDomainState(CONTAINER_LOGS_DOMAIN, containerLogsScope, (previous) => {
       const previousPayload = previous.data ?? {
@@ -1387,8 +1392,10 @@ const LogViewerInner: React.FC<LogViewerProps> = ({
   );
   const hasActiveResultFilter = selectedFilters.length > 0 || textFilter.trim().length > 0;
   const displayedLogCount = filteredEntries.length;
-  const countLabel = `${displayedLogCount} matching log${displayedLogCount === 1 ? '' : 's'}`;
-  const countTitle = countLabel;
+  const countLabel = `${displayedLogCount} matching log${
+    displayedLogCount === 1 ? '' : 's'
+  } in current buffer`;
+  const countTitle = `${countLabel}. Filtering and copy actions apply only to the current log buffer.`;
 
   useEffect(() => {
     if (displayMode !== 'raw' && !canParseContainerLogs) {
@@ -2206,7 +2213,7 @@ const LogViewerInner: React.FC<LogViewerProps> = ({
                       id: 'copy',
                       icon: <CopyIcon width={18} height={18} />,
                       onClick: handleCopyContainerLogs,
-                      title: 'Copy to clipboard (Shift+C)',
+                      title: 'Copy current log buffer to clipboard (Shift+C)',
                       ariaLabel: 'Copy to clipboard',
                       disabled: !hasCopyableContent,
                       feedback:

@@ -9,7 +9,7 @@ import ReactDOM from 'react-dom/client';
 import { act } from 'react';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import ClusterViewRBAC from '@modules/cluster/components/ClusterViewRBAC';
-import { OBJECT_ACTION_IDS } from '@shared/actions/objectActionDescriptors';
+import { OBJECT_ACTION_IDS } from '@shared/actions/objectActionContract';
 
 vi.mock('@core/contexts/FavoritesContext', () => ({
   useFavorites: () => ({
@@ -137,7 +137,7 @@ describe('ClusterViewRBAC', () => {
 
   it('passes persisted state to GridTable', async () => {
     await act(async () => {
-      root.render(<ClusterViewRBAC data={[baseRBAC]} loaded={true} />);
+      root.render(<ClusterViewRBAC />);
       await Promise.resolve();
     });
 
@@ -161,7 +161,7 @@ describe('ClusterViewRBAC', () => {
     const row = { ...baseRBAC, kind, name };
 
     await act(async () => {
-      root.render(<ClusterViewRBAC data={[row]} loaded={true} />);
+      root.render(<ClusterViewRBAC />);
       await Promise.resolve();
     });
 

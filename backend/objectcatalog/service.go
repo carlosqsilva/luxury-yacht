@@ -1,3 +1,9 @@
+/*
+ * backend/objectcatalog/service.go
+ *
+ * Defines the object catalog service and its shared dependencies.
+ */
+
 package objectcatalog
 
 import (
@@ -56,18 +62,10 @@ type Service struct {
 	clusterID   string
 	clusterName string
 
-	mu        sync.RWMutex
-	items     map[string]Summary
-	lastSeen  map[string]time.Time
-	resources map[string]resourceDescriptor
-	identity  *resourceIdentityResolver
-	// cached views to accelerate queries without per-request sorting/filter rebuilds
-	sortedChunks          []*summaryChunk
-	cachedKinds           []KindInfo
-	cachedNamespaces      []string
-	cachedDescriptors     []Descriptor
-	cachesReady           bool
-	lastFirstBatchLatency time.Duration
+	mu sync.RWMutex
+	catalogIndex
+	queryStore CatalogQueryStore
+	identity   *resourceIdentityResolver
 
 	promotedMu sync.RWMutex
 	promoted   map[string]*promotedDescriptor
@@ -98,6 +96,9 @@ type resourceDescriptor struct {
 	Scope      Scope
 }
 
+// summaryChunk holds one published batch of summaries. Chunks are IMMUTABLE
+// once published: items are never mutated in place — emit and cache rebuilds
+// always create fresh chunks. Snapshots therefore share chunk pointers.
 type summaryChunk struct {
 	items []Summary
 }
@@ -143,6 +144,9 @@ func NewService(deps Dependencies, opts *Options) *Service {
 		if !opts.EnableReactiveUpdates {
 			serviceOpts.EnableReactiveUpdates = false
 		}
+		if opts.QueryStore != nil {
+			serviceOpts.QueryStore = opts.QueryStore
+		}
 	}
 
 	nowFn := deps.Now
@@ -150,14 +154,12 @@ func NewService(deps Dependencies, opts *Options) *Service {
 		nowFn = time.Now
 	}
 
-	return &Service{
+	service := &Service{
 		deps:              deps,
 		opts:              serviceOpts,
 		clusterID:         deps.ClusterID,
 		clusterName:       deps.ClusterName,
-		items:             make(map[string]Summary),
-		lastSeen:          make(map[string]time.Time),
-		resources:         make(map[string]resourceDescriptor),
+		catalogIndex:      newCatalogIndex(),
 		identity:          newResourceIdentityResolver(deps.Common, deps.Logger),
 		promoted:          make(map[string]*promotedDescriptor),
 		health:            healthStatus{State: HealthStateUnknown},
@@ -165,6 +167,12 @@ func NewService(deps Dependencies, opts *Options) *Service {
 		now:               nowFn,
 		streamSubscribers: make(map[int]chan StreamingUpdate),
 	}
+	if serviceOpts.QueryStore != nil {
+		service.queryStore = serviceOpts.QueryStore
+	} else {
+		service.queryStore = newInMemoryCatalogQueryStore(service)
+	}
+	return service
 }
 
 // Run starts the catalog ingestion loop and blocks until the context is cancelled.

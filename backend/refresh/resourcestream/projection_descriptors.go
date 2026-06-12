@@ -1,4 +1,8 @@
+// Package resourcestream keeps projection metadata aligned with the shared
+// refresh-domain composition contract.
 package resourcestream
+
+import "github.com/luxury-yacht/app/backend/refresh/domainpermissions"
 
 // ProjectionDescriptor documents the row projection contract for a resource
 // stream domain. The descriptor is intentionally metadata-only; stream
@@ -23,6 +27,13 @@ type ResourceDescriptor struct {
 	Version  string
 	Kind     string
 	Resource string
+}
+
+// SupportedDomains returns the refresh domains served by the resource
+// WebSocket stream. The domainpermissions composition table owns the resource
+// membership; stream registration and projections add behavior-specific wiring.
+func SupportedDomains() []string {
+	return domainpermissions.StreamDomains()
 }
 
 func ProjectionDescriptors() map[string]ProjectionDescriptor {
@@ -78,28 +89,16 @@ var projectionDescriptors = map[string]ProjectionDescriptor{
 	domainNamespaceConfig: namespaceDescriptor(
 		domainNamespaceConfig,
 		"snapshot.BuildConfigMapSummary / snapshot.BuildSecretSummary",
-		[]ResourceDescriptor{core("v1", "ConfigMap", "configmaps"), core("v1", "Secret", "secrets")},
+		streamResourceDescriptors(domainNamespaceConfig),
 		[]ResourceDescriptor{},
 	),
 	domainNamespaceNetwork: {
-		Domain:         domainNamespaceNetwork,
-		ScopeKind:      "namespace",
-		SelectorShape:  "clusterId + namespace",
-		RowIdentity:    "clusterId + full network GVK namespace/name",
-		UpdateIdentity: "ref (full ResourceRef)",
-		PrimaryResources: []ResourceDescriptor{
-			core("v1", "Service", "services"),
-			discovery("EndpointSlice", "endpointslices"),
-			networking("Ingress", "ingresses"),
-			networking("NetworkPolicy", "networkpolicies"),
-			gateway("Gateway", "gateways"),
-			gateway("HTTPRoute", "httproutes"),
-			gateway("GRPCRoute", "grpcroutes"),
-			gateway("TLSRoute", "tlsroutes"),
-			gateway("ListenerSet", "listenersets"),
-			gateway("ReferenceGrant", "referencegrants"),
-			gateway("BackendTLSPolicy", "backendtlspolicies"),
-		},
+		Domain:               domainNamespaceNetwork,
+		ScopeKind:            "namespace",
+		SelectorShape:        "clusterId + namespace",
+		RowIdentity:          "clusterId + full network GVK namespace/name",
+		UpdateIdentity:       "ref (full ResourceRef)",
+		PrimaryResources:     streamResourceDescriptors(domainNamespaceNetwork),
 		RelatedResources:     []ResourceDescriptor{discovery("EndpointSlice", "endpointslices")},
 		Projection:           "snapshot.Build*NetworkSummary",
 		AffectedRowResolver:  "network object and EndpointSlice->Service resolvers",
@@ -109,11 +108,7 @@ var projectionDescriptors = map[string]ProjectionDescriptor{
 	domainNamespaceRBAC: namespaceDescriptor(
 		domainNamespaceRBAC,
 		"snapshot.BuildRoleSummary / BuildRoleBindingSummary / BuildServiceAccountSummary",
-		[]ResourceDescriptor{
-			rbac("Role", "roles"),
-			rbac("RoleBinding", "rolebindings"),
-			core("v1", "ServiceAccount", "serviceaccounts"),
-		},
+		streamResourceDescriptors(domainNamespaceRBAC),
 		[]ResourceDescriptor{},
 	),
 	domainNamespaceCustom: {
@@ -130,16 +125,13 @@ var projectionDescriptors = map[string]ProjectionDescriptor{
 		CompleteIsScopeLevel: true,
 	},
 	domainNamespaceHelm: {
-		Domain:         domainNamespaceHelm,
-		ScopeKind:      "namespace",
-		SelectorShape:  "clusterId + namespace",
-		RowIdentity:    "clusterId + helm.sh/v3 HelmRelease namespace/name",
-		UpdateIdentity: "ref (full ResourceRef)",
-		PrimaryResources: []ResourceDescriptor{
-			core("v1", "Secret", "secrets"),
-			core("v1", "ConfigMap", "configmaps"),
-		},
-		RelatedResources:     []ResourceDescriptor{core("v1", "Secret", "secrets"), core("v1", "ConfigMap", "configmaps")},
+		Domain:               domainNamespaceHelm,
+		ScopeKind:            "namespace",
+		SelectorShape:        "clusterId + namespace",
+		RowIdentity:          "clusterId + helm.sh/v3 HelmRelease namespace/name",
+		UpdateIdentity:       "ref (full ResourceRef)",
+		PrimaryResources:     streamResourceDescriptors(domainNamespaceHelm),
+		RelatedResources:     streamResourceDescriptors(domainNamespaceHelm),
 		Projection:           "snapshot.mapHelmReleases",
 		AffectedRowResolver:  "Secret/ConfigMap old/new Helm release identity resolver",
 		StaleScopeResolver:   "scope-level COMPLETE for affected namespaces",
@@ -148,50 +140,40 @@ var projectionDescriptors = map[string]ProjectionDescriptor{
 	domainNamespaceAutoscaling: namespaceDescriptor(
 		domainNamespaceAutoscaling,
 		"snapshot.BuildHPASummary",
-		[]ResourceDescriptor{autoscaling("HorizontalPodAutoscaler", "horizontalpodautoscalers")},
+		streamResourceDescriptors(domainNamespaceAutoscaling),
 		[]ResourceDescriptor{},
 	),
 	domainNamespaceQuotas: namespaceDescriptor(
 		domainNamespaceQuotas,
 		"snapshot.BuildResourceQuotaSummary / BuildLimitRangeSummary / BuildPodDisruptionBudgetSummary",
-		[]ResourceDescriptor{
-			core("v1", "ResourceQuota", "resourcequotas"),
-			core("v1", "LimitRange", "limitranges"),
-			policy("PodDisruptionBudget", "poddisruptionbudgets"),
-		},
+		streamResourceDescriptors(domainNamespaceQuotas),
 		[]ResourceDescriptor{},
 	),
 	domainNamespaceStorage: namespaceDescriptor(
 		domainNamespaceStorage,
 		"snapshot.BuildPVCStorageSummary",
-		[]ResourceDescriptor{core("v1", "PersistentVolumeClaim", "persistentvolumeclaims")},
+		streamResourceDescriptors(domainNamespaceStorage),
 		[]ResourceDescriptor{},
 	),
 	domainClusterRBAC: clusterDescriptor(
 		domainClusterRBAC,
 		"snapshot.BuildClusterRoleSummary / BuildClusterRoleBindingSummary",
-		[]ResourceDescriptor{rbac("ClusterRole", "clusterroles"), rbac("ClusterRoleBinding", "clusterrolebindings")},
+		streamResourceDescriptors(domainClusterRBAC),
 	),
 	domainClusterStorage: clusterDescriptor(
 		domainClusterStorage,
 		"snapshot.BuildClusterStorageSummary",
-		[]ResourceDescriptor{core("v1", "PersistentVolume", "persistentvolumes")},
+		streamResourceDescriptors(domainClusterStorage),
 	),
 	domainClusterConfig: clusterDescriptor(
 		domainClusterConfig,
 		"snapshot.BuildCluster*Summary",
-		[]ResourceDescriptor{
-			storage("StorageClass", "storageclasses"),
-			networking("IngressClass", "ingressclasses"),
-			gateway("GatewayClass", "gatewayclasses"),
-			admission("ValidatingWebhookConfiguration", "validatingwebhookconfigurations"),
-			admission("MutatingWebhookConfiguration", "mutatingwebhookconfigurations"),
-		},
+		streamResourceDescriptors(domainClusterConfig),
 	),
 	domainClusterCRDs: clusterDescriptor(
 		domainClusterCRDs,
 		"snapshot.BuildClusterCRDSummary",
-		[]ResourceDescriptor{apiextensions("CustomResourceDefinition", "customresourcedefinitions")},
+		streamResourceDescriptors(domainClusterCRDs),
 	),
 	domainClusterCustom: {
 		Domain:               domainClusterCustom,
@@ -253,6 +235,24 @@ func clusterDescriptor(domain, projection string, primary []ResourceDescriptor) 
 	}
 }
 
+func streamResourceDescriptors(domain string) []ResourceDescriptor {
+	composition, ok := domainpermissions.CompositionByDomain()[domain]
+	if !ok {
+		return nil
+	}
+	resources := composition.Stream
+	descriptors := make([]ResourceDescriptor, 0, len(resources))
+	for _, resource := range resources {
+		descriptors = append(descriptors, ResourceDescriptor{
+			Group:    resource.Group,
+			Version:  resource.Version,
+			Kind:     resource.Kind,
+			Resource: resource.Resource,
+		})
+	}
+	return descriptors
+}
+
 func core(version, kind, resource string) ResourceDescriptor {
 	return ResourceDescriptor{Version: version, Kind: kind, Resource: resource}
 }
@@ -271,30 +271,6 @@ func autoscaling(kind, resource string) ResourceDescriptor {
 
 func discovery(kind, resource string) ResourceDescriptor {
 	return ResourceDescriptor{Group: "discovery.k8s.io", Version: "v1", Kind: kind, Resource: resource}
-}
-
-func networking(kind, resource string) ResourceDescriptor {
-	return ResourceDescriptor{Group: "networking.k8s.io", Version: "v1", Kind: kind, Resource: resource}
-}
-
-func gateway(kind, resource string) ResourceDescriptor {
-	return ResourceDescriptor{Group: "gateway.networking.k8s.io", Version: "v1", Kind: kind, Resource: resource}
-}
-
-func rbac(kind, resource string) ResourceDescriptor {
-	return ResourceDescriptor{Group: "rbac.authorization.k8s.io", Version: "v1", Kind: kind, Resource: resource}
-}
-
-func policy(kind, resource string) ResourceDescriptor {
-	return ResourceDescriptor{Group: "policy", Version: "v1", Kind: kind, Resource: resource}
-}
-
-func storage(kind, resource string) ResourceDescriptor {
-	return ResourceDescriptor{Group: "storage.k8s.io", Version: "v1", Kind: kind, Resource: resource}
-}
-
-func admission(kind, resource string) ResourceDescriptor {
-	return ResourceDescriptor{Group: "admissionregistration.k8s.io", Version: "v1", Kind: kind, Resource: resource}
 }
 
 func apiextensions(kind, resource string) ResourceDescriptor {

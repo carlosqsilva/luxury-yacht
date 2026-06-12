@@ -1,8 +1,9 @@
 /**
  * frontend/src/modules/namespace/components/NsViewEvents.tsx
  *
- * UI component for NsViewEvents.
- * Handles rendering and interactions for the namespace feature.
+ * Renders namespace-scoped Kubernetes Events. It displays event rows, links
+ * involved objects through ResourceLink-aware navigation, and wires event
+ * context menu actions into the shared object action controller.
  */
 
 import './NsViewEvents.css';
@@ -15,24 +16,25 @@ import { useShortNames } from '@/hooks/useShortNames';
 import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
 import * as cf from '@shared/components/tables/columnFactories';
 import React, { useMemo, useCallback } from 'react';
-import ResourceGridTableView from '@shared/components/tables/ResourceGridTableView';
+import ResourceInventoryTable from '@modules/resource-grid/ResourceInventoryTable';
 import type { ContextMenuItem } from '@shared/components/ContextMenu';
 import { type GridColumnDefinition } from '@shared/components/tables/GridTable';
-import { buildClusterScopedKey } from '@shared/components/tables/GridTable.utils';
 import { ALL_NAMESPACES_SCOPE } from '@modules/namespace/constants';
 import { useObjectActionController } from '@shared/hooks/useObjectActionController';
 import { useNamespaceColumnLink } from '@modules/namespace/components/useNamespaceColumnLink';
-import { useNamespaceResourceGridTable } from '@shared/hooks/useResourceGridTable';
+import { useQueryBackedNamespaceResourceGridTable } from '@modules/resource-grid/useQueryBackedResourceGridTable';
+import { selectPayloadRows } from '@modules/resource-grid/typedResourceQueryScope';
+import { splitEventObjectTarget } from '@shared/utils/eventObjectIdentity';
 import {
-  canResolveEventObjectReference,
-  resolveEventObjectReference,
-  splitEventObjectTarget,
-} from '@shared/utils/eventObjectIdentity';
-import {
-  buildRequiredCanonicalObjectRowKey,
-  buildRequiredObjectReference,
-} from '@shared/utils/objectIdentity';
-import type { ResourceLink } from '@core/refresh/types';
+  eventGridActionReference,
+  eventGridCanOpenRelatedObject,
+  eventGridObjectNamespace,
+  eventGridSearchText,
+  eventGridStableKey,
+  namespaceEventRowIdentity,
+  resolveEventGridRelatedObject,
+} from '@shared/events/eventGridModel';
+import type { NamespaceEventsSnapshotPayload, ResourceLink } from '@core/refresh/types';
 
 export interface EventData {
   kind: string;
@@ -55,9 +57,6 @@ export interface EventData {
 
 interface EventViewProps {
   namespace: string;
-  data: EventData[];
-  loading?: boolean;
-  loaded?: boolean;
   showNamespaceColumn?: boolean;
 }
 
@@ -65,100 +64,64 @@ interface EventViewProps {
  * GridTable component for namespace Events
  */
 const NsEventsTable: React.FC<EventViewProps> = React.memo(
-  ({ namespace, data, loading = false, loaded = false, showNamespaceColumn = false }) => {
+  ({ namespace, showNamespaceColumn = false }) => {
     const { openWithObject } = useObjectPanel();
     const { navigateToView } = useNavigateToView();
     const { selectedClusterId } = useKubeconfig();
+    const queryClusterId = selectedClusterId;
     const useShortResourceNames = useShortNames();
     const namespaceColumnLink = useNamespaceColumnLink<EventData>('events', (event) =>
       event.objectNamespace && event.objectNamespace.length > 0
         ? event.objectNamespace
         : event.namespace
     );
-    // Include all visible columns in search: type, source, reason, object, message.
     const getSearchText = useCallback(
-      (event: EventData): string[] =>
-        [
-          event.kind,
-          event.namespace,
-          event.type,
-          event.source,
-          event.reason,
-          event.object,
-          event.message,
-        ].filter((v): v is string => Boolean(v)),
+      (event: EventData): string[] => eventGridSearchText(event),
       []
     );
 
-    // Build an object reference from an event's involved object for navigation.
-    const getEventObjectRefInput = useCallback(
-      (event: EventData) => ({
-        object: event.object,
-        involvedObject: event.involvedObject,
-        objectUid: event.objectUid,
-        objectApiVersion: event.objectApiVersion,
-        objectNamespace: event.objectNamespace,
-        eventNamespace: event.namespace,
-        defaultNamespace: namespace,
-        clusterId: event.clusterId ?? selectedClusterId ?? undefined,
-        clusterName: event.clusterName ?? undefined,
-      }),
-      [namespace, selectedClusterId]
-    );
-
     const canOpenEventObject = useCallback(
-      (event: EventData) => canResolveEventObjectReference(getEventObjectRefInput(event)),
-      [getEventObjectRefInput]
+      (event: EventData) =>
+        eventGridCanOpenRelatedObject(event, {
+          defaultNamespace: namespace,
+          selectedClusterId,
+        }),
+      [namespace, selectedClusterId]
     );
 
     const handleEventClick = useCallback(
       async (event: EventData) => {
-        const ref = await resolveEventObjectReference(getEventObjectRefInput(event));
+        const ref = await resolveEventGridRelatedObject(event, {
+          defaultNamespace: namespace,
+          selectedClusterId,
+        });
         if (ref) {
           openWithObject(ref);
         }
       },
-      [getEventObjectRefInput, openWithObject]
+      [namespace, openWithObject, selectedClusterId]
     );
 
     const handleEventAltClick = useCallback(
       async (event: EventData) => {
-        const ref = await resolveEventObjectReference(getEventObjectRefInput(event));
+        const ref = await resolveEventGridRelatedObject(event, {
+          defaultNamespace: namespace,
+          selectedClusterId,
+        });
         if (ref) {
           navigateToView(ref);
         }
       },
-      [getEventObjectRefInput, navigateToView]
+      [namespace, navigateToView, selectedClusterId]
     );
 
     const keyExtractor = useCallback(
-      (event: EventData, index: number) => {
-        const eventNamespace =
-          event.objectNamespace && event.objectNamespace.length > 0
-            ? event.objectNamespace
-            : event.namespace && event.namespace.length > 0
-              ? event.namespace
-              : namespace;
-        const baseKey = `${eventNamespace}-${event.reason}-${event.source}-${event.object}-${event.ageTimestamp ?? event.age ?? '0'}-${index}`;
-        return buildClusterScopedKey(event, baseKey);
-      },
+      (event: EventData, index: number) => eventGridStableKey(event, index, namespace),
       [namespace]
     );
 
     const sortRowIdentity = useCallback(
-      (event: EventData) =>
-        buildRequiredCanonicalObjectRowKey(
-          {
-            kind: 'Event',
-            name: `${event.reason}:${event.source}:${event.object}`,
-            namespace:
-              (event.objectNamespace && event.objectNamespace.length > 0
-                ? event.objectNamespace
-                : event.namespace) ?? namespace,
-            clusterId: event.clusterId,
-          },
-          { fallbackClusterId: selectedClusterId }
-        ),
+      (event: EventData) => namespaceEventRowIdentity(event, namespace, selectedClusterId),
       [namespace, selectedClusterId]
     );
 
@@ -179,10 +142,7 @@ const NsEventsTable: React.FC<EventViewProps> = React.memo(
           cf.createTextColumn(
             'namespace',
             'Namespace',
-            (event) =>
-              event.objectNamespace && event.objectNamespace.length > 0
-                ? event.objectNamespace
-                : event.namespace || '-',
+            (event) => eventGridObjectNamespace(event) ?? '-',
             namespaceColumnLink
           )
         );
@@ -214,12 +174,9 @@ const NsEventsTable: React.FC<EventViewProps> = React.memo(
         ),
         cf.createTextColumn('reason', 'Reason', (event) => event.reason || '-'),
         cf.createTextColumn('message', 'Message', (event) => event.message || '-'),
-        {
-          ...cf.createAgeColumn<EventData>('age', 'Age', (event) =>
-            formatAge(event.ageTimestamp ?? event.age ?? null)
-          ),
-          sortValue: (event) => event.ageTimestamp ?? 0,
-        }
+        cf.createAgeColumn<EventData>('age', 'Age', (event) =>
+          formatAge(event.ageTimestamp ?? event.age ?? null)
+        )
       );
 
       const sizing: cf.ColumnSizingMap = {
@@ -246,28 +203,47 @@ const NsEventsTable: React.FC<EventViewProps> = React.memo(
     ]);
 
     const showNamespaceFilter = namespace === ALL_NAMESPACES_SCOPE;
+    const defaultSort = useMemo(
+      () =>
+        ({
+          key: 'age',
+          direction: 'asc',
+        }) as const,
+      []
+    );
 
-    const { gridTableProps, favModal } = useNamespaceResourceGridTable<EventData>({
+    const diagnosticsLabel =
+      namespace === ALL_NAMESPACES_SCOPE ? 'All Namespaces Events' : 'Namespace Events';
+    const { gridTableProps, favModal, source } = useQueryBackedNamespaceResourceGridTable<
+      NamespaceEventsSnapshotPayload,
+      EventData
+    >({
+      queryTableMode: 'Query Backed Static',
+      clusterId: queryClusterId,
+      domain: 'namespace-events',
+      label: diagnosticsLabel,
+      selectRows: selectPayloadRows,
       viewId: 'namespace-events',
       namespace,
-      data,
       columns,
       keyExtractor,
-      defaultSort: { key: 'ageTimestamp', direction: 'desc' },
+      defaultSort,
       rowIdentity: sortRowIdentity,
       filterAccessors: { getSearchText },
       showNamespaceFilters: showNamespaceFilter,
       showKindDropdown: false,
-      diagnosticsLabel:
-        namespace === ALL_NAMESPACES_SCOPE ? 'All Namespaces Events' : 'Namespace Events',
+      diagnosticsLabel,
       filterOptions: { isNamespaceScoped: namespace !== ALL_NAMESPACES_SCOPE },
     });
+
+    // The involved-object action handler reads the single source of truth.
+    const displayedEvents = source.rows;
 
     const objectActions = useObjectActionController({
       context: 'gridtable',
       useDefaultHandlers: false,
       onViewInvolvedObject: (object) => {
-        const event = data.find(
+        const event = displayedEvents.find(
           (candidate) =>
             candidate.clusterId === object.clusterId &&
             candidate.namespace === object.namespace &&
@@ -289,17 +265,10 @@ const NsEventsTable: React.FC<EventViewProps> = React.memo(
         }
 
         return objectActions.getMenuItems(
-          buildRequiredObjectReference(
-            {
-              kind: 'Event',
-              name: event.reason,
-              namespace: event.namespace,
-              clusterId: event.clusterId,
-              clusterName: event.clusterName,
-            },
-            { fallbackClusterId: selectedClusterId },
-            { involvedObject: event.object }
-          )
+          eventGridActionReference(event, event.reason, selectedClusterId, {
+            involvedObject: event.object,
+            involvedObjectRef: event.involvedObject,
+          })
         );
       },
       [canOpenEventObject, objectActions, selectedClusterId]
@@ -316,10 +285,9 @@ const NsEventsTable: React.FC<EventViewProps> = React.memo(
 
     return (
       <>
-        <ResourceGridTableView
+        <ResourceInventoryTable
+          source={source}
           gridTableProps={gridTableProps}
-          boundaryLoading={loading ?? false}
-          loaded={loaded}
           spinnerMessage="Loading events..."
           favModal={favModal}
           columns={columns}
@@ -327,8 +295,6 @@ const NsEventsTable: React.FC<EventViewProps> = React.memo(
             namespace === ALL_NAMESPACES_SCOPE ? 'All Namespaces Events' : 'Namespace Events'
           }
           diagnosticsMode="live"
-          loading={loading}
-          keyExtractor={keyExtractor}
           onRowClick={handleEventClick}
           tableClassName="gridtable-ns-events"
           enableContextMenu={true}

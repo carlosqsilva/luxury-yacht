@@ -1,3 +1,9 @@
+/**
+ * frontend/src/modules/object-panel/components/ObjectPanel/Helm/ManifestTab.test.tsx
+ *
+ * Verifies Helm manifest loading through scoped refresh-domain state.
+ */
+
 import React, { act } from 'react';
 import ReactDOM from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -9,11 +15,14 @@ const searchShortcutMocks = vi.hoisted(() => ({
 
 const refreshMocks = vi.hoisted(() => ({
   setScopedDomainEnabled: vi.fn(),
+  acquireScopedDomainLease: vi.fn(),
+  releaseScopedDomainLease: vi.fn(),
   fetchScopedDomain: vi.fn(() => Promise.resolve()),
 }));
 
 const refreshStoreMocks = vi.hoisted(() => ({
   useRefreshScopedDomain: vi.fn(),
+  getScopedDomainState: vi.fn(),
 }));
 
 const autoRefreshLoadingState = vi.hoisted(() => ({
@@ -86,10 +95,12 @@ vi.mock('@ui/shortcuts', () => ({
 
 vi.mock('@/core/refresh', () => ({
   refreshOrchestrator: refreshMocks,
+  useRefreshScopedDomain: refreshStoreMocks.useRefreshScopedDomain,
 }));
 
 vi.mock('@/core/refresh/store', () => ({
   useRefreshScopedDomain: refreshStoreMocks.useRefreshScopedDomain,
+  getScopedDomainState: refreshStoreMocks.getScopedDomainState,
 }));
 
 vi.mock('@/core/refresh/hooks/useAutoRefreshLoadingState', () => ({
@@ -111,6 +122,10 @@ vi.mock('@codemirror/lang-yaml', () => ({
 
 vi.mock('@codemirror/view', () => ({
   EditorView: class {
+    static contentAttributes = {
+      of: (attrs: unknown) => ({ type: 'contentAttributes', attrs }),
+    };
+
     static domEventHandlers(handlers: unknown) {
       return handlers;
     }
@@ -207,10 +222,10 @@ describe('ManifestTab', () => {
   it('enables the scoped domain and uses startup fetch intent on mount', async () => {
     const { unmount } = await renderManifestTab();
 
-    expect(refreshMocks.setScopedDomainEnabled).toHaveBeenCalledWith(
+    expect(refreshMocks.acquireScopedDomainLease).toHaveBeenCalledWith(
       'object-helm-manifest',
       'ns:helmrelease:demo',
-      true
+      { preserveState: true }
     );
     expect(refreshMocks.fetchScopedDomain).toHaveBeenCalledWith(
       'object-helm-manifest',

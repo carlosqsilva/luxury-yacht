@@ -9,7 +9,7 @@ import React, { act } from 'react';
 import ReactDOM from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ALL_NAMESPACES_SCOPE } from '@modules/namespace/constants';
-import { OBJECT_ACTION_IDS } from '@shared/actions/objectActionDescriptors';
+import { OBJECT_ACTION_IDS } from '@shared/actions/objectActionContract';
 
 vi.mock('@modules/namespace/components/useNamespaceColumnLink', () => ({
   useNamespaceColumnLink: () => ({
@@ -230,13 +230,7 @@ describe('NsViewConfig ConfigViewGrid', () => {
     const ConfigView = module.default;
 
     const { unmount } = await createRoot(
-      <ConfigView
-        namespace={ALL_NAMESPACES_SCOPE}
-        data={sampleData}
-        loaded
-        loading={false}
-        showNamespaceColumn
-      />
+      <ConfigView namespace={ALL_NAMESPACES_SCOPE} showNamespaceColumn />
     );
 
     expect(gridTablePropsRef.current).toBeTruthy();
@@ -322,13 +316,7 @@ describe('NsViewConfig ConfigViewGrid', () => {
     const ConfigView = module.default;
 
     const { unmount } = await createRoot(
-      <ConfigView
-        namespace={ALL_NAMESPACES_SCOPE}
-        data={sampleData}
-        loaded
-        loading={false}
-        showNamespaceColumn
-      />
+      <ConfigView namespace={ALL_NAMESPACES_SCOPE} showNamespaceColumn />
     );
 
     expect(gridTablePropsRef.current?.filters?.options?.showNamespaceDropdown).toBe(true);
@@ -349,15 +337,7 @@ describe('NsViewConfig ConfigViewGrid', () => {
     const module = await import('./NsViewConfig');
     const ConfigView = module.default;
 
-    const { unmount } = await createRoot(
-      <ConfigView
-        namespace="team-a"
-        data={[defensiveResource]}
-        loaded
-        loading={false}
-        showNamespaceColumn
-      />
-    );
+    const { unmount } = await createRoot(<ConfigView namespace="team-a" showNamespaceColumn />);
 
     const { getCustomContextMenuItems, keyExtractor } = gridTablePropsRef.current;
     expect(keyExtractor(defensiveResource)).toBe('cluster-a|/v1/ConfigMap/default/app-config');
@@ -411,9 +391,7 @@ describe('NsViewConfig ConfigViewGrid', () => {
     const module = await import('./NsViewConfig');
     const ConfigView = module.default;
 
-    const { unmount } = await createRoot(
-      <ConfigView namespace="team-a" data={sampleData} loading={false} loaded showNamespaceColumn />
-    );
+    const { unmount } = await createRoot(<ConfigView namespace="team-a" showNamespaceColumn />);
 
     const { getCustomContextMenuItems } = gridTablePropsRef.current;
     const menuItems = getCustomContextMenuItems(sampleData[0], 'name');
@@ -451,13 +429,7 @@ describe('NsViewConfig ConfigViewGrid', () => {
     const ConfigView = module.default;
 
     const { unmount } = await createRoot(
-      <ConfigView
-        namespace="team-a"
-        data={sampleData}
-        loaded
-        loading={false}
-        showNamespaceColumn={false}
-      />
+      <ConfigView namespace="team-a" showNamespaceColumn={false} />
     );
 
     const { columns, getCustomContextMenuItems } = gridTablePropsRef.current;

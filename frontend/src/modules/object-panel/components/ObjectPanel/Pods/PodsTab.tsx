@@ -1,9 +1,14 @@
 /**
  * frontend/src/modules/object-panel/components/ObjectPanel/Pods/PodsTab.tsx
+ *
+ * Query-backed Pods tab for the object panel. It scopes a typed `pods` query to
+ * the panel's workload (`workload:…`) or node (`node:…`) and renders the
+ * server-paginated, server-filtered page through the shared resource-inventory
+ * table. The query is gated to the active pods tab.
  */
 
-import React, { useCallback, useMemo } from 'react';
-import GridTable, { type GridColumnDefinition } from '@shared/components/tables/GridTable';
+import React, { useCallback, useEffect, useMemo } from 'react';
+import { type GridColumnDefinition } from '@shared/components/tables/GridTable';
 import {
   applyColumnSizing,
   createAgeColumn,
@@ -16,26 +21,29 @@ import {
 import { useNavigateToView } from '@shared/hooks/useNavigateToView';
 import { useObjectLink } from '@shared/hooks/useObjectLink';
 import { useObjectPanel } from '@modules/object-panel/hooks/useObjectPanel';
-import ResourceLoadingBoundary from '@shared/components/ResourceLoadingBoundary';
 import { getMetricsBannerInfo } from '@shared/utils/metricsAvailability';
-import type { PodSnapshotEntry, PodMetricsInfo } from '@/core/refresh/types';
+import type { PodMetricsInfo, PodSnapshotEntry, PodSnapshotPayload } from '@/core/refresh/types';
 import { useViewState } from '@core/contexts/ViewStateContext';
 import { useNamespace } from '@modules/namespace/contexts/NamespaceContext';
+import {
+  POD_PERMISSIONS,
+  queryNamespacesPermissions,
+  type PermissionSpecList,
+} from '@/core/capabilities';
 import '../shared.css';
 import { useObjectActionController } from '@shared/hooks/useObjectActionController';
-import { useObjectPanelResourceGridTable } from '@shared/hooks/useResourceGridTable';
+import ResourceInventoryTable from '@modules/resource-grid/ResourceInventoryTable';
+import { useQueryBackedClusterResourceGridTable } from '@modules/resource-grid/useQueryBackedResourceGridTable';
 import {
-  buildRequiredCanonicalObjectRowKey,
   buildRequiredObjectReference,
   buildRequiredRelatedObjectReference,
 } from '@shared/utils/objectIdentity';
 import { backendStatusTextClass } from '@shared/utils/backendStatusPresentation';
+import { useResourceGridObjectIdentity } from '@modules/resource-grid/useResourceGridObjectIdentity';
+import { selectPayloadRows } from '@modules/resource-grid/typedResourceQueryScope';
+import { buildObjectPanelPodsScope } from './objectPanelPodsScope';
 
 interface PodsTabProps {
-  pods: PodSnapshotEntry[];
-  metrics: PodMetricsInfo | null;
-  loading: boolean;
-  error: string | null;
   isActive: boolean;
 }
 
@@ -56,32 +64,39 @@ const COLUMN_SIZING: ColumnSizingMap = {
 const workloadNameFromOwner = (pod: PodSnapshotEntry) =>
   pod.ownerName ? `${pod.ownerName}${pod.ownerKind ? ` (${pod.ownerKind})` : ''}` : '—';
 
-export const PodsTab: React.FC<PodsTabProps> = ({ pods, metrics, loading, error, isActive }) => {
+export const PodsTab: React.FC<PodsTabProps> = ({ isActive }) => {
   const { openWithObject, objectData } = useObjectPanel();
   const { navigateToView } = useNavigateToView();
   const objectLink = useObjectLink();
   const viewState = useViewState();
   const namespaceContext = useNamespace();
+  // The banner + per-pod staleness come from the pods query payload's metrics
+  // meta, which is scoped to the PANEL OBJECT's cluster (the globally selected
+  // cluster can be a different one). The query hook needs `columns`, so the
+  // column callbacks read this ref instead of closing over the query result.
+  const metricsRef = React.useRef<PodMetricsInfo | null>(null);
+  const metricsLastUpdated = useCallback(() => {
+    const collectedAt = metricsRef.current?.collectedAt;
+    return collectedAt ? new Date(collectedAt * 1000) : undefined;
+  }, []);
 
-  const metricsBanner = useMemo(() => getMetricsBannerInfo(metrics ?? null), [metrics]);
-  const metricsLastUpdated = useMemo(
-    () => (metrics?.collectedAt ? new Date(metrics.collectedAt * 1000) : undefined),
-    [metrics?.collectedAt]
+  const getPodIdentity = useCallback(
+    (pod: PodSnapshotEntry) => ({
+      kind: 'Pod',
+      name: pod.name,
+      namespace: pod.namespace,
+      clusterId: pod.clusterId,
+      clusterName: pod.clusterName ?? undefined,
+    }),
+    []
   );
-
-  const keyExtractor = useCallback(
-    (pod: PodSnapshotEntry) =>
-      buildRequiredCanonicalObjectRowKey(
-        {
-          kind: 'Pod',
-          name: pod.name,
-          namespace: pod.namespace,
-          clusterId: pod.clusterId,
-        },
-        { fallbackClusterId: objectData?.clusterId }
-      ),
-    [objectData?.clusterId]
-  );
+  const podIdentity = useResourceGridObjectIdentity({
+    fallbackClusterId: objectData?.clusterId,
+    getObject: getPodIdentity,
+    openWithObject,
+    navigateToView,
+  });
+  const { open: openPod, navigate: navigatePod } = podIdentity;
   // Ensure pod navigation keeps the active cluster context for object detail scopes.
   const getPodClusterMeta = useCallback(
     (pod: PodSnapshotEntry) => ({
@@ -90,23 +105,7 @@ export const PodsTab: React.FC<PodsTabProps> = ({ pods, metrics, loading, error,
     }),
     []
   );
-  const handlePodOpen = useCallback(
-    (pod: PodSnapshotEntry) => {
-      openWithObject(
-        buildRequiredObjectReference(
-          {
-            kind: 'Pod',
-            name: pod.name,
-            namespace: pod.namespace,
-            clusterId: pod.clusterId,
-            clusterName: pod.clusterName ?? undefined,
-          },
-          { fallbackClusterId: objectData?.clusterId }
-        )
-      );
-    },
-    [objectData?.clusterId, openWithObject]
-  );
+  const handlePodOpen = openPod;
   const handleNamespaceSelect = useCallback(
     (pod: PodSnapshotEntry) => {
       if (!pod.namespace) {
@@ -120,6 +119,20 @@ export const PodsTab: React.FC<PodsTabProps> = ({ pods, metrics, loading, error,
     [namespaceContext, viewState]
   );
 
+  // Scope the pods query to the panel's workload/node. Null for objects we
+  // cannot scope, which keeps the query gated off (see queryClusterId).
+  const podsScope = useMemo(
+    () => buildObjectPanelPodsScope(objectData ?? null, objectData?.kind ?? null),
+    [objectData]
+  );
+
+  // Gate the fetch to when the pods tab is the active panel tab AND a valid pod
+  // scope exists. The query-backed wrapper treats a null clusterId as
+  // "no fetch + no subscription", so this preserves the previous "only fetch
+  // while the pods tab is open" behavior and avoids fanning out to a
+  // cluster-wide pods fetch when the object has no resolvable pod scope.
+  const queryClusterId = isActive && podsScope ? (objectData?.clusterId ?? null) : null;
+
   const columns = useMemo<GridColumnDefinition<PodSnapshotEntry>[]>(() => {
     // Match workloads warning styling when restarts are non-zero.
     const getRestartsClassName = (pod: PodSnapshotEntry) =>
@@ -129,36 +142,12 @@ export const PodsTab: React.FC<PodsTabProps> = ({ pods, metrics, loading, error,
       createKindColumn<PodSnapshotEntry>({
         getKind: () => 'Pod',
         onClick: handlePodOpen,
-        onAltClick: (pod) =>
-          navigateToView(
-            buildRequiredObjectReference(
-              {
-                kind: 'Pod',
-                name: pod.name,
-                namespace: pod.namespace,
-                clusterId: pod.clusterId,
-                clusterName: pod.clusterName,
-              },
-              { fallbackClusterId: objectData?.clusterId }
-            )
-          ),
+        onAltClick: navigatePod,
         sortable: false,
       }),
       createTextColumn<PodSnapshotEntry>('name', 'Name', {
         onClick: handlePodOpen,
-        onAltClick: (pod) =>
-          navigateToView(
-            buildRequiredObjectReference(
-              {
-                kind: 'Pod',
-                name: pod.name,
-                namespace: pod.namespace,
-                clusterId: pod.clusterId,
-                clusterName: pod.clusterName,
-              },
-              { fallbackClusterId: objectData?.clusterId }
-            )
-          ),
+        onAltClick: navigatePod,
         getClassName: () => 'object-panel-link',
         getTitle: (pod) => pod.name,
       }),
@@ -225,9 +214,9 @@ export const PodsTab: React.FC<PodsTabProps> = ({ pods, metrics, loading, error,
         getRequest: (pod) => pod.cpuRequest,
         getLimit: (pod) => pod.cpuLimit,
         getVariant: () => 'compact',
-        getMetricsStale: () => Boolean(metrics?.stale),
-        getMetricsError: () => metrics?.lastError ?? undefined,
-        getMetricsLastUpdated: () => metricsLastUpdated,
+        getMetricsStale: () => Boolean(metricsRef.current?.stale),
+        getMetricsError: () => metricsRef.current?.lastError || undefined,
+        getMetricsLastUpdated: metricsLastUpdated,
         getAnimationKey: (pod) => `pod:${pod.namespace}/${pod.name}:cpu`,
         getShowEmptyState: () => true,
       }),
@@ -239,9 +228,9 @@ export const PodsTab: React.FC<PodsTabProps> = ({ pods, metrics, loading, error,
         getRequest: (pod) => pod.memRequest,
         getLimit: (pod) => pod.memLimit,
         getVariant: () => 'compact',
-        getMetricsStale: () => Boolean(metrics?.stale),
-        getMetricsError: () => metrics?.lastError ?? undefined,
-        getMetricsLastUpdated: () => metricsLastUpdated,
+        getMetricsStale: () => Boolean(metricsRef.current?.stale),
+        getMetricsError: () => metricsRef.current?.lastError || undefined,
+        getMetricsLastUpdated: metricsLastUpdated,
         getAnimationKey: (pod) => `pod:${pod.namespace}/${pod.name}:memory`,
         getShowEmptyState: () => true,
       }),
@@ -257,47 +246,94 @@ export const PodsTab: React.FC<PodsTabProps> = ({ pods, metrics, loading, error,
   }, [
     handleNamespaceSelect,
     handlePodOpen,
-    metrics?.lastError,
-    metrics?.stale,
     metricsLastUpdated,
-    navigateToView,
     objectData?.clusterId,
     objectLink,
     getPodClusterMeta,
+    navigatePod,
   ]);
 
-  const getSearchTokens = useCallback((pod: PodSnapshotEntry) => {
-    const tokens = [pod.name, pod.namespace, pod.node, pod.ownerName, pod.ownerKind];
-    return tokens.filter((token): token is string => Boolean(token));
-  }, []);
-
-  const { gridTableProps } = useObjectPanelResourceGridTable<PodSnapshotEntry>({
+  const { gridTableProps, favModal, source, queryPayload } = useQueryBackedClusterResourceGridTable<
+    PodSnapshotPayload,
+    PodSnapshotEntry
+  >({
+    queryTableMode: 'Query Backed Dynamic',
+    clusterId: queryClusterId,
+    domain: 'pods',
+    label: 'Object Panel Pods',
+    baseScope: podsScope ?? undefined,
+    selectRows: selectPayloadRows,
     viewId: 'object-panel-pods',
-    clusterIdentity: objectData?.clusterId ?? '',
-    enabled: Boolean(objectData?.clusterId),
-    data: pods,
     columns,
-    keyExtractor,
-    defaultSort: { key: 'name', direction: 'asc' },
-    rowIdentity: keyExtractor,
+    objectIdentity: podIdentity,
     diagnosticsLabel: 'Object Panel Pods',
-    filterAccessors: {
-      getKind: () => 'Pod',
-      getNamespace: (pod) => pod.namespace,
-      getSearchText: getSearchTokens,
-    },
+    showKindDropdown: false,
+    // Object-panel pods are already scoped to one workload/node; the namespace
+    // filter UI is not applicable here.
+    filterOptions: { isNamespaceScoped: false },
   });
+
+  // Payload-scoped metrics: same snapshot as the rows, same cluster.
+  const effectiveMetrics = queryPayload?.metrics ?? null;
+  metricsRef.current = effectiveMetrics;
+  const metricsBanner = useMemo(() => getMetricsBannerInfo(effectiveMetrics), [effectiveMetrics]);
+
+  // Query pod-action permissions for every (cluster, namespace) pair visible
+  // in this tab. Workload-scoped pods share the panel object's namespace, but
+  // node-scoped pods span arbitrary namespaces that the panel-level namespace
+  // query never covers. Keyed off the visible rows so permissions also
+  // self-heal after a permission-store reset; the store's TTL and in-flight
+  // dedup keep repeat calls cheap.
+  const visiblePermissionTargets = useMemo(() => {
+    const seen = new Set<string>();
+    const targets: Array<{ namespace: string; clusterId: string }> = [];
+    source.rows.forEach((pod) => {
+      const podNamespace = pod.namespace?.trim();
+      const podClusterId = pod.clusterId?.trim() || objectData?.clusterId?.trim();
+      if (!podNamespace || !podClusterId) {
+        return;
+      }
+      const key = `${podClusterId}|${podNamespace.toLowerCase()}`;
+      if (seen.has(key)) {
+        return;
+      }
+      seen.add(key);
+      targets.push({ namespace: podNamespace, clusterId: podClusterId });
+    });
+    return targets;
+  }, [source.rows, objectData?.clusterId]);
+
+  useEffect(() => {
+    if (visiblePermissionTargets.length === 0) {
+      return;
+    }
+    void queryNamespacesPermissions(visiblePermissionTargets, {
+      specLists: [POD_PERMISSIONS] satisfies PermissionSpecList[],
+    });
+  }, [visiblePermissionTargets]);
 
   const objectActions = useObjectActionController({
     context: 'gridtable',
-    useDefaultHandlers: false,
     onOpen: (object) => openWithObject(object),
     onOpenObjectMap: (object) => openWithObject(object, { initialTab: 'map' }),
   });
 
+  // Context-menu references carry row facts (forwardable ports) on top of
+  // the shared identity so the action policy can gate Port Forward per pod.
+  const getContextMenuItems = useCallback(
+    (pod: PodSnapshotEntry) =>
+      objectActions.getMenuItems(
+        buildRequiredObjectReference(
+          getPodIdentity(pod),
+          { fallbackClusterId: objectData?.clusterId },
+          { portForwardAvailable: pod.portForwardAvailable }
+        )
+      ),
+    [getPodIdentity, objectActions, objectData?.clusterId]
+  );
+
   return (
     <div className="object-panel-pods">
-      {error && <div className="namespace-error-message">{error}</div>}
       {metricsBanner && (
         <div className="metrics-warning-banner" title={metricsBanner.tooltip}>
           <span className="metrics-warning-banner__dot" />
@@ -305,43 +341,22 @@ export const PodsTab: React.FC<PodsTabProps> = ({ pods, metrics, loading, error,
         </div>
       )}
       <div className="object-panel-pods__table">
-        <ResourceLoadingBoundary
-          loading={loading}
-          dataLength={gridTableProps.data.length}
-          hasLoaded={!loading || gridTableProps.data.length > 0}
+        <ResourceInventoryTable<PodSnapshotEntry>
+          source={source}
+          gridTableProps={gridTableProps}
+          columns={columns}
+          diagnosticsLabel="Object Panel Pods"
+          diagnosticsMode="live"
+          onRowClick={handlePodOpen}
+          enableContextMenu
+          getCustomContextMenuItems={getContextMenuItems}
+          tableClassName="gridtable-pods gridtable-pods--namespaced"
           spinnerMessage="Loading pods..."
-        >
-          <GridTable<PodSnapshotEntry>
-            {...gridTableProps}
-            columns={columns}
-            diagnosticsLabel="Object Panel Pods"
-            diagnosticsMode="live"
-            keyExtractor={keyExtractor}
-            onRowClick={handlePodOpen}
-            enableContextMenu
-            getCustomContextMenuItems={(pod) =>
-              objectActions.getMenuItems(
-                buildRequiredObjectReference(
-                  {
-                    kind: 'Pod',
-                    name: pod.name,
-                    namespace: pod.namespace,
-                    clusterId: pod.clusterId,
-                    clusterName: pod.clusterName ?? undefined,
-                  },
-                  { fallbackClusterId: objectData?.clusterId }
-                )
-              )
-            }
-            tableClassName="gridtable-pods gridtable-pods--namespaced"
-            loading={loading && gridTableProps.data.length === 0}
-            loadingOverlay={{
-              show: loading && gridTableProps.data.length > 0,
-              message: 'Updating pods…',
-            }}
-            hideHeader={!isActive}
-          />
-        </ResourceLoadingBoundary>
+          updatingMessage="Updating pods..."
+          favModal={favModal}
+          hideHeader={!isActive}
+          emptyMessage="No pods found"
+        />
       </div>
       {objectActions.modals}
     </div>

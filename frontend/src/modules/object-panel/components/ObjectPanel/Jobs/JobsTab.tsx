@@ -6,7 +6,7 @@
  */
 
 import React, { useCallback, useMemo } from 'react';
-import GridTable, { type GridColumnDefinition } from '@shared/components/tables/GridTable';
+import { type GridColumnDefinition } from '@shared/components/tables/GridTable';
 import {
   applyColumnSizing,
   createAgeColumn,
@@ -17,13 +17,13 @@ import {
 } from '@shared/components/tables/columnFactories';
 import { useNavigateToView } from '@shared/hooks/useNavigateToView';
 import { useObjectPanel } from '@modules/object-panel/hooks/useObjectPanel';
-import ResourceLoadingBoundary from '@shared/components/ResourceLoadingBoundary';
 import type { types } from '@wailsjs/go/models';
 import { useViewState } from '@core/contexts/ViewStateContext';
 import { useNamespace } from '@modules/namespace/contexts/NamespaceContext';
 import '../shared.css';
 import { useObjectActionController } from '@shared/hooks/useObjectActionController';
-import { useObjectPanelResourceGridTable } from '@shared/hooks/useResourceGridTable';
+import { ObjectPanelResourceGridTableSurface } from '@modules/resource-grid/ObjectPanelResourceGridTableSurface';
+import { useObjectPanelResourceGridTable } from '@modules/resource-grid/useResourceGridTable';
 import {
   buildRequiredCanonicalObjectRowKey,
   buildRequiredObjectReference,
@@ -207,6 +207,7 @@ export const JobsTab: React.FC<JobsTabProps> = ({
   }, []);
 
   const { gridTableProps } = useObjectPanelResourceGridTable<JobRow>({
+    tableMode: 'Local Complete',
     viewId: 'object-panel-jobs',
     clusterIdentity: objectData?.clusterId ?? '',
     enabled: Boolean(objectData?.clusterId),
@@ -232,43 +233,38 @@ export const JobsTab: React.FC<JobsTabProps> = ({
   return (
     <div className="object-panel-pods">
       <div className="object-panel-pods__table">
-        <ResourceLoadingBoundary
-          loading={loading}
-          dataLength={gridTableProps.data.length}
-          hasLoaded={!loading || gridTableProps.data.length > 0}
-          spinnerMessage="Loading jobs..."
-        >
-          <GridTable<JobRow>
-            {...gridTableProps}
-            columns={columns}
-            diagnosticsLabel="Object Panel Jobs"
-            diagnosticsMode="live"
-            keyExtractor={keyExtractor}
-            onRowClick={handleJobOpen}
-            enableContextMenu
-            getCustomContextMenuItems={(job) =>
-              objectActions.getMenuItems(
-                buildRequiredObjectReference(
-                  {
-                    kind: 'Job',
-                    name: job.name,
-                    namespace: job.namespace,
-                    clusterId: job.clusterId,
-                    clusterName: job.clusterName ?? undefined,
-                  },
-                  { fallbackClusterId: objectData?.clusterId }
-                )
+        <ObjectPanelResourceGridTableSurface<JobRow>
+          gridTableProps={{
+            ...gridTableProps,
+            // Local-complete table: "all matching rows" is the local row set.
+            // fetchAllRows arms the standard scope-toggle + Copy + Export trio.
+            fetchAllRows: () => Promise.resolve(jobRows),
+            exportFilename: 'object-panel-jobs',
+          }}
+          columns={columns}
+          diagnosticsLabel="Object Panel Jobs"
+          onRowClick={handleJobOpen}
+          enableContextMenu
+          getCustomContextMenuItems={(job) =>
+            objectActions.getMenuItems(
+              buildRequiredObjectReference(
+                {
+                  kind: 'Job',
+                  name: job.name,
+                  namespace: job.namespace,
+                  clusterId: job.clusterId,
+                  clusterName: job.clusterName ?? undefined,
+                },
+                { fallbackClusterId: objectData?.clusterId }
               )
-            }
-            tableClassName="gridtable-pods gridtable-pods--namespaced"
-            loading={loading && gridTableProps.data.length === 0}
-            loadingOverlay={{
-              show: loading && gridTableProps.data.length > 0,
-              message: 'Updating jobs\u2026',
-            }}
-            hideHeader={!isActive}
-          />
-        </ResourceLoadingBoundary>
+            )
+          }
+          tableClassName="gridtable-pods gridtable-pods--namespaced"
+          loading={loading}
+          spinnerMessage="Loading jobs..."
+          updatingMessage="Updating jobs..."
+          hideHeader={!isActive}
+        />
       </div>
       {objectActions.modals}
     </div>

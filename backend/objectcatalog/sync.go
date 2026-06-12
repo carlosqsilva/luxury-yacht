@@ -223,6 +223,10 @@ func (s *Service) sync(ctx context.Context) error {
 	s.syncInProgress.Store(true)
 	defer s.syncInProgress.Store(false)
 
+	// A fresh sync re-attempts every list, so denials from the previous pass
+	// are stale; a permission grant clears the warning here.
+	s.resetDeniedResources()
+
 	currentItems, currentLastSeen, prevResourceCount := s.captureCurrentState()
 	newItems := cloneSummaryMap(currentItems)
 	newLastSeen := cloneTimeMap(currentLastSeen)
@@ -245,14 +249,7 @@ func (s *Service) sync(ctx context.Context) error {
 	}
 	if len(descriptors) == 0 {
 		s.mu.Lock()
-		s.items = make(map[string]Summary)
-		s.lastSeen = make(map[string]time.Time)
-		s.resources = make(map[string]resourceDescriptor)
-		s.sortedChunks = nil
-		s.cachedKinds = nil
-		s.cachedNamespaces = nil
-		s.cachedDescriptors = nil
-		s.cachesReady = true
+		s.catalogIndex.reset()
 		s.mu.Unlock()
 		s.logDebug("no resources discovered; catalog cleared")
 		elapsed := s.now().Sub(start)
@@ -290,7 +287,7 @@ func (s *Service) sync(ctx context.Context) error {
 	s.mu.Lock()
 	s.items = newItems
 	s.lastSeen = newLastSeen
-	s.resources = make(map[string]resourceDescriptor, len(descriptors))
+	s.catalogIndex.replaceResources(nil)
 	s.mu.Unlock()
 
 	var resultsMu sync.Mutex
@@ -388,7 +385,7 @@ func (s *Service) sync(ctx context.Context) error {
 
 	s.mu.Lock()
 	for gvr, desc := range allowedSet {
-		s.resources[gvr] = desc
+		s.catalogIndex.setResource(gvr, desc)
 	}
 	s.mu.Unlock()
 

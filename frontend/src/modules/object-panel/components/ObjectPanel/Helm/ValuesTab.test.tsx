@@ -21,11 +21,14 @@ const searchShortcutMocks = vi.hoisted(() => ({
 
 const refreshMocks = vi.hoisted(() => ({
   setScopedDomainEnabled: vi.fn(),
+  acquireScopedDomainLease: vi.fn(),
+  releaseScopedDomainLease: vi.fn(),
   fetchScopedDomain: vi.fn(() => Promise.resolve()),
 }));
 
 const refreshStoreMocks = vi.hoisted(() => ({
   useRefreshScopedDomain: vi.fn(),
+  getScopedDomainState: vi.fn(),
 }));
 
 const autoRefreshLoadingState = vi.hoisted(() => ({
@@ -111,10 +114,12 @@ vi.mock('@ui/shortcuts', () => ({
 
 vi.mock('@/core/refresh', () => ({
   refreshOrchestrator: refreshMocks,
+  useRefreshScopedDomain: refreshStoreMocks.useRefreshScopedDomain,
 }));
 
 vi.mock('@/core/refresh/store', () => ({
   useRefreshScopedDomain: refreshStoreMocks.useRefreshScopedDomain,
+  getScopedDomainState: refreshStoreMocks.getScopedDomainState,
 }));
 
 vi.mock('@/core/refresh/hooks/useAutoRefreshLoadingState', () => ({
@@ -136,6 +141,10 @@ vi.mock('@codemirror/lang-yaml', () => ({
 
 vi.mock('@codemirror/view', () => ({
   EditorView: class {
+    static contentAttributes = {
+      of: (attrs: unknown) => ({ type: 'contentAttributes', attrs }),
+    };
+
     static domEventHandlers(handlers: unknown) {
       return handlers;
     }
@@ -408,10 +417,10 @@ describe('ValuesTab', () => {
   it('enables scoped domain on mount when active, disables on unmount', async () => {
     const { unmount } = await renderValuesTab({ scope: 'ns:helmrelease:chart', isActive: true });
 
-    expect(refreshMocks.setScopedDomainEnabled).toHaveBeenCalledWith(
+    expect(refreshMocks.acquireScopedDomainLease).toHaveBeenCalledWith(
       'object-helm-values',
       'ns:helmrelease:chart',
-      true
+      { preserveState: true }
     );
     expect(refreshMocks.fetchScopedDomain).toHaveBeenCalledWith(
       'object-helm-values',
@@ -421,10 +430,9 @@ describe('ValuesTab', () => {
 
     await unmount();
 
-    expect(refreshMocks.setScopedDomainEnabled).toHaveBeenCalledWith(
+    expect(refreshMocks.releaseScopedDomainLease).toHaveBeenCalledWith(
       'object-helm-values',
       'ns:helmrelease:chart',
-      false,
       { preserveState: true }
     );
   });

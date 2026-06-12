@@ -1,7 +1,7 @@
 /**
  * frontend/src/ui/settings/sections/AdvancedSection.tsx
  *
- * Advanced tab content: refresh, table limits, persistence, and reset actions.
+ * Advanced tab content: refresh, persistence, Kubernetes API, and reset actions.
  */
 
 import { useState, useEffect } from 'react';
@@ -9,19 +9,17 @@ import { errorHandler } from '@utils/errorHandler';
 import { useAutoRefresh, useBackgroundRefresh } from '@/core/refresh';
 import { clearAllGridTableState } from '@shared/components/tables/persistence/gridTablePersistenceReset';
 import {
+  commitIntegerPreferenceInput,
   getIntegerPreferenceMetadata,
   hydrateAppPreferences,
   getKubernetesClientBurst,
   getKubernetesClientQPS,
-  getMaxTableRows,
   getPermissionSSRRFetchConcurrency,
-  normalizeIntegerPreferenceValue,
   setKubernetesClientBurst,
   setKubernetesClientQPS,
-  setMaxTableRows,
+  setPermissionSSRRFetchConcurrency,
   getSuppressNetworkErrorNotifications,
   setSuppressNetworkErrorNotifications,
-  setPermissionSSRRFetchConcurrency,
 } from '@/core/settings/appPreferences';
 import { clearTintedPalette } from '@utils/paletteTint';
 import { clearAccentColor } from '@utils/accentColor';
@@ -37,9 +35,6 @@ import ToggleSwitch from '@shared/components/ToggleSwitch';
 function AdvancedSection() {
   const { enabled: refreshEnabled, setAutoRefresh } = useAutoRefresh();
   const { enabled: backgroundRefreshEnabled, setBackgroundRefresh } = useBackgroundRefresh();
-  const [maxTableRowsInput, setMaxTableRowsInput] = useState<string>(() =>
-    String(getMaxTableRows())
-  );
   const [kubernetesClientQPSInput, setKubernetesClientQPSInput] = useState<string>(() =>
     String(getKubernetesClientQPS())
   );
@@ -56,7 +51,6 @@ function AdvancedSection() {
   );
   const [isClearStateConfirmOpen, setIsClearStateConfirmOpen] = useState(false);
   const [isResetViewsConfirmOpen, setIsResetViewsConfirmOpen] = useState(false);
-  const maxTableRowsMetadata = getIntegerPreferenceMetadata('maxTableRows');
   const kubernetesClientQPSMetadata = getIntegerPreferenceMetadata('kubernetesClientQPS');
   const kubernetesClientBurstMetadata = getIntegerPreferenceMetadata('kubernetesClientBurst');
   const permissionSSRRFetchConcurrencyMetadata = getIntegerPreferenceMetadata(
@@ -69,7 +63,6 @@ function AdvancedSection() {
       try {
         const prefs = await hydrateAppPreferences({ force: true });
         if (!cancelled) {
-          setMaxTableRowsInput(String(prefs.maxTableRows));
           setKubernetesClientQPSInput(String(prefs.kubernetesClientQPS));
           setKubernetesClientBurstInput(String(prefs.kubernetesClientBurst));
           setPermissionSSRRFetchConcurrencyInput(String(prefs.permissionSSRRFetchConcurrency));
@@ -98,40 +91,40 @@ function AdvancedSection() {
     setGridTablePersistenceMode(mode);
   };
 
-  const commitMaxTableRows = (raw: string) => {
-    const parsed = parseInt(raw, 10);
-    const normalized = normalizeIntegerPreferenceValue('maxTableRows', parsed, {
-      defaultOnNonPositive: true,
-    });
-    setMaxTableRowsInput(String(normalized));
-    setMaxTableRows(normalized);
-  };
-
   const commitKubernetesClientQPS = (raw: string) => {
-    const parsed = parseInt(raw, 10);
-    const normalized = normalizeIntegerPreferenceValue('kubernetesClientQPS', parsed, {
-      defaultOnNonPositive: true,
-    });
+    const normalized = commitIntegerPreferenceInput(
+      'kubernetesClientQPS',
+      raw,
+      setKubernetesClientQPS,
+      {
+        defaultOnNonPositive: true,
+      }
+    );
     setKubernetesClientQPSInput(String(normalized));
-    setKubernetesClientQPS(normalized);
   };
 
   const commitKubernetesClientBurst = (raw: string) => {
-    const parsed = parseInt(raw, 10);
-    const normalized = normalizeIntegerPreferenceValue('kubernetesClientBurst', parsed, {
-      defaultOnNonPositive: true,
-    });
+    const normalized = commitIntegerPreferenceInput(
+      'kubernetesClientBurst',
+      raw,
+      setKubernetesClientBurst,
+      {
+        defaultOnNonPositive: true,
+      }
+    );
     setKubernetesClientBurstInput(String(normalized));
-    setKubernetesClientBurst(normalized);
   };
 
   const commitPermissionSSRRFetchConcurrency = (raw: string) => {
-    const parsed = parseInt(raw, 10);
-    const normalized = normalizeIntegerPreferenceValue('permissionSSRRFetchConcurrency', parsed, {
-      defaultOnNonPositive: true,
-    });
+    const normalized = commitIntegerPreferenceInput(
+      'permissionSSRRFetchConcurrency',
+      raw,
+      setPermissionSSRRFetchConcurrency,
+      {
+        defaultOnNonPositive: true,
+      }
+    );
     setPermissionSSRRFetchConcurrencyInput(String(normalized));
-    setPermissionSSRRFetchConcurrency(normalized);
   };
 
   const handleResetViews = async () => {
@@ -234,40 +227,6 @@ function AdvancedSection() {
             onChange={handleSuppressNetworkErrorsToggle}
             ariaLabel="Suppress network error notifications"
           />
-        </div>
-      </div>
-
-      <div className="settings-subgroup-label">Tables</div>
-      <hr className="settings-subgroup-divider" />
-
-      <div className="settings-row">
-        <div className="settings-row-label">
-          <div className="settings-row-label-title">Max rows</div>
-          <div className="settings-row-label-help">
-            Max number of rows in a data table. Larger values will show more data, but could impact
-            app rendering performance.
-          </div>
-        </div>
-        <div className="settings-row-control">
-          <div className="setting-item setting-item-inline">
-            <input
-              type="number"
-              id="settings-max-table-rows"
-              min={maxTableRowsMetadata.min}
-              max={maxTableRowsMetadata.max}
-              step={100}
-              value={maxTableRowsInput}
-              onChange={(e) => setMaxTableRowsInput(e.target.value)}
-              onBlur={(e) => commitMaxTableRows(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  e.preventDefault();
-                  e.currentTarget.blur();
-                }
-              }}
-            />{' '}
-            rows
-          </div>
         </div>
       </div>
 

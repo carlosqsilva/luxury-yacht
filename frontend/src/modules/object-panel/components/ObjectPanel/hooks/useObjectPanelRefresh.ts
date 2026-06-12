@@ -8,7 +8,7 @@
 import { useCallback, useEffect, useMemo } from 'react';
 
 import { requestRefreshDomain, type DataRequestReason } from '@/core/data-access';
-import { refreshManager, refreshOrchestrator } from '@/core/refresh';
+import { refreshManager } from '@/core/refresh';
 import { useAutoRefreshLoadingState } from '@/core/refresh/hooks/useAutoRefreshLoadingState';
 import { applyPassiveLoadingPolicy } from '@/core/refresh/loadingPolicy';
 import { useRefreshScopedDomain } from '@/core/refresh/store';
@@ -16,6 +16,7 @@ import { useRefreshWatcher } from '@/core/refresh/hooks/useRefreshWatcher';
 
 import { INACTIVE_SCOPE, getObjectDetailsRefresherName } from '../constants';
 import type { PanelObjectData } from '../types';
+import { useObjectPanelScopedDomainLifecycle } from './useObjectPanelScopedDomainLifecycle';
 
 interface UseObjectPanelRefreshArgs {
   detailScope: string | null;
@@ -85,24 +86,13 @@ export const useObjectPanelRefresh = ({
     [detailScope]
   );
 
-  useEffect(() => {
-    if (!detailScope) {
-      return;
-    }
-
-    const enabled = isOpen && !resourceDeleted;
-    refreshOrchestrator.setScopedDomainEnabled('object-details', detailScope, enabled);
-    return () => {
-      // Stop refreshing this scope but preserve the cached snapshot so a
-      // remount (e.g. cluster switch round-trip) renders instantly from
-      // cache while the next fetch catches up. Eviction happens in
-      // ObjectPanelStateContext.closePanel when the user actually closes
-      // the panel — see Tier 1 of the responsiveness fix.
-      refreshOrchestrator.setScopedDomainEnabled('object-details', detailScope, false, {
-        preserveState: true,
-      });
-    };
-  }, [detailScope, isOpen, resourceDeleted]);
+  useObjectPanelScopedDomainLifecycle({
+    domain: 'object-details',
+    scope: detailScope,
+    enabled: isOpen && !resourceDeleted,
+    fetchOnEnable: 'startup',
+    preserveStateOnEnable: true,
+  });
 
   const detailRefresherName = useMemo(
     () => getObjectDetailsRefresherName(objectKind),
@@ -138,12 +128,6 @@ export const useObjectPanelRefresh = ({
     },
     enabled: refreshEnabled && !!objectData && !!detailRefresherName,
   });
-
-  useEffect(() => {
-    if (isOpen && detailScope && !resourceDeleted) {
-      void fetchResourceDetails('startup');
-    }
-  }, [detailScope, fetchResourceDetails, isOpen, resourceDeleted]);
 
   return {
     detailPayload,

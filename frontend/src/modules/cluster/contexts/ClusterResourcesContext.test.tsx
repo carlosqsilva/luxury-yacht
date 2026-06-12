@@ -21,9 +21,11 @@ const {
   scopedStates,
   contextRef,
   autoRefreshLoadingState,
+  permissionStates,
   createDomainState,
 } = vi.hoisted(() => {
   const scopedStateBag: Record<string, any> = {};
+  const permissionStateBag: Record<string, any> = {};
   const contextHolder: { current: ReturnType<typeof useClusterResources> | null } = {
     current: null,
   };
@@ -50,17 +52,24 @@ const {
       resetDomain: vi.fn(),
       resetScopedDomain: vi.fn(),
       setScopedDomainEnabled: vi.fn(),
+      acquireScopedDomainLease: vi.fn(),
+      releaseScopedDomainLease: vi.fn(),
     },
     scopedStates: scopedStateBag,
+    permissionStates: permissionStateBag,
     contextRef: contextHolder,
     autoRefreshLoadingState: autoRefreshState,
     createDomainState: createState,
   };
 });
 
-vi.mock('@/core/data-access', () => ({
-  requestRefreshDomain: (...args: unknown[]) => dataAccessMocks.requestRefreshDomain(...args),
-}));
+vi.mock('@/core/data-access', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return {
+    ...actual,
+    requestRefreshDomain: (...args: unknown[]) => dataAccessMocks.requestRefreshDomain(...args),
+  };
+});
 
 vi.mock('@/core/refresh', () => ({
   refreshOrchestrator: orchestrator,
@@ -77,7 +86,8 @@ vi.mock('@modules/kubernetes/config/KubeconfigContext', () => ({
 }));
 
 vi.mock('@/core/capabilities', () => ({
-  useUserPermission: () => ({ allowed: true, pending: false, entry: { status: 'ready' } }),
+  useUserPermission: (kind: string) =>
+    permissionStates[kind] ?? { allowed: true, pending: false, entry: { status: 'ready' } },
 }));
 
 const TestConsumer: React.FC = () => {
@@ -99,6 +109,7 @@ describe('ClusterResourcesProvider', () => {
     root = ReactDOM.createRoot(container);
 
     Object.keys(scopedStates).forEach((key) => delete scopedStates[key]);
+    Object.keys(permissionStates).forEach((key) => delete permissionStates[key]);
     contextRef.current = null;
     dataAccessMocks.requestRefreshDomain.mockClear();
     Object.values(orchestrator).forEach((value) => value.mockClear());
@@ -114,10 +125,12 @@ describe('ClusterResourcesProvider', () => {
     container.remove();
   });
 
-  const render = async () => {
+  const render = async (
+    activeView: React.ComponentProps<typeof ClusterResourcesProvider>['activeView'] = 'config'
+  ) => {
     await act(async () => {
       root.render(
-        <ClusterResourcesProvider activeView="config">
+        <ClusterResourcesProvider activeView={activeView}>
           <TestConsumer />
         </ClusterResourcesProvider>
       );
@@ -125,22 +138,20 @@ describe('ClusterResourcesProvider', () => {
     });
   };
 
-  it('reports an idle selected cluster view as loading while requesting startup data', async () => {
+  it('does not provider-start query-backed cluster table domains', async () => {
     scopedStates[`cluster-config:${testClusterScope}`] = createDomainState({
       scope: testClusterScope,
     });
 
     await render();
 
-    expect(contextRef.current?.config.loading).toBe(true);
     expect(contextRef.current?.config.hasLoaded).toBe(false);
-    expect(orchestrator.setScopedDomainEnabled).toHaveBeenCalledWith(
+    expect(orchestrator.acquireScopedDomainLease).not.toHaveBeenCalledWith(
       'cluster-config',
       testClusterScope,
-      true,
-      { preserveState: true }
+      expect.anything()
     );
-    expect(dataAccessMocks.requestRefreshDomain).toHaveBeenCalledWith({
+    expect(dataAccessMocks.requestRefreshDomain).not.toHaveBeenCalledWith({
       domain: 'cluster-config',
       scope: testClusterScope,
       reason: 'startup',
@@ -158,7 +169,7 @@ describe('ClusterResourcesProvider', () => {
       status: 'ready',
       scope: testClusterScope,
       data: {
-        resources: [
+        rows: [
           {
             clusterId: testClusterId,
             kind: 'StorageClass',
@@ -205,7 +216,7 @@ describe('ClusterResourcesProvider', () => {
     root = ReactDOM.createRoot(container);
   });
 
-  it('preserves the previous cluster view snapshot when switching active cluster views', async () => {
+  it('leaves query-backed cluster view live lifecycles to the table adapter', async () => {
     await render();
 
     orchestrator.setScopedDomainEnabled.mockClear();
@@ -219,11 +230,113 @@ describe('ClusterResourcesProvider', () => {
       await Promise.resolve();
     });
 
-    expect(orchestrator.setScopedDomainEnabled).toHaveBeenCalledWith(
+    expect(orchestrator.acquireScopedDomainLease).not.toHaveBeenCalledWith(
       'cluster-config',
       testClusterScope,
-      false,
-      { preserveState: true }
+      expect.anything()
     );
+    expect(orchestrator.acquireScopedDomainLease).not.toHaveBeenCalledWith(
+      'nodes',
+      testClusterScope,
+      expect.anything()
+    );
+  });
+
+  it('does not provider-start query-backed cluster domains when permissions allow them', async () => {
+    permissionStates.StorageClass = {
+      allowed: true,
+      pending: false,
+      entry: { status: 'ready' },
+    };
+    permissionStates.IngressClass = {
+      allowed: false,
+      pending: false,
+      entry: { status: 'ready' },
+    };
+    permissionStates.GatewayClass = {
+      allowed: false,
+      pending: false,
+      entry: { status: 'ready' },
+    };
+    permissionStates.MutatingWebhookConfiguration = {
+      allowed: false,
+      pending: false,
+      entry: { status: 'ready' },
+    };
+    permissionStates.ValidatingWebhookConfiguration = {
+      allowed: false,
+      pending: false,
+      entry: { status: 'ready' },
+    };
+    scopedStates[`cluster-config:${testClusterScope}`] = createDomainState({
+      scope: testClusterScope,
+    });
+
+    await render();
+
+    expect(orchestrator.acquireScopedDomainLease).not.toHaveBeenCalledWith(
+      'cluster-config',
+      testClusterScope,
+      expect.anything()
+    );
+    expect(dataAccessMocks.requestRefreshDomain).not.toHaveBeenCalledWith({
+      domain: 'cluster-config',
+      scope: testClusterScope,
+      reason: 'startup',
+    });
+  });
+
+  it('leaves query-backed cluster domains disabled when every resource permission is denied', async () => {
+    for (const kind of [
+      'StorageClass',
+      'IngressClass',
+      'GatewayClass',
+      'MutatingWebhookConfiguration',
+      'ValidatingWebhookConfiguration',
+    ]) {
+      permissionStates[kind] = {
+        allowed: false,
+        pending: false,
+        entry: { status: 'ready' },
+      };
+    }
+    scopedStates[`cluster-config:${testClusterScope}`] = createDomainState({
+      scope: testClusterScope,
+    });
+
+    await render();
+
+    expect(orchestrator.acquireScopedDomainLease).not.toHaveBeenCalledWith(
+      'cluster-config',
+      testClusterScope,
+      expect.anything()
+    );
+    expect(dataAccessMocks.requestRefreshDomain).not.toHaveBeenCalled();
+  });
+
+  it('does not enable or fetch the cluster-custom fanout for the catalog-backed custom view', async () => {
+    scopedStates[`cluster-custom:${testClusterScope}`] = createDomainState({
+      status: 'ready',
+      scope: testClusterScope,
+      data: {
+        resources: [{ clusterId: testClusterId, kind: 'Widget', name: 'legacy-row' }],
+        kinds: ['Widget'],
+      },
+    });
+
+    await render('custom');
+
+    expect(contextRef.current?.custom.data).toEqual([]);
+    expect(contextRef.current?.custom.hasLoaded).toBe(false);
+    expect(orchestrator.acquireScopedDomainLease).not.toHaveBeenCalledWith(
+      'cluster-custom',
+      testClusterScope,
+      expect.anything()
+    );
+    expect(dataAccessMocks.requestRefreshDomain).not.toHaveBeenCalledWith({
+      domain: 'cluster-custom',
+      scope: testClusterScope,
+      reason: 'startup',
+    });
   });
 });

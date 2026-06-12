@@ -1,3 +1,4 @@
+// Package system tests refresh-domain registration wiring and permission gates.
 package system
 
 import (
@@ -13,6 +14,7 @@ import (
 
 	"github.com/luxury-yacht/app/backend/objectcatalog"
 	"github.com/luxury-yacht/app/backend/refresh"
+	"github.com/luxury-yacht/app/backend/refresh/domainpermissions"
 	"github.com/luxury-yacht/app/backend/refresh/informer"
 	"github.com/luxury-yacht/app/backend/refresh/permissions"
 	"github.com/luxury-yacht/app/backend/refresh/resourcestream"
@@ -367,8 +369,8 @@ func TestResourceStreamDomainsAreRegisteredRefreshDomains(t *testing.T) {
 
 func TestDomainPermissionContractsJoinExpectedRequirementSources(t *testing.T) {
 	sources := permissionContractSources{
-		runtime: snapshot.RuntimePermissionRequirements(),
-		stream:  resourcestream.PermissionRequirementsByDomain(),
+		runtime: domainpermissions.NewRuntimeAccess().Policies(),
+		stream:  domainpermissions.StreamRequirementsByDomain(),
 	}
 	for _, domain := range loadRefreshDomainContract(t).Domains {
 		requireDomainPermissionContract(t, domain, sources)
@@ -476,23 +478,20 @@ func TestDomainRegistrationRequiresDependencies(t *testing.T) {
 	require.NotNil(t, custom.require)
 	require.ErrorContains(t, custom.require(), "dynamic client must be provided for namespace custom resources")
 
+	// The helm domain reads from the shared secrets informer and has no extra
+	// dependency gate.
 	helm := findRegistration(t, missingDeps, "namespace-helm")
-	require.NotNil(t, helm.require)
-	require.ErrorContains(t, helm.require(), "helm factory must be provided for namespace helm domain")
+	require.Nil(t, helm.require)
 
 	// Verify that dependency checks pass when the dependencies are provided.
 	withDeps := domainRegistrations(registrationDeps{
 		cfg: Config{
 			DynamicClient: dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()),
-			HelmFactory:   dummyHelmFactory,
 		},
 	})
 
 	customWithDeps := findRegistration(t, withDeps, "namespace-custom")
 	require.NoError(t, customWithDeps.require())
-
-	helmWithDeps := findRegistration(t, withDeps, "namespace-helm")
-	require.NoError(t, helmWithDeps.require())
 }
 
 func TestDomainRegistrationProviderAndServiceGatesAreExplicit(t *testing.T) {
@@ -520,6 +519,39 @@ func TestDomainRegistrationProviderAndServiceGatesAreExplicit(t *testing.T) {
 	require.False(t, findRegistration(t, withProviders, "object-helm-values").skipIf())
 }
 
+func TestPartialDataRegistrationDeniedReasonsUseRuntimeContract(t *testing.T) {
+	registrations := domainRegistrations(registrationDeps{cfg: Config{}})
+	access := domainpermissions.NewRuntimeAccess()
+
+	for _, registration := range registrations {
+		if registration.list == nil || !registration.list.allowAny {
+			continue
+		}
+		expected, ok := access.DeniedReason(registration.name)
+		require.Truef(t, ok, "list-gated partial-data domain %s must have a runtime denied reason", registration.name)
+		require.Equal(t, expected, registration.list.deniedReason)
+	}
+}
+
+func TestListRegistrationMetadataDerivesFromRuntimeContract(t *testing.T) {
+	registrations := domainRegistrations(registrationDeps{cfg: Config{}})
+	access := domainpermissions.NewRuntimeAccess()
+
+	for _, registration := range registrations {
+		if registration.list == nil {
+			continue
+		}
+		plan, ok := access.RegistrationPlan(registration.name)
+		if !ok {
+			continue
+		}
+		require.Equalf(t, permissionIssueResource(plan.Requirements), registration.list.issueResource, "domain %s issue resource", registration.name)
+		require.Equalf(t, permissionLogResource(plan.Requirements), registration.list.logResource, "domain %s log resource", registration.name)
+		require.Equalf(t, permissionLogGroup(plan.Requirements), registration.list.logGroup, "domain %s log group", registration.name)
+		require.Equalf(t, plan.DeniedReason, registration.list.deniedReason, "domain %s denied reason", registration.name)
+	}
+}
+
 // findRegistration locates a registration entry by name.
 func findRegistration(t *testing.T, registrations []domainRegistration, name string) domainRegistration {
 	t.Helper()
@@ -540,8 +572,16 @@ func requirementKeys(reqs []permissions.ResourceRequirement) map[string]struct{}
 	return keys
 }
 
+func requirementVerbKeys(reqs []permissions.ResourceRequirement) map[string]struct{} {
+	keys := make(map[string]struct{}, len(reqs))
+	for _, req := range reqs {
+		keys[permissions.RequirementKey(req)] = struct{}{}
+	}
+	return keys
+}
+
 type permissionContractSources struct {
-	runtime map[string]snapshot.DomainPermissionRequirement
+	runtime map[string]domainpermissions.Policy
 	stream  map[string][]permissions.ResourceRequirement
 }
 
@@ -557,12 +597,31 @@ func requireDomainPermissionContract(t *testing.T, domain refreshDomainRecord, s
 		if domain.Backend.ResourceStream {
 			require.Truef(t, hasStream, "resource stream domain %q must declare stream permission requirements", domain.Domain)
 			streamKeys := requirementKeys(streamReqs)
-			for _, req := range runtimeReq.Requirements {
+			streamVerbKeys := requirementVerbKeys(streamReqs)
+			for _, req := range runtimeReq.Runtime {
 				require.Containsf(
 					t,
 					streamKeys,
 					permissions.ResourceKey(req.Group, req.Resource),
 					"stream domain %q must include snapshot resource %s",
+					domain.Domain,
+					permissions.ResourceKey(req.Group, req.Resource),
+				)
+			}
+			for _, req := range streamReqs {
+				require.Containsf(
+					t,
+					streamVerbKeys,
+					permissions.RequirementKey(permissions.ListRequirement(req.Group, req.Resource)),
+					"stream domain %q must include list for %s",
+					domain.Domain,
+					permissions.ResourceKey(req.Group, req.Resource),
+				)
+				require.Containsf(
+					t,
+					streamVerbKeys,
+					permissions.RequirementKey(permissions.WatchRequirement(req.Group, req.Resource)),
+					"stream domain %q must include watch for %s",
 					domain.Domain,
 					permissions.ResourceKey(req.Group, req.Resource),
 				)

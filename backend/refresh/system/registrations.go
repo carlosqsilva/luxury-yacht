@@ -1,11 +1,15 @@
+// Package system wires refresh domains into the registry and keeps registration
+// gates aligned with the shared permission contracts.
 package system
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/luxury-yacht/app/backend/refresh/domain"
+	"github.com/luxury-yacht/app/backend/refresh/domainpermissions"
 	"github.com/luxury-yacht/app/backend/refresh/informer"
 	"github.com/luxury-yacht/app/backend/refresh/metrics"
 	"github.com/luxury-yacht/app/backend/refresh/permissions"
@@ -34,7 +38,8 @@ type domainRegistration struct {
 	require            func() error           // Function to determine if registration is required
 }
 
-// domainMeta captures shared metadata for gated domain registrations.
+// domainMeta captures shared metadata for gated registrations that cannot use
+// the runtime permission contract directly.
 type domainMeta struct {
 	issueResource string
 	logGroup      string
@@ -44,16 +49,19 @@ type domainMeta struct {
 
 // registerDomains registers refresh domains in a fixed order to preserve behavior.
 // The checker is used for a universal runtime permission check before each registration.
-func registerDomains(gate *permissionGate, checker *permissions.Checker, registrations []domainRegistration) error {
-	return runDomainRegistrations(gate, checker, registrations)
+func registerDomains(ctx context.Context, gate *permissionGate, checker *permissions.Checker, registrations []domainRegistration) error {
+	return runDomainRegistrations(ctx, gate, checker, registrations)
 }
 
 // runDomainRegistrations applies the registration table in-order.
-// Before each domain's gate logic, it checks runtime permissions using
-// defaultPermissionChecks() as the single source of truth. If the domain's
-// required permissions are denied, a permission-denied placeholder is registered
-// instead of proceeding with the normal registration.
-func runDomainRegistrations(gate *permissionGate, checker *permissions.Checker, registrations []domainRegistration) error {
+// Before each domain's gate logic, it checks runtime permissions through the
+// shared domain access adapter. If denied, a permission-denied placeholder is
+// registered instead of proceeding with the normal registration.
+func runDomainRegistrations(ctx context.Context, gate *permissionGate, checker *permissions.Checker, registrations []domainRegistration) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	access := domainpermissions.NewRuntimeAccess()
 	for _, registration := range registrations {
 		if registration.skipIf != nil && registration.skipIf() {
 			continue
@@ -64,14 +72,10 @@ func runDomainRegistrations(gate *permissionGate, checker *permissions.Checker, 
 			}
 		}
 
-		// Universal runtime permission check: use defaultPermissionChecks() to verify
-		// the user has access to this domain's resources before attempting registration.
-		// If denied, register a placeholder that returns 403 and skip further gate logic.
-		// If the check fails (e.g. SSAR error), fall through to existing gate logic.
 		if checker != nil {
-			allowed, deniedReason, err := snapshot.CheckDomainPermission(context.Background(), registration.name, checker)
-			if err == nil && !allowed {
-				if regErr := snapshot.RegisterPermissionDeniedDomain(gate.registry, registration.name, deniedReason); regErr != nil {
+			decision, err := access.Check(ctx, registration.name, checker)
+			if err == nil && !decision.Allowed {
+				if regErr := snapshot.RegisterPermissionDeniedDomain(gate.registry, registration.name, decision.DeniedReason); regErr != nil {
 					return regErr
 				}
 				continue
@@ -115,8 +119,8 @@ func runDomainRegistrations(gate *permissionGate, checker *permissions.Checker, 
 }
 
 // preflightRequests collects permission requests used to prime permission caches.
-// It merges requirements from the registration table, the runtime permission checks
-// (defaultPermissionChecks), and any extra requests (e.g. metrics).
+// It merges requirements from the registration table, the shared domain access
+// contract, and any extra requests such as metrics.
 func preflightRequests(registrations []domainRegistration, extra []informer.PermissionRequest) []informer.PermissionRequest {
 	requests := make([]informer.PermissionRequest, 0, len(extra))
 	seen := make(map[string]struct{})
@@ -138,8 +142,8 @@ func preflightRequests(registrations []domainRegistration, extra []informer.Perm
 		add(req.Group, req.Resource, req.Verb)
 	}
 
-	// Add all runtime permission requirements so the universal check is pre-warmed.
-	for _, req := range snapshot.RuntimePreflightRequirements() {
+	// Add the shared domain permission contract so runtime and stream checks are pre-warmed.
+	for _, req := range domainpermissions.PreflightRequirements() {
 		add(req.Group, req.Resource, req.Verb)
 	}
 
@@ -184,11 +188,11 @@ func domainRegistrations(deps registrationDeps) []domainRegistration {
 		logResource:   crdResource,
 		deniedReason:  crdIssue,
 	}
-	crdListCheck := listCheck{group: crdGroup, resource: crdResource}
 	crdListWatchCheck := listWatchCheck{group: crdGroup, resource: crdResource}
 
 	yamlProvider, yamlOK := deps.cfg.ObjectDetailsProvider.(snapshot.ObjectYAMLProvider)
 	helmProvider, helmOK := deps.cfg.ObjectDetailsProvider.(snapshot.HelmContentProvider)
+	runtimeAccess := domainpermissions.NewRuntimeAccess()
 
 	return []domainRegistration{
 		directRegistration("namespaces", func() error {
@@ -258,34 +262,22 @@ func domainRegistrations(deps registrationDeps) []domainRegistration {
 			deniedReason: "core/nodes (and pods)",
 		}),
 
-		listRegistration(listDomainConfig{
-			name:          "cluster-config",
-			issueResource: "storage.k8s.io/storageclasses,networking.k8s.io/ingressclasses,gateway.networking.k8s.io/gatewayclasses,admissionregistration.k8s.io/validatingwebhookconfigurations,admissionregistration.k8s.io/mutatingwebhookconfigurations",
-			logGroup:      "*",
-			logResource:   "storageclasses/ingressclasses/gatewayclasses/webhooks",
-			checks: []listCheck{
-				{group: "storage.k8s.io", resource: "storageclasses"},
-				{group: "networking.k8s.io", resource: "ingressclasses"},
-				{group: "gateway.networking.k8s.io", resource: "gatewayclasses"},
-				{group: "admissionregistration.k8s.io", resource: "validatingwebhookconfigurations"},
-				{group: "admissionregistration.k8s.io", resource: "mutatingwebhookconfigurations"},
-			},
-			allowAny: true,
-			register: func(allowed map[string]bool) error {
+		accessListRegistration(runtimeAccess, listDomainConfig{
+			name: "cluster-config",
+			register: func(allowed domainpermissions.AllowedResources) error {
 				return snapshot.RegisterClusterConfigDomainWithGatewayAPI(
 					deps.registry,
 					deps.informerFactory.SharedInformerFactory(),
 					deps.informerFactory.GatewayInformerFactory(),
 					snapshot.ClusterConfigPermissions{
-						IncludeStorageClasses:     allowed["storage.k8s.io/storageclasses"],
-						IncludeIngressClasses:     allowed["networking.k8s.io/ingressclasses"],
-						IncludeGatewayClasses:     allowed["gateway.networking.k8s.io/gatewayclasses"],
-						IncludeValidatingWebhooks: allowed["admissionregistration.k8s.io/validatingwebhookconfigurations"],
-						IncludeMutatingWebhooks:   allowed["admissionregistration.k8s.io/mutatingwebhookconfigurations"],
+						IncludeStorageClasses:     allowed.Allows("storage.k8s.io", "storageclasses"),
+						IncludeIngressClasses:     allowed.Allows("networking.k8s.io", "ingressclasses"),
+						IncludeGatewayClasses:     allowed.Allows("gateway.networking.k8s.io", "gatewayclasses"),
+						IncludeValidatingWebhooks: allowed.Allows("admissionregistration.k8s.io", "validatingwebhookconfigurations"),
+						IncludeMutatingWebhooks:   allowed.Allows("admissionregistration.k8s.io", "mutatingwebhookconfigurations"),
 					},
 				)
 			},
-			deniedReason: "cluster configuration resources",
 		}),
 
 		listWatchRegistration(applyListWatchMeta(listWatchDomainConfig{
@@ -299,10 +291,9 @@ func domainRegistrations(deps registrationDeps) []domainRegistration {
 			},
 		}, crdMeta)),
 
-		listRegistration(applyListMeta(listDomainConfig{
-			name:   "cluster-custom",
-			checks: []listCheck{crdListCheck},
-			register: func(_ map[string]bool) error {
+		accessListRegistration(runtimeAccess, listDomainConfig{
+			name: "cluster-custom",
+			register: func(_ domainpermissions.AllowedResources) error {
 				return snapshot.RegisterClusterCustomDomain(
 					deps.registry,
 					deps.informerFactory.APIExtensionsInformerFactory(),
@@ -310,33 +301,24 @@ func domainRegistrations(deps registrationDeps) []domainRegistration {
 					deps.cfg.Logger,
 				)
 			},
-		}, crdMeta)),
+		}),
 
 		directRegistration("cluster-events", func() error {
 			return snapshot.RegisterClusterEventsDomain(deps.registry, deps.informerFactory.SharedInformerFactory())
 		}),
 
-		listRegistration(listDomainConfig{
-			name:          "cluster-rbac",
-			issueResource: "rbac.authorization.k8s.io/clusterroles,clusterrolebindings",
-			logGroup:      "rbac.authorization.k8s.io",
-			logResource:   "clusterroles/clusterrolebindings",
-			checks: []listCheck{
-				{group: "rbac.authorization.k8s.io", resource: "clusterroles"},
-				{group: "rbac.authorization.k8s.io", resource: "clusterrolebindings"},
-			},
-			allowAny: true,
-			register: func(allowed map[string]bool) error {
+		accessListRegistration(runtimeAccess, listDomainConfig{
+			name: "cluster-rbac",
+			register: func(allowed domainpermissions.AllowedResources) error {
 				return snapshot.RegisterClusterRBACDomain(
 					deps.registry,
 					deps.informerFactory.SharedInformerFactory(),
 					snapshot.ClusterRBACPermissions{
-						IncludeClusterRoles:        allowed["rbac.authorization.k8s.io/clusterroles"],
-						IncludeClusterRoleBindings: allowed["rbac.authorization.k8s.io/clusterrolebindings"],
+						IncludeClusterRoles:        allowed.Allows("rbac.authorization.k8s.io", "clusterroles"),
+						IncludeClusterRoleBindings: allowed.Allows("rbac.authorization.k8s.io", "clusterrolebindings"),
 					},
 				)
 			},
-			deniedReason: "rbac.authorization.k8s.io",
 		}),
 
 		listWatchRegistration(listWatchDomainConfig{
@@ -356,37 +338,24 @@ func domainRegistrations(deps registrationDeps) []domainRegistration {
 			deniedReason: "core/persistentvolumes",
 		}),
 
-		listRegistration(listDomainConfig{
-			name:          "namespace-workloads",
-			issueResource: "core/pods,apps/deployments,apps/statefulsets,apps/daemonsets,batch/jobs,batch/cronjobs",
-			logGroup:      "*",
-			logResource:   "pods/deployments/statefulsets/daemonsets/jobs/cronjobs",
-			checks: []listCheck{
-				{group: "", resource: "pods"},
-				{group: "apps", resource: "deployments"},
-				{group: "apps", resource: "statefulsets"},
-				{group: "apps", resource: "daemonsets"},
-				{group: "batch", resource: "jobs"},
-				{group: "batch", resource: "cronjobs"},
-			},
-			allowAny: true,
-			register: func(allowed map[string]bool) error {
+		accessListRegistration(runtimeAccess, listDomainConfig{
+			name: "namespace-workloads",
+			register: func(allowed domainpermissions.AllowedResources) error {
 				return snapshot.RegisterNamespaceWorkloadsDomain(
 					deps.registry,
 					deps.informerFactory.SharedInformerFactory(),
 					deps.metricsProvider,
 					deps.cfg.Logger,
 					snapshot.NamespaceWorkloadsPermissions{
-						IncludePods:         allowed["core/pods"],
-						IncludeDeployments:  allowed["apps/deployments"],
-						IncludeStatefulSets: allowed["apps/statefulsets"],
-						IncludeDaemonSets:   allowed["apps/daemonsets"],
-						IncludeJobs:         allowed["batch/jobs"],
-						IncludeCronJobs:     allowed["batch/cronjobs"],
+						IncludePods:         allowed.Allows("", "pods"),
+						IncludeDeployments:  allowed.Allows("apps", "deployments"),
+						IncludeStatefulSets: allowed.Allows("apps", "statefulsets"),
+						IncludeDaemonSets:   allowed.Allows("apps", "daemonsets"),
+						IncludeJobs:         allowed.Allows("batch", "jobs"),
+						IncludeCronJobs:     allowed.Allows("batch", "cronjobs"),
 					},
 				)
 			},
-			deniedReason: "workload resources",
 		}),
 		directRegistration("namespace-autoscaling", func() error {
 			return snapshot.RegisterNamespaceAutoscalingDomain(
@@ -394,33 +363,23 @@ func domainRegistrations(deps registrationDeps) []domainRegistration {
 				deps.informerFactory.SharedInformerFactory(),
 			)
 		}),
-		listRegistration(listDomainConfig{
-			name:          "namespace-config",
-			issueResource: "core/configmaps,secrets",
-			logGroup:      "",
-			logResource:   "configmaps/secrets",
-			checks: []listCheck{
-				{group: "", resource: "configmaps"},
-				{group: "", resource: "secrets"},
-			},
-			allowAny: true,
-			register: func(allowed map[string]bool) error {
+		accessListRegistration(runtimeAccess, listDomainConfig{
+			name: "namespace-config",
+			register: func(allowed domainpermissions.AllowedResources) error {
 				return snapshot.RegisterNamespaceConfigDomain(
 					deps.registry,
 					deps.informerFactory.SharedInformerFactory(),
 					snapshot.NamespaceConfigPermissions{
-						IncludeConfigMaps: allowed["core/configmaps"],
-						IncludeSecrets:    allowed["core/secrets"],
+						IncludeConfigMaps: allowed.Allows("", "configmaps"),
+						IncludeSecrets:    allowed.Allows("", "secrets"),
 					},
 				)
 			},
-			deniedReason: "core/configmaps,secrets",
 		}),
 
-		withRequire(listRegistration(applyListMeta(listDomainConfig{
-			name:   "namespace-custom",
-			checks: []listCheck{crdListCheck},
-			register: func(_ map[string]bool) error {
+		withRequire(accessListRegistration(runtimeAccess, listDomainConfig{
+			name: "namespace-custom",
+			register: func(_ domainpermissions.AllowedResources) error {
 				return snapshot.RegisterNamespaceCustomDomain(
 					deps.registry,
 					deps.informerFactory.APIExtensionsInformerFactory(),
@@ -428,111 +387,70 @@ func domainRegistrations(deps registrationDeps) []domainRegistration {
 					deps.cfg.Logger,
 				)
 			},
-		}, crdMeta)), requireAvailable("dynamic client must be provided for namespace custom resources", func() bool {
+		}), requireAvailable("dynamic client must be provided for namespace custom resources", func() bool {
 			return deps.cfg.DynamicClient != nil
 		})),
 
 		directRegistration("namespace-events", func() error {
 			return snapshot.RegisterNamespaceEventsDomain(deps.registry, deps.informerFactory.SharedInformerFactory())
 		}),
-		withRequire(directRegistration("namespace-helm", func() error {
+		directRegistration("namespace-helm", func() error {
 			return snapshot.RegisterNamespaceHelmDomain(
 				deps.registry,
 				deps.informerFactory.SharedInformerFactory(),
-				deps.cfg.HelmFactory,
 			)
-		}), requireAvailable("helm factory must be provided for namespace helm domain", func() bool {
-			return deps.cfg.HelmFactory != nil
-		})),
-		listRegistration(listDomainConfig{
-			name:          "namespace-network",
-			issueResource: "core/services,discovery.k8s.io/endpointslices,networking.k8s.io/ingresses,networking.k8s.io/networkpolicies,gateway.networking.k8s.io",
-			logGroup:      "*",
-			logResource:   "services/endpointslices/ingresses/networkpolicies/gateway-api",
-			checks: []listCheck{
-				{group: "", resource: "services"},
-				{group: "discovery.k8s.io", resource: "endpointslices"},
-				{group: "networking.k8s.io", resource: "ingresses"},
-				{group: "networking.k8s.io", resource: "networkpolicies"},
-				{group: "gateway.networking.k8s.io", resource: "gateways"},
-				{group: "gateway.networking.k8s.io", resource: "httproutes"},
-				{group: "gateway.networking.k8s.io", resource: "grpcroutes"},
-				{group: "gateway.networking.k8s.io", resource: "tlsroutes"},
-				{group: "gateway.networking.k8s.io", resource: "listenersets"},
-				{group: "gateway.networking.k8s.io", resource: "referencegrants"},
-				{group: "gateway.networking.k8s.io", resource: "backendtlspolicies"},
-			},
-			allowAny: true,
-			register: func(allowed map[string]bool) error {
+		}),
+		accessListRegistration(runtimeAccess, listDomainConfig{
+			name: "namespace-network",
+			register: func(allowed domainpermissions.AllowedResources) error {
 				return snapshot.RegisterNamespaceNetworkDomainWithGatewayAPI(
 					deps.registry,
 					deps.informerFactory.SharedInformerFactory(),
 					deps.informerFactory.GatewayInformerFactory(),
 					snapshot.NamespaceNetworkPermissions{
-						IncludeServices:           allowed["core/services"],
-						IncludeEndpointSlices:     allowed["discovery.k8s.io/endpointslices"],
-						IncludeIngresses:          allowed["networking.k8s.io/ingresses"],
-						IncludeNetworkPolicies:    allowed["networking.k8s.io/networkpolicies"],
-						IncludeGateways:           allowed["gateway.networking.k8s.io/gateways"],
-						IncludeHTTPRoutes:         allowed["gateway.networking.k8s.io/httproutes"],
-						IncludeGRPCRoutes:         allowed["gateway.networking.k8s.io/grpcroutes"],
-						IncludeTLSRoutes:          allowed["gateway.networking.k8s.io/tlsroutes"],
-						IncludeListenerSets:       allowed["gateway.networking.k8s.io/listenersets"],
-						IncludeReferenceGrants:    allowed["gateway.networking.k8s.io/referencegrants"],
-						IncludeBackendTLSPolicies: allowed["gateway.networking.k8s.io/backendtlspolicies"],
+						IncludeServices:           allowed.Allows("", "services"),
+						IncludeEndpointSlices:     allowed.Allows("discovery.k8s.io", "endpointslices"),
+						IncludeIngresses:          allowed.Allows("networking.k8s.io", "ingresses"),
+						IncludeNetworkPolicies:    allowed.Allows("networking.k8s.io", "networkpolicies"),
+						IncludeGateways:           allowed.Allows("gateway.networking.k8s.io", "gateways"),
+						IncludeHTTPRoutes:         allowed.Allows("gateway.networking.k8s.io", "httproutes"),
+						IncludeGRPCRoutes:         allowed.Allows("gateway.networking.k8s.io", "grpcroutes"),
+						IncludeTLSRoutes:          allowed.Allows("gateway.networking.k8s.io", "tlsroutes"),
+						IncludeListenerSets:       allowed.Allows("gateway.networking.k8s.io", "listenersets"),
+						IncludeReferenceGrants:    allowed.Allows("gateway.networking.k8s.io", "referencegrants"),
+						IncludeBackendTLSPolicies: allowed.Allows("gateway.networking.k8s.io", "backendtlspolicies"),
 					},
 				)
 			},
-			deniedReason: "network resources",
 		}),
-		listRegistration(listDomainConfig{
-			name:          "namespace-quotas",
-			issueResource: "core/resourcequotas,limitranges,policy/poddisruptionbudgets",
-			logGroup:      "*",
-			logResource:   "resourcequotas/limitranges/poddisruptionbudgets",
-			checks: []listCheck{
-				{group: "", resource: "resourcequotas"},
-				{group: "", resource: "limitranges"},
-				{group: "policy", resource: "poddisruptionbudgets"},
-			},
-			allowAny: true,
-			register: func(allowed map[string]bool) error {
+		accessListRegistration(runtimeAccess, listDomainConfig{
+			name: "namespace-quotas",
+			register: func(allowed domainpermissions.AllowedResources) error {
 				return snapshot.RegisterNamespaceQuotasDomain(
 					deps.registry,
 					deps.informerFactory.SharedInformerFactory(),
 					snapshot.NamespaceQuotasPermissions{
-						IncludeResourceQuotas:       allowed["core/resourcequotas"],
-						IncludeLimitRanges:          allowed["core/limitranges"],
-						IncludePodDisruptionBudgets: allowed["policy/poddisruptionbudgets"],
+						IncludeResourceQuotas:       allowed.Allows("", "resourcequotas"),
+						IncludeLimitRanges:          allowed.Allows("", "limitranges"),
+						IncludePodDisruptionBudgets: allowed.Allows("policy", "poddisruptionbudgets"),
 					},
 				)
 			},
-			deniedReason: "quota resources",
 		}),
 
-		listRegistration(listDomainConfig{
-			name:          "namespace-rbac",
-			issueResource: "rbac.authorization.k8s.io/roles,rolebindings,core/serviceaccounts",
-			logGroup:      "rbac.authorization.k8s.io",
-			logResource:   "roles/rolebindings/serviceaccounts",
-			checks: []listCheck{
-				{group: "rbac.authorization.k8s.io", resource: "roles"},
-				{group: "rbac.authorization.k8s.io", resource: "rolebindings"},
-				{group: "", resource: "serviceaccounts"},
-			},
-			allowAny: true,
-			register: func(allowed map[string]bool) error {
+		accessListRegistration(runtimeAccess, listDomainConfig{
+			name: "namespace-rbac",
+			register: func(allowed domainpermissions.AllowedResources) error {
 				return snapshot.RegisterNamespaceRBACDomain(
 					deps.registry,
 					deps.informerFactory.SharedInformerFactory(),
 					snapshot.NamespaceRBACPermissions{
-						IncludeRoles:           allowed["rbac.authorization.k8s.io/roles"],
-						IncludeRoleBindings:    allowed["rbac.authorization.k8s.io/rolebindings"],
-						IncludeServiceAccounts: allowed["core/serviceaccounts"],
+						IncludeRoles:           allowed.Allows("rbac.authorization.k8s.io", "roles"),
+						IncludeRoleBindings:    allowed.Allows("rbac.authorization.k8s.io", "rolebindings"),
+						IncludeServiceAccounts: allowed.Allows("", "serviceaccounts"),
 					},
 				)
 			},
-			deniedReason: "rbac.authorization.k8s.io/roles,rolebindings,serviceaccounts",
 		}),
 
 		directRegistration("namespace-storage", func() error {
@@ -588,6 +506,80 @@ func listRegistration(cfg listDomainConfig) domainRegistration {
 	return domainRegistration{name: cfgCopy.name, list: &cfgCopy}
 }
 
+func accessListRegistration(access domainpermissions.RuntimeAccess, cfg listDomainConfig) domainRegistration {
+	plan, ok := access.RegistrationPlan(cfg.name)
+	if !ok {
+		panic(fmt.Sprintf("registration access plan missing for %s", cfg.name))
+	}
+	cfg.checks = listChecksFromRegistrationPlan(plan)
+	cfg.allowAny = plan.AllowAny()
+	cfg = applyRegistrationPlanMeta(cfg, plan)
+	cfg.deniedReason = plan.DeniedReason
+	return listRegistration(cfg)
+}
+
+func applyRegistrationPlanMeta(cfg listDomainConfig, plan domainpermissions.RegistrationAccessPlan) listDomainConfig {
+	if cfg.issueResource == "" {
+		cfg.issueResource = permissionIssueResource(plan.Requirements)
+	}
+	if cfg.logResource == "" {
+		cfg.logResource = permissionLogResource(plan.Requirements)
+	}
+	if cfg.logGroup == "" {
+		cfg.logGroup = permissionLogGroup(plan.Requirements)
+	}
+	return cfg
+}
+
+func permissionIssueResource(reqs []permissions.ResourceRequirement) string {
+	parts := make([]string, 0, len(reqs))
+	for _, req := range reqs {
+		parts = append(parts, permissions.ResourceKey(req.Group, req.Resource))
+	}
+	return strings.Join(parts, ",")
+}
+
+func permissionLogResource(reqs []permissions.ResourceRequirement) string {
+	parts := make([]string, 0, len(reqs))
+	for _, req := range reqs {
+		if req.Resource == "" {
+			continue
+		}
+		parts = append(parts, req.Resource)
+	}
+	return strings.Join(parts, "/")
+}
+
+func permissionLogGroup(reqs []permissions.ResourceRequirement) string {
+	group := ""
+	hasGroup := false
+	for _, req := range reqs {
+		if req.Group == "" {
+			continue
+		}
+		if !hasGroup {
+			group = req.Group
+			hasGroup = true
+			continue
+		}
+		if req.Group != group {
+			return "*"
+		}
+	}
+	return group
+}
+
+func listChecksFromRegistrationPlan(plan domainpermissions.RegistrationAccessPlan) []listCheck {
+	checks := make([]listCheck, 0, len(plan.Requirements))
+	for _, req := range plan.Requirements {
+		if req.Verb != "list" {
+			panic(fmt.Sprintf("registration access plan %s contains non-list requirement %s", plan.Domain, req.Verb))
+		}
+		checks = append(checks, listCheck{group: req.Group, resource: req.Resource})
+	}
+	return checks
+}
+
 func listWatchRegistration(cfg listWatchDomainConfig) domainRegistration {
 	cfgCopy := cfg
 	return domainRegistration{name: cfgCopy.name, listWatch: &cfgCopy}
@@ -616,15 +608,6 @@ func requireAvailable(message string, available func() bool) func() error {
 		}
 		return nil
 	}
-}
-
-// applyListMeta copies shared metadata into a list-gated registration config.
-func applyListMeta(cfg listDomainConfig, meta domainMeta) listDomainConfig {
-	cfg.issueResource = meta.issueResource
-	cfg.logGroup = meta.logGroup
-	cfg.logResource = meta.logResource
-	cfg.deniedReason = meta.deniedReason
-	return cfg
 }
 
 // applyListWatchMeta copies shared metadata into a list/watch-gated registration config.

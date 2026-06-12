@@ -2,7 +2,6 @@ package snapshot
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -31,8 +30,17 @@ type NamespaceAutoscalingBuilder struct {
 // NamespaceAutoscalingSnapshot payload for autoscaling tab.
 type NamespaceAutoscalingSnapshot struct {
 	ClusterMeta
-	Resources []AutoscalingSummary `json:"resources"`
-	Kinds     []string             `json:"kinds,omitempty"`
+	ResourceQueryEnvelope
+	Rows []AutoscalingSummary `json:"rows"`
+}
+
+func namespaceAutoscalingQueryCapabilities() ResourceQueryCapabilities {
+	return newTypedResourceCapabilities(
+		[]string{"name", "kind", "namespace", "target", "min", "max", "current", "age"},
+		[]string{"kinds", "namespaces"},
+		[]string{"kind", "name", "namespace", "target", "targetApiVersion"},
+		[]string{"HorizontalPodAutoscaler"},
+	)
 }
 
 // AutoscalingSummary captures HPA details for display.
@@ -55,20 +63,7 @@ type AutoscalingSummary struct {
 	Max              int32  `json:"max"`
 	Current          int32  `json:"current"`
 	Age              string `json:"age"`
-}
-
-func parseAutoscalingNamespace(scope string) (string, error) {
-	_, scopeValue := refresh.SplitClusterScope(scope)
-	namespace := strings.TrimSpace(scopeValue)
-	if strings.HasPrefix(namespace, "namespace:") {
-		namespace = strings.TrimPrefix(namespace, "namespace:")
-		namespace = strings.TrimLeft(namespace, ":")
-	}
-	namespace = strings.TrimSpace(namespace)
-	if namespace == "" {
-		return "", errors.New(errNamespaceAutoscalingScopeRequired)
-	}
-	return namespace, nil
+	AgeTimestamp     int64  `json:"ageTimestamp,omitempty"`
 }
 
 // RegisterNamespaceAutoscalingDomain registers the autoscaling domain.
@@ -92,33 +87,21 @@ func RegisterNamespaceAutoscalingDomain(
 func (b *NamespaceAutoscalingBuilder) Build(ctx context.Context, scope string) (*refresh.Snapshot, error) {
 	meta := ClusterMetaFromContext(ctx)
 	clusterID, trimmed := refresh.SplitClusterScope(scope)
-	trimmed = strings.TrimSpace(trimmed)
-	if trimmed == "" {
-		return nil, errors.New(errNamespaceAutoscalingScopeRequired)
+	baseScope, query, err := parseTypedTableQueryScope(clusterID, strings.TrimSpace(trimmed), namespaceAutoscalingDomainName, "")
+	if err != nil {
+		return nil, err
+	}
+	parsedScope, err := parseNamespaceSnapshotScope(refresh.JoinClusterScope(clusterID, baseScope), errNamespaceAutoscalingScopeRequired)
+	if err != nil {
+		return nil, err
 	}
 
-	isAll := isAllNamespaceScope(trimmed)
-	var (
-		namespace  string
-		err        error
-		scopeLabel string
-	)
-	if isAll {
-		scopeLabel = refresh.JoinClusterScope(clusterID, "namespace:all")
-	} else {
-		namespace, err = parseAutoscalingNamespace(trimmed)
-		if err != nil {
-			return nil, err
-		}
-		scopeLabel = refresh.JoinClusterScope(clusterID, trimmed)
-	}
-
-	hpas, err := b.listHPAs(namespace)
+	hpas, err := b.listHPAs(parsedScope.Namespace)
 	if err != nil {
 		return nil, fmt.Errorf("namespace autoscaling: failed to list hpas: %w", err)
 	}
 
-	return b.buildSnapshot(meta, scopeLabel, hpas)
+	return b.buildSnapshot(meta, refresh.JoinClusterScope(clusterID, strings.TrimSpace(trimmed)), query, hpas)
 }
 
 func (b *NamespaceAutoscalingBuilder) listHPAs(namespace string) ([]*autoscalingv1.HorizontalPodAutoscaler, error) {
@@ -131,6 +114,7 @@ func (b *NamespaceAutoscalingBuilder) listHPAs(namespace string) ([]*autoscaling
 func (b *NamespaceAutoscalingBuilder) buildSnapshot(
 	meta ClusterMeta,
 	scope string,
+	query typedTableQuery,
 	hpas []*autoscalingv1.HorizontalPodAutoscaler,
 ) (*refresh.Snapshot, error) {
 	resources := make([]AutoscalingSummary, 0, len(hpas))
@@ -156,22 +140,27 @@ func (b *NamespaceAutoscalingBuilder) buildSnapshot(
 		return resources[i].Namespace < resources[j].Namespace
 	})
 
-	if len(resources) > config.SnapshotNamespaceAutoscalingEntryLimit {
-		resources = resources[:config.SnapshotNamespaceAutoscalingEntryLimit]
-	}
-
+	resolved := resolveTypedSnapshotPage(
+		namespaceAutoscalingDomainName,
+		resources,
+		query,
+		autoscalingTableQueryAdapter(),
+		namespaceAutoscalingQueryCapabilities(),
+		config.SnapshotNamespaceAutoscalingEntryLimit,
+		"autoscaling resources",
+		func(resource AutoscalingSummary) string { return resource.Kind },
+		nil,
+	)
 	return &refresh.Snapshot{
 		Domain:  namespaceAutoscalingDomainName,
 		Scope:   scope,
 		Version: version,
 		Payload: NamespaceAutoscalingSnapshot{
-			ClusterMeta: meta,
-			Resources:   resources,
-			Kinds:       snapshotSortedKinds(resources, func(resource AutoscalingSummary) string { return resource.Kind }),
+			ClusterMeta:           meta,
+			ResourceQueryEnvelope: resolved.Envelope,
+			Rows:                  resolved.Rows,
 		},
-		Stats: refresh.SnapshotStats{
-			ItemCount: len(resources),
-		},
+		Stats: resolved.Stats,
 	}, nil
 }
 

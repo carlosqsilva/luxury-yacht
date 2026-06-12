@@ -10,7 +10,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import NsViewAutoscaling, {
   type AutoscalingData,
 } from '@modules/namespace/components/NsViewAutoscaling';
-import { OBJECT_ACTION_IDS } from '@shared/actions/objectActionDescriptors';
+import { OBJECT_ACTION_IDS } from '@shared/actions/objectActionContract';
 
 vi.mock('@modules/namespace/components/useNamespaceColumnLink', () => ({
   useNamespaceColumnLink: () => ({
@@ -163,15 +163,7 @@ describe('NsViewAutoscaling', () => {
     const entry = baseHpa();
 
     await act(async () => {
-      root.render(
-        <NsViewAutoscaling
-          namespace="team-a"
-          data={[entry]}
-          loading={false}
-          loaded={true}
-          showNamespaceColumn={true}
-        />
-      );
+      root.render(<NsViewAutoscaling namespace="team-a" showNamespaceColumn={true} />);
       await Promise.resolve();
     });
 

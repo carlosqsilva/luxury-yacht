@@ -1,3 +1,10 @@
+/*
+ * backend/refresh/snapshot/service_test.go
+ *
+ * Exercises snapshot service behavior around build dispatch, caching,
+ * permission handling, and the required cluster identity contract.
+ */
+
 package snapshot
 
 import (
@@ -5,12 +12,40 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/luxury-yacht/app/backend/internal/config"
 	"github.com/luxury-yacht/app/backend/refresh"
 	"github.com/luxury-yacht/app/backend/refresh/domain"
+	"github.com/luxury-yacht/app/backend/refresh/domainpermissions"
 	"github.com/luxury-yacht/app/backend/refresh/permissions"
 	"github.com/luxury-yacht/app/backend/refresh/telemetry"
 )
+
+func testClusterMeta() ClusterMeta {
+	return ClusterMeta{ClusterID: "cluster-a", ClusterName: "Cluster A"}
+}
+
+type fakeInformerHub struct {
+	mu     sync.RWMutex
+	synced bool
+}
+
+func (h *fakeInformerHub) Start(context.Context) error { return nil }
+
+func (h *fakeInformerHub) HasSynced(context.Context) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.synced
+}
+
+func (h *fakeInformerHub) Shutdown() error { return nil }
+
+func (h *fakeInformerHub) setSynced(synced bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.synced = synced
+}
 
 func TestServiceBuildEmitsSequenceAndChecksum(t *testing.T) {
 	reg := domain.New()
@@ -31,7 +66,7 @@ func TestServiceBuildEmitsSequenceAndChecksum(t *testing.T) {
 	}
 
 	rec := telemetry.NewRecorder()
-	service := NewService(reg, rec, ClusterMeta{})
+	service := NewService(reg, rec, testClusterMeta())
 
 	snap, err := service.Build(context.Background(), "demo", "scope-a")
 	if err != nil {
@@ -53,6 +88,117 @@ func TestServiceBuildEmitsSequenceAndChecksum(t *testing.T) {
 	}
 }
 
+func TestServiceBuildWaitsForInformerSyncBeforeBuilding(t *testing.T) {
+	reg := domain.New()
+	built := make(chan struct{})
+	if err := reg.Register(refresh.DomainConfig{
+		Name: "nodes",
+		BuildSnapshot: func(ctx context.Context, scope string) (*refresh.Snapshot, error) {
+			close(built)
+			return &refresh.Snapshot{
+				Domain:  "nodes",
+				Scope:   scope,
+				Payload: map[string][]string{"nodes": {"node-a"}},
+			}, nil
+		},
+	}); err != nil {
+		t.Fatalf("register failed: %v", err)
+	}
+
+	hub := &fakeInformerHub{}
+	service := NewService(reg, nil, testClusterMeta()).WithInformerHub(hub)
+	done := make(chan error, 1)
+	go func() {
+		_, err := service.Build(context.Background(), "nodes", "")
+		done <- err
+	}()
+
+	select {
+	case <-built:
+		t.Fatal("snapshot built before informer caches synced")
+	case err := <-done:
+		t.Fatalf("Build returned before informer caches synced: %v", err)
+	case <-time.After(config.RefreshInformerSyncPollInterval * 2):
+	}
+
+	hub.setSynced(true)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Build returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Build did not complete after informer caches synced")
+	}
+}
+
+func TestServiceBuildFailsWhenInformerSyncTimesOut(t *testing.T) {
+	reg := domain.New()
+	built := false
+	if err := reg.Register(refresh.DomainConfig{
+		Name: "nodes",
+		BuildSnapshot: func(ctx context.Context, scope string) (*refresh.Snapshot, error) {
+			built = true
+			return &refresh.Snapshot{Domain: "nodes", Scope: scope}, nil
+		},
+	}); err != nil {
+		t.Fatalf("register failed: %v", err)
+	}
+
+	rec := telemetry.NewRecorder()
+	hub := &fakeInformerHub{}
+	service := NewService(reg, rec, testClusterMeta()).WithInformerHub(hub)
+	service.informerSyncTimeout = 50 * time.Millisecond
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := service.Build(context.Background(), "nodes", "")
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected informer sync timeout error")
+		}
+		if !errors.Is(err, errInformerSyncTimeout) {
+			t.Fatalf("expected informer sync timeout error, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Build hung past the informer sync timeout")
+	}
+
+	if built {
+		t.Fatal("snapshot builder must not run when informer caches never sync")
+	}
+
+	summary := rec.SnapshotSummary()
+	if len(summary.Snapshots) != 1 {
+		t.Fatalf("expected one telemetry entry for the sync timeout, got %d", len(summary.Snapshots))
+	}
+	if summary.Snapshots[0].LastStatus != "error" || summary.Snapshots[0].LastError == "" {
+		t.Fatalf("expected error telemetry for the sync timeout, got %+v", summary.Snapshots[0])
+	}
+}
+
+func TestServiceBuildRequiresClusterIdentity(t *testing.T) {
+	reg := domain.New()
+	if err := reg.Register(refresh.DomainConfig{
+		Name: "demo",
+		BuildSnapshot: func(ctx context.Context, scope string) (*refresh.Snapshot, error) {
+			return &refresh.Snapshot{Domain: "demo", Scope: scope}, nil
+		},
+	}); err != nil {
+		t.Fatalf("register failed: %v", err)
+	}
+
+	service := NewService(reg, nil, ClusterMeta{})
+	if _, err := service.Build(context.Background(), "demo", "scope-a"); err == nil {
+		t.Fatalf("expected missing cluster identity error")
+	}
+}
+
 func TestServiceBuildRecordsFailure(t *testing.T) {
 	reg := domain.New()
 	if err := reg.Register(refresh.DomainConfig{
@@ -65,7 +211,7 @@ func TestServiceBuildRecordsFailure(t *testing.T) {
 	}
 
 	rec := telemetry.NewRecorder()
-	service := NewService(reg, rec, ClusterMeta{})
+	service := NewService(reg, rec, testClusterMeta())
 
 	if _, err := service.Build(context.Background(), "demo-fail", "scope-b"); err == nil {
 		t.Fatalf("expected build error")
@@ -98,7 +244,7 @@ func TestServiceBuildCachesAndBypasses(t *testing.T) {
 		t.Fatalf("register failed: %v", err)
 	}
 
-	service := NewService(reg, nil, ClusterMeta{})
+	service := NewService(reg, nil, testClusterMeta())
 
 	snap1, err := service.Build(context.Background(), "demo-cache", "scope-a")
 	if err != nil {
@@ -146,7 +292,7 @@ func TestServiceBuildDoesNotCacheObjectMaintenance(t *testing.T) {
 		t.Fatalf("register failed: %v", err)
 	}
 
-	service := NewService(reg, nil, ClusterMeta{})
+	service := NewService(reg, nil, testClusterMeta())
 	snap1, err := service.Build(context.Background(), "object-maintenance", "cluster-a|node:worker-1")
 	if err != nil {
 		t.Fatalf("Build returned error: %v", err)
@@ -193,7 +339,7 @@ func TestServiceBuildDoesNotSingleflightObjectMaintenance(t *testing.T) {
 		t.Fatalf("register failed: %v", err)
 	}
 
-	service := NewService(reg, nil, ClusterMeta{})
+	service := NewService(reg, nil, testClusterMeta())
 	ctx := context.Background()
 
 	done := make(chan struct{})
@@ -248,7 +394,7 @@ func TestServiceBuildBypassUsesSeparateSingleflightKey(t *testing.T) {
 		t.Fatalf("register failed: %v", err)
 	}
 
-	service := NewService(reg, nil, ClusterMeta{})
+	service := NewService(reg, nil, testClusterMeta())
 	ctx := context.Background()
 
 	done := make(chan struct{})
@@ -304,7 +450,7 @@ func TestServiceBuildSkipsCacheForPartialSnapshots(t *testing.T) {
 			t.Fatalf("register failed: %v", err)
 		}
 
-		service := NewService(reg, nil, ClusterMeta{})
+		service := NewService(reg, nil, testClusterMeta())
 		if _, err := service.Build(context.Background(), "demo-partial-"+testCase.name, "scope-a"); err != nil {
 			t.Fatalf("Build returned error: %v", err)
 		}
@@ -321,7 +467,7 @@ func TestServiceBuildBlocksPermissionDenied(t *testing.T) {
 	reg := domain.New()
 	called := false
 	// Use a real domain name so the default permission map is applied.
-	// namespace-config uses requireAny, so we must deny ALL resources to trigger denial.
+	// namespace-config uses ModeAny, so we must deny ALL resources to trigger denial.
 	if err := reg.Register(refresh.DomainConfig{
 		Name: namespaceConfigDomainName,
 		BuildSnapshot: func(ctx context.Context, scope string) (*refresh.Snapshot, error) {
@@ -340,7 +486,7 @@ func TestServiceBuildBlocksPermissionDenied(t *testing.T) {
 	checker := permissions.NewCheckerWithReview("cluster-a", 0, func(ctx context.Context, group, resource, verb string) (bool, error) {
 		return false, nil
 	})
-	service := NewServiceWithPermissions(reg, nil, ClusterMeta{}, checker)
+	service := NewServiceWithPermissions(reg, nil, testClusterMeta(), checker)
 
 	if _, err := service.Build(context.Background(), namespaceConfigDomainName, "scope-a"); err == nil {
 		t.Fatalf("expected permission error")
@@ -374,7 +520,7 @@ func TestServiceBuildBlocksNamespacesWithoutListPermission(t *testing.T) {
 		}
 		return true, nil
 	})
-	service := NewServiceWithPermissions(reg, nil, ClusterMeta{}, checker)
+	service := NewServiceWithPermissions(reg, nil, testClusterMeta(), checker)
 
 	if _, err := service.Build(context.Background(), "namespaces", "cluster-a|"); err == nil {
 		t.Fatalf("expected permission error")
@@ -389,7 +535,7 @@ func TestServiceBuildBlocksNamespacesWithoutListPermission(t *testing.T) {
 func TestServiceBuildAllowsPartialPermissions(t *testing.T) {
 	reg := domain.New()
 	called := false
-	// namespace-config uses requireAny — if at least one resource is allowed, the domain should load.
+	// namespace-config uses ModeAny — if at least one resource is allowed, the domain should load.
 	if err := reg.Register(refresh.DomainConfig{
 		Name: namespaceConfigDomainName,
 		BuildSnapshot: func(ctx context.Context, scope string) (*refresh.Snapshot, error) {
@@ -411,13 +557,68 @@ func TestServiceBuildAllowsPartialPermissions(t *testing.T) {
 		}
 		return true, nil
 	})
-	service := NewServiceWithPermissions(reg, nil, ClusterMeta{}, checker)
+	service := NewServiceWithPermissions(reg, nil, testClusterMeta(), checker)
 
 	if _, err := service.Build(context.Background(), namespaceConfigDomainName, "scope-a"); err != nil {
 		t.Fatalf("expected partial permissions to allow build, got: %v", err)
 	}
 	if !called {
 		t.Fatalf("expected snapshot builder to run with partial permissions")
+	}
+}
+
+func TestServiceBuildKeysCacheByRuntimeAllowedResources(t *testing.T) {
+	reg := domain.New()
+	buildCount := 0
+	if err := reg.Register(refresh.DomainConfig{
+		Name: namespaceConfigDomainName,
+		BuildSnapshot: func(ctx context.Context, scope string) (*refresh.Snapshot, error) {
+			buildCount++
+			allowed, ok := domainpermissions.AllowedResourcesFromContext(ctx, namespaceConfigDomainName)
+			if !ok {
+				t.Fatalf("expected runtime allowed resources in snapshot context")
+			}
+			return &refresh.Snapshot{
+				Domain: namespaceConfigDomainName,
+				Scope:  scope,
+				Payload: map[string]bool{
+					"configmaps": allowed.Allows("", "configmaps"),
+					"secrets":    allowed.Allows("", "secrets"),
+				},
+				Stats: refresh.SnapshotStats{TotalItems: 1},
+			}, nil
+		},
+	}); err != nil {
+		t.Fatalf("register failed: %v", err)
+	}
+
+	checker := permissions.NewCheckerWithReview("cluster-a", 0, func(ctx context.Context, group, resource, verb string) (bool, error) {
+		return resource == "configmaps" || resource == "secrets", nil
+	})
+	service := NewServiceWithPermissions(reg, nil, testClusterMeta(), checker)
+
+	first, err := service.Build(context.Background(), namespaceConfigDomainName, "cluster-a|namespace:default")
+	if err != nil {
+		t.Fatalf("first build failed: %v", err)
+	}
+	firstPayload := first.Payload.(map[string]bool)
+	if !firstPayload["configmaps"] || !firstPayload["secrets"] {
+		t.Fatalf("expected first build to allow both resources, got %#v", firstPayload)
+	}
+
+	service.permissionChecker = permissions.NewCheckerWithReview("cluster-a", 0, func(ctx context.Context, group, resource, verb string) (bool, error) {
+		return resource == "secrets", nil
+	})
+	second, err := service.Build(context.Background(), namespaceConfigDomainName, "cluster-a|namespace:default")
+	if err != nil {
+		t.Fatalf("second build failed: %v", err)
+	}
+	secondPayload := second.Payload.(map[string]bool)
+	if secondPayload["configmaps"] || !secondPayload["secrets"] {
+		t.Fatalf("expected second build to reflect revoked configmap access, got %#v", secondPayload)
+	}
+	if buildCount != 2 {
+		t.Fatalf("expected permission-specific cache keys to force a rebuild, got %d builds", buildCount)
 	}
 }
 
@@ -433,7 +634,7 @@ func TestServiceBuildSkipsEnsureForPermissionDeniedDomain(t *testing.T) {
 		reviewCalled = true
 		return false, nil
 	})
-	service := NewServiceWithPermissions(reg, nil, ClusterMeta{}, checker)
+	service := NewServiceWithPermissions(reg, nil, testClusterMeta(), checker)
 
 	// Build should return PermissionDeniedError from the placeholder's BuildSnapshot,
 	// NOT from ensurePermissions (which should be skipped).
@@ -472,7 +673,7 @@ func TestServiceBuildAllowsWhenPermissionsSucceed(t *testing.T) {
 	checker := permissions.NewCheckerWithReview("cluster-a", 0, func(ctx context.Context, group, resource, verb string) (bool, error) {
 		return true, nil
 	})
-	service := NewServiceWithPermissions(reg, nil, ClusterMeta{}, checker)
+	service := NewServiceWithPermissions(reg, nil, testClusterMeta(), checker)
 
 	if _, err := service.Build(context.Background(), namespaceConfigDomainName, "scope-a"); err != nil {
 		t.Fatalf("Build returned error: %v", err)

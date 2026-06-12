@@ -40,7 +40,6 @@ type AppSettings struct {
 	AutoRefreshEnabled                       bool     `json:"autoRefreshEnabled"`                       // Enable automatic refresh cycles
 	RefreshBackgroundClustersEnabled         bool     `json:"refreshBackgroundClustersEnabled"`         // Refresh inactive clusters in the background
 	MetricsRefreshIntervalMs                 int      `json:"metricsRefreshIntervalMs"`                 // Metrics refresh interval (ms)
-	MaxTableRows                             int      `json:"maxTableRows"`                             // Max rows shown in a data table (100-10000)
 	KubernetesClientQPS                      int      `json:"kubernetesClientQPS"`                      // Per-cluster Kubernetes REST client QPS
 	KubernetesClientBurst                    int      `json:"kubernetesClientBurst"`                    // Per-cluster Kubernetes REST client burst allowance
 	PermissionSSRRFetchConcurrency           int      `json:"permissionSSRRFetchConcurrency"`           // Concurrent namespace SelfSubjectRulesReview fetches
@@ -50,6 +49,7 @@ type AppSettings struct {
 	ObjPanelLogsAPITimestampFormat           string   `json:"objPanelLogsApiTimestampFormat"`           // Day.js format for the Kubernetes API timestamp shown in container logs
 	ObjPanelLogsAPITimestampUseLocalTimeZone bool     `json:"objPanelLogsApiTimestampUseLocalTimeZone"` // Render the Kubernetes API timestamp in the user's local timezone instead of UTC
 	GridTablePersistenceMode                 string   `json:"gridTablePersistenceMode"`                 // "shared" or "namespaced"
+	DefaultTablePageSize                     int      `json:"defaultTablePageSize"`                     // Default rows per page for tables without a persisted page size
 	DefaultObjectPanelPosition               string   `json:"defaultObjectPanelPosition"`               // "right", "bottom", or "floating"
 	ObjectPanelDockedRightWidth              int      `json:"objectPanelDockedRightWidth"`              // Default width when docked right (px)
 	ObjectPanelDockedBottomHeight            int      `json:"objectPanelDockedBottomHeight"`            // Default height when docked bottom (px)
@@ -649,7 +649,7 @@ type ConfigMapDetails struct {
 	DataCount   int               `json:"dataCount"`
 	Labels      map[string]string `json:"labels,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty"`
-	UsedBy      []string          `json:"usedBy,omitempty"`
+	UsedBy      []ObjectRef       `json:"usedBy,omitempty"`
 }
 
 type SecretDetails struct {
@@ -664,7 +664,7 @@ type SecretDetails struct {
 	DataCount   int               `json:"dataCount"`
 	Labels      map[string]string `json:"labels,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty"`
-	UsedBy      []string          `json:"usedBy,omitempty"`
+	UsedBy      []ObjectRef       `json:"usedBy,omitempty"`
 }
 
 type ServiceDetails struct {
@@ -974,7 +974,7 @@ type RoleDetails struct {
 	Rules              []PolicyRule      `json:"rules"`
 	Labels             map[string]string `json:"labels,omitempty"`
 	Annotations        map[string]string `json:"annotations,omitempty"`
-	UsedByRoleBindings []string          `json:"usedByRoleBindings,omitempty"`
+	UsedByRoleBindings []ObjectRef       `json:"usedByRoleBindings,omitempty"`
 }
 
 type PolicyRule struct {
@@ -1019,8 +1019,8 @@ type ClusterRoleDetails struct {
 	AggregationRule     *AggregationRule  `json:"aggregationRule,omitempty"`
 	Labels              map[string]string `json:"labels,omitempty"`
 	Annotations         map[string]string `json:"annotations,omitempty"`
-	ClusterRoleBindings []string          `json:"clusterRoleBindings,omitempty"`
-	RoleBindings        []string          `json:"roleBindings,omitempty"`
+	ClusterRoleBindings []ObjectRef       `json:"clusterRoleBindings,omitempty"`
+	RoleBindings        []ObjectRef       `json:"roleBindings,omitempty"`
 }
 
 type AggregationRule struct {
@@ -1044,14 +1044,14 @@ type ServiceAccountDetails struct {
 	Namespace                    string            `json:"namespace"`
 	Age                          string            `json:"age"`
 	Details                      string            `json:"details"`
-	Secrets                      []string          `json:"secrets,omitempty"`
-	ImagePullSecrets             []string          `json:"imagePullSecrets,omitempty"`
+	Secrets                      []ObjectRef       `json:"secrets,omitempty"`
+	ImagePullSecrets             []ObjectRef       `json:"imagePullSecrets,omitempty"`
 	AutomountServiceAccountToken *bool             `json:"automountServiceAccountToken,omitempty"`
 	Labels                       map[string]string `json:"labels,omitempty"`
 	Annotations                  map[string]string `json:"annotations,omitempty"`
-	UsedByPods                   []string          `json:"usedByPods,omitempty"`
-	RoleBindings                 []string          `json:"roleBindings,omitempty"`
-	ClusterRoleBindings          []string          `json:"clusterRoleBindings,omitempty"`
+	UsedByPods                   []ObjectRef       `json:"usedByPods,omitempty"`
+	RoleBindings                 []ObjectRef       `json:"roleBindings,omitempty"`
+	ClusterRoleBindings          []ObjectRef       `json:"clusterRoleBindings,omitempty"`
 }
 
 type PodMetricsSummary struct {

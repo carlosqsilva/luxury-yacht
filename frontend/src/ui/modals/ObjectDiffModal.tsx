@@ -1,8 +1,8 @@
 /**
- * frontend/src/components/modals/ObjectDiffModal.tsx
+ * frontend/src/ui/modals/ObjectDiffModal.tsx
  *
- * UI component for ObjectDiffModal.
- * Provides a global, side-by-side YAML diff viewer for Kubernetes objects.
+ * Global side-by-side YAML diff modal for comparing Kubernetes objects across
+ * clusters, namespaces, kinds, and catalog matches.
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -13,10 +13,16 @@ import type { DropdownOption } from '@shared/components/dropdowns/Dropdown/types
 import { useModalFocusTrap } from '@shared/components/modals/useModalFocusTrap';
 import ModalSurface from '@shared/components/modals/ModalSurface';
 import ModalHeader from '@shared/components/modals/ModalHeader';
-import { readCatalogObjectMatch, requestData, requestRefreshDomain } from '@/core/data-access';
+import {
+  readCatalogObjectMatchForRef,
+  requestData,
+  requestRefreshDomain,
+  resetRefreshDomain,
+  setRefreshDomainEnabled,
+} from '@/core/data-access';
 import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
 import { buildClusterScope, buildObjectScope } from '@core/refresh/clusterScope';
-import { refreshOrchestrator, useRefreshScopedDomain } from '@core/refresh';
+import { useRefreshScopedDomain } from '@core/refresh';
 import type { CatalogItem, CatalogSnapshotPayload } from '@core/refresh/types';
 import { computeBudgetedLineDiff, type LineDiffResult } from '@shared/components/diff/lineDiff';
 import { OBJECT_DIFF_BUDGETS } from '@shared/components/diff/diffBudgets';
@@ -300,7 +306,7 @@ const useCatalogDiffSnapshot = (
       return;
     }
 
-    refreshOrchestrator.setScopedDomainEnabled('catalog-diff', scope, true);
+    setRefreshDomainEnabled({ domain: 'catalog-diff', scope, enabled: true });
     void requestRefreshDomain({
       domain: 'catalog-diff',
       scope,
@@ -309,8 +315,8 @@ const useCatalogDiffSnapshot = (
 
     return () => {
       // Clean up the previous scope to prevent background refreshes.
-      refreshOrchestrator.setScopedDomainEnabled('catalog-diff', scope, false);
-      refreshOrchestrator.resetScopedDomain('catalog-diff', scope);
+      setRefreshDomainEnabled({ domain: 'catalog-diff', scope, enabled: false });
+      resetRefreshDomain('catalog-diff', scope);
     };
   }, [enabled, scope]);
 
@@ -347,7 +353,7 @@ const useObjectYamlSnapshot = (selection: CatalogItem | null, enabled: boolean) 
       return;
     }
 
-    refreshOrchestrator.setScopedDomainEnabled('object-yaml', scope, true);
+    setRefreshDomainEnabled({ domain: 'object-yaml', scope, enabled: true });
     void requestRefreshDomain({
       domain: 'object-yaml',
       scope,
@@ -355,8 +361,8 @@ const useObjectYamlSnapshot = (selection: CatalogItem | null, enabled: boolean) 
     });
 
     return () => {
-      refreshOrchestrator.setScopedDomainEnabled('object-yaml', scope, false);
-      refreshOrchestrator.resetScopedDomain('object-yaml', scope);
+      setRefreshDomainEnabled({ domain: 'object-yaml', scope, enabled: false });
+      resetRefreshDomain('object-yaml', scope);
     };
   }, [enabled, scope]);
 
@@ -665,14 +671,14 @@ const ObjectDiffModal: React.FC<ObjectDiffModalProps> = ({
           resource: 'catalog-object-match',
           reason: 'user',
           read: () =>
-            readCatalogObjectMatch(
-              selection.clusterId,
-              selection.namespace ?? '',
-              selection.group,
-              selection.version,
-              selection.kind,
-              selection.name
-            ),
+            readCatalogObjectMatchForRef({
+              clusterId: selection.clusterId,
+              namespace: selection.namespace,
+              group: selection.group,
+              version: selection.version,
+              kind: selection.kind,
+              name: selection.name,
+            }),
         });
         const match = toCatalogItem(result.status === 'executed' ? result.data : null);
         if (leftInitialSelectionRequestRef.current !== requestId) {
@@ -985,15 +991,7 @@ const ObjectDiffModal: React.FC<ObjectDiffModalProps> = ({
       const result = await requestData({
         resource: 'catalog-object-match',
         reason: 'user',
-        read: () =>
-          readCatalogObjectMatch(
-            targetClusterId,
-            leftSelection.namespace ?? '',
-            leftSelection.group,
-            leftSelection.version,
-            leftSelection.kind,
-            leftSelection.name
-          ),
+        read: () => readCatalogObjectMatchForRef(leftSelection, { clusterId: targetClusterId }),
       });
       const match = toCatalogItem(result.status === 'executed' ? result.data : null);
       if (
@@ -1047,15 +1045,7 @@ const ObjectDiffModal: React.FC<ObjectDiffModalProps> = ({
       const result = await requestData({
         resource: 'catalog-object-match',
         reason: 'user',
-        read: () =>
-          readCatalogObjectMatch(
-            targetClusterId,
-            rightSelection.namespace ?? '',
-            rightSelection.group,
-            rightSelection.version,
-            rightSelection.kind,
-            rightSelection.name
-          ),
+        read: () => readCatalogObjectMatchForRef(rightSelection, { clusterId: targetClusterId }),
       });
       const match = toCatalogItem(result.status === 'executed' ? result.data : null);
       if (

@@ -7,7 +7,6 @@
  */
 
 import { eventBus, type UnsubscribeFn } from '@/core/events';
-import { readQueryPermissions, requestData } from '@/core/data-access';
 import { resolveBuiltinGroupVersion } from '@/shared/constants/builtinGroupVersions';
 import type {
   PermissionEntry,
@@ -27,6 +26,11 @@ import {
   getPermissionResultErrorMessage,
   isTransientPermissionResultError,
 } from './transientPermissionErrors';
+import {
+  queryPermissions,
+  type QueryPayloadItem,
+  type QueryResponseResult,
+} from './permissionRead';
 
 /**
  * Resolve GVK for a permission lookup. When the caller supplied explicit
@@ -56,82 +60,6 @@ const resolvePermissionGVK = (
   }
   return { group: g, version: ver };
 };
-
-interface QueryPayloadItem {
-  id: string;
-  clusterId: string;
-  /**
-   * API group for the target kind. Optional: when present alongside
-   * `version`, the backend routes through the strict GVK resolver. When
-   * absent, the backend falls back to kind-only resolution. This is what
-   * lets the permission store disambiguate colliding CRDs (e.g. two
-   * different DBInstance kinds).
-   */
-  group?: string;
-  /** API version paired with `group`. */
-  version?: string;
-  resourceKind: string;
-  verb: string;
-  namespace: string;
-  subresource: string;
-  name: string;
-}
-
-interface QueryResponseResult {
-  id: string;
-  clusterId: string;
-  group?: string;
-  version?: string;
-  resourceKind: string;
-  verb: string;
-  namespace: string;
-  subresource: string;
-  name: string;
-  allowed: boolean;
-  source: string;
-  reason: string;
-  error: string;
-}
-
-interface QueryResponseDiagnostics {
-  key: string;
-  clusterId: string;
-  namespace?: string;
-  method: string;
-  ssrrIncomplete: boolean;
-  ssrrRuleCount: number;
-  ssarFallbackCount: number;
-  checkCount: number;
-}
-
-interface QueryPermissionsResponse {
-  results: QueryResponseResult[];
-  diagnostics: QueryResponseDiagnostics[];
-}
-
-function QueryPermissions(queries: QueryPayloadItem[]): Promise<QueryPermissionsResponse> {
-  return requestData<QueryPermissionsResponse>({
-    resource: 'query-permissions',
-    label: 'Query Permissions',
-    adapter: 'permission-read',
-    reason: 'startup',
-    scope: Array.from(
-      new Set(
-        queries.map((query) =>
-          query.namespace
-            ? `cluster:${query.clusterId}|namespace:${query.namespace}`
-            : `cluster:${query.clusterId}`
-        )
-      )
-    ).join(' || '),
-    read: () => readQueryPermissions<QueryPermissionsResponse>(queries),
-  }).then((result) => {
-    if (result.status !== 'executed' || !result.data) {
-      throw new Error(result.blockedReason ?? 'query-permissions-blocked');
-    }
-    return result.data;
-  });
-}
 
 // ---------------------------------------------------------------------------
 // Permission key (must match the existing format from bootstrap.ts)
@@ -612,10 +540,36 @@ export const queryNamespacesPermissions = async (
         name: item.name,
       }));
 
+      // Targets whose results were transient (cluster still connecting).
+      // Their results are not cached and their freshness timestamp is not
+      // recorded, so the next caller — or the cluster-ready re-issue —
+      // retries instead of waiting out the TTL. Mirrors queryClusterPermissions.
+      const transientTargets = new Set<NamespaceQueryTarget>();
+
       try {
-        const response = await QueryPermissions(payload);
-        applyResults(response.results, chunkBatch);
+        const response = await queryPermissions(payload);
+        const resultsById = new Map(response.results.map((result) => [result.id, result]));
         for (const target of chunk) {
+          const targetResults = target.batch
+            .map((item) => resultsById.get(item.id))
+            .filter((result): result is QueryResponseResult => Boolean(result));
+          const transientError = targetResults.find(isTransientPermissionResultError);
+          if (transientError) {
+            transientTargets.add(target);
+            completeQueryDiagnostics(
+              target.diagnosticsKey,
+              false,
+              getPermissionResultErrorMessage(transientError),
+              target.startedAt,
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              target.batch.length
+            );
+            continue;
+          }
+          applyResults(targetResults, target.batch);
           const nsDiag = response.diagnostics?.find((d) => d.key === target.diagnosticsKey);
           completeQueryDiagnostics(
             target.diagnosticsKey,
@@ -665,7 +619,13 @@ export const queryNamespacesPermissions = async (
         for (const target of chunk) {
           inFlightQueries.delete(target.requestKey);
           pendingSpecs.delete(target.requestKey);
-          recordNamespaceQueryTimestamp(target);
+          // The metadata records the interest (who asked for what) so the
+          // cluster-ready re-issue can replay it; the timestamp records
+          // freshness and is only valid for definitive answers.
+          recordNamespaceQueryMetadata(target);
+          if (!transientTargets.has(target)) {
+            recordNamespaceQueryTimestamp(target);
+          }
         }
       }
     })
@@ -740,7 +700,7 @@ export const queryClusterPermissions = (clusterId: string): void => {
 
   let shouldRecordTimestamp = true;
 
-  QueryPermissions(payload)
+  queryPermissions(payload)
     .then((response) => {
       const transientError = response.results.find(isTransientPermissionResultError);
       if (transientError) {
@@ -881,7 +841,7 @@ export const queryKindPermissions = (
 
   inFlightQueries.add(queryKey);
 
-  QueryPermissions(payload)
+  queryPermissions(payload)
     .then((response) => {
       for (const r of response.results) {
         permissionResults.set(r.id, {
@@ -1061,6 +1021,9 @@ const recordQueryTimestamp = (queryKey: string): void => {
 
 const recordNamespaceQueryTimestamp = (target: NamespaceQueryTarget): void => {
   lastQueryTimestamps.set(target.requestKey, Date.now());
+};
+
+const recordNamespaceQueryMetadata = (target: NamespaceQueryTarget): void => {
   namespaceQueryMetadata.set(target.requestKey, {
     clusterId: target.clusterId,
     namespace: target.namespace,
@@ -1173,8 +1136,24 @@ export const initializePermissionStore = (clusterId: string): void => {
   }
   if (!unsubClusterLifecycle) {
     unsubClusterLifecycle = eventBus.on('cluster:lifecycle', (payload) => {
-      if (payload.clusterId === currentClusterId && payload.state === 'ready') {
+      if (payload.state !== 'ready') {
+        return;
+      }
+      if (payload.clusterId === currentClusterId) {
         queryClusterPermissions(currentClusterId);
+      }
+      // Re-issue recorded namespace queries for the cluster that just became
+      // ready. Surfaces that queried while it was connecting (e.g. restored
+      // object panels) got transient errors and have no other re-query
+      // trigger of their own.
+      for (const metadata of namespaceQueryMetadata.values()) {
+        if (metadata.clusterId !== payload.clusterId) {
+          continue;
+        }
+        void queryNamespacesPermissions(
+          [{ namespace: metadata.namespace, clusterId: metadata.clusterId }],
+          { force: true, specLists: metadata.specLists }
+        );
       }
     });
   }

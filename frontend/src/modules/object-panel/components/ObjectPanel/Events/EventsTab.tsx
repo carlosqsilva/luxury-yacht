@@ -1,5 +1,8 @@
 /**
  * frontend/src/modules/object-panel/components/ObjectPanel/Events/EventsTab.tsx
+ *
+ * Renders object-scoped Kubernetes events in the object panel, backed by the
+ * shared events refresh scope computed by ObjectPanel.
  */
 
 import React, { useEffect, useCallback, useMemo, useRef } from 'react';
@@ -14,9 +17,12 @@ import {
 import { useTableSort } from '@hooks/useTableSort';
 import { formatAge, formatFullDate } from '@utils/ageFormatter';
 import { errorHandler } from '@/utils/errorHandler';
+import { buildLocalPartialDataLabel } from '@modules/resource-grid/tablePartialState';
+import { boundedRowsSource } from '@modules/resource-grid/boundedRowsSource';
+import { useResourceInventoryTable } from '@modules/resource-grid/useResourceInventoryTable';
 import { requestRefreshDomain, type DataRequestReason } from '@/core/data-access';
 import type { ObjectEventSummary } from '@/core/refresh/types';
-import { refreshManager, refreshOrchestrator } from '@/core/refresh';
+import { refreshManager } from '@/core/refresh';
 import { useAutoRefreshLoadingState } from '@/core/refresh/hooks/useAutoRefreshLoadingState';
 import { applyPassiveLoadingPolicy } from '@/core/refresh/loadingPolicy';
 import { useRefreshScopedDomain } from '@/core/refresh/store';
@@ -26,20 +32,25 @@ import { useObjectPanel } from '@modules/object-panel/hooks/useObjectPanel';
 import { useNavigateToView } from '@shared/hooks/useNavigateToView';
 import {
   buildEventObjectReference,
-  canResolveEventObjectReference,
-  resolveEventObjectReference,
   splitEventObjectTarget,
 } from '@shared/utils/eventObjectIdentity';
+import {
+  eventGridCanOpenRelatedObject,
+  eventGridRelatedObjectInput,
+  objectPanelEventGridRow,
+  resolveEventGridRelatedObject,
+} from '@shared/events/eventGridModel';
 import type { ResolvedObjectReference } from '@shared/utils/objectIdentity';
 import type { PanelObjectData } from '../types';
 import { CLUSTER_SCOPE, INACTIVE_SCOPE } from '../constants';
+import { useObjectPanelScopedDomainLifecycle } from '../hooks/useObjectPanelScopedDomainLifecycle';
 import './EventsTab.css';
 
 interface EventsTabProps {
   objectData?: PanelObjectData | null;
   isActive?: boolean;
   // Refresh-domain scope string for the object-events provider. Owned
-  // by ObjectPanel via getObjectPanelKind so EventsTab and
+  // by ObjectPanel via getObjectPanelScopes so EventsTab and
   // ObjectPanelContent (which handles full-cleanup on panel close)
   // cannot drift apart on the same scope key.
   eventsScope: string | null;
@@ -95,22 +106,11 @@ const EventsTab: React.FC<EventsTabProps> = ({ objectData, isActive, eventsScope
 
   const eventsSnapshot = useRefreshScopedDomain('object-events', eventsScope ?? INACTIVE_SCOPE);
 
-  // Enable/disable the scoped domain based on tab activity. preserveState
-  // keeps the store entry alive when the tab unmounts so diagnostics can still
-  // see it. Full cleanup (reset) is handled by ObjectPanelContent when the
-  // panel closes.
-  useEffect(() => {
-    if (!eventsScope) {
-      return;
-    }
-    const enabled = Boolean(isActive && objectData);
-    refreshOrchestrator.setScopedDomainEnabled('object-events', eventsScope, enabled);
-    return () => {
-      refreshOrchestrator.setScopedDomainEnabled('object-events', eventsScope, false, {
-        preserveState: true,
-      });
-    };
-  }, [eventsScope, isActive, objectData]);
+  useObjectPanelScopedDomainLifecycle({
+    domain: 'object-events',
+    scope: eventsScope,
+    enabled: Boolean(isActive && objectData),
+  });
 
   const fetchEvents = useCallback(
     async (reason: DataRequestReason = 'startup') => {
@@ -193,19 +193,21 @@ const EventsTab: React.FC<EventsTabProps> = ({ objectData, isActive, eventsScope
         | 'clusterName'
       >
     ) => ({
-      involvedObject: event.involvedObject,
-      object: `${event.objectKind}/${event.objectName}`,
-      objectUid: event.objectUid,
-      objectApiVersion: event.objectApiVersion,
-      objectNamespace:
-        event.objectNamespace && event.objectNamespace !== CLUSTER_SCOPE
-          ? event.objectNamespace
-          : undefined,
-      clusterId: event.clusterId ?? objectData?.clusterId ?? undefined,
-      clusterName: event.clusterName ?? objectData?.clusterName ?? undefined,
-      fallbackKind: objectData?.kind,
-      fallbackGroup: objectData?.group,
-      fallbackVersion: objectData?.version,
+      ...eventGridRelatedObjectInput(
+        objectPanelEventGridRow(
+          {
+            ...event,
+            clusterId: event.clusterId ?? objectData?.clusterId,
+            clusterName: event.clusterName ?? objectData?.clusterName,
+          },
+          CLUSTER_SCOPE
+        ),
+        {
+          fallbackKind: objectData?.kind,
+          fallbackGroup: objectData?.group,
+          fallbackVersion: objectData?.version,
+        }
+      ),
     }),
     [
       objectData?.clusterId,
@@ -285,62 +287,105 @@ const EventsTab: React.FC<EventsTabProps> = ({ objectData, isActive, eventsScope
 
   const canOpenRelatedObject = useCallback(
     (item: EventDisplay) =>
-      canResolveEventObjectReference(
-        buildEventObjectRefInput({
-          objectKind: item.objectKind,
-          objectName: item.objectName,
-          objectNamespace: item.objectNamespace,
-          objectUid: item.objectUid,
-          objectApiVersion: item.objectApiVersion,
-          involvedObject: item.involvedObject,
-          clusterId: item.clusterId,
-          clusterName: item.clusterName,
-        })
+      eventGridCanOpenRelatedObject(
+        objectPanelEventGridRow(
+          {
+            objectKind: item.objectKind,
+            objectName: item.objectName,
+            objectNamespace: item.objectNamespace,
+            objectUid: item.objectUid,
+            objectApiVersion: item.objectApiVersion,
+            involvedObject: item.involvedObject,
+            clusterId: item.clusterId ?? objectData?.clusterId,
+            clusterName: item.clusterName ?? objectData?.clusterName,
+          },
+          CLUSTER_SCOPE
+        ),
+        {
+          fallbackKind: objectData?.kind,
+          fallbackGroup: objectData?.group,
+          fallbackVersion: objectData?.version,
+        }
       ),
-    [buildEventObjectRefInput]
+    [
+      objectData?.clusterId,
+      objectData?.clusterName,
+      objectData?.group,
+      objectData?.kind,
+      objectData?.version,
+    ]
   );
 
   const openRelatedObject = useCallback(
     async (item: EventDisplay) => {
-      const ref = await resolveEventObjectReference(
-        buildEventObjectRefInput({
-          objectKind: item.objectKind,
-          objectName: item.objectName,
-          objectNamespace: item.objectNamespace,
-          objectUid: item.objectUid,
-          objectApiVersion: item.objectApiVersion,
-          involvedObject: item.involvedObject,
-          clusterId: item.clusterId,
-          clusterName: item.clusterName,
-        })
+      const ref = await resolveEventGridRelatedObject(
+        objectPanelEventGridRow(
+          {
+            objectKind: item.objectKind,
+            objectName: item.objectName,
+            objectNamespace: item.objectNamespace,
+            objectUid: item.objectUid,
+            objectApiVersion: item.objectApiVersion,
+            involvedObject: item.involvedObject,
+            clusterId: item.clusterId ?? objectData?.clusterId,
+            clusterName: item.clusterName ?? objectData?.clusterName,
+          },
+          CLUSTER_SCOPE
+        ),
+        {
+          fallbackKind: objectData?.kind,
+          fallbackGroup: objectData?.group,
+          fallbackVersion: objectData?.version,
+        }
       );
       if (ref) {
         openWithObjectRef.current(ref);
       }
     },
-    [buildEventObjectRefInput]
+    [
+      objectData?.clusterId,
+      objectData?.clusterName,
+      objectData?.group,
+      objectData?.kind,
+      objectData?.version,
+    ]
   );
 
   // Alt+click: navigate to the related object's view and focus it.
   const navigateToRelatedObject = useCallback(
     async (item: EventDisplay) => {
-      const ref = await resolveEventObjectReference(
-        buildEventObjectRefInput({
-          objectKind: item.objectKind,
-          objectName: item.objectName,
-          objectNamespace: item.objectNamespace,
-          objectUid: item.objectUid,
-          objectApiVersion: item.objectApiVersion,
-          involvedObject: item.involvedObject,
-          clusterId: item.clusterId,
-          clusterName: item.clusterName,
-        })
+      const ref = await resolveEventGridRelatedObject(
+        objectPanelEventGridRow(
+          {
+            objectKind: item.objectKind,
+            objectName: item.objectName,
+            objectNamespace: item.objectNamespace,
+            objectUid: item.objectUid,
+            objectApiVersion: item.objectApiVersion,
+            involvedObject: item.involvedObject,
+            clusterId: item.clusterId ?? objectData?.clusterId,
+            clusterName: item.clusterName ?? objectData?.clusterName,
+          },
+          CLUSTER_SCOPE
+        ),
+        {
+          fallbackKind: objectData?.kind,
+          fallbackGroup: objectData?.group,
+          fallbackVersion: objectData?.version,
+        }
       );
       if (ref) {
         navigateToView(ref);
       }
     },
-    [buildEventObjectRefInput, navigateToView]
+    [
+      navigateToView,
+      objectData?.clusterId,
+      objectData?.clusterName,
+      objectData?.group,
+      objectData?.kind,
+      objectData?.version,
+    ]
   );
 
   const columns = useMemo<GridColumnDefinition<EventDisplay>[]>(() => {
@@ -400,11 +445,45 @@ const EventsTab: React.FC<EventsTabProps> = ({ objectData, isActive, eventsScope
     return base;
   }, [canOpenRelatedObject, navigateToRelatedObject, openRelatedObject]);
 
-  const { sortedData, sortConfig, handleSort } = useTableSort(events, 'ageTimestamp', 'desc', {
+  const { sortedData, sortConfig, handleSort } = useTableSort(events, 'age', 'desc', {
     columns,
   });
+  const partialDataLabel = useMemo(
+    () =>
+      buildLocalPartialDataLabel({
+        stats: eventsSnapshot.stats,
+        fallback: 'Object Events are loaded as a recent local window.',
+        sourceLabel: 'Object Events',
+        sourceVerb: 'are',
+      }),
+    [eventsSnapshot.stats]
+  );
 
-  if (eventsLoading && events.length === 0) {
+  // Object events are a bounded, always-partial (recent-window) Event-resource
+  // table. Its display lifecycle runs through the shared controller so the
+  // loading / settled-empty / partial decisions are centralized (no view-local
+  // display path) and a transiently-empty refresh can never flash "No events
+  // found". The bespoke object-panel presentation below is driven by this render
+  // state; the no-filter, age-sorted GridTable + useTableSort stay as a
+  // presentation-only direct exception — the lifecycle is the controller's.
+  const eventsRender = useResourceInventoryTable(
+    boundedRowsSource<EventDisplay>({
+      rows: sortedData,
+      loading: eventsLoading,
+      // The object-events domain retains data across refreshes and
+      // `eventsLoading` already means "no data AND actively loading", so "not
+      // loading" is the settled state. Using it as `loaded` makes the
+      // controller derive exactly the panel's existing loading/empty conditions
+      // (loading only while fetching; empty only once settled), keeping the
+      // paused/error ordering and appearance unchanged.
+      loaded: !eventsLoading,
+      error: eventsError,
+      mode: 'Local Partial',
+      partialLabel: partialDataLabel,
+    })
+  );
+
+  if (eventsRender.showLoadingBoundary) {
     return (
       <div className="object-panel-tab-content">
         <div className="object-panel-placeholder">
@@ -424,17 +503,17 @@ const EventsTab: React.FC<EventsTabProps> = ({ objectData, isActive, eventsScope
     );
   }
 
-  if (eventsError) {
+  if (eventsRender.error) {
     return (
       <div className="object-panel-tab-content">
         <div className="object-panel-placeholder error">
-          <p>Error loading events: {eventsError}</p>
+          <p>Error loading events: {eventsRender.error}</p>
         </div>
       </div>
     );
   }
 
-  if (events.length === 0) {
+  if (eventsRender.isEmpty) {
     return (
       <div className="object-panel-tab-content">
         <div className="object-panel-placeholder">
@@ -447,8 +526,11 @@ const EventsTab: React.FC<EventsTabProps> = ({ objectData, isActive, eventsScope
   return (
     <div className="object-panel-tab-content">
       <div className="events-display">
+        <div className="events-display__partial-state" role="status">
+          {eventsRender.partialLabel}
+        </div>
         <GridTable<EventDisplay>
-          data={sortedData}
+          data={eventsRender.rows}
           columns={columns}
           sortConfig={sortConfig}
           onSort={handleSort}

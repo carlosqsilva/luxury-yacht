@@ -8,7 +8,7 @@
 import ReactDOM from 'react-dom/client';
 import { act } from 'react';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { OBJECT_ACTION_IDS } from '@shared/actions/objectActionDescriptors';
+import { OBJECT_ACTION_IDS } from '@shared/actions/objectActionContract';
 
 vi.mock('@modules/namespace/components/useNamespaceColumnLink', () => ({
   useNamespaceColumnLink: () => ({
@@ -181,16 +181,10 @@ describe('NsViewRBAC', () => {
     ...overrides,
   });
 
-  const renderRBACView = async (rows: RBACData[] = [baseRBAC()]) => {
+  const renderRBACView = async (options: { stats?: any; namespace?: string } = {}) => {
     await act(async () => {
       root.render(
-        <NsViewRBAC
-          namespace="team-a"
-          data={rows}
-          loading={false}
-          loaded={true}
-          showNamespaceColumn={true}
-        />
+        <NsViewRBAC namespace={options.namespace ?? 'team-a'} showNamespaceColumn={true} />
       );
       await Promise.resolve();
     });
@@ -199,7 +193,7 @@ describe('NsViewRBAC', () => {
 
   it('provides open action for RBAC rows', async () => {
     const entry = baseRBAC();
-    const props = await renderRBACView([entry]);
+    const props = await renderRBACView();
     const openItem = props
       .getCustomContextMenuItems(entry, 'name')
       .find((item: any) => item.actionId === OBJECT_ACTION_IDS.viewDetails);
@@ -220,7 +214,7 @@ describe('NsViewRBAC', () => {
 
   it('deletes RBAC entries on confirmation', async () => {
     const entry = baseRBAC();
-    const props = await renderRBACView([entry]);
+    const props = await renderRBACView();
 
     const deleteItem = props
       .getCustomContextMenuItems(entry, 'name')
@@ -251,7 +245,7 @@ describe('NsViewRBAC', () => {
 
   it('opens the Map for ServiceAccount rows', async () => {
     const entry = baseRBAC({ kind: 'ServiceAccount', name: 'builder' });
-    const props = await renderRBACView([entry]);
+    const props = await renderRBACView();
     const objectMapItem = props
       .getCustomContextMenuItems(entry, 'name')
       .find((item: any) => item.actionId === OBJECT_ACTION_IDS.viewMap);

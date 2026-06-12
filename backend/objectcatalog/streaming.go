@@ -79,17 +79,16 @@ func (a *streamingAggregator) complete(_ int) {
 	}
 }
 
-// cloneChunksLocked creates a deep copy of the aggregator's chunks.
+// cloneChunksLocked snapshots the aggregator's chunk list. Chunks are
+// immutable once appended (their items are never mutated after creation), so
+// only the pointer slice is copied — deep-copying every item made each emit
+// cost O(total items), quadratic across an initial sync.
 func (a *streamingAggregator) cloneChunksLocked() []*summaryChunk {
 	if len(a.chunks) == 0 {
 		return nil
 	}
 	result := make([]*summaryChunk, len(a.chunks))
-	for i, chunk := range a.chunks {
-		items := make([]Summary, len(chunk.items))
-		copy(items, chunk.items)
-		result[i] = &summaryChunk{items: items}
-	}
+	copy(result, a.chunks)
 	return result
 }
 
@@ -205,7 +204,7 @@ func (s *Service) broadcastStreaming(ready bool) {
 func (s *Service) CachesReady() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.cachesReady
+	return s.catalogIndex.cachesAreReady()
 }
 
 // publishStreamingState updates the streaming state in the service.
@@ -219,24 +218,15 @@ func (s *Service) publishStreamingState(
 	chunkSnapshot := make([]*summaryChunk, len(chunks))
 	copy(chunkSnapshot, chunks)
 
-	kindSnapshot := snapshotSortedKindInfos(kindSet)
-	namespaceSnapshot := snapshotSortedKeys(namespaceSet)
-
 	s.mu.Lock()
-	s.sortedChunks = chunkSnapshot
-	s.cachedKinds = kindSnapshot
-	s.cachedNamespaces = namespaceSnapshot
-	if descriptors != nil {
-		s.cachedDescriptors = append([]Descriptor(nil), descriptors...)
-	}
-	s.cachesReady = ready
+	s.catalogIndex.publishStreamingState(chunkSnapshot, kindSet, namespaceSet, descriptors, ready)
 	s.mu.Unlock()
 }
 
 // setFirstBatchLatency records the time-to-first-batch measurement.
 func (s *Service) setFirstBatchLatency(latency time.Duration) {
 	s.mu.Lock()
-	s.lastFirstBatchLatency = latency
+	s.catalogIndex.setFirstBatchLatency(latency)
 	s.mu.Unlock()
 }
 
@@ -244,5 +234,5 @@ func (s *Service) setFirstBatchLatency(latency time.Duration) {
 func (s *Service) FirstBatchLatency() time.Duration {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.lastFirstBatchLatency
+	return s.catalogIndex.firstBatchLatency()
 }

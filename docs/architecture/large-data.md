@@ -1,163 +1,316 @@
-# Large Data Architecture
+# Large Data Contract
 
-Large data views in Luxury Yacht are designed around bounded rendering,
-stable identity, explicit metadata sources, and diagnostics that explain what
-kind of table is being measured.
+Large-cluster support is a product constraint, not a table decoration. The app
+must avoid loading, rendering, filtering, or exporting unbounded cluster data
+without an explicit cap or pagination model.
 
-See [README.md](README.md) for the architecture doc map.
+## Agent Contract
 
-## Product Model
+- Preserve `clusterId` in row identity and persisted table state.
+- Every resource-grid table declares a required `tableMode`: `Local Complete`,
+  `Local Partial`, `Query Backed Static`, or `Query Backed Dynamic`.
+- A table is not large-data safe just because it has been classified.
+  Classification is only the starting point. The table must either provide
+  backend-owned global semantics, prove a real complete bound, or visibly
+  present itself as a bounded/recent/partial view with matching action limits.
+- Prefer server/query-side bounds for catalog-scale data.
+- Use GridTable virtualization for large row sets; do not disable it to mask
+  focus, hover, or width bugs.
+- Metadata that claims to describe the object universe must come from catalog or
+  query metadata, not a capped row slice.
+- Query-backed tables must not run local full-row search, filtering, sorting,
+  or facet generation over the current page as if it were the full result set.
+- Cursor pagination for catalog-scale data is first/previous/next keyset
+  navigation. Numbered page jumps require a separate bounded offset contract.
+- Query-backed pagination controls belong together in the table footer. Show
+  page size and visible range. Show exact totals and page counts only when the
+  backend result says the total is exact; otherwise make the count approximate
+  and avoid random page-jump UI.
+- Browse page size is user-selectable only from bounded options. Changing page
+  size starts a new backend query scope and invalidates prior page cursors.
+- Make truncation, load-more, degraded data, stale data, unavailable metrics,
+  permission-blocked reads, and capped windows visible in UI state.
+- Exact totals are preferred for Browse while they remain within measured
+  backend budgets. The catalog query path stops exact total/facet metadata above
+  its backend exact-metadata budget and emits `totalIsExact: false` /
+  `facetsExact: false`; the UI renders that count as approximate.
+- CSV/copy actions operate on the current page by default; the "all matching
+  rows" scope is a client-driven walk over the query cursor (the same bounded
+  query path the table uses), and it fails loudly on a failed page rather than
+  saving a partial result. Destructive object actions must operate on concrete
+  visible-row refs with full `clusterId`, GVK, namespace, and name — never on a
+  query-wide selector.
+- Keep large text surfaces such as logs bounded, searchable, and copyable
+  without forcing the full buffer into expensive React rendering.
 
-The default table model is:
+## Ownership
 
-- capped result sets
-- virtualization for large tables
-- filters/search to narrow oversized views
-- stable row identity across refresh, stream, sort, and filter changes
-- measured performance diagnostics rather than guesswork
+- Catalog query and metadata bounds: `backend/objectcatalog`,
+  `backend/refresh/snapshot/catalog.go`
+- Table virtualization and persistence:
+  `frontend/src/shared/components/tables`
+- Refresh payload caps and diagnostics: `backend/refresh/snapshot`,
+  `frontend/src/core/refresh`
+- Log viewer bounds: object-panel log viewer modules and log stream managers
 
-This model does not try to restore the older "always load the full active
-dataset" approach.
+## Browse Query Chain
 
-Avoid numbered pages as the primary user interaction. Query-backed surfaces may
-use explicit load-more or backend continue tokens when the domain owns that
-contract, but ordinary typed tables should stay capped and encourage filtering
-instead of unbounded loading.
+Producer: `backend/objectcatalog.Service.Query` owns Browse filtering, search,
+sort, page limits, cursor validation, totals, and facets. Cursor tokens are
+bound to `clusterId`, query signature, backend sort contract, page direction,
+page limit, cursor version, and the last row's stable sort/tie-breaker values.
+Namespace and kind filters use the catalog query index. Default, search-only,
+and sort-only catalog queries may still stream over all catalog chunks as an
+O(N) CPU scan, but they feed a bounded page buffer and exact-metadata budget
+instead of collecting the full result set in memory.
 
-## Current Mechanisms
+Query store seam: `backend/objectcatalog.CatalogQueryStore` sits behind
+`Service.Query`. The default implementation is the current in-memory catalog
+index and preserves the public `QueryOptions` to `QueryResult` contract. A
+future SQLite or other persistent backing store may replace this seam when
+benchmarks show that O(N) chunk scans, memory residency, or startup rebuild
+costs exceed the large-cluster budget. The decision point is a measured
+regression in catalog query latency, catalog memory residency, or cursor-page
+churn benchmarks; frontend scopes and snapshot payloads must not change when
+the store changes.
 
-Shared GridTable behavior:
+Snapshot boundary: `backend/refresh/snapshot/catalog.go` parses the refresh
+scope into catalog query options and emits `CatalogSnapshot` payloads with full
+catalog object identity, `continue`, `previous`, `cursorInvalid`,
+`totalIsExact`, `facetsExact`, and reason-bearing `issues`.
 
-- `maxTableRows` is a user setting with default `1000`, minimum `100`, and
-  maximum `10000`.
-- `GridTable` applies the cap after local filtering and before rendering.
-- The filter bar shows `displayed of total` when the cap hides rows and tells
-  users to narrow the result set or change the setting.
-- Row virtualization is enabled by default with threshold `120`, overscan `6`,
-  and estimated row height `44`.
-- Column virtualization is available through `virtualization.columnWindow` for
-  wide tables that opt into it.
-- `GridTable` has a generic load-more API (`hasMore`, `onRequestMore`,
-  `isRequestingMore`) for query-backed tables that explicitly wire paging.
+Frontend boundary: `frontend/src/core/data-access` owns refresh-domain reads.
+`frontend/src/modules/browse/hooks/useBrowseCatalog.ts` builds the scoped
+catalog query, debounces search, requests cursor pages, replaces the current
+row window, and restarts from page one only when the backend reports an invalid
+cursor.
 
-Catalog/browse behavior:
+Consumers: `BrowseView` renders a `Query Backed Static` resource-grid table.
+Favorites persist query-backed filter and sort state. Object actions receive
+concrete visible-row refs with `clusterId`, group, version, kind, namespace,
+and name. CSV export/copy in the "all matching rows" scope walks the query
+cursor client-side; destructive object actions continue to use concrete
+visible-row refs.
 
-- Browse scopes include `limit=<maxTableRows>`.
-- Backend catalog queries default to `ObjectCatalogQueryLimit = 1000` and clamp
-  caller-supplied limits to `ObjectCatalogMaxQueryLimit = 10000`.
-- Catalog snapshots include `continue`, `total`, `batchIndex`, `batchSize`,
-  `totalBatches`, and `isFinal` so query-backed consumers can reason about
-  partial results.
-- Browse derives kind/namespace filter metadata from catalog metadata, not from
-  the currently displayed row slice.
+## Table Modes
 
-Diagnostics behavior:
+`Local Complete` tables may run local search, filtering, sorting, facets, CSV,
+and selection because the loaded rows are the full bounded dataset for that
+table scope.
 
-- GridTable diagnostics record `inputRows`, `sourceRows` (post-cap), and
-  `displayedRows`.
-- Diagnostics modes are `local`, `query`, and `live`; each mode changes how row
-  count and reference churn signals should be interpreted.
-- Diagnostics also record filter option cost, filter pass cost, sort cost,
-  render cost, scroll frame timings, and broad replacement signals.
+`Local Partial` tables may run local transforms only over the visible bounded
+window. They must not imply global totals, global facets, global sorting, or
+export beyond the window.
 
-## Durable Rules
+Local Partial is a user-facing contract, not an internal excuse. The table must
+label the window source, such as recent, capped, degraded, or buffered; totals
+and facets must be scoped to that window; destructive and export actions must
+enforce visible/windowed-row scope.
 
-### Identity
+`Query Backed Static` tables receive rows that are already searched, filtered,
+sorted, and paged by the backend. Shared table logic must not locally narrow or
+resort those rows. Browse is the reference implementation.
 
-Every Kubernetes object row must preserve canonical identity:
+`Query Backed Dynamic` tables are query-backed and include volatile projected
+fields such as CPU or memory metrics. All-namespaces Pods and Workloads use
+their refresh-domain query scopes for backend search, filters, keyset paging,
+and CPU/memory sort. Cursor continuity is keyset-based: the cursor carries the
+dynamic metrics revision for diagnostics and signature stability, but ordinary
+metrics refreshes do not reject the cursor or bounce the user back to page 1.
 
-- `clusterId`
-- `group`
-- `version`
-- `kind`
-- `namespace`
-- `name`
+## Resource Inventory Source Model
 
-Use empty `namespace` for cluster-scoped objects. `uid` remains important for
-lifecycle-sensitive workflows, but it is not the primary row key.
+Every resource inventory table renders through one controller
+(`ResourceInventoryTable`, see [`docs/frontend/gridtable.md`](../frontend/gridtable.md))
+fed by a normalized source state, not a per-view display path. The source comes
+from one of two adapters:
 
-Use the catalog as the canonical source for object identity and existence. See
-[catalog.md](catalog.md) and [shared-resource-model.md](shared-resource-model.md)
-for the full identity contract.
+- `boundedRowsSource` for bounded local data (`Local Complete` / `Local Partial`).
+  It never exposes pagination, so a bounded table cannot silently fan out to query
+  scale.
+- `backendQuerySource` for backend-owned query results (catalog Browse/Custom and
+  the typed-resource query wrappers).
 
-### Metadata Sourcing
+The controller derives the display state from the source lifecycle, not from the
+current row count: a refresh that momentarily holds zero rows renders as loading,
+and only a settled, loaded, empty result renders as empty. Truncation/partial is
+carried on the source (`completeness` plus a label) and owned by the controller,
+so a partial, recent, or degraded window can never be presented as a complete
+table. New resource tables must use one of the two adapters through the
+controller; if a table cannot prove bounded-complete, bounded-partial, or
+backend-owned semantics, stop and update the backend query contract rather than
+adding a new frontend source shape.
 
-Metadata-driven controls must use explicit metadata sources where required:
+## Typed Resource Query Contract
 
-- Catalog-backed browse filters should use catalog metadata.
-- Typed views may use typed-domain metadata when the domain supplies it.
-- Row-derived metadata is allowed only when it is deliberate, local to that
-  table, and safe under caps.
+Typed resource queries use `ResourceQueryRequest` and `ResourceQueryResult` in
+`backend/refresh/snapshot/resource_query_contract.go`, mirrored by frontend
+refresh types. The contract carries full `clusterId` and GVK identity for every
+row, stable projected table fields, dynamic CPU/memory fields, backend
+predicates, facets, exactness flags, partial/degraded issues, and a dynamic
+revision reference.
 
-Do not rebuild global filter/sidebar metadata from whatever rows happened to be
-loaded most recently.
+Metadata label/annotation search is not implicitly global for query-backed
+typed tables. A typed table may expose metadata search globally only after that
+metadata is indexed by the backend query implementation. Until then, metadata
+search remains Local Complete-only, or the large-scope table must show an
+explicit degraded/disabled state.
 
-### Interaction Ownership
+Metric sorts use a bounded dynamic paging model. The backend response must name
+the metrics source and revision used for the result. Deep metric paging is
+allowed only within the chosen bounded snapshot/top-k policy; cursors must not
+restart merely because the live metrics stream refreshes.
 
-Table families must declare where search, filter, and sort truth lives:
+Keyset ordering must be self-consistent. The page sort and the cursor boundary
+must be derived from one comparable value per row, so the order rows are laid out
+in is exactly the order the cursor walks. Computing them from two different
+functions can skip or duplicate rows across pages. A numeric sort field must stay
+uniformly numeric: a row that is missing a value (no age timestamp, no metric
+sample, an unparseable cell) sorts as a `-Inf` sentinel with `ok=true`, never via
+a string fallback, so numeric and string comparable spaces never mix within one
+field. See `typedTableSortedItemLess` and `typedTableComparableSortValue` in
+`backend/refresh/snapshot/typed_table_query.go`; this invariant is what prevents
+silent dup/skip when a new sort field or adapter is added.
 
-- `local`: GridTable search/filter/sort operate on the loaded row set.
-- `query`: upstream query/filtering shapes the result before it reaches the
-  table.
-- `live`: frequent row changes are expected because key fields are time-varying
-  or stream-driven.
+The typed builders expose two paths: a backend-query page when the scope carries
+a query string (`query.Enabled`) and a bounded local window otherwise. The
+window path is the canonical refresh snapshot — it backs object panels, counts
+elsewhere, and the live-data version that drives query refetch — so it is not
+redundant with the query path and must not be deleted as a "path consolidation."
+Single-namespace, all-namespaces, and cluster scopes all run both: the query page
+feeds the table (with backend keyset pagination) while the window snapshot feeds
+liveness and the other consumers above. Single-namespace resource tables are
+query-backed too — the frontend passes the selected namespace as the query
+`baseScope` (`namespace:<name>`) so the page is scoped to that namespace — so
+pagination and table semantics are uniform across every scope, not just
+all-namespaces and cluster.
+Degraded and unavailable-source reasons are computed and surfaced on both paths;
+a window missing a permission-blocked source is reported inexact and
+issue-bearing, never as a complete table.
 
-These modes are part of diagnostics semantics as well as UI interpretation.
+Object-panel related-resource tables stay local while their owner-scoped domain
+keeps them naturally bounded. They move to typed query-backed mode only if an
+object-panel table becomes namespace or cluster scale.
 
-### Diagnostics Semantics
+## Liveness Contract for Query-Backed Tables (Track A acceptance A1)
 
-Interpret performance diagnostics by table mode:
+A query-backed table renders one-shot query pages, so its liveness comes from
+refetching — never from mutating displayed rows in place. The contract:
 
-- `local`: broad input replacement is usually suspicious when the effective row
-  set is unchanged.
-- `query`: broad replacement can be normal when the upstream query changes, but
-  is suspicious for stable queries.
-- `live`: churn is expected; prioritize sort, render, and scroll-frame warnings
-  before treating replacement as a feed bug.
+- The typed query refetches exactly when the scoped live domain's **data
+  identity** changes: `liveDomainVersion = version:checksum:streamRevision`
+  (`useQueryBackedResourceGridTable.ts`). `version`/`checksum` come from window
+  snapshots (polls, resyncs); `streamRevision` is bumped by the resource-stream
+  and events-stream managers when a streamed delivery actually changes rows.
+  Refresh timestamps are deliberately excluded — identical data must never
+  trigger a refetch (the anti-churn invariant).
+- **Update latency**: for streamed domains, a cluster change is visible within
+  one stream coalescing window (200ms flush in the stream managers) plus one
+  query round-trip (an in-memory backend page build — tens of milliseconds at
+  100k rows). For poll-backed domains, latency is the poll cadence plus the same
+  round-trip. A healthy stream suppresses snapshot polls; the stream manager
+  falls back to polling on drift or stream failure, restoring poll-cadence
+  liveness automatically.
+- **Cursor stability across live updates**: pagination cursors are value-based
+  keysets (sort value + row key), so a page-2+ cursor survives concurrent
+  inserts/deletes without skipping or duplicating rows; metric-backed sorts
+  tolerate metrics-revision advances (`typedTableQueryCursor.matches`). A cursor
+  whose anchor context disappears reports `cursorInvalid` and the table resets
+  to page 1.
+- Every query refetch is visually silent — user-initiated (sort/filter/page
+  size) and background liveness alike. The table keeps the last applied rows
+  (or the settled "no matches" state) until the new page lands; `loading` is
+  reported only before the first applied result for a scope, so filtering never
+  dims the view, swaps in a spinner, or unmounts the filter input (which would
+  steal focus while typing).
 
-## Performance Expectations
+## High-Risk Typed Producer Trace
 
-Large-data work should optimize for:
+Pods: `backend/refresh/snapshot/pods.go` feeds namespace and all-namespaces pod
+tables. It carries pod identity, status, restart, readiness, node, owner, and
+metrics projection state. All-namespaces Pods are `Query Backed Dynamic`:
+search, namespace filters, health predicates, pagination, and CPU/memory sort
+are backend-owned for the current metrics snapshot. The current implementation
+still scans the informer-backed object set for each query page, but it no
+longer retains the full projected pod row universe before sorting and slicing;
+matching rows feed a bounded keyset candidate buffer plus exact facet/total
+accounting.
 
-- stable row keys and row object reuse where practical
-- bounded metadata derivation
-- incremental update paths for live data
-- explicit recomputation boundaries
-- virtualized rows for large tables
-- optional column virtualization for very wide tables
-- capped display counts even when upstream data is much larger
-- responsiveness during refresh and stream churn
+Workloads: `backend/refresh/snapshot/namespace_workloads.go` feeds namespace
+workload tables. Both single-namespace and all-namespaces workload tables are
+`Query Backed Dynamic` (single-namespace runs a namespace-scoped query page):
+kind and namespace filters, search, pagination, and CPU/memory aggregate sorts
+are backend-owned for the current metrics snapshot. Like Pods, this is a bounded
+projected-row query path, not a persistent secondary index for workload summaries.
 
-Heavy live families such as Pods should be evaluated after shared table and
-refresh groundwork is stable, not before it.
+Custom resources: cluster and namespace custom table row universes come from
+the object catalog query path with `customOnly=true`. Search, kind filters,
+sort, paging, counts, and facets for the visible table are owned by the backend
+catalog query contract. The frontend hydrates only the current catalog page
+through `HydrateCatalogCustomRows` to recover status, readiness, conditions,
+labels, and annotations. Production Custom tabs do not subscribe to, enable, or
+load the legacy `cluster-custom` and `namespace-custom` CRD fanout domains, and
+they do not pass those full-row payloads through the Wails boundary. Those
+legacy domains remain registered only for explicit resource-stream and
+diagnostic compatibility surfaces; any future surface that enables them pays the
+old full-CR-row fanout cost and must not be described as large-table-safe.
+
+Events: cluster and namespace event tables use typed backend query pages over
+the current event set and are `Query Backed Static` for table search, filters,
+sort, counts, and cursor pagination. Object-panel events remain object-scoped
+recent/capped windows and are visibly `Local Partial`.
+
+Nodes: `backend/refresh/snapshot/nodes.go` feeds a `Query Backed Dynamic`
+cluster table. Search, pagination, status filters, age sort, and CPU/memory
+metric sorts are backend-owned for the current resource and metric projection
+state.
+
+Config, RBAC, storage, network, quotas, autoscaling, and Helm: these snapshot
+producers expose typed backend query pages for cluster, all-namespaces, and
+single-namespace surfaces alike. Single-namespace tables run a namespace-scoped
+query page (`baseScope = namespace:<name>`) rather than a local-complete window,
+so pagination and table semantics match every other scope.
+
+## App-Wide Table State
+
+The app-wide hardening pass is complete as of
+[`docs/plans/app-wide-table-hardening.md`](../plans/app-wide-table-hardening.md):
+every production resource table is query-backed, proven owner/scope bounded, or
+visibly Local Partial with matching action limits. Completion does not mean
+every table is globally query-backed; it means no production table may present a
+capped, recent, buffered, degraded, or page-limited row set as complete global
+data.
+
+Future table work must preserve that contract. If measured fixtures show that a
+currently Local Complete table can exceed its scope budget, either migrate it to
+`Query Backed Static` / `Query Backed Dynamic` or make it visibly
+`Local Partial` with honest counts, filters, export, selection, and destructive
+action semantics.
+
+## Current Browse Budget
+
+Measured on 2026-05-31 with Apple M2 Max using the synthetic catalog benchmark:
+
+- 100k first page: 4.32 ms, 160 KB allocated.
+- 100k cursor page: 7.07 ms, 151 KB allocated.
+- 100k per-cluster catalog index residency: 26.75 MB.
+- 250k first page: 11.45 ms, 161 KB allocated.
+- 250k cursor page: 17.67 ms, 151 KB allocated.
+- 250k per-cluster catalog index residency: 66.80 MB.
+- 3 x 100k multi-cluster catalog index residency: 80.19 MB aggregate.
+
+## Change Checklist
+
+When touching high-volume data:
+
+1. Identify the maximum backend payload size and frontend rendered row count.
+2. Check whether filters/search are local, query-backed, or both.
+3. Preserve stable row keys and column keys for persistence.
+4. Confirm empty, truncated, loading, blocked, and degraded states.
+5. Add tests for capped/paginated behavior rather than only small fixtures.
 
 ## Validation
 
-Validate both real and synthetic data.
-
-Minimum real-cluster surfaces:
-
-- Cluster Browse
-- All Namespaces Browse
-- representative all-namespaces typed views
-- representative cluster typed views
-- heavy live views such as Pods, Workloads, Nodes, and Events
-
-Synthetic targets should probe upstream/input sizes beyond the display cap:
-
-- `25k` rows
-- `50k` rows
-- `100k` rows for the heaviest generic table and query paths
-
-For capped tables, the expected result is not rendering every synthetic row. The
-expected result is that query/filter metadata stays correct, displayed rows stay
-bounded, scrolling remains smooth, and object actions keep canonical identity.
-
-Validation checks:
-
-- filter stability and metadata correctness
-- count/cap correctness (`input`, `post-cap`, and visible counts)
-- smooth scrolling and responsive sorting/filtering
-- no obvious UI stalls during ordinary refresh or stream updates
-- stable object opening, diff, navigation, and actions
-- multi-cluster-safe object identity behavior
+Use focused backend snapshot/catalog tests and frontend table tests for the
+changed path. For visual table work, verify behavior with enough rows to trigger
+virtualization.
