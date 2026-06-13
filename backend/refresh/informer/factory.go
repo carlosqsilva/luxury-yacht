@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apiextensionsclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	apiextinformers "k8s.io/apiextensions-apiserver/pkg/client/informers/externalversions"
 	"k8s.io/client-go/informers"
@@ -34,8 +36,9 @@ type Factory struct {
 	synced   bool
 	syncedMu sync.RWMutex
 
-	syncedFns   []cache.InformerSynced
-	syncedFnsMu sync.Mutex
+	syncStates   []*informerSyncState
+	shutdown     bool
+	syncStatesMu sync.Mutex
 
 	pendingClusterInformers []clusterInformerRegistration
 
@@ -44,6 +47,17 @@ type Factory struct {
 	permissionMu      sync.RWMutex
 
 	runtimePermissions *permissions.Checker
+}
+
+// informerSyncState tracks one informer's progress toward its initial sync.
+// terminal flips when the watch fails with an error that can never succeed,
+// so the informer stops blocking the sync gates. key is the canonical
+// resource identity (permissions.ResourceKey format) used for per-resource
+// readiness checks.
+type informerSyncState struct {
+	key       string
+	hasSynced cache.InformerSynced
+	terminal  atomic.Bool
 }
 
 const podNodeIndexName = "pods:node"
@@ -116,20 +130,20 @@ func New(client kubernetes.Interface, apiextClient apiextensionsclientset.Interf
 	if err := podInformer.AddIndexers(cache.Indexers{podNodeIndexName: podNodeIndexFunc}); err != nil {
 		klog.V(2).Infof("pods informer: failed to add node index: %v", err)
 	}
-	result.registerInformer(podInformer)
-	result.registerInformer(kubeFactory.Core().V1().ConfigMaps().Informer())
-	result.registerInformer(kubeFactory.Core().V1().Secrets().Informer())
-	result.registerInformer(kubeFactory.Core().V1().Services().Informer())
-	result.registerInformer(kubeFactory.Discovery().V1().EndpointSlices().Informer())
+	result.registerInformer("", "pods", podInformer)
+	result.registerInformer("", "configmaps", kubeFactory.Core().V1().ConfigMaps().Informer())
+	result.registerInformer("", "secrets", kubeFactory.Core().V1().Secrets().Informer())
+	result.registerInformer("", "services", kubeFactory.Core().V1().Services().Informer())
+	result.registerInformer("discovery.k8s.io", "endpointslices", kubeFactory.Discovery().V1().EndpointSlices().Informer())
 	result.registerClusterInformer("", "namespaces", func() cache.SharedIndexInformer {
 		return kubeFactory.Core().V1().Namespaces().Informer()
 	})
-	result.registerInformer(kubeFactory.Apps().V1().ReplicaSets().Informer())
-	result.registerInformer(kubeFactory.Apps().V1().Deployments().Informer())
-	result.registerInformer(kubeFactory.Apps().V1().StatefulSets().Informer())
-	result.registerInformer(kubeFactory.Apps().V1().DaemonSets().Informer())
-	result.registerInformer(kubeFactory.Batch().V1().Jobs().Informer())
-	result.registerInformer(kubeFactory.Batch().V1().CronJobs().Informer())
+	result.registerInformer("apps", "replicasets", kubeFactory.Apps().V1().ReplicaSets().Informer())
+	result.registerInformer("apps", "deployments", kubeFactory.Apps().V1().Deployments().Informer())
+	result.registerInformer("apps", "statefulsets", kubeFactory.Apps().V1().StatefulSets().Informer())
+	result.registerInformer("apps", "daemonsets", kubeFactory.Apps().V1().DaemonSets().Informer())
+	result.registerInformer("batch", "jobs", kubeFactory.Batch().V1().Jobs().Informer())
+	result.registerInformer("batch", "cronjobs", kubeFactory.Batch().V1().CronJobs().Informer())
 	result.registerClusterInformer("rbac.authorization.k8s.io", "clusterroles", func() cache.SharedIndexInformer {
 		return kubeFactory.Rbac().V1().ClusterRoles().Informer()
 	})
@@ -142,31 +156,31 @@ func New(client kubernetes.Interface, apiextClient apiextensionsclientset.Interf
 	result.registerClusterInformer("rbac.authorization.k8s.io", "rolebindings", func() cache.SharedIndexInformer {
 		return kubeFactory.Rbac().V1().RoleBindings().Informer()
 	})
-	result.registerInformer(kubeFactory.Core().V1().ServiceAccounts().Informer())
+	result.registerInformer("", "serviceaccounts", kubeFactory.Core().V1().ServiceAccounts().Informer())
 	result.registerClusterInformer("", "persistentvolumes", func() cache.SharedIndexInformer {
 		return kubeFactory.Core().V1().PersistentVolumes().Informer()
 	})
-	result.registerInformer(kubeFactory.Core().V1().PersistentVolumeClaims().Informer())
-	result.registerInformer(kubeFactory.Core().V1().ResourceQuotas().Informer())
-	result.registerInformer(kubeFactory.Core().V1().LimitRanges().Informer())
+	result.registerInformer("", "persistentvolumeclaims", kubeFactory.Core().V1().PersistentVolumeClaims().Informer())
+	result.registerInformer("", "resourcequotas", kubeFactory.Core().V1().ResourceQuotas().Informer())
+	result.registerInformer("", "limitranges", kubeFactory.Core().V1().LimitRanges().Informer())
 	result.registerClusterInformer("storage.k8s.io", "storageclasses", func() cache.SharedIndexInformer {
 		return kubeFactory.Storage().V1().StorageClasses().Informer()
 	})
 	result.registerClusterInformer("networking.k8s.io", "ingressclasses", func() cache.SharedIndexInformer {
 		return kubeFactory.Networking().V1().IngressClasses().Informer()
 	})
-	result.registerInformer(kubeFactory.Networking().V1().Ingresses().Informer())
-	result.registerInformer(kubeFactory.Networking().V1().NetworkPolicies().Informer())
-	result.registerInformer(kubeFactory.Autoscaling().V1().HorizontalPodAutoscalers().Informer())
+	result.registerInformer("networking.k8s.io", "ingresses", kubeFactory.Networking().V1().Ingresses().Informer())
+	result.registerInformer("networking.k8s.io", "networkpolicies", kubeFactory.Networking().V1().NetworkPolicies().Informer())
+	result.registerInformer("autoscaling", "horizontalpodautoscalers", kubeFactory.Autoscaling().V1().HorizontalPodAutoscalers().Informer())
 	// Keep PDBs in sync for the namespace quotas refresh domain.
-	result.registerInformer(kubeFactory.Policy().V1().PodDisruptionBudgets().Informer())
+	result.registerInformer("policy", "poddisruptionbudgets", kubeFactory.Policy().V1().PodDisruptionBudgets().Informer())
 	result.registerClusterInformer("admissionregistration.k8s.io", "validatingwebhookconfigurations", func() cache.SharedIndexInformer {
 		return kubeFactory.Admissionregistration().V1().ValidatingWebhookConfigurations().Informer()
 	})
 	result.registerClusterInformer("admissionregistration.k8s.io", "mutatingwebhookconfigurations", func() cache.SharedIndexInformer {
 		return kubeFactory.Admissionregistration().V1().MutatingWebhookConfigurations().Informer()
 	})
-	result.registerInformer(kubeFactory.Core().V1().Events().Informer())
+	result.registerInformer("", "events", kubeFactory.Core().V1().Events().Informer())
 
 	if apiextClient != nil {
 		result.apiextFactory = apiextinformers.NewSharedInformerFactory(apiextClient, resync)
@@ -180,6 +194,8 @@ func New(client kubernetes.Interface, apiextClient apiextensionsclientset.Interf
 	return result
 }
 
+const gatewayGroup = "gateway.networking.k8s.io"
+
 // WithGatewayFactory registers Gateway API informers that are available on the cluster.
 // It must be called before Start so the Gateway caches participate in initial sync.
 func (f *Factory) WithGatewayFactory(factory gatewayinformers.SharedInformerFactory, presence common.GatewayAPIPresence) *Factory {
@@ -189,28 +205,28 @@ func (f *Factory) WithGatewayFactory(factory gatewayinformers.SharedInformerFact
 	f.gatewayFactory = factory
 	gateway := factory.Gateway().V1()
 	if presence.Has("GatewayClass") {
-		f.registerInformer(gateway.GatewayClasses().Informer())
+		f.registerInformer(gatewayGroup, "gatewayclasses", gateway.GatewayClasses().Informer())
 	}
 	if presence.Has("Gateway") {
-		f.registerInformer(gateway.Gateways().Informer())
+		f.registerInformer(gatewayGroup, "gateways", gateway.Gateways().Informer())
 	}
 	if presence.Has("HTTPRoute") {
-		f.registerInformer(gateway.HTTPRoutes().Informer())
+		f.registerInformer(gatewayGroup, "httproutes", gateway.HTTPRoutes().Informer())
 	}
 	if presence.Has("GRPCRoute") {
-		f.registerInformer(gateway.GRPCRoutes().Informer())
+		f.registerInformer(gatewayGroup, "grpcroutes", gateway.GRPCRoutes().Informer())
 	}
 	if presence.Has("TLSRoute") {
-		f.registerInformer(gateway.TLSRoutes().Informer())
+		f.registerInformer(gatewayGroup, "tlsroutes", gateway.TLSRoutes().Informer())
 	}
 	if presence.Has("ListenerSet") {
-		f.registerInformer(gateway.ListenerSets().Informer())
+		f.registerInformer(gatewayGroup, "listenersets", gateway.ListenerSets().Informer())
 	}
 	if presence.Has("ReferenceGrant") {
-		f.registerInformer(gateway.ReferenceGrants().Informer())
+		f.registerInformer(gatewayGroup, "referencegrants", gateway.ReferenceGrants().Informer())
 	}
 	if presence.Has("BackendTLSPolicy") {
-		f.registerInformer(gateway.BackendTLSPolicies().Informer())
+		f.registerInformer(gatewayGroup, "backendtlspolicies", gateway.BackendTLSPolicies().Informer())
 	}
 	return f
 }
@@ -227,7 +243,7 @@ func (f *Factory) Start(ctx context.Context) error {
 			go f.gatewayFactory.Start(ctx.Done())
 		}
 
-		synced := cache.WaitForCacheSync(ctx.Done(), f.syncedFns...)
+		synced := f.waitForCachesToSettle(ctx)
 		f.syncedMu.Lock()
 		f.synced = synced
 		f.syncedMu.Unlock()
@@ -236,6 +252,50 @@ func (f *Factory) Start(ctx context.Context) error {
 		}
 	})
 	return startErr
+}
+
+// waitForCachesToSettle blocks until every registered informer has either
+// synced or terminally failed, returning false only when ctx ends first.
+// Waiting on a watch that can never complete would otherwise keep the
+// factory unsynced forever and block cluster readiness (issue #225).
+func (f *Factory) waitForCachesToSettle(ctx context.Context) bool {
+	ticker := time.NewTicker(config.RefreshInformerSyncPollInterval)
+	defer ticker.Stop()
+	for {
+		if f.cachesSettled() {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-ticker.C:
+		}
+	}
+}
+
+func (f *Factory) cachesSettled() bool {
+	f.syncStatesMu.Lock()
+	states := make([]*informerSyncState, len(f.syncStates))
+	copy(states, f.syncStates)
+	f.syncStatesMu.Unlock()
+	for _, state := range states {
+		if state.terminal.Load() {
+			continue
+		}
+		if !state.hasSynced() {
+			return false
+		}
+	}
+	return true
+}
+
+// isTerminalWatchError reports whether a reflector failure can never succeed:
+// the server does not serve the resource (for example a Gateway API kind
+// watched at a version the cluster does not have) or the identity is not
+// allowed to watch it. Transient failures — network errors, throttling,
+// expired auth — must keep blocking the sync gate, so anything else is false.
+func isTerminalWatchError(err error) bool {
+	return apierrors.IsNotFound(err) || apierrors.IsForbidden(err)
 }
 
 // SharedInformerFactory exposes the underlying factory once started.
@@ -263,22 +323,62 @@ func (f *Factory) HasSynced(ctx context.Context) bool {
 	return f.synced
 }
 
+// ResourcesSettled reports whether every informer backing the supplied
+// canonical resource keys (permissions.ResourceKey format, e.g. "core/pods")
+// has either synced or terminally failed. A key with no registered informer
+// is settled — the informer was skipped (insufficient permissions, API not
+// present) so there is nothing to wait for. A shut-down factory reports
+// false, mirroring HasSynced.
+func (f *Factory) ResourcesSettled(keys []string) bool {
+	if f == nil {
+		return false
+	}
+	f.syncStatesMu.Lock()
+	shutdown := f.shutdown
+	states := make([]*informerSyncState, len(f.syncStates))
+	copy(states, f.syncStates)
+	f.syncStatesMu.Unlock()
+	if shutdown {
+		return false
+	}
+	if len(keys) == 0 {
+		return true
+	}
+	wanted := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		wanted[key] = struct{}{}
+	}
+	for _, state := range states {
+		if _, ok := wanted[state.key]; !ok {
+			continue
+		}
+		if state.terminal.Load() {
+			continue
+		}
+		if !state.hasSynced() {
+			return false
+		}
+	}
+	return true
+}
+
 // Shutdown clears factory references to allow garbage collection.
 // The informers themselves stop via context cancellation, but clearing
 // references ensures memory is reclaimed during transport rebuilds.
 func (f *Factory) Shutdown() error {
 	// Ensure any in-progress Start has completed before clearing fields.
-	// The context should already be cancelled by the caller, so
-	// WaitForCacheSync inside Start will return quickly.
+	// The context should already be cancelled by the caller, so the settle
+	// loop inside Start will return quickly.
 	f.once.Do(func() {})
 
 	f.syncedMu.Lock()
 	f.synced = false
 	f.syncedMu.Unlock()
 
-	f.syncedFnsMu.Lock()
-	f.syncedFns = nil
-	f.syncedFnsMu.Unlock()
+	f.syncStatesMu.Lock()
+	f.syncStates = nil
+	f.shutdown = true
+	f.syncStatesMu.Unlock()
 
 	f.permissionMu.Lock()
 	f.permissionAllowed = nil
@@ -293,13 +393,25 @@ func (f *Factory) Shutdown() error {
 	return nil
 }
 
-func (f *Factory) registerInformer(inf cache.SharedIndexInformer) {
+func (f *Factory) registerInformer(group, resource string, inf cache.SharedIndexInformer) {
 	if inf == nil {
 		return
 	}
-	f.syncedFnsMu.Lock()
-	f.syncedFns = append(f.syncedFns, inf.HasSynced)
-	f.syncedFnsMu.Unlock()
+	state := &informerSyncState{key: permissions.ResourceKey(group, resource), hasSynced: inf.HasSynced}
+	err := inf.SetWatchErrorHandlerWithContext(func(ctx context.Context, r *cache.Reflector, watchErr error) {
+		cache.DefaultWatchErrorHandler(ctx, r, watchErr)
+		if isTerminalWatchError(watchErr) && state.terminal.CompareAndSwap(false, true) {
+			klog.V(2).Infof("informer excluded from initial cache sync; its watch can never complete: %v", watchErr)
+		}
+	})
+	if err != nil {
+		// Handlers can only be set before the informer starts; a started
+		// informer keeps the default handler and must sync as before.
+		klog.V(2).Infof("informer watch error handler not installed: %v", err)
+	}
+	f.syncStatesMu.Lock()
+	f.syncStates = append(f.syncStates, state)
+	f.syncStatesMu.Unlock()
 }
 
 type informerFactoryFunc func() cache.SharedIndexInformer
@@ -364,7 +476,7 @@ func (f *Factory) processPendingClusterInformers() {
 			klog.V(2).Infof("Skipping informer for %s/%s due to insufficient permissions", pending.group, pending.resource)
 			continue
 		}
-		f.registerInformer(pending.factory())
+		f.registerInformer(pending.group, pending.resource, pending.factory())
 	}
 
 	f.pendingClusterInformers = nil
