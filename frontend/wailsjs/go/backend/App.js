@@ -50,10 +50,6 @@ export function CloseShellSession(arg1) {
   return window['go']['backend']['App']['CloseShellSession'](arg1);
 }
 
-export function CreateVersionedEndpoint(arg1, arg2, arg3, arg4) {
-  return window['go']['backend']['App']['CreateVersionedEndpoint'](arg1, arg2, arg3, arg4);
-}
-
 export function CtxOrBackground() {
   return window['go']['backend']['App']['CtxOrBackground']();
 }

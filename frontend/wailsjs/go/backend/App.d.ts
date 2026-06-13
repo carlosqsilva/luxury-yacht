@@ -32,8 +32,6 @@ export function CloseCluster(arg1:string):Promise<void>;
 
 export function CloseShellSession(arg1:string):Promise<void>;
 
-export function CreateVersionedEndpoint(arg1:string,arg2:string,arg3:any,arg4:string):Promise<backend.VersionedResponse>;
-
 export function CtxOrBackground():Promise<context.Context>;
 
 export function DeleteFavorite(arg1:string):Promise<void>;

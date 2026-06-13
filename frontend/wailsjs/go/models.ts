@@ -773,23 +773,6 @@ export namespace backend {
 	        this.catalogP95Ms = source["catalogP95Ms"];
 	    }
 	}
-	
-	export class VersionedResponse {
-	    data: any;
-	    version: string;
-	    notModified: boolean;
-	
-	    static createFrom(source: any = {}) {
-	        return new VersionedResponse(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.data = source["data"];
-	        this.version = source["version"];
-	        this.notModified = source["notModified"];
-	    }
-	}
 
 }
 

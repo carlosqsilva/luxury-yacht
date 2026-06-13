@@ -44,7 +44,7 @@ func Classify(message string) string {
 	}
 
 	lower := strings.ToLower(msg)
-	if strings.Contains(lower, "[refresh:metrics] poll failed") || errorPattern.MatchString(lower) {
+	if errorPattern.MatchString(lower) {
 		return LevelError
 	}
 	if warnPattern.MatchString(lower) {
