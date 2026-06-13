@@ -11,6 +11,7 @@ import (
 	coreinformers "k8s.io/client-go/informers/core/v1"
 	"k8s.io/client-go/tools/cache"
 
+	"github.com/luxury-yacht/app/backend/internal/applog"
 	"github.com/luxury-yacht/app/backend/internal/config"
 	"github.com/luxury-yacht/app/backend/internal/logsources"
 	"github.com/luxury-yacht/app/backend/internal/timeutil"
@@ -97,7 +98,7 @@ func NewManager(
 	clusterID string,
 ) *Manager {
 	if logger == nil {
-		logger = noopLogger{}
+		logger = applog.Noop
 	}
 	m := &Manager{
 		informer:    informer,
@@ -208,10 +209,10 @@ func (m *Manager) Resume(scope string, since uint64) ([]StreamEvent, bool) {
 }
 
 func (m *Manager) logWarn(message string) {
-	if m == nil || m.logger == nil {
+	if m == nil {
 		return
 	}
-	m.logger.Warn(message, logsources.EventStream, m.clusterID)
+	applog.Warn(m.logger, message, logsources.EventStream, m.clusterID)
 }
 
 // NextSequence reserves a sequence for non-event payloads (for example, initial snapshots).

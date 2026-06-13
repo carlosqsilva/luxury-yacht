@@ -4,24 +4,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/luxury-yacht/app/backend/internal/applog"
 	"github.com/luxury-yacht/app/backend/refresh"
 	"github.com/luxury-yacht/app/backend/resourcemodel"
 )
 
-// Logger represents the minimal interface required for streaming telemetry.
-type Logger interface {
-	Debug(message string, source ...string)
-	Info(message string, source ...string)
-	Warn(message string, source ...string)
-	Error(message string, source ...string)
-}
-
-type noopLogger struct{}
-
-func (noopLogger) Debug(string, ...string) {}
-func (noopLogger) Info(string, ...string)  {}
-func (noopLogger) Warn(string, ...string)  {}
-func (noopLogger) Error(string, ...string) {}
+// Logger represents the minimal interface required for streaming telemetry,
+// aliased to the canonical internal/applog.Logger.
+type Logger = applog.Logger
 
 // Entry represents a single Kubernetes event emitted to streaming subscribers.
 type Entry struct {

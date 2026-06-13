@@ -43,6 +43,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
+	"github.com/luxury-yacht/app/backend/internal/applog"
 	"github.com/luxury-yacht/app/backend/internal/config"
 	"github.com/luxury-yacht/app/backend/internal/logsources"
 	"github.com/luxury-yacht/app/backend/refresh/containerlogsstream"
@@ -247,7 +248,7 @@ func NewManager(
 	dynamicClient dynamic.Interface,
 ) *Manager {
 	if logger == nil {
-		logger = noopLogger{}
+		logger = applog.Noop
 	}
 	mgr := &Manager{
 		clusterMeta:     meta,
@@ -304,17 +305,17 @@ func (m *Manager) Stop() {
 }
 
 func (m *Manager) logWarn(message string) {
-	if m == nil || m.logger == nil {
+	if m == nil {
 		return
 	}
-	m.logger.Warn(message, logsources.ResourceStream, m.clusterMeta.ClusterID, m.clusterMeta.ClusterName)
+	applog.Warn(m.logger, message, logsources.ResourceStream, m.clusterMeta.ClusterID, m.clusterMeta.ClusterName)
 }
 
 func (m *Manager) logInfo(message string) {
-	if m == nil || m.logger == nil {
+	if m == nil {
 		return
 	}
-	m.logger.Info(message, logsources.ResourceStream, m.clusterMeta.ClusterID, m.clusterMeta.ClusterName)
+	applog.Info(m.logger, message, logsources.ResourceStream, m.clusterMeta.ClusterID, m.clusterMeta.ClusterName)
 }
 
 // SetCustomResourceCacheInvalidator registers a cache eviction callback for custom resources.
