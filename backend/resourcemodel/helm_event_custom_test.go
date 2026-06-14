@@ -62,7 +62,7 @@ func TestBuildHelmReleaseResourceModelSyntheticIdentityAndFacts(t *testing.T) {
 		Chart:   &chart.Chart{Metadata: &chart.Metadata{Name: "orders-chart", Version: "1.2.2"}},
 		Info:    &release.Info{Status: release.StatusSuperseded, LastDeployed: first},
 	}}
-	resources := []ResourceLink{BuildHelmManifestResourceLinkWithResolver(context.Background(), helmTestResolver, "cluster-a", "apps/v1", "Deployment", "apps", "orders")}
+	resources := []ResourceLink{BuildHelmManifestResourceLinkWithNamespaceSourceAndResolver(context.Background(), helmTestResolver, "cluster-a", "apps/v1", "Deployment", "apps", "orders", true)}
 
 	model := BuildHelmReleaseResourceModel(
 		"cluster-a",
@@ -120,7 +120,7 @@ func TestBuildHelmReleaseResourceModelSummaryMaterializationOmitsDetailPayloads(
 		},
 	}
 	history := []*release.Release{{Version: 2, Info: &release.Info{Status: release.StatusSuperseded}}}
-	resources := []ResourceLink{BuildHelmManifestResourceLink("cluster-a", "apps/v1", "Deployment", "apps", "orders")}
+	resources := []ResourceLink{BuildHelmManifestResourceLinkWithNamespaceSourceAndResolver(context.Background(), nil, "cluster-a", "apps/v1", "Deployment", "apps", "orders", true)}
 
 	model := BuildHelmReleaseResourceModel(
 		"cluster-a",
@@ -141,7 +141,7 @@ func TestBuildHelmReleaseResourceModelSummaryMaterializationOmitsDetailPayloads(
 }
 
 func TestBuildHelmManifestResourceLinkDoesNotGuessMissingAPIVersion(t *testing.T) {
-	link := BuildHelmManifestResourceLink("cluster-a", "", "Deployment", "apps", "orders")
+	link := BuildHelmManifestResourceLinkWithNamespaceSourceAndResolver(context.Background(), nil, "cluster-a", "", "Deployment", "apps", "orders", true)
 
 	require.Nil(t, link.Ref)
 	require.NotNil(t, link.Display)
@@ -184,7 +184,9 @@ func TestBuildHelmManifestResourceLinkRespectsBuiltinScope(t *testing.T) {
 }
 
 func TestBuildHelmManifestResourceLinkKeepsUnknownDefaultNamespaceDisplayOnly(t *testing.T) {
-	link := BuildHelmManifestResourceLinkWithNamespaceSource(
+	link := BuildHelmManifestResourceLinkWithNamespaceSourceAndResolver(
+		context.Background(),
+		nil,
 		"cluster-a",
 		"databases.example.com/v1alpha1",
 		"Database",
@@ -201,7 +203,9 @@ func TestBuildHelmManifestResourceLinkKeepsUnknownDefaultNamespaceDisplayOnly(t 
 }
 
 func TestBuildHelmManifestResourceLinkKeepsExplicitUnknownNamespaceOpenable(t *testing.T) {
-	link := BuildHelmManifestResourceLinkWithNamespaceSource(
+	link := BuildHelmManifestResourceLinkWithNamespaceSourceAndResolver(
+		context.Background(),
+		nil,
 		"cluster-a",
 		"databases.example.com/v1alpha1",
 		"Database",

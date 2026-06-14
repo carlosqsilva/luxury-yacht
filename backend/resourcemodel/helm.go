@@ -137,31 +137,6 @@ func BuildHelmReleaseStatusPresentation(facts HelmReleaseFacts) ResourceStatusPr
 	}
 }
 
-func BuildHelmManifestResourceLinks(clusterID string, resources []HelmManifestResourceFacts) []ResourceLink {
-	return BuildHelmManifestResourceLinksWithResolver(context.Background(), nil, clusterID, resources)
-}
-
-func BuildHelmManifestResourceLinksWithResolver(ctx context.Context, resolver common.ResourceResolver, clusterID string, resources []HelmManifestResourceFacts) []ResourceLink {
-	if len(resources) == 0 {
-		return nil
-	}
-	links := make([]ResourceLink, 0, len(resources))
-	for _, resource := range resources {
-		link := BuildHelmManifestResourceLinkWithResolver(ctx, resolver, clusterID, resource.APIVersion, resource.Kind, resource.Namespace, resource.Name)
-		if link.Ref != nil || link.Display != nil {
-			links = append(links, link)
-		}
-	}
-	return links
-}
-
-type HelmManifestResourceFacts struct {
-	APIVersion string
-	Kind       string
-	Namespace  string
-	Name       string
-}
-
 type HelmManifestResourceIdentity struct {
 	Group     string
 	Version   string
@@ -173,18 +148,6 @@ type HelmManifestResourceIdentity struct {
 	Openable  bool
 }
 
-func BuildHelmManifestResourceLink(clusterID, apiVersion, kind, namespace, name string) ResourceLink {
-	return BuildHelmManifestResourceLinkWithResolver(context.Background(), nil, clusterID, apiVersion, kind, namespace, name)
-}
-
-func BuildHelmManifestResourceLinkWithResolver(ctx context.Context, resolver common.ResourceResolver, clusterID, apiVersion, kind, namespace, name string) ResourceLink {
-	return BuildHelmManifestResourceLinkWithNamespaceSourceAndResolver(ctx, resolver, clusterID, apiVersion, kind, namespace, name, strings.TrimSpace(namespace) != "")
-}
-
-func BuildHelmManifestResourceLinkWithNamespaceSource(clusterID, apiVersion, kind, namespace, name string, namespaceExplicit bool) ResourceLink {
-	return BuildHelmManifestResourceLinkWithNamespaceSourceAndResolver(context.Background(), nil, clusterID, apiVersion, kind, namespace, name, namespaceExplicit)
-}
-
 func BuildHelmManifestResourceLinkWithNamespaceSourceAndResolver(ctx context.Context, resolver common.ResourceResolver, clusterID, apiVersion, kind, namespace, name string, namespaceExplicit bool) ResourceLink {
 	identity := ResolveHelmManifestResourceIdentityWithResolver(ctx, resolver, apiVersion, kind, namespace, name, namespaceExplicit)
 	if !identity.Openable {
@@ -194,10 +157,6 @@ func BuildHelmManifestResourceLinkWithNamespaceSourceAndResolver(ctx context.Con
 		return clusterResourceLink(clusterID, identity.Group, identity.Version, identity.Kind, identity.Resource, identity.Name, "")
 	}
 	return namespacedResourceLink(clusterID, identity.Group, identity.Version, identity.Kind, identity.Resource, identity.Namespace, identity.Name, "")
-}
-
-func ResolveHelmManifestResourceIdentity(apiVersion, kind, namespace, name string, namespaceExplicit bool) HelmManifestResourceIdentity {
-	return ResolveHelmManifestResourceIdentityWithResolver(context.Background(), nil, apiVersion, kind, namespace, name, namespaceExplicit)
 }
 
 func ResolveHelmManifestResourceIdentityWithResolver(ctx context.Context, resolver common.ResourceResolver, apiVersion, kind, namespace, name string, namespaceExplicit bool) HelmManifestResourceIdentity {
