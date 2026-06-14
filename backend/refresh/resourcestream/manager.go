@@ -227,6 +227,13 @@ type Manager struct {
 
 	customInformerMu sync.Mutex
 	customInformers  map[string]*customResourceInformer
+	// stopped is set once Stop() runs. It is terminal: a torn-down manager is
+	// discarded and replaced by a fresh one. It gates ensureCustomInformer so a
+	// CRD event arriving after teardown (the shared CRD informer can still fire,
+	// including its resync, until the factory is shut down) cannot resurrect a
+	// custom informer whose stopCh nothing would ever close. Guarded by
+	// customInformerMu.
+	stopped bool
 	// customInvalidator evicts cached YAML/details when custom resources change.
 	customInvalidatorMu sync.RWMutex
 	customInvalidator   func(kind, namespace, name string)
@@ -298,6 +305,7 @@ func (m *Manager) Stop() {
 	}
 	m.customInformerMu.Lock()
 	defer m.customInformerMu.Unlock()
+	m.stopped = true
 	for key, informer := range m.customInformers {
 		informer.stop()
 		delete(m.customInformers, key)
@@ -482,6 +490,12 @@ func (m *Manager) ensureCustomInformer(crd *apiextensionsv1.CustomResourceDefini
 	kind := crd.Spec.Names.Kind
 
 	m.customInformerMu.Lock()
+	// Once stopped, never resurrect an informer; the check-and-insert below must
+	// stay atomic with Stop()'s drain, so both gate on stopped under this lock.
+	if m.stopped {
+		m.customInformerMu.Unlock()
+		return
+	}
 	existing := m.customInformers[crd.Name]
 	if existing != nil && existing.gvr == gvr && existing.kind == kind && existing.domain == customDomain {
 		m.customInformerMu.Unlock()

@@ -583,6 +583,29 @@ func TestManagerSkipsCustomInformerForFirstClassGatewayCRD(t *testing.T) {
 	}
 }
 
+func TestManagerDoesNotRecreateCustomInformerAfterStop(t *testing.T) {
+	manager := &Manager{
+		clusterMeta:     snapshot.ClusterMeta{ClusterID: "c1", ClusterName: "cluster"},
+		logger:          applog.Noop,
+		dynamicClient:   dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()),
+		customInformers: make(map[string]*customResourceInformer),
+		subscribers:     make(map[string]map[string]map[uint64]*subscription),
+	}
+
+	// Teardown drains the custom informers and marks the manager stopped.
+	manager.Stop()
+
+	// A CRD event arriving after Stop (e.g. an informer resync firing during the
+	// teardown window, before the shared CRD informer is shut down) must not
+	// resurrect a custom informer. Re-creating one here would spawn a goroutine
+	// and a dynamic watch on a stopCh that nothing will ever close — a permanent
+	// goroutine + watch leak.
+	crd := customResourceDefinition("widgets.example.com", "example.com", "widgets", "Widget", apiextensionsv1.NamespaceScoped, "1")
+	manager.handleCustomResourceDefinition(crd, MessageTypeAdded)
+
+	require.Empty(t, manager.customInformers, "stopped manager must not re-create custom informers")
+}
+
 func TestManagerCRDSignatureChangeCompletesCustomDomain(t *testing.T) {
 	manager := &Manager{
 		clusterMeta: snapshot.ClusterMeta{ClusterID: "c1", ClusterName: "cluster"},
