@@ -19,7 +19,10 @@ import { DockablePanel, useDockablePanelContext } from '@ui/dockable';
 import { getDefaultObjectPanelPosition } from '@core/settings/appPreferences';
 import { errorHandler } from '@utils/errorHandler';
 import { CurrentObjectPanelContext } from '@modules/object-panel/hooks/useObjectPanel';
-import { useObjectPanelState } from '@modules/object-panel/contexts/ObjectPanelStateContext';
+import {
+  useObjectPanelState,
+  useObjectPanelActiveTab,
+} from '@modules/object-panel/contexts/ObjectPanelStateContext';
 import { queryNamespacePermissions } from '@/core/capabilities';
 import {
   clearRequestedObjectPanelTab,
@@ -116,7 +119,7 @@ interface ObjectPanelProps {
 // ============================================================================
 function ObjectPanel({ panelId, objectRef }: ObjectPanelProps) {
   const objectData = objectRef;
-  const { closePanel, getObjectPanelActiveTab, setObjectPanelActiveTab } = useObjectPanelState();
+  const { closePanel, setObjectPanelActiveTab } = useObjectPanelState();
   const { tabGroups, getPreferredOpenGroupKey } = useDockablePanelContext();
   const openTargetGroupKey = getPreferredOpenGroupKey(getDefaultObjectPanelPosition());
   const openTargetPosition: DockPosition =
@@ -148,7 +151,7 @@ function ObjectPanel({ panelId, objectRef }: ObjectPanelProps) {
   // state is reset on remount, which is the right behavior for modal
   // flags but the wrong behavior for "which tab was the user looking at."
   const [state, dispatch] = useReducer(panelReducer, INITIAL_PANEL_STATE);
-  const activeTab: ViewType = getObjectPanelActiveTab(panelId) ?? 'details';
+  const activeTab: ViewType = useObjectPanelActiveTab(panelId) ?? 'details';
 
   const {
     objectKind,

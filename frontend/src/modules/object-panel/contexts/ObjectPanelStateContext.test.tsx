@@ -12,6 +12,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import {
   ObjectPanelStateProvider,
   useObjectPanelState,
+  useObjectPanelActiveTab,
 } from '@modules/object-panel/contexts/ObjectPanelStateContext';
 
 const clearPanelStateMock = vi.fn();
@@ -48,6 +49,15 @@ const Harness: React.FC = () => {
   return null;
 };
 
+// Captures the reactive active tab for a single panel so assertions can read
+// it imperatively. Reads through the public useObjectPanelActiveTab hook.
+const activeTabProbeRef: { current: string | undefined } = { current: undefined };
+
+const TabProbe: React.FC<{ panelId: string }> = ({ panelId }) => {
+  activeTabProbeRef.current = useObjectPanelActiveTab(panelId);
+  return null;
+};
+
 describe('ObjectPanelStateContext', () => {
   let container: HTMLDivElement;
   let root: ReactDOM.Root;
@@ -64,6 +74,7 @@ describe('ObjectPanelStateContext', () => {
     mockClusterName = 'Cluster A';
     mockClusterIds = ['cluster-a', 'cluster-b'];
     stateRef.current = null;
+    activeTabProbeRef.current = undefined;
     resetScopedDomainMock.mockClear();
     clearPanelStateMock.mockClear();
     handoffLayoutBeforeCloseMock.mockClear();
@@ -76,11 +87,12 @@ describe('ObjectPanelStateContext', () => {
     container.remove();
   });
 
-  const renderProvider = async () => {
+  const renderProvider = async (probePanelId?: string) => {
     await act(async () => {
       root.render(
         <ObjectPanelStateProvider>
           <Harness />
+          {probePanelId ? <TabProbe panelId={probePanelId} /> : null}
         </ObjectPanelStateProvider>
       );
     });
@@ -134,6 +146,49 @@ describe('ObjectPanelStateContext', () => {
     expect(clusterAEntries[0]?.name).toBe('api');
   });
 
+  it('does not re-render state-only consumers when a panel tab changes', async () => {
+    // A consumer that uses the object-panel state context but never reads the
+    // active tab must not re-render when some panel switches its sub-tab.
+    let stateConsumerRenders = 0;
+    const StateConsumer: React.FC = () => {
+      useObjectPanelState();
+      stateConsumerRenders += 1;
+      return null;
+    };
+
+    // Render the tree exactly once so children element identity is preserved;
+    // that way a child only re-renders when the context value it reads changes.
+    await act(async () => {
+      root.render(
+        <ObjectPanelStateProvider>
+          <Harness />
+          <StateConsumer />
+        </ObjectPanelStateProvider>
+      );
+    });
+
+    let panelId = '';
+    act(() => {
+      panelId =
+        stateRef.current?.onRowClick({
+          kind: 'Pod',
+          name: 'api',
+          namespace: 'default',
+          clusterId: 'cluster-a',
+        }) ?? '';
+    });
+
+    // Opening a panel legitimately changes openPanels, so re-renders here are
+    // expected. Baseline the count after the open.
+    const rendersAfterOpen = stateConsumerRenders;
+
+    act(() => {
+      stateRef.current?.setObjectPanelActiveTab(panelId, 'logs');
+    });
+
+    expect(stateConsumerRenders).toBe(rendersAfterOpen);
+  });
+
   it('persists active sub-tab per cluster slice and isolates across switches', async () => {
     await renderProvider();
 
@@ -151,13 +206,16 @@ describe('ObjectPanelStateContext', () => {
     act(() => {
       stateRef.current?.setObjectPanelActiveTab(panelId, 'logs');
     });
-    expect(stateRef.current?.getObjectPanelActiveTab(panelId)).toBe('logs');
+    // Mount the probe for this panel now that we know its id; it reads the
+    // active tab reactively through the public hook.
+    await renderProvider(panelId);
+    expect(activeTabProbeRef.current).toBe('logs');
 
     // Switch to cluster-b. The cluster-a tab persistence must not leak.
     mockClusterId = 'cluster-b';
     mockClusterName = 'Cluster B';
-    await renderProvider();
-    expect(stateRef.current?.getObjectPanelActiveTab(panelId)).toBeUndefined();
+    await renderProvider(panelId);
+    expect(activeTabProbeRef.current).toBeUndefined();
 
     // Open the same identity in cluster-b and store a different sub-tab.
     act(() => {
@@ -171,13 +229,13 @@ describe('ObjectPanelStateContext', () => {
     act(() => {
       stateRef.current?.setObjectPanelActiveTab(panelId, 'yaml');
     });
-    expect(stateRef.current?.getObjectPanelActiveTab(panelId)).toBe('yaml');
+    expect(activeTabProbeRef.current).toBe('yaml');
 
     // Switching back to cluster-a should restore that slice's tab, untouched.
     mockClusterId = 'cluster-a';
     mockClusterName = 'Cluster A';
-    await renderProvider();
-    expect(stateRef.current?.getObjectPanelActiveTab(panelId)).toBe('logs');
+    await renderProvider(panelId);
+    expect(activeTabProbeRef.current).toBe('logs');
   });
 
   it('clears the active sub-tab entry when a panel is closed', async () => {
@@ -196,13 +254,14 @@ describe('ObjectPanelStateContext', () => {
     act(() => {
       stateRef.current?.setObjectPanelActiveTab(panelId, 'events');
     });
-    expect(stateRef.current?.getObjectPanelActiveTab(panelId)).toBe('events');
+    await renderProvider(panelId);
+    expect(activeTabProbeRef.current).toBe('events');
 
     act(() => {
       stateRef.current?.closePanel(panelId);
     });
     expect(stateRef.current?.openPanels.has(panelId)).toBe(false);
-    expect(stateRef.current?.getObjectPanelActiveTab(panelId)).toBeUndefined();
+    expect(activeTabProbeRef.current).toBeUndefined();
     expect(handoffLayoutBeforeCloseMock).toHaveBeenCalledWith(panelId);
     expect(clearPanelStateMock).toHaveBeenCalledWith(panelId);
   });

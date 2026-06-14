@@ -3,7 +3,7 @@
  */
 
 import ReactDOM from 'react-dom/client';
-import { createContext, useCallback, useState } from 'react';
+import { createContext, useSyncExternalStore } from 'react';
 import { act } from 'react';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildClusterScope } from '@/core/refresh/clusterScope';
@@ -80,39 +80,50 @@ const mockApp = {
 
 const defaultClusterId = 'alpha:ctx';
 
-// Mock useObjectPanelState to provide closePanel + per-panel active tab helpers.
-// The active tab map lives in React state so calling setObjectPanelActiveTab
-// re-renders the consuming ObjectPanel — matching the real provider's
-// useState-backed updates that trigger a render when the tab changes.
+// Shared, reactive active-tab store mirroring the real two-context split:
+// setObjectPanelActiveTab (on the state context) writes, useObjectPanelActiveTab
+// (a separate subscription) reads, and a write re-renders the consuming
+// ObjectPanel — matching the real provider's tab-change behavior.
+const tabStore = vi.hoisted(() => {
+  let tabs = new Map<string, string>();
+  const listeners = new Set<() => void>();
+  return {
+    subscribe: (listener: () => void) => {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    getSnapshot: () => tabs,
+    set: (panelId: string, tab: string) => {
+      if (tabs.get(panelId) === tab) {
+        return;
+      }
+      const next = new Map(tabs);
+      next.set(panelId, tab);
+      tabs = next;
+      listeners.forEach((listener) => listener());
+    },
+    reset: () => {
+      tabs = new Map();
+      listeners.forEach((listener) => listener());
+    },
+  };
+});
+
 vi.mock('@modules/object-panel/contexts/ObjectPanelStateContext', () => ({
-  useObjectPanelState: () => {
-    const [activeTabs, setActiveTabs] = useState<Map<string, string>>(() => new Map());
-    const getObjectPanelActiveTab = useCallback(
-      (panelId: string) => activeTabs.get(panelId),
-      [activeTabs]
-    );
-    const setObjectPanelActiveTab = useCallback((panelId: string, tab: string) => {
-      setActiveTabs((prev) => {
-        if (prev.get(panelId) === tab) {
-          return prev;
-        }
-        const next = new Map(prev);
-        next.set(panelId, tab);
-        return next;
-      });
-    }, []);
-    return {
-      closePanel: mockClosePanel,
-      openPanels: new Map(),
-      showObjectPanel: true,
-      onRowClick: vi.fn(),
-      onCloseObjectPanel: vi.fn(),
-      setShowObjectPanel: vi.fn(),
-      hydrateClusterMeta: vi.fn((d: any) => d),
-      getObjectPanelActiveTab,
-      setObjectPanelActiveTab,
-    };
-  },
+  useObjectPanelState: () => ({
+    closePanel: mockClosePanel,
+    openPanels: new Map(),
+    showObjectPanel: true,
+    onRowClick: vi.fn(),
+    onCloseObjectPanel: vi.fn(),
+    setShowObjectPanel: vi.fn(),
+    hydrateClusterMeta: vi.fn((d: any) => d),
+    setObjectPanelActiveTab: tabStore.set,
+  }),
+  useObjectPanelActiveTab: (panelId: string) =>
+    useSyncExternalStore(tabStore.subscribe, tabStore.getSnapshot).get(panelId),
 }));
 
 // Mock dockable to provide both DockablePanel and useDockablePanelContext
@@ -293,6 +304,7 @@ describe('ObjectPanel tab availability', () => {
 
     mockUseRefreshWatcher.mockClear();
     mockClosePanel.mockReset();
+    tabStore.reset();
 
     ctx = {} as RenderContext;
     ctx.container = document.createElement('div');
