@@ -4,7 +4,7 @@
  * The single per-kind Descriptor: a kind's identity plus every typed behaviour the
  * app needs from it (stream summary, object-map node + edges, detail binding) and
  * the facet flags that tell each subsystem how to treat it (catalog source,
- * detail-cache eviction). One registry (refresh/kindregistry) aggregates these;
+ * detail-cache eviction). One registry (kind/kindregistry) aggregates these;
  * every subsystem loops that registry and filters by facet, so no subsystem ever
  * names a kind itself.
  *

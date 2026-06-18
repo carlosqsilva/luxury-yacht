@@ -32,9 +32,11 @@ Read:
 
 Start here for graph/data correctness:
 
-- `backend/refresh/snapshot/object_map.go`
+- `backend/refresh/snapshot/object_map.go` plus the per-kind collectors/edges in
+  `backend/resources/<kind>/objectmap*.go`, dispatched via
+  `backend/refresh/snapshot/object_map_collector_registry.go` and
+  `object_map_edge_registry.go`
 - `backend/refresh/system/registrations.go`
-- `backend/refresh/snapshot/permission_checks.go`
 - `backend/resourcemodel` for shared facts, status, identity, and links
 - `backend/refresh/snapshot/object_map_test.go` or adjacent object-map tests
 

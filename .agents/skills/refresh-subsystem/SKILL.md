@@ -77,11 +77,11 @@ Three registration kinds:
 **Two-layer permission checking:**
 
 1. **Preflight** — bulk SSAR calls to warm the cache at startup
-2. **Per-domain runtime check** — `defaultPermissionChecks()` in `backend/refresh/snapshot/permission_checks.go`
+2. **Per-domain runtime check** — list/watch checks declared on each domain's registration config and evaluated by the `permissionGate` in `backend/refresh/system/permission_gate.go`
 
 To register a new domain, add it to `domainRegistrations()` in `registrations.go`. Consider:
 
-- What permissions does it need? Add checks to `defaultPermissionChecks()` in `permission_checks.go`
+- What permissions does it need? Declare them on the domain's `listDomainConfig`/`listWatchDomainConfig` so the `permissionGate` checks them
 - Does it need informers? Register them in `backend/refresh/informer/factory.go`
 - What order? Place it after any domains it depends on
 
@@ -120,8 +120,8 @@ Resource WebSocket domains also require:
 | `frontend/src/core/refresh/streaming/resourceStreamRows.ts`               | Pure row replacement, deletion, stable reuse, and metrics-preserving merge logic |
 | `frontend/src/core/refresh/streaming/resourceStreamConnection.ts`         | WebSocket connection lifecycle, queued sends, reconnect, pause/resume           |
 | `frontend/src/core/refresh/streaming/resourceStreamSubscriptions.ts`      | Single-cluster scope resolution, subscription state, unsubscribe debounce, resume tokens |
-| `backend/refresh/resourcestream/domains.go`                               | Supported streamed refresh domain list                                          |
-| `backend/refresh/resourcestream/stream_registration_*.go`                 | Informer registration and lister/indexer setup                                  |
+| `backend/kind/kindregistry/registry.go`                                   | Add the `Stream` facet so `StreamDescriptors()` projects the streamed kind      |
+| `backend/refresh/resourcestream/stream_registration_*.go`                 | Bespoke informer registration and lister/indexer setup for kinds that need it   |
 | `backend/refresh/resourcestream/update_helpers_test.go` and manager tests | Stream envelope metadata and row-shape parity                                   |
 
 Resource stream descriptors describe row behavior only. Domain descriptors must
@@ -234,24 +234,26 @@ Key behaviors:
 
 Backend resource stream registration is split by behavior:
 
-| File                             | Purpose                                                                  |
-| -------------------------------- | ------------------------------------------------------------------------ |
-| `stream_registration_helpers.go` | Permission checks and Add/Update/Delete event mapping                    |
-| `stream_registration_direct.go`  | Direct object-to-stream handlers without manager listers/indexers        |
-| `stream_registration_network.go` | Network and Gateway API handlers, including service/route/policy listers |
-| `stream_registration_related.go` | Pod/node/workload registrations that seed related-object lookup state    |
-| `domains.go`                     | Supported resource stream domain list used for parity guardrails         |
+| File                              | Purpose                                                                  |
+| --------------------------------- | ------------------------------------------------------------------------ |
+| `stream_descriptor_dispatch.go`   | Generic `registerDescriptorStreams` that wires every plain object→row kind from `kindregistry.StreamDescriptors()` |
+| `stream_registration_helpers.go`  | Permission checks and Add/Update/Delete event mapping                    |
+| `stream_registration_direct.go`   | Bespoke handlers that still need a custom informer/related-object invalidation (configmap, secret, HPA) |
+| `stream_registration_network.go`  | Network handlers that need a manager-level lister (service/endpointslice correlation) |
+| `stream_registration_related.go`  | Pod/node/workload registrations that seed related-object lookup state    |
 
-Keep permission checks before lazy informer creation. Do not replace these files with a large descriptor table if the behavior-specific split is clearer.
+Plain object→row kinds are now projected from the descriptor registry; only kinds that need a custom handler or lister keep a hand-written registration. Keep permission checks before lazy informer creation. Do not replace the remaining bespoke files with a large descriptor table if the behavior-specific split is clearer.
 Ordinary object updates may use shared `newObjectUpdate`/`newObjectRowUpdate`
 helpers, but keep pods, endpoint slices, workloads, custom resources,
 node-derived updates, and Helm resync signals explicit.
 Do not assign `Update.Row` in stream handlers; add or reuse projection helpers
 so snapshot and stream rows are built by the same canonical constructor path.
-Resource-stream permission resources live in
-`backend/refresh/resourcestream/permission_contract.go` and are checked against
-snapshot runtime permissions by
-`TestDomainPermissionContractsJoinExpectedRequirementSources`.
+Resource-stream permission resources are declared as the primary/related
+resources on each stream projection descriptor in
+`backend/refresh/resourcestream/projection_descriptors.go` and are checked
+against snapshot runtime permissions by
+`TestDomainPermissionContractsJoinExpectedRequirementSources` in
+`backend/refresh/system/registrations_test.go`.
 
 ## Known Fragility Points
 

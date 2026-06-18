@@ -95,9 +95,15 @@ display-only unless catalog lookup can safely resolve them.
 
 ## Ownership
 
-- Semantic model, facts, status, and links: `backend/resourcemodel`
+- Per-kind model, facts, and status: `backend/resources/<kind>/{model,facts}.go`,
+  built once per kind from the shared primitives and registered with one entry in
+  `backend/kind/kindregistry` (see
+  [resource-kind-registry.md](resource-kind-registry.md))
+- Shared status/facts/link primitives and the relationship index:
+  `backend/resourcemodel`
 - Refresh/table/object-map projections: `backend/refresh/snapshot`
-- Rich detail DTO projections: `backend/resources`, `backend/resources/types`
+- Rich detail DTO projections: `backend/resources/<kind>/{details,dto}.go`, with
+  shared cross-kind DTO field types in `backend/resources/types`
 - Catalog identity/existence: `backend/objectcatalog`
 - Frontend status rendering: `frontend/src/shared/utils/backendStatusPresentation.ts`
 - Frontend link navigation: `frontend/src/shared/utils/resourceLinkIdentity.ts`

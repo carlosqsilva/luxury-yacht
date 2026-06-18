@@ -42,7 +42,8 @@ cluster scope and a node-specific drain modal scope. Enabling one must not
 disable or reset the other.
 
 The backend snapshot path should bypass normal cache and singleflight behavior
-for this state so modal refreshes after `StartDrainNode` see the new operation.
+for this state so modal refreshes after the `startDrain` object action see the
+new operation.
 
 ## Change Checklist
 

@@ -109,7 +109,7 @@ Example:
    Response cache map read/written from multiple goroutines without mutex.
    Impact: Data race under concurrent requests; potential crash.
 
-2. **[STABILITY] Nil safety — backend/resources/workloads/deployments.go:83**
+2. **[STABILITY] Nil safety — backend/resources/deployment/model.go:83**
    Deployment.Spec.Replicas dereferenced without nil check (it's a *int32).
    Impact: Panic when API returns a deployment with nil replicas field.
    Cross-boundary: Frontend would see a WebSocket disconnect on panic.
