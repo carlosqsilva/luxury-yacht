@@ -149,16 +149,19 @@ describe('IngressOverview', () => {
       rulesValue?.querySelectorAll<HTMLButtonElement>('button.overview-scheme-link') ?? []
     ).map((b) => b.title);
 
+    // Each title is the exact resolved URL ("Open <url> in browser"), so assert
+    // the whole title. A substring match would also accept an arbitrary host
+    // before or after the expected URL.
     // TLS-covered host offers both https and http.
-    expect(linkTitles.some((t) => t.includes('https://secure.example.com'))).toBe(true);
-    expect(linkTitles.some((t) => t.includes('http://secure.example.com'))).toBe(true);
+    expect(linkTitles).toContain('Open https://secure.example.com in browser');
+    expect(linkTitles).toContain('Open http://secure.example.com in browser');
     // Uncovered host offers http only — never https (no cert).
-    expect(linkTitles.some((t) => t.includes('http://plain.example.com'))).toBe(true);
-    expect(linkTitles.some((t) => t.includes('https://plain.example.com'))).toBe(false);
+    expect(linkTitles).toContain('Open http://plain.example.com in browser');
+    expect(linkTitles).not.toContain('Open https://plain.example.com in browser');
 
-    // Wildcard hosts aren't browsable, so they get no scheme links but still
-    // show their name.
-    expect(linkTitles.some((t) => t.includes('wild'))).toBe(false);
+    // Wildcard hosts aren't browsable, so they get no scheme links — only the
+    // three links above — but the name still shows.
+    expect(linkTitles).toHaveLength(3);
     expect(rulesValue?.textContent).toContain('*.wild.example.com');
   });
 

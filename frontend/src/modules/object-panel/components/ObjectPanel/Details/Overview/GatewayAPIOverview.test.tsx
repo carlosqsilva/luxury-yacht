@@ -162,13 +162,16 @@ describe('GatewayAPIOverview', () => {
       listenersValue?.querySelectorAll<HTMLButtonElement>('button.overview-scheme-link') ?? []
     ).map((b) => b.title);
 
-    // HTTPS listener → https, default 443 omitted.
-    expect(linkTitles.some((t) => t.includes('https://secure.example.com'))).toBe(true);
-    expect(linkTitles.some((t) => t.includes(':443'))).toBe(false);
+    // Each title is the exact resolved URL ("Open <url> in browser"), so assert
+    // the whole title. A substring match would also accept an arbitrary host
+    // before or after the expected URL.
+    // HTTPS listener → https, default 443 omitted (the exact title proves it).
+    expect(linkTitles).toContain('Open https://secure.example.com in browser');
     // HTTP listener → http with its non-default port.
-    expect(linkTitles.some((t) => t.includes('http://plain.example.com:8080'))).toBe(true);
-    // TLS listener has an ambiguous scheme, so its hostname stays plain text.
-    expect(linkTitles.some((t) => t.includes('tls.example.com'))).toBe(false);
+    expect(linkTitles).toContain('Open http://plain.example.com:8080 in browser');
+    // TLS listener has an ambiguous scheme, so it produces no link — only the
+    // two links above — though its hostname stays as plain text.
+    expect(linkTitles).toHaveLength(2);
     expect(listenersValue?.textContent).toContain('tls.example.com');
   });
 
