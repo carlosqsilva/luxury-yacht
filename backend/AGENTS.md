@@ -9,15 +9,27 @@ Applies to Go code under `backend/`.
     list/table payloads. Add table/list data there, not in `backend/resources`.
     Follow `docs/architecture/refresh-system.md`.
   - `backend/resources` is the detail/action service layer for rich object
-    details, logs/debug helpers, and imperative operations. Keep services
-    request-shaped and pass cluster-scoped dependencies in from callers.
+    details, logs/debug helpers, and imperative operations. Each built-in kind
+    lives in its own package `backend/resources/<kind>/` (`identity.go`,
+    `descriptor.go`, `model.go`, `facts.go`, `dto.go`, `details.go`, `actions.go`,
+    and object-map files) and is registered with one entry in
+    `backend/kind/kindregistry`; subsystems loop that registry and filter by facet
+    instead of naming kinds. Keep services request-shaped and pass cluster-scoped
+    dependencies in from callers. Follow
+    `docs/architecture/resource-kind-registry.md`.
   - `backend/objectcatalog` is the discovery/catalog source of truth; use it for
     resource identity and browse/catalog listings. Follow
     `docs/architecture/catalog.md`.
-  - `backend/resourcemodel` owns shared Kubernetes semantics. Before adding or
+  - `backend/resourcemodel` owns the *shared* Kubernetes semantics primitives
+    (status presentation, facts, `ResourceLink` constructors, and the
+    relationship index) that the per-kind models build on; per-kind
+    status/facts/DTOs live in `backend/resources/<kind>/`. Before adding or
     changing resource status, relationship links, object references, capability
     integration, or fact slots, follow `docs/architecture/shared-resource-model.md`.
-  - Resource handlers follow `resource_<Kind>.go` with adjacent `_test.go` suites (for example `kubeconfigs_test.go`).
+  - The `App.Get<Kind>` detail bindings and the object-panel detail-fetcher
+    dispatch map are generated from each kind's `appbinding.Spec`; run
+    `go generate ./backend` after adding or changing a kind, and never hand-edit
+    `resource_details_generated.go` / `object_detail_fetchers_generated.go`.
 - Manual refreshes and streaming domains belong to the backend refresh registry + ManualQueue; avoid bespoke refresh/streaming code.
 
 ## Object Catalog

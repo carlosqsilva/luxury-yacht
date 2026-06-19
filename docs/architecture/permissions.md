@@ -48,7 +48,7 @@ shape, failure behavior, and diagnostics differ.
 - Frontend permission specs and feature labels live under
   `frontend/src/core/capabilities`.
 - Visible object action wiring lives in
-  `frontend/src/shared/actions/objectActionPermissionMatrix.ts`.
+  `frontend/src/shared/actions/objectActionPolicy.ts`.
 - Exact GVK/GVR resolution should go through the object catalog resolver.
 - Permission cache and diagnostics must remain cluster-scoped.
 
@@ -60,7 +60,7 @@ shape, failure behavior, and diagnostics differ.
 - UI permission endpoint: `backend/app_permissions.go`
 - Capability query types and rule matching: `backend/capabilities`
 - Frontend permission store/specs/hooks: `frontend/src/core/capabilities`
-- Action matrix: `frontend/src/shared/actions/objectActionPermissionMatrix.ts`
+- Action matrix: `frontend/src/shared/actions/objectActionPolicy.ts`
 
 ## Change Checklist
 

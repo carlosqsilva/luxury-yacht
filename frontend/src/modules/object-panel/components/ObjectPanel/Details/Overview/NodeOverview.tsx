@@ -3,7 +3,7 @@
  */
 
 import React from 'react';
-import { types } from '@wailsjs/go/models';
+import { nodes } from '@wailsjs/go/models';
 import { OverviewItem } from '@modules/object-panel/components/ObjectPanel/Details/Overview/shared/OverviewItem';
 import { ResourceHeader } from '@shared/components/kubernetes/ResourceHeader';
 import { ResourceStatus } from '@shared/components/kubernetes/ResourceStatus';
@@ -31,7 +31,6 @@ const nodeConditionVariant = (type: string, status: string): StatusChipVariant =
 
 interface NodeOverviewProps {
   name: string;
-  age: string;
   status?: string;
   statusState?: string;
   statusPresentation?: string;
@@ -48,8 +47,8 @@ interface NodeOverviewProps {
   podsCapacity?: string;
   podsCount?: number;
   storageCapacity?: string;
-  taints?: types.NodeTaint[];
-  conditions?: types.NodeCondition[];
+  taints?: nodes.NodeTaint[];
+  conditions?: nodes.NodeCondition[];
   labels?: Record<string, string>;
   annotations?: Record<string, string>;
   /** Set when an active drain job exists for this node. */
@@ -60,7 +59,6 @@ interface NodeOverviewProps {
 
 export const NodeOverview: React.FC<NodeOverviewProps> = ({
   name,
-  age,
   status,
   statusState,
   statusPresentation,
@@ -87,7 +85,7 @@ export const NodeOverview: React.FC<NodeOverviewProps> = ({
   return (
     <>
       {/* Use composed component for header */}
-      <ResourceHeader kind="Node" name={name} age={age} />
+      <ResourceHeader kind="Node" name={name} />
 
       {/* Use composed component for status */}
       {status && (

@@ -82,7 +82,6 @@ describe('GatewayAPIOverview', () => {
         kind: 'Gateway',
         name: 'edge',
         namespace: 'prod',
-        age: '3h',
         gatewayClassRef: {
           clusterId: 'cluster-a',
           group: 'gateway.networking.k8s.io',
@@ -124,13 +123,64 @@ describe('GatewayAPIOverview', () => {
     ).toBe('shared');
   });
 
+  it('renders HTTP(S) listener hostnames as browser links and leaves others as text', async () => {
+    await renderComponent({
+      gatewayDetails: {
+        kind: 'Gateway',
+        name: 'edge',
+        namespace: 'prod',
+        listeners: [
+          {
+            name: 'https',
+            protocol: 'HTTPS',
+            port: 443,
+            hostname: 'secure.example.com',
+            attachedRoutes: 0,
+          },
+          {
+            name: 'http',
+            protocol: 'HTTP',
+            port: 8080,
+            hostname: 'plain.example.com',
+            attachedRoutes: 0,
+          },
+          {
+            name: 'passthrough',
+            protocol: 'TLS',
+            port: 8443,
+            hostname: 'tls.example.com',
+            attachedRoutes: 0,
+          },
+        ],
+        labels: {},
+        annotations: {},
+      } as any,
+    });
+
+    const listenersValue = getValueForLabel(container, 'Listeners');
+    const linkTitles = Array.from(
+      listenersValue?.querySelectorAll<HTMLButtonElement>('button.overview-scheme-link') ?? []
+    ).map((b) => b.title);
+
+    // Each title is the exact resolved URL ("Open <url> in browser"), so assert
+    // the whole title. A substring match would also accept an arbitrary host
+    // before or after the expected URL.
+    // HTTPS listener → https, default 443 omitted (the exact title proves it).
+    expect(linkTitles).toContain('Open https://secure.example.com in browser');
+    // HTTP listener → http with its non-default port.
+    expect(linkTitles).toContain('Open http://plain.example.com:8080 in browser');
+    // TLS listener has an ambiguous scheme, so it produces no link — only the
+    // two links above — though its hostname stays as plain text.
+    expect(linkTitles).toHaveLength(2);
+    expect(listenersValue?.textContent).toContain('tls.example.com');
+  });
+
   it('renders route parents, backends, rules, and hostnames', async () => {
     await renderComponent({
       routeDetails: {
         kind: 'HTTPRoute',
         name: 'web',
         namespace: 'prod',
-        age: '1h',
         hostnames: ['example.com'],
         parentRefs: [
           {
@@ -194,7 +244,6 @@ describe('GatewayAPIOverview', () => {
         kind: 'ReferenceGrant',
         name: 'allow-widgets',
         namespace: 'prod',
-        age: '4h',
         from: [{ group: 'gateway.networking.k8s.io', kind: 'HTTPRoute', namespace: 'team-a' }],
         to: [
           {

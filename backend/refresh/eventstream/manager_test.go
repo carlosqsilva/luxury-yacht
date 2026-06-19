@@ -10,6 +10,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/cache"
 
+	"github.com/luxury-yacht/app/backend/internal/applog"
 	"github.com/luxury-yacht/app/backend/refresh/telemetry"
 )
 
@@ -18,7 +19,7 @@ func TestManagerBroadcastsToSubscribers(t *testing.T) {
 	factory := informers.NewSharedInformerFactory(client, 0)
 	informer := factory.Core().V1().Events()
 
-	manager := NewManager(informer, noopLogger{}, telemetry.NewRecorder(), "cluster-a")
+	manager := NewManager(informer, applog.Noop, telemetry.NewRecorder(), "cluster-a")
 
 	stopCh := make(chan struct{})
 	defer close(stopCh)
@@ -89,7 +90,7 @@ func TestManagerOnlyBroadcastsClusterScopedEventsToClusterSubscribers(t *testing
 	factory := informers.NewSharedInformerFactory(client, 0)
 	informer := factory.Core().V1().Events()
 
-	manager := NewManager(informer, noopLogger{}, telemetry.NewRecorder(), "cluster-a")
+	manager := NewManager(informer, applog.Noop, telemetry.NewRecorder(), "cluster-a")
 
 	stopCh := make(chan struct{})
 	defer close(stopCh)
@@ -160,7 +161,7 @@ func TestManagerOnlyBroadcastsClusterScopedEventsToClusterSubscribers(t *testing
 
 func TestManagerEvictsResumeBufferWhenLastSubscriberCancels(t *testing.T) {
 	manager := &Manager{
-		logger:      noopLogger{},
+		logger:      applog.Noop,
 		subscribers: make(map[string]map[uint64]*subscription),
 		buffers:     make(map[string]*eventBuffer),
 		sequences:   make(map[string]uint64),
@@ -206,14 +207,14 @@ func TestManagerEvictsResumeBufferWhenLastSubscriberCancels(t *testing.T) {
 
 func TestManagerSubscribeWithResumeReplaysAndSubscribes(t *testing.T) {
 	manager := &Manager{
-		logger:      noopLogger{},
+		logger:      applog.Noop,
 		subscribers: make(map[string]map[uint64]*subscription),
 		buffers:     make(map[string]*eventBuffer),
 		sequences:   make(map[string]uint64),
 	}
 
 	buffer := newEventBuffer(2)
-	buffer.add(bufferedEvent{
+	buffer.Add(bufferedEvent{
 		sequence: 1,
 		entry: Entry{
 			Kind:    "Event",
@@ -221,7 +222,7 @@ func TestManagerSubscribeWithResumeReplaysAndSubscribes(t *testing.T) {
 			Message: "first message",
 		},
 	})
-	buffer.add(bufferedEvent{
+	buffer.Add(bufferedEvent{
 		sequence: 2,
 		entry: Entry{
 			Kind:    "Event",
@@ -266,15 +267,15 @@ func TestManagerSubscribeWithResumeReplaysAndSubscribes(t *testing.T) {
 
 func TestEventBufferDetectsExpiredResumeAfterOverflow(t *testing.T) {
 	buffer := newEventBuffer(2)
-	buffer.add(bufferedEvent{sequence: 1, entry: Entry{Name: "one"}})
-	buffer.add(bufferedEvent{sequence: 2, entry: Entry{Name: "two"}})
-	buffer.add(bufferedEvent{sequence: 3, entry: Entry{Name: "three"}})
+	buffer.Add(bufferedEvent{sequence: 1, entry: Entry{Name: "one"}})
+	buffer.Add(bufferedEvent{sequence: 2, entry: Entry{Name: "two"}})
+	buffer.Add(bufferedEvent{sequence: 3, entry: Entry{Name: "three"}})
 
-	if _, ok := buffer.since(1); ok {
+	if _, ok := buffer.Since(1); ok {
 		t.Fatal("expected resume before oldest buffered event to fail")
 	}
 
-	events, ok := buffer.since(2)
+	events, ok := buffer.Since(2)
 	if !ok {
 		t.Fatal("expected resume from retained sequence to succeed")
 	}

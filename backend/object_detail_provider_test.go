@@ -23,6 +23,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/luxury-yacht/app/backend/refresh/snapshot"
+	"github.com/luxury-yacht/app/backend/resourcecontract"
 )
 
 func TestObjectDetailProviderFetchesKnownKinds(t *testing.T) {
@@ -164,6 +165,38 @@ func TestObjectDetailFetchersHaveExactGVKPolicy(t *testing.T) {
 	}
 }
 
+func TestObjectDetailFetcherGVKsContractDerived(t *testing.T) {
+	// Every typed fetcher GVK must come from the built-in resource contract, so
+	// the GVK metadata cannot drift from resourcecontract.BuiltinResources.
+	for kind, gvk := range objectDetailFetcherGVKs {
+		if _, ok := resourcecontract.FindBuiltin(gvk.Group, gvk.Version, gvk.Kind); !ok {
+			t.Fatalf("object detail fetcher %q resolves to GVK %s which is not in the built-in contract", kind, gvk)
+		}
+	}
+
+	// resolveDetailFetcherGVK resolves a fetcher kind to its contract GVK.
+	cases := map[string]schema.GroupVersionKind{
+		"pod":                     {Group: "", Version: "v1", Kind: "Pod"},
+		"deployment":              {Group: "apps", Version: "v1", Kind: "Deployment"},
+		"storageclass":            {Group: "storage.k8s.io", Version: "v1", Kind: "StorageClass"},
+		"horizontalpodautoscaler": {Group: "autoscaling", Version: "v2", Kind: "HorizontalPodAutoscaler"},
+	}
+	for kind, want := range cases {
+		if got := resolveDetailFetcherGVK(kind); got != want {
+			t.Fatalf("resolveDetailFetcherGVK(%q) = %s, want %s", kind, got, want)
+		}
+	}
+
+	// The HPA version pin must serve autoscaling/v2 only; v1 falls back to the
+	// generic detail path.
+	if _, ok := lookupObjectDetailFetcher(schema.GroupVersionKind{Group: "autoscaling", Version: "v2", Kind: "HorizontalPodAutoscaler"}); !ok {
+		t.Fatal("expected autoscaling/v2 HorizontalPodAutoscaler to be served by a typed fetcher")
+	}
+	if _, ok := lookupObjectDetailFetcher(schema.GroupVersionKind{Group: "autoscaling", Version: "v1", Kind: "HorizontalPodAutoscaler"}); ok {
+		t.Fatal("expected autoscaling/v1 HorizontalPodAutoscaler to fall back to the generic detail path")
+	}
+}
+
 func TestObjectDetailProviderCacheKeyIncludesGVK(t *testing.T) {
 	coreConfigMap := schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}
 	otherConfigMap := schema.GroupVersionKind{Group: "example.com", Version: "v1", Kind: "ConfigMap"}
@@ -228,6 +261,33 @@ func TestObjectDetailProviderUsesClusterContext(t *testing.T) {
 
 	if _, _, err := provider.FetchObjectDetails(ctx, schema.GroupVersionKind{Version: "v1", Kind: "Node"}, "", "node-a"); err == nil {
 		t.Fatal("expected error when fetching node from another cluster")
+	}
+}
+
+// TestObjectDetailProviderFetchObjectHeaderMetadata proves Age works for the
+// kind that previously had none: a custom resource with no typed detail panel.
+// The provider reads the live object via the generic GVK path and returns its
+// creation timestamp in RFC3339 UTC (the same format the object catalog stores,
+// so the Details Age matches the Browse table byte-for-byte).
+func TestObjectDetailProviderFetchObjectHeaderMetadata(t *testing.T) {
+	const clusterID = "headermeta-provider"
+	app := newCollidingDBInstanceCluster(t, clusterID)
+
+	provider, ok := app.objectDetailProvider().(snapshot.ObjectHeaderMetadataProvider)
+	if !ok {
+		t.Fatal("object detail provider does not implement ObjectHeaderMetadataProvider")
+	}
+	ctx := snapshot.WithClusterMeta(context.Background(), snapshot.ClusterMeta{
+		ClusterID:   clusterID,
+		ClusterName: "ctx",
+	})
+
+	meta, err := provider.FetchObjectHeaderMetadata(ctx, ackDBInstanceGVK, "default", "my-db")
+	if err != nil {
+		t.Fatalf("FetchObjectHeaderMetadata returned error: %v", err)
+	}
+	if meta.CreationTimestamp != "2023-01-02T03:04:05Z" {
+		t.Fatalf("expected RFC3339 creation timestamp, got %q", meta.CreationTimestamp)
 	}
 }
 

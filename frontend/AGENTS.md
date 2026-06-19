@@ -73,8 +73,8 @@ Applies to React/TypeScript code under `frontend/`.
 
 - Never use inline CSS; keep CSS in files.
 - All form labels for inputs must have the exact same spacing unless told otherwise.
-- Favor reusing shared styles in `frontend/src/styles`; otherwise keep CSS close to the source (for example `ContextMenu.tsx` → `ContextMenu.css`).
-- Always tokenize sizes/colors with shared tokens in `frontend/src/styles`; colors must support Light and Dark themes.
+- Favor reusing shared styles in `frontend/styles` (the `@styles` alias); otherwise keep CSS close to the source (for example `ContextMenu.tsx` → `ContextMenu.css`).
+- Always tokenize sizes/colors with shared tokens in `frontend/styles/tokens`; colors must support Light and Dark themes.
 
 ## Project Structure & Module Organization
 

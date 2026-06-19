@@ -10,7 +10,7 @@
  * - Helps ensure consistency between backend data structures and frontend usage.
  * - Supports telemetry and monitoring of refresh operations by defining standard payloads.
  */
-import { types } from '@wailsjs/go/models';
+import { nodes } from '@wailsjs/go/models';
 import type { SnapshotStats } from './client';
 
 // PermissionDeniedStatus mirrors Status-like RBAC error payloads from the refresh API.
@@ -216,7 +216,7 @@ export interface ClusterNodeSnapshotEntry extends ClusterMeta {
   unschedulable: boolean;
   labels?: Record<string, string>;
   annotations?: Record<string, string>;
-  taints?: types.NodeTaint[];
+  taints?: nodes.NodeTaint[];
   podMetrics?: NodePodMetric[];
 }
 
@@ -711,6 +711,13 @@ export interface PodSnapshotPayload extends ClusterMeta, ResourceQueryEnvelopeFi
 
 export interface ObjectDetailsSnapshotPayload extends ClusterMeta {
   details: any;
+  // Object creation time (RFC3339 UTC) for every kind; the frontend formats it
+  // into Age with the same formatter the Browse table uses. Omitted by the
+  // backend when unavailable. Mirrors snapshot.ObjectDetailsSnapshotPayload.
+  creationTimestamp?: string;
+  // Relative "last modified" time (same format as Age); omitted by the backend
+  // when it can't be determined. Mirrors snapshot.ObjectDetailsSnapshotPayload.
+  lastModified?: string;
   resourceModel?: ResourceModel;
 }
 

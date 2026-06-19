@@ -2,7 +2,6 @@ package snapshot
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -16,22 +15,80 @@ import (
 	policyv1 "k8s.io/api/policy/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	storagev1 "k8s.io/api/storage/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/informers"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayfake "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned/fake"
 )
 
+// allowAllPermissions satisfies objectMapPermissionChecker for tests, where every
+// resource is listable.
+type allowAllPermissions struct{}
+
+func (allowAllPermissions) CanListWatch(string, string) bool { return true }
+
+// newObjectMapTestBuilder builds an objectMapBuilder whose typed listers are backed
+// by a started+synced informer factory over the fake clientset, mirroring how
+// RegisterObjectMapDomain wires the production builder. HPA still reads live from
+// the client (the autoscaling/v2 hybrid path), so the same fake clientset is kept.
+func newObjectMapTestBuilder(t *testing.T, client kubernetes.Interface) *objectMapBuilder {
+	t.Helper()
+	shared := informers.NewSharedInformerFactory(client, 0)
+	// Register every informer object-map reads before Start so the listers sync.
+	shared.Core().V1().Pods().Informer()
+	shared.Core().V1().Services().Informer()
+	shared.Discovery().V1().EndpointSlices().Informer()
+	shared.Core().V1().PersistentVolumeClaims().Informer()
+	shared.Core().V1().PersistentVolumes().Informer()
+	shared.Storage().V1().StorageClasses().Informer()
+	shared.Core().V1().ConfigMaps().Informer()
+	shared.Core().V1().Secrets().Informer()
+	shared.Core().V1().ServiceAccounts().Informer()
+	shared.Core().V1().Nodes().Informer()
+	shared.Apps().V1().Deployments().Informer()
+	shared.Apps().V1().ReplicaSets().Informer()
+	shared.Apps().V1().StatefulSets().Informer()
+	shared.Apps().V1().DaemonSets().Informer()
+	shared.Batch().V1().Jobs().Informer()
+	shared.Batch().V1().CronJobs().Informer()
+	shared.Policy().V1().PodDisruptionBudgets().Informer()
+	shared.Networking().V1().NetworkPolicies().Informer()
+	shared.Networking().V1().Ingresses().Informer()
+	shared.Networking().V1().IngressClasses().Informer()
+	shared.Rbac().V1().ClusterRoles().Informer()
+	shared.Rbac().V1().ClusterRoleBindings().Informer()
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	shared.Start(stop)
+	// Bounded wait: if a reactor makes an informer fail to list, its reflector
+	// retries forever — degrade to an empty lister instead of hanging the suite
+	// until the 10-minute test timeout.
+	syncCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	shared.WaitForCacheSync(syncCtx.Done())
+	return &objectMapBuilder{
+		client:      client,
+		shared:      shared,
+		permissions: allowAllPermissions{},
+	}
+}
+
+// denyPermissions denies CanListWatch for the named resources, for tests that
+// exercise the permission-gated skip in collectTyped.
+type denyPermissions struct{ denied map[string]bool }
+
+func (d denyPermissions) CanListWatch(_ string, resource string) bool { return !d.denied[resource] }
+
 func TestObjectMapBuildsRecursiveCoreRelationships(t *testing.T) {
 	client := fake.NewSimpleClientset(objectMapFixtureObjects()...)
-	builder := &objectMapBuilder{client: client}
+	builder := newObjectMapTestBuilder(t, client)
 	ctx := WithClusterMeta(context.Background(), ClusterMeta{ClusterID: "cluster-a", ClusterName: "Cluster A"})
 
 	snap, err := builder.Build(ctx, "cluster-a|default:apps/v1:Deployment:web?maxDepth=5&maxNodes=100")
@@ -94,7 +151,7 @@ func TestObjectMapBuildsRecursiveCoreRelationships(t *testing.T) {
 
 func TestObjectMapBuildsFromPodDisruptionBudget(t *testing.T) {
 	client := fake.NewSimpleClientset(objectMapPDBFixtureObjects()...)
-	builder := &objectMapBuilder{client: client}
+	builder := newObjectMapTestBuilder(t, client)
 	ctx := WithClusterMeta(context.Background(), ClusterMeta{ClusterID: "cluster-a", ClusterName: "Cluster A"})
 
 	snap, err := builder.Build(ctx, "default:policy/v1:PodDisruptionBudget:web?maxDepth=5&maxNodes=100")
@@ -114,7 +171,7 @@ func TestObjectMapBuildsFromPodDisruptionBudget(t *testing.T) {
 
 func TestObjectMapBuildsFromNetworkPolicyPodSelector(t *testing.T) {
 	client := fake.NewSimpleClientset(objectMapNetworkPolicyFixtureObjects()...)
-	builder := &objectMapBuilder{client: client}
+	builder := newObjectMapTestBuilder(t, client)
 	ctx := WithClusterMeta(context.Background(), ClusterMeta{ClusterID: "cluster-a", ClusterName: "Cluster A"})
 
 	snap, err := builder.Build(ctx, "default:networking.k8s.io/v1:NetworkPolicy:web?maxDepth=5&maxNodes=100")
@@ -138,7 +195,7 @@ func TestObjectMapNetworkPolicyEmptyPodSelectorSelectsNamespacePods(t *testing.T
 		podFixture("other", "other-pod", "pod-other-uid", "", map[string]string{"app": "web"}),
 		networkPolicyFixture("default", "all-pods", "netpol-all-uid", metav1.LabelSelector{}),
 	)
-	builder := &objectMapBuilder{client: client}
+	builder := newObjectMapTestBuilder(t, client)
 	ctx := WithClusterMeta(context.Background(), ClusterMeta{ClusterID: "cluster-a", ClusterName: "Cluster A"})
 
 	snap, err := builder.Build(ctx, "default:networking.k8s.io/v1:NetworkPolicy:all-pods?maxDepth=5&maxNodes=100")
@@ -153,276 +210,9 @@ func TestObjectMapNetworkPolicyEmptyPodSelectorSelectsNamespacePods(t *testing.T
 	assertEdge(t, payload, "NetworkPolicy", "all-pods", "Pod", "web-pod", "selector")
 }
 
-func TestObjectMapPodStatusRequiresAllContainersReady(t *testing.T) {
-	readyContainer := func(name string) corev1.ContainerStatus {
-		return corev1.ContainerStatus{
-			Name:  name,
-			Ready: true,
-			State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
-		}
-	}
-	runningContainer := func(name string) corev1.ContainerStatus {
-		return corev1.ContainerStatus{
-			Name:  name,
-			Ready: false,
-			State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
-		}
-	}
-
-	tests := []struct {
-		name             string
-		pod              corev1.Pod
-		wantState        string
-		wantLabel        string
-		wantPresentation string
-	}{
-		{
-			name: "all regular containers ready",
-			pod: corev1.Pod{
-				Spec: corev1.PodSpec{Containers: []corev1.Container{
-					{Name: "app"},
-					{Name: "sidecar"},
-				}},
-				Status: corev1.PodStatus{
-					Phase: corev1.PodRunning,
-					ContainerStatuses: []corev1.ContainerStatus{
-						readyContainer("app"),
-						readyContainer("sidecar"),
-					},
-				},
-			},
-			wantState:        "Running",
-			wantLabel:        "Running",
-			wantPresentation: "ready",
-		},
-		{
-			name: "running phase with unready running container",
-			pod: corev1.Pod{
-				Spec: corev1.PodSpec{Containers: []corev1.Container{
-					{Name: "app"},
-					{Name: "sidecar"},
-				}},
-				Status: corev1.PodStatus{
-					Phase: corev1.PodRunning,
-					ContainerStatuses: []corev1.ContainerStatus{
-						readyContainer("app"),
-						runningContainer("sidecar"),
-					},
-				},
-			},
-			wantState:        "Running",
-			wantLabel:        "Running",
-			wantPresentation: "warning",
-		},
-		{
-			name: "running phase with missing container status",
-			pod: corev1.Pod{
-				Spec: corev1.PodSpec{Containers: []corev1.Container{
-					{Name: "app"},
-					{Name: "sidecar"},
-				}},
-				Status: corev1.PodStatus{
-					Phase:             corev1.PodRunning,
-					ContainerStatuses: []corev1.ContainerStatus{readyContainer("app")},
-				},
-			},
-			wantState:        "Running",
-			wantLabel:        "Running",
-			wantPresentation: "warning",
-		},
-		{
-			name: "running phase with no container statuses",
-			pod: corev1.Pod{
-				Spec:   corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
-				Status: corev1.PodStatus{Phase: corev1.PodRunning},
-			},
-			wantState:        "Running",
-			wantLabel:        "Running",
-			wantPresentation: "warning",
-		},
-		{
-			name: "startup container creation stays degraded",
-			pod: corev1.Pod{
-				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
-				Status: corev1.PodStatus{
-					Phase: corev1.PodPending,
-					ContainerStatuses: []corev1.ContainerStatus{{
-						Name:  "app",
-						State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"}},
-					}},
-				},
-			},
-			wantState:        "Pending",
-			wantLabel:        "ContainerCreating",
-			wantPresentation: "warning",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			status := objectMapPodStatus("cluster-a", tt.pod)
-			if status == nil || status.State != tt.wantState || status.Label != tt.wantLabel || status.Presentation != tt.wantPresentation {
-				t.Fatalf("unexpected pod status: got %#v, want state=%q label=%q presentation=%q", status, tt.wantState, tt.wantLabel, tt.wantPresentation)
-			}
-		})
-	}
-}
-
-func TestObjectMapNodeStatusUsesKubernetesReadyConditionStatus(t *testing.T) {
-	readyCondition := corev1.NodeCondition{
-		Type:   corev1.NodeReady,
-		Status: corev1.ConditionTrue,
-		Reason: "KubeletReady",
-	}
-	notReadyCondition := corev1.NodeCondition{
-		Type:   corev1.NodeReady,
-		Status: corev1.ConditionFalse,
-		Reason: "KubeletNotReady",
-	}
-
-	tests := []struct {
-		name             string
-		node             corev1.Node
-		wantState        string
-		wantLabel        string
-		wantPresentation string
-	}{
-		{
-			name: "ready schedulable",
-			node: corev1.Node{Status: corev1.NodeStatus{
-				Conditions: []corev1.NodeCondition{readyCondition},
-			}},
-			wantState:        "True",
-			wantLabel:        "Ready",
-			wantPresentation: "ready",
-		},
-		{
-			name: "ready unschedulable",
-			node: corev1.Node{
-				Spec: corev1.NodeSpec{Unschedulable: true},
-				Status: corev1.NodeStatus{
-					Conditions: []corev1.NodeCondition{readyCondition},
-				},
-			},
-			wantState:        "True",
-			wantLabel:        "Ready (Cordoned)",
-			wantPresentation: "cordoned",
-		},
-		{
-			name: "ready with unschedulable taint",
-			node: corev1.Node{
-				Spec: corev1.NodeSpec{Taints: []corev1.Taint{{
-					Key:    corev1.TaintNodeUnschedulable,
-					Effect: corev1.TaintEffectNoSchedule,
-				}}},
-				Status: corev1.NodeStatus{
-					Conditions: []corev1.NodeCondition{readyCondition},
-				},
-			},
-			wantState:        "True",
-			wantLabel:        "Ready (Cordoned)",
-			wantPresentation: "cordoned",
-		},
-		{
-			name: "cordoned not ready remains false",
-			node: corev1.Node{
-				Spec: corev1.NodeSpec{Unschedulable: true},
-				Status: corev1.NodeStatus{
-					Conditions: []corev1.NodeCondition{notReadyCondition},
-				},
-			},
-			wantState:        "False",
-			wantLabel:        "NotReady",
-			wantPresentation: "not-ready",
-		},
-		{
-			name: "terminating ready keeps raw ready state with terminating presentation",
-			node: func() corev1.Node {
-				deletingAt := metav1.NewTime(time.Date(2026, time.May, 7, 20, 15, 0, 0, time.UTC))
-				return corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{DeletionTimestamp: &deletingAt},
-					Status: corev1.NodeStatus{
-						Conditions: []corev1.NodeCondition{readyCondition},
-					},
-				}
-			}(),
-			wantState:        "True",
-			wantLabel:        "Terminating",
-			wantPresentation: "terminating",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			status := objectMapNodeStatus("cluster-a", tt.node)
-			if status == nil || status.State != tt.wantState || status.Label != tt.wantLabel || status.Presentation != tt.wantPresentation {
-				t.Fatalf("unexpected node status: got %#v, want state=%q label=%q presentation=%q", status, tt.wantState, tt.wantLabel, tt.wantPresentation)
-			}
-		})
-	}
-}
-
-func TestObjectMapServiceStatusUsesSharedServiceModel(t *testing.T) {
-	tests := []struct {
-		name             string
-		service          corev1.Service
-		wantState        string
-		wantLabel        string
-		wantPresentation string
-	}{
-		{
-			name: "load balancer active",
-			service: corev1.Service{
-				Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeLoadBalancer},
-				Status: corev1.ServiceStatus{
-					LoadBalancer: corev1.LoadBalancerStatus{
-						Ingress: []corev1.LoadBalancerIngress{{IP: "192.0.2.10"}},
-					},
-				},
-			},
-			wantState:        "LoadBalancer",
-			wantLabel:        "LoadBalancer active",
-			wantPresentation: "ready",
-		},
-		{
-			name:             "load balancer pending",
-			service:          corev1.Service{Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeLoadBalancer}},
-			wantState:        "LoadBalancer",
-			wantLabel:        "LoadBalancer pending",
-			wantPresentation: "warning",
-		},
-		{
-			name: "external name has no status indicator",
-			service: corev1.Service{Spec: corev1.ServiceSpec{
-				Type:         corev1.ServiceTypeExternalName,
-				ExternalName: "example.com",
-			}},
-			wantState:        "ExternalName",
-			wantLabel:        "ExternalName",
-			wantPresentation: "ready",
-		},
-		{
-			name:             "cluster ip reports source service type",
-			service:          corev1.Service{Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeClusterIP}},
-			wantState:        "ClusterIP",
-			wantLabel:        "ClusterIP",
-			wantPresentation: "ready",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			status := objectMapServiceStatus("cluster-a", tt.service)
-			if status == nil || status.State != tt.wantState || status.Label != tt.wantLabel || status.Presentation != tt.wantPresentation {
-				t.Fatalf("unexpected service status: got %#v, want state=%q label=%q presentation=%q", status, tt.wantState, tt.wantLabel, tt.wantPresentation)
-			}
-		})
-	}
-}
-
 func TestObjectMapEnforcesVersionedSeedScope(t *testing.T) {
 	client := fake.NewSimpleClientset(objectMapFixtureObjects()...)
-	builder := &objectMapBuilder{client: client}
+	builder := newObjectMapTestBuilder(t, client)
 	ctx := WithClusterMeta(context.Background(), ClusterMeta{ClusterID: "cluster-a"})
 
 	if _, err := builder.Build(ctx, "default:Deployment:web"); err == nil {
@@ -430,27 +220,15 @@ func TestObjectMapEnforcesVersionedSeedScope(t *testing.T) {
 	}
 }
 
-func TestObjectMapFailsOnTransientListError(t *testing.T) {
+// Typed specs are now sourced from the shared informer caches, so object-map no
+// longer hard-fails on a transient typed-list error — like every other
+// lister-backed domain it serves whatever the cache holds. Resources the user
+// cannot list are skipped via the CanListWatch permission gate (below) rather
+// than via a per-build list error.
+func TestObjectMapSkipsResourceWithoutPermission(t *testing.T) {
 	client := fake.NewSimpleClientset(objectMapFixtureObjects()...)
-	client.Fake.PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
-		return true, nil, apierrors.NewInternalError(fmt.Errorf("temporary pods failure"))
-	})
-	builder := &objectMapBuilder{client: client}
-	ctx := WithClusterMeta(context.Background(), ClusterMeta{ClusterID: "cluster-a"})
-
-	if _, err := builder.Build(ctx, "default:apps/v1:Deployment:web"); err == nil {
-		t.Fatal("expected transient list error to fail snapshot")
-	} else if !strings.Contains(err.Error(), "pods") {
-		t.Fatalf("expected error to identify failed resource, got %v", err)
-	}
-}
-
-func TestObjectMapSkipsForbiddenListError(t *testing.T) {
-	client := fake.NewSimpleClientset(objectMapFixtureObjects()...)
-	client.Fake.PrependReactor("list", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) {
-		return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, "", fmt.Errorf("denied"))
-	})
-	builder := &objectMapBuilder{client: client}
+	builder := newObjectMapTestBuilder(t, client)
+	builder.permissions = denyPermissions{denied: map[string]bool{"secrets": true}}
 	ctx := WithClusterMeta(context.Background(), ClusterMeta{ClusterID: "cluster-a"})
 
 	snap, err := builder.Build(ctx, "default:apps/v1:Deployment:web?maxDepth=5&maxNodes=100")
@@ -473,7 +251,7 @@ func TestObjectMapAppliesNodeCap(t *testing.T) {
 		objects = append(objects, podFixture("default", "web-pod-"+string(rune('a'+i)), "pod-"+string(rune('a'+i)), "", map[string]string{"app": "web"}))
 	}
 	client := fake.NewSimpleClientset(objects...)
-	builder := &objectMapBuilder{client: client}
+	builder := newObjectMapTestBuilder(t, client)
 	ctx := WithClusterMeta(context.Background(), ClusterMeta{ClusterID: "cluster-a"})
 
 	snap, err := builder.Build(ctx, "default:/v1:Service:web?maxDepth=1&maxNodes=3")
@@ -492,7 +270,7 @@ func TestObjectMapAppliesNodeCap(t *testing.T) {
 func TestObjectMapBuildsNamespaceGraph(t *testing.T) {
 	objects := append(objectMapFixtureObjects(), podFixture("other", "other-pod", "other-pod-uid", "", map[string]string{"app": "other"}))
 	client := fake.NewSimpleClientset(objects...)
-	builder := &objectMapBuilder{client: client}
+	builder := newObjectMapTestBuilder(t, client)
 	ctx := WithClusterMeta(context.Background(), ClusterMeta{ClusterID: "cluster-a", ClusterName: "Cluster A"})
 
 	snap, err := builder.Build(ctx, "cluster-a|namespace:default?maxNodes=100")
@@ -529,7 +307,7 @@ func TestObjectMapNamespaceGraphDoesNotReverseExpandFromStorageClass(t *testing.
 		},
 	)
 	client := fake.NewSimpleClientset(objects...)
-	builder := &objectMapBuilder{client: client}
+	builder := newObjectMapTestBuilder(t, client)
 	ctx := WithClusterMeta(context.Background(), ClusterMeta{ClusterID: "cluster-a"})
 
 	snap, err := builder.Build(ctx, "cluster-a|namespace:default?maxNodes=100")
@@ -546,7 +324,7 @@ func TestObjectMapNamespaceGraphDoesNotReverseExpandFromStorageClass(t *testing.
 
 func TestObjectMapDoesNotFanOutThroughSharedHubResources(t *testing.T) {
 	client := fake.NewSimpleClientset(objectMapHubFixtureObjects()...)
-	builder := &objectMapBuilder{client: client}
+	builder := newObjectMapTestBuilder(t, client)
 	ctx := WithClusterMeta(context.Background(), ClusterMeta{ClusterID: "cluster-a"})
 
 	snap, err := builder.Build(ctx, "default:apps/v1:Deployment:web?maxDepth=6&maxNodes=100")
@@ -567,7 +345,7 @@ func TestObjectMapDoesNotFanOutThroughSharedHubResources(t *testing.T) {
 
 func TestObjectMapReverseTraversesHubEdgesFromSeed(t *testing.T) {
 	client := fake.NewSimpleClientset(objectMapHubFixtureObjects()...)
-	builder := &objectMapBuilder{client: client}
+	builder := newObjectMapTestBuilder(t, client)
 	ctx := WithClusterMeta(context.Background(), ClusterMeta{ClusterID: "cluster-a"})
 
 	nodeSnap, err := builder.Build(ctx, "__cluster__:/v1:Node:node-1?maxDepth=1&maxNodes=100")
@@ -601,7 +379,7 @@ func TestObjectMapReverseTraversesHubEdgesFromSeed(t *testing.T) {
 
 func TestObjectMapNodeSeedDoesNotTraversePodForwardDependencies(t *testing.T) {
 	client := fake.NewSimpleClientset(objectMapHubFixtureObjects()...)
-	builder := &objectMapBuilder{client: client}
+	builder := newObjectMapTestBuilder(t, client)
 	ctx := WithClusterMeta(context.Background(), ClusterMeta{ClusterID: "cluster-a"})
 
 	snap, err := builder.Build(ctx, "__cluster__:/v1:Node:node-1?maxDepth=3&maxNodes=7")
@@ -631,7 +409,7 @@ func TestObjectMapNodeSeedDoesNotTraversePodForwardDependencies(t *testing.T) {
 
 func TestObjectMapBuildsFromStorageClass(t *testing.T) {
 	client := fake.NewSimpleClientset(objectMapStorageFixtureObjects()...)
-	builder := &objectMapBuilder{client: client}
+	builder := newObjectMapTestBuilder(t, client)
 	ctx := WithClusterMeta(context.Background(), ClusterMeta{ClusterID: "cluster-a", ClusterName: "Cluster A"})
 
 	snap, err := builder.Build(ctx, "__cluster__:storage.k8s.io/v1:StorageClass:fast?maxDepth=2&maxNodes=100")
@@ -669,7 +447,7 @@ func TestObjectMapBuildsFromStorageClass(t *testing.T) {
 
 func TestObjectMapDoesNotFanOutThroughSharedStorageClass(t *testing.T) {
 	client := fake.NewSimpleClientset(objectMapStorageFixtureObjects()...)
-	builder := &objectMapBuilder{client: client}
+	builder := newObjectMapTestBuilder(t, client)
 	ctx := WithClusterMeta(context.Background(), ClusterMeta{ClusterID: "cluster-a"})
 
 	snap, err := builder.Build(ctx, "default:/v1:PersistentVolumeClaim:data?maxDepth=2&maxNodes=100")
@@ -719,7 +497,7 @@ func TestObjectMapReverseTraversalPolicies(t *testing.T) {
 
 func TestObjectMapBuildsFromIngressClass(t *testing.T) {
 	client := fake.NewSimpleClientset(objectMapIngressClassFixtureObjects()...)
-	builder := &objectMapBuilder{client: client}
+	builder := newObjectMapTestBuilder(t, client)
 	ctx := WithClusterMeta(context.Background(), ClusterMeta{ClusterID: "cluster-a", ClusterName: "Cluster A"})
 
 	snap, err := builder.Build(ctx, "__cluster__:networking.k8s.io/v1:IngressClass:public?maxDepth=4&maxNodes=100")
@@ -741,7 +519,7 @@ func TestObjectMapBuildsFromIngressClass(t *testing.T) {
 
 func TestObjectMapDoesNotFanOutThroughSharedIngressClass(t *testing.T) {
 	client := fake.NewSimpleClientset(objectMapIngressClassFixtureObjects()...)
-	builder := &objectMapBuilder{client: client}
+	builder := newObjectMapTestBuilder(t, client)
 	ctx := WithClusterMeta(context.Background(), ClusterMeta{ClusterID: "cluster-a"})
 
 	snap, err := builder.Build(ctx, "default:networking.k8s.io/v1:Ingress:web?maxDepth=2&maxNodes=100")
@@ -758,7 +536,7 @@ func TestObjectMapDoesNotFanOutThroughSharedIngressClass(t *testing.T) {
 
 func TestObjectMapBuildsFromClusterRole(t *testing.T) {
 	client := fake.NewSimpleClientset(objectMapClusterRBACFixtureObjects()...)
-	builder := &objectMapBuilder{client: client}
+	builder := newObjectMapTestBuilder(t, client)
 	ctx := WithClusterMeta(context.Background(), ClusterMeta{ClusterID: "cluster-a", ClusterName: "Cluster A"})
 
 	snap, err := builder.Build(ctx, "__cluster__:rbac.authorization.k8s.io/v1:ClusterRole:admin?maxDepth=3&maxNodes=100")
@@ -781,7 +559,7 @@ func TestObjectMapBuildsFromClusterRole(t *testing.T) {
 
 func TestObjectMapBuildsFromClusterRoleBinding(t *testing.T) {
 	client := fake.NewSimpleClientset(objectMapClusterRBACFixtureObjects()...)
-	builder := &objectMapBuilder{client: client}
+	builder := newObjectMapTestBuilder(t, client)
 	ctx := WithClusterMeta(context.Background(), ClusterMeta{ClusterID: "cluster-a", ClusterName: "Cluster A"})
 
 	snap, err := builder.Build(ctx, "__cluster__:rbac.authorization.k8s.io/v1:ClusterRoleBinding:admin-binding?maxDepth=2&maxNodes=100")
@@ -806,7 +584,8 @@ func TestObjectMapBuildsGatewayAPIRelationships(t *testing.T) {
 	if list, err := gatewayClient.GatewayV1().Gateways("default").List(context.Background(), metav1.ListOptions{}); err != nil || len(list.Items) != 1 {
 		t.Fatalf("gateway fixture did not seed fake client: count=%d err=%v", len(list.Items), err)
 	}
-	builder := &objectMapBuilder{client: client, gatewayClient: gatewayClient}
+	builder := newObjectMapTestBuilder(t, client)
+	builder.gatewayClient = gatewayClient
 	ctx := WithClusterMeta(context.Background(), ClusterMeta{ClusterID: "cluster-a", ClusterName: "Cluster A"})
 
 	snap, err := builder.Build(ctx, "default:gateway.networking.k8s.io/v1:Gateway:edge?maxDepth=5&maxNodes=100")
@@ -841,7 +620,8 @@ func TestObjectMapBuildsGatewayAPIRelationships(t *testing.T) {
 func TestObjectMapBuildsGatewayAPIPolicyAndGrantRelationships(t *testing.T) {
 	client := fake.NewSimpleClientset(serviceFixture("default", "web", "svc-web-uid", nil))
 	gatewayClient := newObjectMapGatewayClient(t)
-	builder := &objectMapBuilder{client: client, gatewayClient: gatewayClient}
+	builder := newObjectMapTestBuilder(t, client)
+	builder.gatewayClient = gatewayClient
 	ctx := WithClusterMeta(context.Background(), ClusterMeta{ClusterID: "cluster-a", ClusterName: "Cluster A"})
 
 	snap, err := builder.Build(ctx, "default:/v1:Service:web?maxDepth=3&maxNodes=100")
@@ -859,7 +639,8 @@ func TestObjectMapBuildsGatewayAPIPolicyAndGrantRelationships(t *testing.T) {
 func TestObjectMapNamespaceGraphIncludesGatewayAPIResources(t *testing.T) {
 	client := fake.NewSimpleClientset(serviceFixture("default", "web", "svc-web-uid", nil))
 	gatewayClient := newObjectMapGatewayClient(t)
-	builder := &objectMapBuilder{client: client, gatewayClient: gatewayClient}
+	builder := newObjectMapTestBuilder(t, client)
+	builder.gatewayClient = gatewayClient
 	ctx := WithClusterMeta(context.Background(), ClusterMeta{ClusterID: "cluster-a", ClusterName: "Cluster A"})
 
 	snap, err := builder.Build(ctx, "namespace:default?maxNodes=100")

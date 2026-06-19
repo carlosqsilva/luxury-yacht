@@ -9,23 +9,22 @@ import { ResourceMetadata } from '@shared/components/kubernetes/ResourceMetadata
 import { useObjectPanel } from '@modules/object-panel/hooks/useObjectPanel';
 import { ObjectPanelLink } from '@shared/components/ObjectPanelLink';
 import { buildRequiredRelatedObjectReference } from '@shared/utils/objectIdentity';
-import { types } from '@wailsjs/go/models';
+import { hpa } from '@wailsjs/go/models';
 import './PolicyOverview.css';
 
 interface PolicyOverviewProps {
   kind?: string;
   name?: string;
   namespace?: string;
-  age?: string;
   // HPA fields
-  scaleTargetRef?: types.ScaleTargetReference | null;
+  scaleTargetRef?: hpa.ScaleTargetReference | null;
   minReplicas?: number;
   maxReplicas?: number;
   currentReplicas?: number;
   desiredReplicas?: number;
-  metrics?: types.MetricSpec[] | null;
-  currentMetrics?: types.MetricStatus[] | null;
-  behavior?: types.ScalingBehavior | null;
+  metrics?: hpa.MetricSpec[] | null;
+  currentMetrics?: hpa.MetricStatus[] | null;
+  behavior?: hpa.ScalingBehavior | null;
   // PDB fields
   minAvailable?: string;
   maxUnavailable?: string;
@@ -45,7 +44,7 @@ interface PolicyOverviewProps {
 
 // Policy resources Overview
 export const PolicyOverview: React.FC<PolicyOverviewProps> = (props) => {
-  const { kind, name, namespace, age } = props;
+  const { kind, name, namespace } = props;
   const { objectData } = useObjectPanel();
   const clusterMeta = {
     clusterId: objectData?.clusterId ?? undefined,
@@ -106,7 +105,7 @@ export const PolicyOverview: React.FC<PolicyOverviewProps> = (props) => {
 
   // Render behavior rules as a structured display
   const renderBehaviorRules = (
-    rules: types.ScalingRules | null | undefined,
+    rules: hpa.ScalingRules | null | undefined,
     direction: 'up' | 'down'
   ): React.ReactNode => {
     // Default stabilization windows per Kubernetes docs
@@ -187,7 +186,7 @@ export const PolicyOverview: React.FC<PolicyOverviewProps> = (props) => {
 
   const currentMetrics = props.currentMetrics ?? [];
 
-  const findCurrentMetric = (metric: types.MetricSpec) => {
+  const findCurrentMetric = (metric: hpa.MetricSpec) => {
     const kind = metric.kind?.toLowerCase();
     const target = metric.target ?? {};
 
@@ -215,7 +214,7 @@ export const PolicyOverview: React.FC<PolicyOverviewProps> = (props) => {
   };
 
   // Render a single metric with detailed target information
-  const renderMetric = (metric: types.MetricSpec, index: number): React.ReactNode => {
+  const renderMetric = (metric: hpa.MetricSpec, index: number): React.ReactNode => {
     const kind = metric.kind?.toLowerCase();
     const target = metric.target ?? {};
     const current = findCurrentMetric(metric);
@@ -302,7 +301,7 @@ export const PolicyOverview: React.FC<PolicyOverviewProps> = (props) => {
 
   return (
     <>
-      <ResourceHeader kind={kind || ''} name={name || ''} namespace={namespace} age={age} />
+      <ResourceHeader kind={kind || ''} name={name || ''} namespace={namespace} />
 
       {/* HPA-specific fields */}
       {props.kind?.toLowerCase() === 'horizontalpodautoscaler' && (

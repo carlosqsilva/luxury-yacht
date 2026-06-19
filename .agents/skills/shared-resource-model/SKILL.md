@@ -16,17 +16,23 @@ refresh rows, streams, object panel details, and object map nodes/edges.
 2. `backend/AGENTS.md`
 3. `frontend/AGENTS.md` for frontend consumers
 4. `docs/architecture/shared-resource-model.md`
-5. `docs/architecture/catalog.md` when identity/existence is involved
-6. `docs/architecture/refresh-system.md` when rows, streams, events, or object
+5. `docs/architecture/resource-kind-registry.md` for the per-kind package +
+   registry layout (where identity, model, facts, and DTO live)
+6. `docs/architecture/catalog.md` when identity/existence is involved
+7. `docs/architecture/refresh-system.md` when rows, streams, events, or object
    details consume the model
 
 ## Backend Entry Points
 
-- `backend/resourcemodel`
+- `backend/resources/<kind>` — per-kind `identity.go`, `descriptor.go`,
+  `model.go`, `facts.go`, `dto.go` (the single definition of a kind)
+- `backend/resourcemodel` — shared status/facts/link primitives + relationship
+  index that the per-kind models build on
+- `backend/resourcekind`, `backend/resourcecontract`, `backend/kind/kindregistry`
+  — identity leaf, the built-in identity contract, and the kind registry
 - `backend/refresh/snapshot`
-- `backend/resources`
-- `backend/resources/types`
-- `backend/object_detail_provider.go`
+- `backend/resources/types` — shared cross-kind DTO field types
+- `backend/object_detail_provider.go` — detail dispatch (generated bindings)
 
 ## Frontend Entry Points
 

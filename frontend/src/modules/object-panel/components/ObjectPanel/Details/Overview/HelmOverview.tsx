@@ -3,7 +3,7 @@
  */
 
 import React from 'react';
-import { types } from '@wailsjs/go/models';
+import { helm } from '@wailsjs/go/models';
 import { OverviewItem } from '@modules/object-panel/components/ObjectPanel/Details/Overview/shared/OverviewItem';
 import { ResourceHeader } from '@shared/components/kubernetes/ResourceHeader';
 import { ResourceStatus } from '@shared/components/kubernetes/ResourceStatus';
@@ -16,11 +16,10 @@ import './shared/LabelsAndAnnotations.css';
 import './HelmOverview.css';
 
 interface HelmOverviewProps {
-  helmReleaseDetails?: types.HelmReleaseDetails | null;
+  helmReleaseDetails?: helm.HelmReleaseDetails | null;
   // Fallback props for when details aren't loaded yet (from table data)
   name?: string;
   namespace?: string;
-  age?: string;
   chart?: string;
   appVersion?: string;
   status?: string;
@@ -36,7 +35,6 @@ export const HelmOverview: React.FC<HelmOverviewProps> = ({
   // Fallback props
   name,
   namespace,
-  age,
   chart,
   appVersion,
   status,
@@ -55,7 +53,6 @@ export const HelmOverview: React.FC<HelmOverviewProps> = ({
   // Use details if available, otherwise fall back to table data
   const displayName = helmReleaseDetails?.name || name || '-';
   const displayNamespace = helmReleaseDetails?.namespace || namespace || '-';
-  const displayAge = helmReleaseDetails?.age || age || '-';
   const displayChart = helmReleaseDetails?.chart || chart || '-';
   const displayAppVersion = helmReleaseDetails?.appVersion || appVersion;
   const displayStatus = helmReleaseDetails?.status || status;
@@ -67,12 +64,7 @@ export const HelmOverview: React.FC<HelmOverviewProps> = ({
 
   return (
     <>
-      <ResourceHeader
-        kind="HelmRelease"
-        name={displayName}
-        namespace={displayNamespace}
-        age={displayAge}
-      />
+      <ResourceHeader kind="HelmRelease" name={displayName} namespace={displayNamespace} />
       <ResourceStatus
         status={displayStatus}
         statusState={helmReleaseDetails?.statusState}
@@ -108,8 +100,8 @@ export const HelmOverview: React.FC<HelmOverviewProps> = ({
           <div className="metadata-label">Managed Resources</div>
           <div className="metadata-pairs">
             {helmReleaseDetails.resources
-              .sort((a: types.HelmResource, b: types.HelmResource) => a.kind.localeCompare(b.kind))
-              .map((resource: types.HelmResource, idx: number) => {
+              .sort((a: helm.HelmResource, b: helm.HelmResource) => a.kind.localeCompare(b.kind))
+              .map((resource: helm.HelmResource, idx: number) => {
                 const resourceRef = (() => {
                   const scope = (resource.scope ?? '').trim().toLowerCase();
                   if (scope !== 'cluster' && scope !== 'namespaced') {
@@ -165,7 +157,7 @@ export const HelmOverview: React.FC<HelmOverviewProps> = ({
         <div className="metadata-section">
           <div className="metadata-label">Release History</div>
           <div className="metadata-pairs">
-            {helmReleaseDetails.history.slice(0, 5).map((h: types.HelmRevision) => (
+            {helmReleaseDetails.history.slice(0, 5).map((h: helm.HelmRevision) => (
               <div key={`history-${h.revision}`} className="metadata-pair helm-history-item">
                 <div className="helm-history-header">
                   <span className="metadata-key">Revision {h.revision}:</span>

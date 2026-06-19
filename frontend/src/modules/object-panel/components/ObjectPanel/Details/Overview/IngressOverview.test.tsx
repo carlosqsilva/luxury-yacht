@@ -71,7 +71,6 @@ describe('IngressOverview', () => {
       ingressDetails: {
         name: 'web-ingress',
         namespace: 'prod',
-        age: '2d',
         ingressClassName: 'nginx',
         loadBalancerStatus: ['lb.example.com'],
         rules: [
@@ -129,12 +128,48 @@ describe('IngressOverview', () => {
     expect(defaultBackend?.querySelector('a')).toBeTruthy();
   });
 
+  it('renders rule hosts as browser links with the TLS-derived scheme', async () => {
+    await renderComponent({
+      ingressDetails: {
+        name: 'web-ingress',
+        namespace: 'prod',
+        rules: [
+          { host: 'secure.example.com', paths: [] },
+          { host: 'plain.example.com', paths: [] },
+          { host: '*.wild.example.com', paths: [] },
+        ],
+        tls: [{ hosts: ['secure.example.com'], secretName: 'tls-secret' }],
+        labels: {},
+        annotations: {},
+      } as any,
+    });
+
+    const rulesValue = getValueForLabel(container, 'Rules');
+    const linkTitles = Array.from(
+      rulesValue?.querySelectorAll<HTMLButtonElement>('button.overview-scheme-link') ?? []
+    ).map((b) => b.title);
+
+    // Each title is the exact resolved URL ("Open <url> in browser"), so assert
+    // the whole title. A substring match would also accept an arbitrary host
+    // before or after the expected URL.
+    // TLS-covered host offers both https and http.
+    expect(linkTitles).toContain('Open https://secure.example.com in browser');
+    expect(linkTitles).toContain('Open http://secure.example.com in browser');
+    // Uncovered host offers http only — never https (no cert).
+    expect(linkTitles).toContain('Open http://plain.example.com in browser');
+    expect(linkTitles).not.toContain('Open https://plain.example.com in browser');
+
+    // Wildcard hosts aren't browsable, so they get no scheme links — only the
+    // three links above — but the name still shows.
+    expect(linkTitles).toHaveLength(3);
+    expect(rulesValue?.textContent).toContain('*.wild.example.com');
+  });
+
   it('shows a "no address" chip when the load balancer has no addresses yet', async () => {
     await renderComponent({
       ingressDetails: {
         name: 'minimal',
         namespace: 'default',
-        age: '1h',
         rules: [],
         tls: [],
         labels: {},

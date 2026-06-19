@@ -12,7 +12,7 @@
  */
 
 import ReactDOM from 'react-dom/client';
-import { createContext, useContext, useCallback, useState } from 'react';
+import { createContext, useContext, useSyncExternalStore } from 'react';
 import { act } from 'react';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { KubernetesObjectReference } from '@/types/view-state';
@@ -33,35 +33,48 @@ const { capturedChildrenRef, probedObjectDataRef, mockUseCapabilities, mockRefre
     },
   }));
 
+// Shared, reactive active-tab store mirroring the real two-context split:
+// setObjectPanelActiveTab writes, useObjectPanelActiveTab reads reactively.
+const tabStore = vi.hoisted(() => {
+  let tabs = new Map<string, string>();
+  const listeners = new Set<() => void>();
+  return {
+    subscribe: (listener: () => void) => {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    getSnapshot: () => tabs,
+    set: (panelId: string, tab: string) => {
+      if (tabs.get(panelId) === tab) {
+        return;
+      }
+      const next = new Map(tabs);
+      next.set(panelId, tab);
+      tabs = next;
+      listeners.forEach((listener) => listener());
+    },
+    reset: () => {
+      tabs = new Map();
+      listeners.forEach((listener) => listener());
+    },
+  };
+});
+
 vi.mock('@modules/object-panel/contexts/ObjectPanelStateContext', () => ({
-  useObjectPanelState: () => {
-    const [activeTabs, setActiveTabs] = useState<Map<string, string>>(() => new Map());
-    const getObjectPanelActiveTab = useCallback(
-      (panelId: string) => activeTabs.get(panelId),
-      [activeTabs]
-    );
-    const setObjectPanelActiveTab = useCallback((panelId: string, tab: string) => {
-      setActiveTabs((prev) => {
-        if (prev.get(panelId) === tab) {
-          return prev;
-        }
-        const next = new Map(prev);
-        next.set(panelId, tab);
-        return next;
-      });
-    }, []);
-    return {
-      closePanel: vi.fn(),
-      openPanels: new Map(),
-      showObjectPanel: true,
-      onRowClick: vi.fn(),
-      onCloseObjectPanel: vi.fn(),
-      setShowObjectPanel: vi.fn(),
-      hydrateClusterMeta: vi.fn((d: unknown) => d),
-      getObjectPanelActiveTab,
-      setObjectPanelActiveTab,
-    };
-  },
+  useObjectPanelState: () => ({
+    closePanel: vi.fn(),
+    openPanels: new Map(),
+    showObjectPanel: true,
+    onRowClick: vi.fn(),
+    onCloseObjectPanel: vi.fn(),
+    setShowObjectPanel: vi.fn(),
+    hydrateClusterMeta: vi.fn((d: unknown) => d),
+    setObjectPanelActiveTab: tabStore.set,
+  }),
+  useObjectPanelActiveTab: (panelId: string) =>
+    useSyncExternalStore(tabStore.subscribe, tabStore.getSnapshot).get(panelId),
 }));
 
 // Teleporting DockablePanel: capture children (exactly what the real panel
@@ -197,6 +210,7 @@ describe('ObjectPanel content under a tab-group leader', () => {
   beforeEach(() => {
     capturedChildrenRef.current = null;
     probedObjectDataRef.current = undefined;
+    tabStore.reset();
     container = document.createElement('div');
     document.body.appendChild(container);
     root = ReactDOM.createRoot(container);

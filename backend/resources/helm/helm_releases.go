@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/luxury-yacht/app/backend/internal/applog"
 	"github.com/luxury-yacht/app/backend/internal/logsources"
 	"github.com/luxury-yacht/app/backend/resourcemodel"
 	"github.com/luxury-yacht/app/backend/resources/common"
@@ -21,7 +22,7 @@ import (
 )
 
 // ReleaseDetails returns detailed information about a Helm release.
-func (s *Service) ReleaseDetails(namespace, name string) (*types.HelmReleaseDetails, error) {
+func (s *Service) ReleaseDetails(namespace, name string) (*HelmReleaseDetails, error) {
 	if err := s.ensureClient(); err != nil {
 		return nil, err
 	}
@@ -46,54 +47,41 @@ func (s *Service) ReleaseDetails(namespace, name string) (*types.HelmReleaseDeta
 
 	resources := s.extractResourcesFromManifest(release.Manifest, namespace)
 	resourceLinks := s.extractResourceLinksFromManifest(release.Manifest, namespace)
-	model := resourcemodel.BuildHelmReleaseResourceModel(
-		s.deps.Common.ClusterID,
-		release,
-		namespace,
-		resourceLinks,
-		history,
-		resourcemodel.ResourceModelBuildOptions{
-			Materialization: resourcemodel.MaterializeSummaryFacts | resourcemodel.MaterializeRelationshipFacts | resourcemodel.MaterializeDetailFacts,
-		},
-	)
-	facts := model.Facts.HelmRelease
+	opts := resourcemodel.ResourceModelBuildOptions{
+		Materialization: resourcemodel.MaterializeSummaryFacts | resourcemodel.MaterializeRelationshipFacts | resourcemodel.MaterializeDetailFacts,
+	}
+	model := BuildResourceModel(s.deps.Common.ClusterID, release, namespace, resourceLinks, history, opts)
+	facts := BuildFacts(release, resourceLinks, history, opts)
 
-	details := &types.HelmReleaseDetails{
-		Kind:               "helmrelease",
-		Name:               model.Ref.Name,
-		Namespace:          model.Ref.Namespace,
-		Age:                helmAge(model),
-		Chart:              facts.Chart,
-		Version:            facts.Version,
-		AppVersion:         facts.AppVersion,
-		Status:             model.Status.Label,
-		StatusState:        model.Status.State,
-		StatusPresentation: model.Status.Presentation,
-		StatusReason:       model.Status.Reason,
-		Revision:           facts.Revision,
-		Updated:            helmUpdatedAge(facts),
-		Description:        facts.Description,
-		Notes:              facts.Notes,
-		Values:             release.Config,
-		Labels:             model.Metadata.Labels,
-		Annotations:        model.Metadata.Annotations,
+	details := &HelmReleaseDetails{
+		Kind:             "helmrelease",
+		Name:             model.Ref.Name,
+		Namespace:        model.Ref.Namespace,
+		Chart:            facts.Chart,
+		Version:          facts.Version,
+		AppVersion:       facts.AppVersion,
+		StatusProjection: types.NewStatusProjection(model.Status),
+		Revision:         facts.Revision,
+		Updated:          helmUpdatedAge(facts),
+		Description:      facts.Description,
+		Notes:            facts.Notes,
+		Values:           release.Config,
+		Labels:           model.Metadata.Labels,
+		Annotations:      model.Metadata.Annotations,
 	}
 
 	for _, h := range facts.History {
-		status := resourcemodel.BuildHelmReleaseStatusPresentation(resourcemodel.HelmReleaseFacts{
+		status := statusPresentation(Facts{
 			RawStatus:   h.Status,
 			Description: h.Description,
 		})
-		details.History = append(details.History, types.HelmRevision{
-			Revision:           h.Revision,
-			Updated:            helmRevisionUpdatedAge(h),
-			Status:             status.Label,
-			StatusState:        status.State,
-			StatusPresentation: status.Presentation,
-			StatusReason:       status.Reason,
-			Chart:              h.Chart,
-			AppVersion:         h.AppVersion,
-			Description:        h.Description,
+		details.History = append(details.History, HelmRevision{
+			Revision:         h.Revision,
+			Updated:          helmRevisionUpdatedAge(h),
+			StatusProjection: types.NewStatusProjection(status),
+			Chart:            h.Chart,
+			AppVersion:       h.AppVersion,
+			Description:      h.Description,
 		})
 	}
 
@@ -219,8 +207,8 @@ func (s *Service) initActionConfig(settings *cli.EnvSettings, namespace string) 
 	return actionConfig, nil
 }
 
-func (s *Service) extractResourcesFromManifest(manifest, defaultNamespace string) []types.HelmResource {
-	var resources []types.HelmResource
+func (s *Service) extractResourcesFromManifest(manifest, defaultNamespace string) []HelmResource {
+	var resources []HelmResource
 	resourceMap := make(map[string]bool)
 
 	trimmed := strings.TrimPrefix(strings.TrimSpace(manifest), "---")
@@ -287,7 +275,7 @@ func (s *Service) extractResourcesFromManifest(manifest, defaultNamespace string
 					continue
 				}
 				resourceMap[key] = true
-				resources = append(resources, types.HelmResource{
+				resources = append(resources, HelmResource{
 					Kind:       itemKind,
 					APIVersion: itemAPIVersion,
 					Name:       name,
@@ -317,7 +305,7 @@ func (s *Service) extractResourcesFromManifest(manifest, defaultNamespace string
 			continue
 		}
 		resourceMap[key] = true
-		resources = append(resources, types.HelmResource{
+		resources = append(resources, HelmResource{
 			Kind:       kind,
 			APIVersion: apiVersion,
 			Name:       name,
@@ -402,21 +390,14 @@ func (s *Service) extractResourceLinksFromManifest(manifest, defaultNamespace st
 	return links
 }
 
-func helmAge(model resourcemodel.ResourceModel) string {
-	if model.Metadata.CreationTimestamp.IsZero() {
-		return ""
-	}
-	return common.FormatAge(model.Metadata.CreationTimestamp.Time)
-}
-
-func helmUpdatedAge(facts *resourcemodel.HelmReleaseFacts) string {
-	if facts == nil || facts.Updated == nil || facts.Updated.IsZero() {
+func helmUpdatedAge(facts Facts) string {
+	if facts.Updated == nil || facts.Updated.IsZero() {
 		return ""
 	}
 	return common.FormatAge(facts.Updated.Time)
 }
 
-func helmRevisionUpdatedAge(facts resourcemodel.HelmRevisionFacts) string {
+func helmRevisionUpdatedAge(facts HelmRevisionFacts) string {
 	if facts.Updated == nil || facts.Updated.IsZero() {
 		return ""
 	}
@@ -424,31 +405,21 @@ func helmRevisionUpdatedAge(facts resourcemodel.HelmRevisionFacts) string {
 }
 
 func (s *Service) logDebug(msg string) {
-	if s.deps.Common.Logger != nil {
-		s.deps.Common.Logger.Debug(msg, logsources.Helm)
-	}
+	applog.Debug(s.deps.Common.Logger, msg, logsources.Helm)
 }
 
 func (s *Service) logDebugf(format string, args ...interface{}) {
-	if s.deps.Common.Logger != nil {
-		s.deps.Common.Logger.Debug(fmt.Sprintf(format, args...), logsources.Helm)
-	}
+	applog.Debug(s.deps.Common.Logger, fmt.Sprintf(format, args...), logsources.Helm)
 }
 
 func (s *Service) logWarn(msg string) {
-	if s.deps.Common.Logger != nil {
-		s.deps.Common.Logger.Warn(msg, logsources.Helm)
-	}
+	applog.Warn(s.deps.Common.Logger, msg, logsources.Helm)
 }
 
 func (s *Service) logError(msg string) {
-	if s.deps.Common.Logger != nil {
-		s.deps.Common.Logger.Error(msg, logsources.Helm)
-	}
+	applog.Error(s.deps.Common.Logger, msg, logsources.Helm)
 }
 
 func (s *Service) logInfo(msg string) {
-	if s.deps.Common.Logger != nil {
-		s.deps.Common.Logger.Info(msg, logsources.Helm)
-	}
+	applog.Info(s.deps.Common.Logger, msg, logsources.Helm)
 }

@@ -1,8 +1,14 @@
 ### Added
 
-- Left/right arrow keys can be used to navigate pages in paginated tables.
+### Changed
 
 ### Fixed
 
-- Cluster initialization should no longer hang on unknown API versions of CRDs. Unknown CRDs will be flagged in the Application Logs, but cluster init should proceed normally.
-- Tables now load as soon as their own data is ready during cluster connection: one slow or failing watch (for example a misbehaving CRD or restricted resource) no longer delays every other view's first load.
+- Browse tables (Storage and other resource views) no longer get stuck on a
+  loading spinner the first time you open a view for a namespace or cluster that
+  has none of that resource. The empty result now settles to the "no objects
+  found" state instead of waiting forever for data that will never arrive.
+- Object details now show an Age for every resource type, including custom
+  resources, and the value always matches the Age shown in the cluster/namespace
+  browse tables. Age is now derived once from the object's creation timestamp
+  instead of per resource type.

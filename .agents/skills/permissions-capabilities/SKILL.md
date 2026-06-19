@@ -24,9 +24,9 @@ gating, delete/scale/restart/trigger/suspend actions, or restricted-RBAC tests.
 - `backend/capabilities`
 - `backend/resource_permission.go`
 - `backend/refresh/permissions/resource_requirement.go`
-- `backend/refresh/snapshot/permission_checks.go`
 - `backend/refresh/snapshot/permission.go`
-- `backend/refresh/resourcestream/permission_contract.go`
+- `backend/refresh/resourcestream/projection_descriptors.go` for stream
+  permission resources (primary/related resources per descriptor)
 - `backend/refresh/system/registrations.go`
 - `backend/refresh/system/permission_gate.go`
 - Backend operation/action services under `backend/resources`, `backend/object_yaml*.go`,
@@ -36,7 +36,7 @@ gating, delete/scale/restart/trigger/suspend actions, or restricted-RBAC tests.
 
 - `frontend/src/core/capabilities`
 - `frontend/src/core/capabilities/permissionFeatures.ts`
-- `frontend/src/shared/actions/objectActionPermissionMatrix.ts`
+- `frontend/src/shared/actions/objectActionPolicy.ts`
 - `frontend/src/modules/object-panel/components/ObjectPanel/hooks/useObjectPanelCapabilities.ts`
 - `frontend/src/modules/object-panel/components/ObjectPanel/constants.ts`
 - `frontend/src/shared/hooks/useObjectActions.tsx`
@@ -57,7 +57,8 @@ gating, delete/scale/restart/trigger/suspend actions, or restricted-RBAC tests.
 - [ ] Frontend action availability mirrors backend capability rules and exposes
       denied/pending reasons.
 - [ ] UI-visible mutating actions are represented in
-      `OBJECT_ACTION_PERMISSION_MATRIX`.
+      `resolveObjectActionPolicy` / `ObjectActionPolicy`
+      (`frontend/src/shared/actions/objectActionPolicy.ts`).
       Include derived action ids that reuse the same backend mutation, such as
       fixed-replica scale variants.
 - [ ] Permission-denied refresh domains remain visible in diagnostics.

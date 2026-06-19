@@ -8,7 +8,6 @@ import (
 	"sync/atomic"
 
 	"github.com/luxury-yacht/app/backend/capabilities"
-	"github.com/luxury-yacht/app/backend/internal/versioning"
 	"github.com/luxury-yacht/app/backend/refresh"
 	"github.com/luxury-yacht/app/backend/refresh/containerlogsstream"
 	"github.com/luxury-yacht/app/backend/refresh/system"
@@ -29,7 +28,6 @@ type App struct {
 	windowSettings       *WindowSettings
 	appSettings          *AppSettings
 	logger               *Logger
-	versionCache         *versioning.Cache
 	// responseCache stores short-lived detail/YAML/helm GET responses.
 	responseCache           *responseCache
 	sidebarVisible          bool
@@ -133,7 +131,6 @@ type App struct {
 func NewApp() *App {
 	app := &App{
 		logger:                   NewLogger(1000),
-		versionCache:             versioning.NewCache(),
 		responseCache:            newDefaultResponseCache(),
 		sidebarVisible:           true,
 		appLogsPanelVisible:      false,

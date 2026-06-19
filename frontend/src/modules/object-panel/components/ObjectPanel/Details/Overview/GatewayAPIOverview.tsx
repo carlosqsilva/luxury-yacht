@@ -3,8 +3,18 @@
  */
 
 import React from 'react';
-import { resourcemodel, types } from '@wailsjs/go/models';
+import {
+  backendtlspolicy,
+  gateway,
+  gatewayclass,
+  listenerset,
+  referencegrant,
+  resourcemodel,
+  types,
+} from '@wailsjs/go/models';
 import { OverviewItem } from '@modules/object-panel/components/ObjectPanel/Details/Overview/shared/OverviewItem';
+import { ExternalHostLinks } from '@modules/object-panel/components/ObjectPanel/Details/Overview/shared/ExternalHostLinks';
+import { listenerScheme } from '@modules/object-panel/components/ObjectPanel/Details/Overview/shared/hostLink';
 import { ObjectPanelLink } from '@shared/components/ObjectPanelLink';
 import { StatusChip, type StatusChipVariant } from '@shared/components/StatusChip';
 import { ResourceHeader } from '@shared/components/kubernetes/ResourceHeader';
@@ -14,12 +24,12 @@ import { buildRequiredObjectReference } from '@shared/utils/objectIdentity';
 import './shared/OverviewBlocks.css';
 
 interface GatewayAPIOverviewProps {
-  gatewayDetails?: types.GatewayDetails | null;
-  gatewayClassDetails?: types.GatewayClassDetails | null;
+  gatewayDetails?: gateway.GatewayDetails | null;
+  gatewayClassDetails?: gatewayclass.GatewayClassDetails | null;
   routeDetails?: types.RouteDetails | null;
-  listenerSetDetails?: types.ListenerSetDetails | null;
-  referenceGrantDetails?: types.ReferenceGrantDetails | null;
-  backendTLSPolicyDetails?: types.BackendTLSPolicyDetails | null;
+  listenerSetDetails?: listenerset.ListenerSetDetails | null;
+  referenceGrantDetails?: referencegrant.ReferenceGrantDetails | null;
+  backendTLSPolicyDetails?: backendtlspolicy.BackendTLSPolicyDetails | null;
 }
 
 const conditionVariant = (status: string): StatusChipVariant => {
@@ -135,6 +145,9 @@ const ListenerList: React.FC<{ listeners?: types.GatewayListenerDetails[] | null
     <div className="overview-card-list">
       {listeners.map((listener) => {
         const hasRows = Boolean(listener.hostname);
+        // Only HTTP/HTTPS listeners get a browsable link; other protocols
+        // (TLS/TCP/UDP) keep the hostname as plain text.
+        const hostScheme = listenerScheme(listener.protocol);
         return (
           <div
             key={`${listener.name}-${listener.port}-${listener.protocol}`}
@@ -154,7 +167,12 @@ const ListenerList: React.FC<{ listeners?: types.GatewayListenerDetails[] | null
                 {listener.hostname && (
                   <div className="overview-row">
                     <span className="overview-row-label">Hostname</span>
-                    <span className="overview-row-value">{listener.hostname}</span>
+                    <span className="overview-row-value">
+                      <ExternalHostLinks
+                        host={listener.hostname}
+                        schemes={hostScheme ? [{ scheme: hostScheme, port: listener.port }] : []}
+                      />
+                    </span>
                   </div>
                 )}
               </div>
@@ -313,7 +331,7 @@ const ReferenceGrantDiagram: React.FC<{
 };
 
 const GatewayDetailsOverview: React.FC<{
-  details: types.GatewayDetails;
+  details: gateway.GatewayDetails;
   clusterName?: string;
 }> = ({ details, clusterName }) => {
   const hasAddresses = Boolean(details.addresses?.length);
@@ -322,12 +340,7 @@ const GatewayDetailsOverview: React.FC<{
 
   return (
     <>
-      <ResourceHeader
-        kind="Gateway"
-        name={details.name}
-        namespace={details.namespace}
-        age={details.age}
-      />
+      <ResourceHeader kind="Gateway" name={details.name} namespace={details.namespace} />
       <OverviewItem
         label="Gateway Class"
         value={<RefLink value={details.gatewayClassRef} clusterName={clusterName} />}
@@ -356,7 +369,7 @@ const GatewayDetailsOverview: React.FC<{
 };
 
 const GatewayClassOverview: React.FC<{
-  details: types.GatewayClassDetails;
+  details: gatewayclass.GatewayClassDetails;
   clusterName?: string;
 }> = ({ details, clusterName }) => {
   const hasUsedBy = Boolean(details.usedBy?.length);
@@ -364,7 +377,7 @@ const GatewayClassOverview: React.FC<{
 
   return (
     <>
-      <ResourceHeader kind="GatewayClass" name={details.name} age={details.age} />
+      <ResourceHeader kind="GatewayClass" name={details.name} />
       <OverviewItem label="Controller" value={details.controller} fullWidth />
       <OverviewItem
         label="Parameters"
@@ -401,12 +414,7 @@ const RouteOverview: React.FC<{
 
   return (
     <>
-      <ResourceHeader
-        kind={details.kind}
-        name={details.name}
-        namespace={details.namespace}
-        age={details.age}
-      />
+      <ResourceHeader kind={details.kind} name={details.name} namespace={details.namespace} />
       <OverviewItem
         label="Hostnames"
         value={details.hostnames?.join(', ')}
@@ -443,7 +451,7 @@ const RouteOverview: React.FC<{
 };
 
 const ListenerSetOverview: React.FC<{
-  details: types.ListenerSetDetails;
+  details: listenerset.ListenerSetDetails;
   clusterName?: string;
 }> = ({ details, clusterName }) => {
   const hasListeners = Boolean(details.listeners?.length);
@@ -451,12 +459,7 @@ const ListenerSetOverview: React.FC<{
 
   return (
     <>
-      <ResourceHeader
-        kind="ListenerSet"
-        name={details.name}
-        namespace={details.namespace}
-        age={details.age}
-      />
+      <ResourceHeader kind="ListenerSet" name={details.name} namespace={details.namespace} />
       <OverviewItem
         label="Parent Gateway"
         value={<RefLink value={details.parentRef} clusterName={clusterName} />}
@@ -479,19 +482,14 @@ const ListenerSetOverview: React.FC<{
 };
 
 const ReferenceGrantOverview: React.FC<{
-  details: types.ReferenceGrantDetails;
+  details: referencegrant.ReferenceGrantDetails;
   clusterName?: string;
 }> = ({ details, clusterName }) => {
   const hasGrant = Boolean(details.from?.length) || Boolean(details.to?.length);
 
   return (
     <>
-      <ResourceHeader
-        kind="ReferenceGrant"
-        name={details.name}
-        namespace={details.namespace}
-        age={details.age}
-      />
+      <ResourceHeader kind="ReferenceGrant" name={details.name} namespace={details.namespace} />
       {hasGrant && (
         <div className="overview-stacked">
           <div className="overview-label">Grant</div>
@@ -504,7 +502,7 @@ const ReferenceGrantOverview: React.FC<{
 };
 
 const BackendTLSPolicyOverview: React.FC<{
-  details: types.BackendTLSPolicyDetails;
+  details: backendtlspolicy.BackendTLSPolicyDetails;
   clusterName?: string;
 }> = ({ details, clusterName }) => {
   const hasTargetRefs = Boolean(details.targetRefs?.length);
@@ -512,12 +510,7 @@ const BackendTLSPolicyOverview: React.FC<{
 
   return (
     <>
-      <ResourceHeader
-        kind="BackendTLSPolicy"
-        name={details.name}
-        namespace={details.namespace}
-        age={details.age}
-      />
+      <ResourceHeader kind="BackendTLSPolicy" name={details.name} namespace={details.namespace} />
       <OverviewItem
         label="Target Refs"
         value={<RefList refs={details.targetRefs} clusterName={clusterName} />}

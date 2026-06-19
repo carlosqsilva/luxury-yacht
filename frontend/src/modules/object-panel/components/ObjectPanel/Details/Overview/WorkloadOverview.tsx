@@ -49,11 +49,10 @@ const composePodStateCaption = (
     const n = created - ready;
     return { headline, drift: `${n} not ready` };
   }
-  if (available < ready) {
-    const n = ready - available;
-    return { headline, drift: `${n} waiting` };
-  }
-  return { headline };
+  // Reaching here implies ready >= created >= desired > available, so the
+  // remaining gap is pods that are ready but not yet available.
+  const n = ready - available;
+  return { headline, drift: `${n} waiting` };
 };
 
 interface PodStateBarProps {
@@ -256,7 +255,6 @@ const strategyTooltip = (strategy: string, kind: StrategyKind): React.ReactNode 
 interface WorkloadOverviewProps {
   kind: string;
   name: string;
-  age: string;
   namespace?: string;
 
   // Common workload fields
@@ -340,7 +338,6 @@ interface WorkloadOverviewProps {
 export const WorkloadOverview: React.FC<WorkloadOverviewProps> = ({
   kind,
   name,
-  age,
   namespace,
   status,
   statusState,
@@ -395,7 +392,7 @@ export const WorkloadOverview: React.FC<WorkloadOverviewProps> = ({
   return (
     <>
       {/* Use composed component for header */}
-      <ResourceHeader kind={kind} name={name} namespace={namespace} age={age} />
+      <ResourceHeader kind={kind} name={name} namespace={namespace} />
       <ResourceStatus
         status={status}
         statusState={statusState}

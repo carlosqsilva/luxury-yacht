@@ -15,11 +15,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/luxury-yacht/app/backend/internal/applog"
 	"github.com/luxury-yacht/app/backend/internal/config"
 	"github.com/luxury-yacht/app/backend/internal/parallel"
 	"github.com/luxury-yacht/app/backend/nodemaintenance"
-	"github.com/luxury-yacht/app/backend/resourcemodel"
 	"github.com/luxury-yacht/app/backend/resources/common"
+	podres "github.com/luxury-yacht/app/backend/resources/pods"
 	restypes "github.com/luxury-yacht/app/backend/resources/types"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -48,7 +49,7 @@ func (s *Service) requestContext() context.Context {
 }
 
 // Node returns detailed information about a single node.
-func (s *Service) Node(name string) (*restypes.NodeDetails, error) {
+func (s *Service) Node(name string) (*NodeDetails, error) {
 	if err := s.ensureClient("Nodes"); err != nil {
 		return nil, err
 	}
@@ -67,7 +68,7 @@ func (s *Service) Node(name string) (*restypes.NodeDetails, error) {
 }
 
 // Nodes returns detailed information about all nodes in the cluster.
-func (s *Service) Nodes() ([]*restypes.NodeDetails, error) {
+func (s *Service) Nodes() ([]*NodeDetails, error) {
 	if err := s.ensureClient("Nodes"); err != nil {
 		return nil, err
 	}
@@ -97,7 +98,7 @@ func (s *Service) Nodes() ([]*restypes.NodeDetails, error) {
 		return nil, err
 	}
 
-	details := make([]*restypes.NodeDetails, 0, len(nodeList.Items))
+	details := make([]*NodeDetails, 0, len(nodeList.Items))
 	for i := range nodeList.Items {
 		node := &nodeList.Items[i]
 		details = append(details, s.buildNodeDetails(node, podsByNode[node.Name], nodeMetrics[node.Name]))
@@ -452,30 +453,27 @@ func nodePodFieldSelector(nodeName string) string {
 	return fields.OneTermEqualSelector("spec.nodeName", nodeName).String()
 }
 
-func (s *Service) buildNodeDetails(node *corev1.Node, pods []corev1.Pod, nodeMetrics corev1.ResourceList) *restypes.NodeDetails {
+func (s *Service) buildNodeDetails(node *corev1.Node, pods []corev1.Pod, nodeMetrics corev1.ResourceList) *NodeDetails {
 	var cpuRequests, cpuLimits, memRequests, memLimits int64
 	var podsList []restypes.PodSimpleInfo
 	var nodeRestarts int32
-	model := resourcemodel.BuildNodeResourceModel(s.deps.ClusterID, node)
-	nodeFacts := model.Facts.Node
+	model := BuildResourceModel(s.deps.ClusterID, node)
+	nodeFacts := BuildFacts(node)
 
 	for _, pod := range pods {
-		podModel := resourcemodel.BuildPodResourceModel(s.deps.ClusterID, &pod)
-		podFacts := podModel.Facts.Pod
+		podModel := podres.BuildResourceModel(s.deps.ClusterID, &pod)
+		podFacts := podres.BuildFacts(&pod)
 		podRestarts := podFacts.RestartCount
 		nodeRestarts += podRestarts
 
 		podsList = append(podsList, restypes.PodSimpleInfo{
-			Kind:               "Pod",
-			Name:               pod.Name,
-			Namespace:          pod.Namespace,
-			Status:             podModel.Status.Label,
-			StatusState:        podModel.Status.State,
-			StatusPresentation: podModel.Status.Presentation,
-			StatusReason:       podModel.Status.Reason,
-			Ready:              fmt.Sprintf("%d/%d", podFacts.ReadyContainers, podFacts.TotalContainers),
-			Restarts:           podRestarts,
-			Age:                common.FormatAge(pod.CreationTimestamp.Time),
+			Kind:             "Pod",
+			Name:             pod.Name,
+			Namespace:        pod.Namespace,
+			StatusProjection: restypes.NewStatusProjection(podModel.Status),
+			Ready:            fmt.Sprintf("%d/%d", podFacts.ReadyContainers, podFacts.TotalContainers),
+			Restarts:         podRestarts,
+			Age:              common.FormatAge(pod.CreationTimestamp.Time),
 		})
 
 		if pod.Status.Phase == corev1.PodRunning || pod.Status.Phase == corev1.PodPending {
@@ -500,29 +498,25 @@ func (s *Service) buildNodeDetails(node *corev1.Node, pods []corev1.Pod, nodeMet
 		}
 	}
 
-	details := &restypes.NodeDetails{
-		Name:               node.Name,
-		Status:             model.Status.Label,
-		StatusState:        model.Status.State,
-		StatusPresentation: model.Status.Presentation,
-		StatusReason:       model.Status.Reason,
-		Age:                common.FormatAge(node.CreationTimestamp.Time),
-		Unschedulable:      nodeFacts != nil && nodeFacts.Unschedulable,
-		Architecture:       node.Status.NodeInfo.Architecture,
-		OS:                 node.Status.NodeInfo.OperatingSystem,
-		OSImage:            node.Status.NodeInfo.OSImage,
-		KernelVersion:      node.Status.NodeInfo.KernelVersion,
-		ContainerRuntime:   node.Status.NodeInfo.ContainerRuntimeVersion,
-		KubeletVersion:     node.Status.NodeInfo.KubeletVersion,
-		Labels:             node.Labels,
-		Annotations:        node.Annotations,
-		PodsList:           podsList,
-		PodsCount:          len(podsList),
-		Restarts:           nodeRestarts,
+	details := &NodeDetails{
+		Name:             node.Name,
+		StatusProjection: restypes.NewStatusProjection(model.Status),
+		Unschedulable:    nodeFacts.Unschedulable,
+		Architecture:     node.Status.NodeInfo.Architecture,
+		OS:               node.Status.NodeInfo.OperatingSystem,
+		OSImage:          node.Status.NodeInfo.OSImage,
+		KernelVersion:    node.Status.NodeInfo.KernelVersion,
+		ContainerRuntime: node.Status.NodeInfo.ContainerRuntimeVersion,
+		KubeletVersion:   node.Status.NodeInfo.KubeletVersion,
+		Labels:           node.Labels,
+		Annotations:      node.Annotations,
+		PodsList:         podsList,
+		PodsCount:        len(podsList),
+		Restarts:         nodeRestarts,
 	}
 
 	for _, condition := range node.Status.Conditions {
-		details.Conditions = append(details.Conditions, restypes.NodeCondition{
+		details.Conditions = append(details.Conditions, NodeCondition{
 			Kind:    string(condition.Type),
 			Status:  string(condition.Status),
 			Reason:  condition.Reason,
@@ -531,7 +525,7 @@ func (s *Service) buildNodeDetails(node *corev1.Node, pods []corev1.Pod, nodeMet
 	}
 
 	for _, taint := range node.Spec.Taints {
-		details.Taints = append(details.Taints, restypes.NodeTaint{
+		details.Taints = append(details.Taints, NodeTaint{
 			Key:    taint.Key,
 			Value:  taint.Value,
 			Effect: string(taint.Effect),
@@ -685,7 +679,7 @@ func deriveNodeRoles(labels map[string]string) string {
 	return strings.Join(roles, ",")
 }
 
-func setNodeAddresses(details *restypes.NodeDetails, addresses []corev1.NodeAddress) {
+func setNodeAddresses(details *NodeDetails, addresses []corev1.NodeAddress) {
 	for _, addr := range addresses {
 		switch addr.Type {
 		case corev1.NodeInternalIP:
@@ -698,7 +692,7 @@ func setNodeAddresses(details *restypes.NodeDetails, addresses []corev1.NodeAddr
 	}
 }
 
-func setNodeCapacity(details *restypes.NodeDetails, capacity, allocatable corev1.ResourceList) {
+func setNodeCapacity(details *NodeDetails, capacity, allocatable corev1.ResourceList) {
 	if cpu, ok := capacity[corev1.ResourceCPU]; ok {
 		details.CPUCapacity = cpu.String()
 	}
@@ -722,7 +716,7 @@ func setNodeCapacity(details *restypes.NodeDetails, capacity, allocatable corev1
 	}
 }
 
-func setNodeRequests(details *restypes.NodeDetails, cpuRequests, cpuLimits, memRequests, memLimits int64) {
+func setNodeRequests(details *NodeDetails, cpuRequests, cpuLimits, memRequests, memLimits int64) {
 	if cpuRequests > 0 {
 		details.CPURequests = fmt.Sprintf("%dm", cpuRequests)
 	} else {
@@ -745,7 +739,7 @@ func setNodeRequests(details *restypes.NodeDetails, cpuRequests, cpuLimits, memR
 	}
 }
 
-func setNodeUsage(details *restypes.NodeDetails, usage corev1.ResourceList) {
+func setNodeUsage(details *NodeDetails, usage corev1.ResourceList) {
 	if usage == nil {
 		return
 	}
@@ -757,7 +751,7 @@ func setNodeUsage(details *restypes.NodeDetails, usage corev1.ResourceList) {
 	}
 }
 
-func setLegacySummaries(details *restypes.NodeDetails) {
+func setLegacySummaries(details *NodeDetails) {
 	if details.CPUCapacity != "" {
 		details.CPU = details.CPUCapacity
 	}
@@ -781,13 +775,9 @@ func formatMemoryBytes(bytes int64) string {
 }
 
 func (s *Service) logInfo(msg string) {
-	if s.deps.Logger != nil {
-		s.deps.Logger.Info(msg, "NodeOperations")
-	}
+	applog.Info(s.deps.Logger, msg, "NodeOperations")
 }
 
 func (s *Service) logError(msg string) {
-	if s.deps.Logger != nil {
-		s.deps.Logger.Error(msg, "NodeOperations")
-	}
+	applog.Error(s.deps.Logger, msg, "NodeOperations")
 }

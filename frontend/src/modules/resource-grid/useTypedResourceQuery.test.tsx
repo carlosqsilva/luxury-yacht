@@ -319,6 +319,101 @@ describe('useTypedResourceQuery', () => {
     expect(result?.error).toBeNull();
   });
 
+  it('self-heals a warm-up result without waiting for a live-data identity change', async () => {
+    // The first request warms up (executed but no payload yet — backend caches
+    // still syncing on the very first view). For an EMPTY domain the live-data
+    // identity is a constant (no rows ⇒ version 0, checksum stable), so the
+    // identity-driven retry can never fire. The hook must retry the warm-up on
+    // its own and settle once the backend is ready, instead of spinning forever.
+    requestRefreshDomainStateMock
+      .mockResolvedValueOnce({ status: 'executed', data: { status: 'ready', data: null } })
+      .mockResolvedValue({ status: 'executed', data: { status: 'ready', data: { rows: [] } } });
+
+    const Probe: React.FC = () => {
+      result = useTypedResourceQuery<TestPayload, TestRow>({
+        enabled: true,
+        clusterId: 'cluster-a',
+        domain: 'namespace-storage',
+        label: 'Namespace Storage',
+        filters: DEFAULT_GRID_TABLE_FILTER_STATE,
+        sortConfig,
+        // Constant across the whole test — the empty-domain identity never moves.
+        liveDataVersion: '0::',
+        selectRows,
+      });
+      return null;
+    };
+
+    vi.useFakeTimers();
+    try {
+      await act(async () => {
+        root.render(<Probe />);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      // Warm-up: not loaded yet, no fabricated error, still showing the spinner.
+      expect(result?.loaded).toBe(false);
+      expect(result?.error).toBeNull();
+      expect(requestRefreshDomainStateMock).toHaveBeenCalledTimes(1);
+
+      // Without any live-data identity change, the warm-up retry fires and the
+      // now-ready (empty) payload settles the table — no infinite spinner.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+
+      expect(requestRefreshDomainStateMock.mock.calls.length).toBeGreaterThan(1);
+      expect(result?.loaded).toBe(true);
+      expect(result?.rows).toEqual([]);
+      expect(result?.error).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stops the warm-up retry once the query has loaded (no refetch storm)', async () => {
+    // Once a payload applies, the self-healing retry must go quiet: a loaded
+    // table must not keep re-issuing the query on a timer.
+    requestRefreshDomainStateMock.mockResolvedValue({
+      status: 'executed',
+      data: { status: 'ready', data: { rows: [{ name: 'pvc-a' }] } },
+    });
+
+    const Probe: React.FC = () => {
+      result = useTypedResourceQuery<TestPayload, TestRow>({
+        enabled: true,
+        clusterId: 'cluster-a',
+        domain: 'namespace-storage',
+        label: 'Namespace Storage',
+        filters: DEFAULT_GRID_TABLE_FILTER_STATE,
+        sortConfig,
+        liveDataVersion: 'v1',
+        selectRows,
+      });
+      return null;
+    };
+
+    vi.useFakeTimers();
+    try {
+      await act(async () => {
+        root.render(<Probe />);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(result?.loaded).toBe(true);
+      const callsAfterLoad = requestRefreshDomainStateMock.mock.calls.length;
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10000);
+      });
+      // No additional requests fired after the load settled.
+      expect(requestRefreshDomainStateMock.mock.calls.length).toBe(callsAfterLoad);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps a thrown fetch failure as a real error', async () => {
     requestRefreshDomainStateMock.mockRejectedValueOnce(new Error('cluster gone'));
 
@@ -647,6 +742,66 @@ describe('useTypedResourceQuery', () => {
 
     expect(result?.loading).toBe(false);
     expect(result?.rows).toEqual([{ name: 'pod-b' }]);
+  });
+
+  it('never commits the previous cluster rows after a cluster switch (no cross-cluster flash)', async () => {
+    // Multi-cluster correctness: switching the active cluster must NOT paint the
+    // prior cluster's rows under the new cluster, even for one frame. Cluster A
+    // settles with rows; cluster B is held in flight so the ONLY way pod-a could
+    // appear under cluster-b is the stale in-flight `rows` state surviving the
+    // switch. We record every COMMITTED frame via a layout effect (which never
+    // fires for a render React discards) and assert no committed cluster-b frame
+    // carries cluster-a's rows.
+    requestRefreshDomainStateMock.mockImplementation((request: { scope?: string }) => {
+      if (typeof request?.scope === 'string' && request.scope.startsWith('cluster-a')) {
+        return Promise.resolve({
+          status: 'executed',
+          data: { status: 'ready', data: { rows: [{ name: 'pod-a' }] } },
+        });
+      }
+      // cluster-b: keep the fetch in flight so no cluster-b rows ever arrive.
+      return new Promise(() => {});
+    });
+
+    const committed: Array<{ clusterId: string; rows: TestRow[] }> = [];
+    const Probe: React.FC<{ clusterId: string }> = ({ clusterId }) => {
+      const query = useTypedResourceQuery<TestPayload, TestRow>({
+        enabled: true,
+        clusterId,
+        domain: 'pods',
+        label: 'All Namespaces Pods',
+        filters: DEFAULT_GRID_TABLE_FILTER_STATE,
+        sortConfig,
+        liveDataVersion: 'v1',
+        selectRows,
+      });
+      result = query;
+      React.useLayoutEffect(() => {
+        committed.push({ clusterId, rows: query.rows });
+      });
+      return null;
+    };
+
+    await act(async () => {
+      root.render(<Probe clusterId="cluster-a" />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result?.rows).toEqual([{ name: 'pod-a' }]);
+
+    // Ignore cluster-a's own committed frames; only what commits under cluster-b matters.
+    committed.length = 0;
+
+    await act(async () => {
+      root.render(<Probe clusterId="cluster-b" />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const leakedFrames = committed.filter(
+      (frame) => frame.clusterId === 'cluster-b' && frame.rows.some((row) => row.name === 'pod-a')
+    );
+    expect(leakedFrames).toEqual([]);
   });
 
   it('keeps a blocked query request in the warm-up (not-loaded) state', async () => {

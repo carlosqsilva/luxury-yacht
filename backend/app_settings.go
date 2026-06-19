@@ -216,63 +216,27 @@ const (
 )
 
 func clampKubernetesClientQPS(qps int) int {
-	if qps < minKubernetesClientQPS {
-		return minKubernetesClientQPS
-	}
-	if qps > maxKubernetesClientQPS {
-		return maxKubernetesClientQPS
-	}
-	return qps
+	return clampInt(qps, minKubernetesClientQPS, maxKubernetesClientQPS)
 }
 
 func clampKubernetesClientBurst(burst int) int {
-	if burst < minKubernetesClientBurst {
-		return minKubernetesClientBurst
-	}
-	if burst > maxKubernetesClientBurst {
-		return maxKubernetesClientBurst
-	}
-	return burst
+	return clampInt(burst, minKubernetesClientBurst, maxKubernetesClientBurst)
 }
 
 func clampPermissionSSRRFetchConcurrency(limit int) int {
-	if limit < minPermissionSSRRFetchConcurrency {
-		return minPermissionSSRRFetchConcurrency
-	}
-	if limit > maxPermissionSSRRFetchConcurrency {
-		return maxPermissionSSRRFetchConcurrency
-	}
-	return limit
+	return clampInt(limit, minPermissionSSRRFetchConcurrency, maxPermissionSSRRFetchConcurrency)
 }
 
 func clampObjPanelLogsBufferMaxSize(size int) int {
-	if size < minObjPanelLogsBufferMaxSize {
-		return minObjPanelLogsBufferMaxSize
-	}
-	if size > maxObjPanelLogsBufferMaxSize {
-		return maxObjPanelLogsBufferMaxSize
-	}
-	return size
+	return clampInt(size, minObjPanelLogsBufferMaxSize, maxObjPanelLogsBufferMaxSize)
 }
 
 func clampObjPanelLogsTargetPerScopeLimit(limit int) int {
-	if limit < minObjPanelLogsTargetPerScopeLimit {
-		return minObjPanelLogsTargetPerScopeLimit
-	}
-	if limit > maxObjPanelLogsTargetPerScopeLimit {
-		return maxObjPanelLogsTargetPerScopeLimit
-	}
-	return limit
+	return clampInt(limit, minObjPanelLogsTargetPerScopeLimit, maxObjPanelLogsTargetPerScopeLimit)
 }
 
 func clampObjPanelLogsTargetGlobalLimit(limit int) int {
-	if limit < minObjPanelLogsTargetGlobalLimit {
-		return minObjPanelLogsTargetGlobalLimit
-	}
-	if limit > maxObjPanelLogsTargetGlobalLimit {
-		return maxObjPanelLogsTargetGlobalLimit
-	}
-	return limit
+	return clampInt(limit, minObjPanelLogsTargetGlobalLimit, maxObjPanelLogsTargetGlobalLimit)
 }
 
 // settingsKubeconfig captures user-configurable kubeconfig settings.
@@ -1713,7 +1677,7 @@ func (a *App) SetPaletteTint(mode string, hue, saturation, brightness int) error
 		{Key: saturationKey, Value: saturation},
 		{Key: brightnessKey, Value: brightness},
 	}})
-	if err == nil && a.logger != nil {
+	if err == nil {
 		a.logger.Info(
 			fmt.Sprintf(
 				"Palette tint (%s) changed to hue=%d saturation=%d brightness=%d",
@@ -1745,7 +1709,7 @@ func (a *App) SetLinkColor(mode string, color string) error {
 	if err != nil && color != "" && !validHexColorRe.MatchString(color) {
 		return fmt.Errorf("invalid link color format: %s (expected #rrggbb)", color)
 	}
-	if err == nil && a.logger != nil {
+	if err == nil {
 		a.logger.Info(fmt.Sprintf("Link color (%s) changed to: %s", mode, color), logsources.Settings)
 	}
 	return err
@@ -1765,7 +1729,7 @@ func (a *App) SetAccentColor(mode string, color string) error {
 	if err != nil && color != "" && !validHexColorRe.MatchString(color) {
 		return fmt.Errorf("invalid accent color format: %s (expected #rrggbb)", color)
 	}
-	if err == nil && a.logger != nil {
+	if err == nil {
 		a.logger.Info(fmt.Sprintf("Accent color (%s) changed to: %s", mode, color), logsources.Settings)
 	}
 	return err

@@ -17,6 +17,8 @@ import (
 	"strings"
 	"time"
 
+	podspkg "github.com/luxury-yacht/app/backend/resources/pods"
+
 	"github.com/google/uuid"
 	"github.com/luxury-yacht/app/backend/internal/config"
 	"github.com/luxury-yacht/app/backend/internal/logsources"
@@ -86,7 +88,7 @@ func (a *App) startPortForwardAction(targetRef ObjectActionTargetRef, options Ob
 
 	if err := a.requireResourcePermission(deps.Context, deps, resourcePermissionCheck{
 		Version:     "v1",
-		Kind:        "Pod",
+		Kind:        podspkg.Identity.Kind,
 		Namespace:   target.Namespace,
 		Name:        resolved.PodName,
 		Verb:        "create",
@@ -112,7 +114,7 @@ func (a *App) startPortForwardAction(targetRef ObjectActionTargetRef, options Ob
 			TargetGroup:   target.Group,
 			TargetVersion: target.Version,
 			TargetName:    target.Name,
-			Status:        "connecting",
+			Status:        PortForwardStatusConnecting,
 			StartedAt:     time.Now().Format(time.RFC3339),
 		},
 		stopChan:  make(chan struct{}),
@@ -207,7 +209,7 @@ func (a *App) runPortForwarder(ctx context.Context, session *portForwardSessionI
 		// Check if we should reconnect.
 		if !a.shouldReconnect(session) {
 			session.mu.Lock()
-			session.Status = "error"
+			session.Status = PortForwardStatusError
 			session.StatusReason = err.Error()
 			session.mu.Unlock()
 			a.portForwardLifecycle().emitStatus(session)
@@ -218,14 +220,14 @@ func (a *App) runPortForwarder(ctx context.Context, session *portForwardSessionI
 		session.mu.Lock()
 		session.reconnectAttempt++
 		attempt := session.reconnectAttempt
-		session.Status = "reconnecting"
+		session.Status = PortForwardStatusReconnecting
 		session.StatusReason = fmt.Sprintf("attempt %d/%d: %s", attempt, config.PortForwardMaxReconnectAttempts, err.Error())
 		session.mu.Unlock()
 		a.portForwardLifecycle().emitStatus(session)
 
 		if attempt > config.PortForwardMaxReconnectAttempts {
 			session.mu.Lock()
-			session.Status = "error"
+			session.Status = PortForwardStatusError
 			session.StatusReason = "max reconnect attempts exceeded"
 			session.mu.Unlock()
 			a.portForwardLifecycle().emitStatus(session)
@@ -245,9 +247,7 @@ func (a *App) runPortForwarder(ctx context.Context, session *portForwardSessionI
 
 		// Re-resolve the pod (it may have changed for workloads/services).
 		if err := a.reresolvePod(ctx, session); err != nil {
-			if a.logger != nil {
-				a.logger.Warn(fmt.Sprintf("Failed to re-resolve pod for %s: %v", session.ID, err), logsources.PortForward)
-			}
+			a.logger.Warn(fmt.Sprintf("Failed to re-resolve pod for %s: %v", session.ID, err), logsources.PortForward)
 			continue
 		}
 	}
@@ -426,7 +426,7 @@ func runtimeOperationFromPortForward(session *portForwardSessionInternal) Runtim
 			session.Namespace,
 			session.TargetName,
 		),
-		Status:       session.Status,
+		Status:       string(session.Status),
 		StatusReason: session.StatusReason,
 		StartedAt:    session.StartedAt,
 		DisplayName:  fmt.Sprintf("Port forward %s/%s", session.Namespace, session.TargetName),

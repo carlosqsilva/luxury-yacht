@@ -4,7 +4,15 @@
  * Owns object-panel tab state across the app: open object refs, active tabs,
  * canonical panel IDs, and full cache eviction when a panel is closed.
  */
-import React, { createContext, useContext, useState, useCallback, useMemo, useEffect } from 'react';
+import React, {
+  createContext,
+  useContext,
+  useState,
+  useCallback,
+  useMemo,
+  useEffect,
+  useRef,
+} from 'react';
 import type { KubernetesObjectReference } from '@/types/view-state';
 import type { ViewType } from '@modules/object-panel/components/ObjectPanel/types';
 import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
@@ -83,16 +91,14 @@ interface ObjectPanelStateContextType {
   hydrateClusterMeta: (data: KubernetesObjectReference) => KubernetesObjectReference;
 
   /**
-   * Read the persisted active sub-tab for an object panel. Returns
-   * undefined if no tab has been explicitly set; the panel can fall
-   * back to its own default in that case.
-   */
-  getObjectPanelActiveTab: (panelId: string) => ViewType | undefined;
-
-  /**
    * Persist the active sub-tab for an object panel into the active
    * cluster's slice. Survives unmount/remount cycles caused by cluster
    * switching.
+   *
+   * Reading the active tab is intentionally NOT on this context — use the
+   * reactive useObjectPanelActiveTab hook. Keeping the read separate stops a
+   * tab switch from churning this (otherwise stable) value and re-rendering
+   * every consumer.
    */
   setObjectPanelActiveTab: (panelId: string, tab: ViewType) => void;
 }
@@ -106,6 +112,25 @@ export const useObjectPanelState = () => {
   }
   return context;
 };
+
+/**
+ * Volatile context carrying only the per-panel active-tab map. Kept separate
+ * from ObjectPanelStateContext so switching a panel's sub-tab does not churn
+ * the (otherwise stable) main context value and re-render every
+ * useObjectPanelState() consumer. Only components that render tab-dependent
+ * content subscribe here, via useObjectPanelActiveTab.
+ */
+const ObjectPanelActiveTabsContext = createContext<Map<string, ViewType>>(
+  DEFAULT_OBJECT_PANEL_STATE.activeTabs
+);
+
+/**
+ * Reactively read the persisted active sub-tab for an object panel. Returns
+ * undefined when no tab has been set so the caller can fall back to its own
+ * default. Re-renders the caller only when the active-tab map changes.
+ */
+export const useObjectPanelActiveTab = (panelId: string): ViewType | undefined =>
+  useContext(ObjectPanelActiveTabsContext).get(panelId);
 
 interface ObjectPanelStateProviderProps {
   children: React.ReactNode;
@@ -125,6 +150,13 @@ export const ObjectPanelStateProvider: React.FC<ObjectPanelStateProviderProps> =
   const activeState = objectPanelStateByCluster[clusterKey] ?? DEFAULT_OBJECT_PANEL_STATE;
   const { openPanels } = activeState;
   const showObjectPanel = openPanels.size > 0;
+
+  // Mirror the per-cluster state in a ref so imperative callbacks (e.g.
+  // onCloseObjectPanel) can read the current slice without depending on
+  // objectPanelStateByCluster — that dependency would rebuild the callback,
+  // and therefore the whole context value, on every tab switch.
+  const stateByClusterRef = useRef(objectPanelStateByCluster);
+  stateByClusterRef.current = objectPanelStateByCluster;
 
   const updateActiveState = useCallback(
     (updater: (prev: ObjectPanelState) => ObjectPanelState) => {
@@ -250,7 +282,7 @@ export const ObjectPanelStateProvider: React.FC<ObjectPanelStateProviderProps> =
   const onCloseObjectPanel = useCallback(() => {
     // Clear dockable state, scoped-domain caches, AND LogViewer prefs
     // for every open object panel in the active cluster before closing.
-    const current = objectPanelStateByCluster[clusterKey] ?? DEFAULT_OBJECT_PANEL_STATE;
+    const current = stateByClusterRef.current[clusterKey] ?? DEFAULT_OBJECT_PANEL_STATE;
     current.openPanels.forEach((ref, panelId) => {
       evictPanelScopes(ref);
       clearLogViewerPrefs(panelId);
@@ -258,14 +290,7 @@ export const ObjectPanelStateProvider: React.FC<ObjectPanelStateProviderProps> =
       clearPanelState(panelId);
     });
     updateActiveState(() => DEFAULT_OBJECT_PANEL_STATE);
-  }, [updateActiveState, objectPanelStateByCluster, clusterKey]);
-
-  const getObjectPanelActiveTab = useCallback(
-    (panelId: string): ViewType | undefined => {
-      return activeState.activeTabs.get(panelId);
-    },
-    [activeState]
-  );
+  }, [updateActiveState, clusterKey]);
 
   const setObjectPanelActiveTab = useCallback(
     (panelId: string, tab: ViewType) => {
@@ -296,7 +321,6 @@ export const ObjectPanelStateProvider: React.FC<ObjectPanelStateProviderProps> =
         }
       },
       hydrateClusterMeta,
-      getObjectPanelActiveTab,
       setObjectPanelActiveTab,
     }),
     [
@@ -306,12 +330,15 @@ export const ObjectPanelStateProvider: React.FC<ObjectPanelStateProviderProps> =
       closePanel,
       onCloseObjectPanel,
       hydrateClusterMeta,
-      getObjectPanelActiveTab,
       setObjectPanelActiveTab,
     ]
   );
 
   return (
-    <ObjectPanelStateContext.Provider value={value}>{children}</ObjectPanelStateContext.Provider>
+    <ObjectPanelStateContext.Provider value={value}>
+      <ObjectPanelActiveTabsContext.Provider value={activeState.activeTabs}>
+        {children}
+      </ObjectPanelActiveTabsContext.Provider>
+    </ObjectPanelStateContext.Provider>
   );
 };

@@ -38,11 +38,20 @@ export interface OpenWithObjectOptions {
 interface CurrentObjectPanelContextValue {
   objectData: KubernetesObjectReference | null;
   panelId: string | null;
+  // Object creation time (RFC3339 UTC) for the current object. The shared
+  // ResourceHeader formats it into Age for every kind. Empty/absent when the
+  // backend can't determine it.
+  creationTimestamp?: string | null;
+  // Relative "last modified" time for the current object (managedFields-derived,
+  // same format as Age). Empty/absent when the backend can't determine it.
+  lastModified?: string | null;
 }
 
 export const CurrentObjectPanelContext = createContext<CurrentObjectPanelContextValue>({
   objectData: null,
   panelId: null,
+  creationTimestamp: null,
+  lastModified: null,
 });
 
 // Read the current panel's object data. Only meaningful inside a <ObjectPanel> tree.
@@ -83,7 +92,12 @@ export function useObjectPanel() {
   const { tabGroups, focusPanel } = useDockablePanelContext();
 
   // Per-instance object data (only set when called inside an ObjectPanel tree).
-  const { objectData, panelId: currentPanelId } = useCurrentObjectPanel();
+  const {
+    objectData,
+    panelId: currentPanelId,
+    creationTimestamp,
+    lastModified,
+  } = useCurrentObjectPanel();
   const pendingFocusPanelIdRef = useRef<string | null>(null);
 
   // Keep the close callback updated for closeObjectPanelGlobal (test-only).
@@ -155,6 +169,11 @@ export function useObjectPanel() {
   return {
     // Object data for the current panel instance (null outside an ObjectPanel tree).
     objectData,
+    // Object creation time (RFC3339 UTC) for the current object (when available);
+    // the shared ResourceHeader formats it into Age.
+    creationTimestamp,
+    // Relative "last modified" time for the current object (when available).
+    lastModified,
     // Whether any object panel is open.
     isOpen: showObjectPanel,
     // All open panels.
