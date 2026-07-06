@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/luxury-yacht/app/backend/refresh"
 	"github.com/luxury-yacht/app/backend/resourcemodel"
 )
 
@@ -20,6 +21,11 @@ const (
 	StreamScopeAllNamespace StreamScopeKind = "namespace-all"
 	StreamScopeNode         StreamScopeKind = "node"
 	StreamScopeWorkload     StreamScopeKind = "workload"
+	// StreamScopeObject pins one Kubernetes object by its object-scope tail
+	// (namespace:group/version:kind:name — the snapshot domains' encoding,
+	// decoded solely by refresh.ParseObjectScope). Used by the object-events
+	// doorbell, whose subscriptions are per-panel-object.
+	StreamScopeObject StreamScopeKind = "object"
 )
 
 // StreamSelector is the typed subscription identity for a resource stream.
@@ -42,6 +48,9 @@ type StreamSelector struct {
 	Namespace string
 	Node      string
 	Workload  *WorkloadSelector
+	// Object is the validated object-scope tail; non-empty only when
+	// ScopeKind == StreamScopeObject.
+	Object string
 }
 
 func (s StreamSelector) Cluster() string {
@@ -92,7 +101,11 @@ func ParseStreamSelector(clusterID, domain, scope string) (StreamSelector, error
 		domainClusterStorage,
 		domainClusterConfig,
 		domainClusterCRDs,
-		domainClusterCustom:
+		domainClusterCustom,
+		domainCatalog,
+		domainClusterEvents,
+		domainNamespaces,
+		domainClusterOverview:
 		if scope != "" && !strings.EqualFold(strings.TrimSuffix(scope, ":"), "cluster") {
 			return StreamSelector{}, fmt.Errorf("%s stream does not accept scope %q", domain, scope)
 		}
@@ -102,6 +115,17 @@ func ParseStreamSelector(clusterID, domain, scope string) (StreamSelector, error
 	case domainPods:
 		return parsePodSelector(selector, scope)
 
+	case domainObjectEvents:
+		// Per-object doorbell: the scope is the snapshot domain's object-scope
+		// tail. Validate through the single object-scope decoder so a malformed
+		// subscribe is rejected here, not silently never-matched.
+		if _, err := refresh.ParseObjectScope(scope); err != nil {
+			return StreamSelector{}, fmt.Errorf("%s stream scope: %w", domain, err)
+		}
+		selector.ScopeKind = StreamScopeObject
+		selector.Object = scope
+		return selector, nil
+
 	case domainWorkloads,
 		domainNamespaceConfig,
 		domainNamespaceNetwork,
@@ -110,7 +134,8 @@ func ParseStreamSelector(clusterID, domain, scope string) (StreamSelector, error
 		domainNamespaceHelm,
 		domainNamespaceAutoscaling,
 		domainNamespaceQuotas,
-		domainNamespaceStorage:
+		domainNamespaceStorage,
+		domainNamespaceEvents:
 		return parseNamespaceSelector(selector, scope)
 
 	default:
@@ -143,6 +168,8 @@ func (s StreamSelector) String() string {
 			s.Workload.Kind,
 			s.Workload.Name,
 		)
+	case StreamScopeObject:
+		return s.Object
 	}
 	return ""
 }
@@ -185,7 +212,7 @@ func parsePodSelector(selector StreamSelector, scope string) (StreamSelector, er
 		version := strings.TrimSpace(parts[2])
 		kind := strings.TrimSpace(parts[3])
 		name := strings.TrimSpace(parts[4])
-		if namespace == "" || version == "" || kind == "" || name == "" {
+		if namespace == "" || group == "" || version == "" || kind == "" || name == "" {
 			return StreamSelector{}, fmt.Errorf("pods workload scope requires namespace:group:version:kind:name")
 		}
 		selector.ScopeKind = StreamScopeWorkload

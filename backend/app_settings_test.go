@@ -29,7 +29,40 @@ func setTestConfigEnv(t *testing.T) {
 	baseDir := t.TempDir()
 	t.Setenv("HOME", baseDir)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(baseDir, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(baseDir, ".cache"))
 	t.Setenv("APPDATA", filepath.Join(baseDir, "AppData", "Roaming"))
+}
+
+func TestClearAppStateRemovesCacheDir(t *testing.T) {
+	setTestConfigEnv(t)
+	app := newTestAppWithDefaults(t)
+	app.Ctx = context.Background()
+
+	// The app cache dir lives under the user cache dir (redirected into a temp
+	// dir by setTestConfigEnv). Seed the subdirs the three cache subsystems use
+	// so we can prove Factory Reset removes cached data, not just config files.
+	cacheBase, err := os.UserCacheDir()
+	require.NoError(t, err)
+	cacheDir := filepath.Join(cacheBase, "luxury-yacht")
+	for _, sub := range []string{"discovery", "spill", "diagnostics"} {
+		dir := filepath.Join(cacheDir, sub)
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "cached"), []byte("x"), 0o644))
+	}
+
+	// A sibling under the user cache dir must be left untouched — Factory Reset
+	// only clears this app's cache subtree.
+	sibling := filepath.Join(cacheBase, "other-app")
+	require.NoError(t, os.MkdirAll(sibling, 0o755))
+
+	require.NoError(t, app.ClearAppState())
+
+	_, statErr := os.Stat(cacheDir)
+	require.Truef(t, os.IsNotExist(statErr),
+		"expected app cache dir %q to be removed, stat err=%v", cacheDir, statErr)
+
+	_, siblingErr := os.Stat(sibling)
+	require.NoError(t, siblingErr, "unrelated sibling cache dir must be preserved")
 }
 
 func TestAppLoadWindowSettingsDefaultWhenMissing(t *testing.T) {
@@ -1007,4 +1040,31 @@ func TestAppSettingsDefaultTablePageSize(t *testing.T) {
 	app.appSettings = nil
 	require.NoError(t, app.loadAppSettings())
 	require.Equal(t, maxTablePageSize, app.appSettings.DefaultTablePageSize)
+}
+
+// TestGetAppSettingsDoesNotDeadlockWhenSettingsNotLoaded pins the settingsMu leaf-lock
+// companion of the limiter fix: GetAppSettings holds settingsMu while loadAppSettings
+// runs, and the settings tail reaches sharedContainerLogsTargetLimiter. The accessor
+// must not lock settingsMu (containerLogsTargetLimiterMu is a leaf lock) — re-locking
+// it on the same goroutine deadlocked forever.
+func TestGetAppSettingsDoesNotDeadlockWhenSettingsNotLoaded(t *testing.T) {
+	app := &App{} // appSettings == nil and no limiter yet: both lazy inits fire
+
+	type result struct {
+		settings *AppSettings
+		err      error
+	}
+	done := make(chan result, 1)
+	go func() {
+		settings, err := app.GetAppSettings()
+		done <- result{settings: settings, err: err}
+	}()
+
+	select {
+	case res := <-done:
+		require.NoError(t, res.err)
+		require.NotNil(t, res.settings)
+	case <-time.After(3 * time.Second):
+		t.Fatal("GetAppSettings deadlocked: the limiter accessor re-locked settingsMu")
+	}
 }

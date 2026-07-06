@@ -19,19 +19,19 @@ import (
 
 func TestSortNamespaceCustomSummaries(t *testing.T) {
 	items := []NamespaceCustomSummary{
-		{Namespace: "staging", APIGroup: "apps.example.com", Kind: "Widget", Name: "zeta"},
-		{Namespace: "default", APIGroup: "alpha.example.com", Kind: "Gadget", Name: "beta"},
-		{Namespace: "default", APIGroup: "alpha.example.com", Kind: "Gadget", Name: "alpha"},
-		{Namespace: "default", APIGroup: "beta.example.com", Kind: "Gadget", Name: "a"},
+		{Namespace: "staging", Group: "apps.example.com", Kind: "Widget", Name: "zeta"},
+		{Namespace: "default", Group: "alpha.example.com", Kind: "Gadget", Name: "beta"},
+		{Namespace: "default", Group: "alpha.example.com", Kind: "Gadget", Name: "alpha"},
+		{Namespace: "default", Group: "beta.example.com", Kind: "Gadget", Name: "a"},
 	}
 
 	sortNamespaceCustomSummaries(items)
 
 	require.Equal(t, []NamespaceCustomSummary{
-		{Namespace: "default", APIGroup: "alpha.example.com", Kind: "Gadget", Name: "alpha"},
-		{Namespace: "default", APIGroup: "alpha.example.com", Kind: "Gadget", Name: "beta"},
-		{Namespace: "default", APIGroup: "beta.example.com", Kind: "Gadget", Name: "a"},
-		{Namespace: "staging", APIGroup: "apps.example.com", Kind: "Widget", Name: "zeta"},
+		{Namespace: "default", Group: "alpha.example.com", Kind: "Gadget", Name: "alpha"},
+		{Namespace: "default", Group: "alpha.example.com", Kind: "Gadget", Name: "beta"},
+		{Namespace: "default", Group: "beta.example.com", Kind: "Gadget", Name: "a"},
+		{Namespace: "staging", Group: "apps.example.com", Kind: "Widget", Name: "zeta"},
 	}, items)
 }
 
@@ -153,4 +153,63 @@ func registerDBClusterTypes(t testing.TB, scheme *runtime.Scheme) {
 	gvk := schema.GroupVersionKind{Group: "postgresql.cnpg.io", Version: "v1", Kind: "DBCluster"}
 	scheme.AddKnownTypeWithName(gvk, &unstructured.Unstructured{})
 	scheme.AddKnownTypeWithName(gvk.GroupVersion().WithKind("DBClusterList"), &unstructured.UnstructuredList{})
+}
+
+// Scoped clusters (docs/plans/namespace-scope.md): the all-namespaces view
+// fans the per-CRD LIST over the configured scope instead of one cluster-wide
+// LIST the identity cannot perform. A namespace outside the scope must never
+// be listed.
+func TestNamespaceCustomBuilderAllNamespacesFansOutOverScope(t *testing.T) {
+	now := time.Now()
+	widgetCRD := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{Name: "widgets.acme.test"},
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Group: "acme.test",
+			Scope: apiextensionsv1.NamespaceScoped,
+			Names: apiextensionsv1.CustomResourceDefinitionNames{Plural: "widgets", Kind: "Widget"},
+			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{{
+				Name: "v1", Served: true, Storage: true,
+			}},
+		},
+	}
+
+	makeWidget := func(namespace, name string) *unstructured.Unstructured {
+		return &unstructured.Unstructured{
+			Object: map[string]any{
+				"apiVersion": "acme.test/v1",
+				"kind":       "Widget",
+				"metadata": map[string]any{
+					"name":              name,
+					"namespace":         namespace,
+					"resourceVersion":   "10",
+					"creationTimestamp": metav1.NewTime(now.Add(-time.Hour)).Format(time.RFC3339),
+				},
+			},
+		}
+	}
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, apiextensionsscheme.AddToScheme(scheme))
+	registerWidgetTypes(t, scheme)
+
+	builder := &NamespaceCustomBuilder{
+		dynamic:   testsupport.NewDynamicClient(t, scheme, makeWidget("team-a", "wa"), makeWidget("team-c", "wc")),
+		crdLister: testsupport.NewCRDLister(t, widgetCRD),
+		logger:    applog.Noop,
+		scope:     []string{"team-a", "team-b"},
+	}
+
+	snapshot, err := builder.Build(context.Background(), "cluster-a|namespace:all")
+	require.NoError(t, err)
+	payload, ok := snapshot.Payload.(NamespaceCustomSnapshot)
+	require.True(t, ok)
+
+	require.Equal(t, []string{"Widget"}, payload.Kinds, "CRD discovery must still work under scope")
+
+	var names []string
+	for _, item := range payload.Resources {
+		names = append(names, item.Namespace+"/"+item.Name)
+	}
+	require.Equal(t, []string{"team-a/wa"}, names,
+		"scope namespaces listed, out-of-scope namespaces excluded")
 }

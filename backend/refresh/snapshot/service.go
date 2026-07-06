@@ -9,9 +9,14 @@ package snapshot
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -33,12 +38,14 @@ type Service struct {
 	group               singleflight.Group
 	sequence            uint64
 	cluster             ClusterMeta
+	informerHubMu       sync.RWMutex
 	informerHub         refresh.InformerHub
 	domainReadiness     map[string][]string
 	informerSyncTimeout time.Duration
 	cacheMu             sync.RWMutex
 	cache               map[string]cacheEntry
 	cacheTTL            time.Duration
+	epoch               string
 	permissionChecker   *permissions.Checker
 	runtimeAccess       domainpermissions.RuntimeAccess
 	requestSerial       uint64
@@ -53,6 +60,8 @@ type cacheEntry struct {
 	snapshot  *refresh.Snapshot
 	expiresAt time.Time
 }
+
+var sourceVersionEpochSerial uint64
 
 type BuildRequest struct {
 	Context context.Context
@@ -92,6 +101,7 @@ func newService(
 		cluster:             meta,
 		cache:               make(map[string]cacheEntry),
 		cacheTTL:            config.SnapshotCacheTTL,
+		epoch:               newSourceVersionEpoch(meta),
 		informerSyncTimeout: config.RefreshInformerSyncTimeout,
 		permissionChecker:   checker,
 		runtimeAccess:       access,
@@ -105,8 +115,31 @@ func (s *Service) WithInformerHub(hub refresh.InformerHub) *Service {
 	if s == nil {
 		return s
 	}
-	s.informerHub = hub
+	s.SetInformerHub(hub)
 	return s
+}
+
+// SetInformerHub swaps the sync-gate hub at runtime. The governor's Cold-tier serving
+// transition uses it: after a cooled cluster's manager + informer factory are shut down, the
+// original hub's HasSynced reports false (factory.Shutdown clears its synced flag), which would
+// block every cooled Build until timeout. A cooled cluster's data is frozen and resident in
+// its mmap-backed stores, so its readiness gate must report settled immediately — the cool path
+// installs an always-synced hub here. Guarded so it never races an in-flight Build's hub read.
+func (s *Service) SetInformerHub(hub refresh.InformerHub) {
+	if s == nil {
+		return
+	}
+	s.informerHubMu.Lock()
+	s.informerHub = hub
+	s.informerHubMu.Unlock()
+}
+
+// currentInformerHub reads the live hub under the lock, so a runtime swap (SetInformerHub)
+// is visible to an in-flight Build's poll loop without racing.
+func (s *Service) currentInformerHub() refresh.InformerHub {
+	s.informerHubMu.RLock()
+	defer s.informerHubMu.RUnlock()
+	return s.informerHub
 }
 
 // WithDomainReadiness narrows the informer sync gate per domain: a declared
@@ -145,9 +178,10 @@ func (s *Service) BuildRequest(req BuildRequest) (*refresh.Snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := s.waitForInformerSync(ctx, domainName); err != nil {
+	syncWait, err := s.waitForInformerSync(ctx, domainName)
+	if err != nil {
 		if errors.Is(err, errInformerSyncTimeout) {
-			s.recordTelemetry(domainName, scope, 0, err, false, 0, nil, 0, 0, 0, true, 0)
+			s.recordTelemetry(domainName, scope, 0, err, false, 0, nil, 0, 0, 0, true, 0, syncWait.Milliseconds())
 		}
 		return nil, err
 	}
@@ -163,13 +197,14 @@ func (s *Service) BuildRequest(req BuildRequest) (*refresh.Snapshot, error) {
 	if s.shouldBypassSingleflight(domainName) {
 		groupKey = fmt.Sprintf("%s:live:%d", cacheKey, atomic.AddUint64(&s.requestSerial, 1))
 	}
-	if !refresh.HasCacheBypass(ctx) {
+	bypassSnapshotCache := s.shouldBypassSnapshotCache(domainName)
+	if !refresh.HasCacheBypass(ctx) && !bypassSnapshotCache {
 		if cached := s.loadCache(cacheKey); cached != nil {
 			return cached, nil
 		}
 	}
 	value, err, _ := s.group.Do(groupKey, func() (interface{}, error) {
-		if !refresh.HasCacheBypass(ctx) {
+		if !refresh.HasCacheBypass(ctx) && !bypassSnapshotCache {
 			if cached := s.loadCache(cacheKey); cached != nil {
 				return cached, nil
 			}
@@ -191,6 +226,7 @@ func (s *Service) BuildRequest(req BuildRequest) (*refresh.Snapshot, error) {
 				0,
 				true,
 				duration.Milliseconds(),
+				syncWait.Milliseconds(),
 			)
 			return nil, buildErr
 		}
@@ -206,6 +242,7 @@ func (s *Service) BuildRequest(req BuildRequest) (*refresh.Snapshot, error) {
 				snap.Checksum = checksumBytes(data)
 			}
 		}
+		s.finalizeSourceVersion(snap)
 		s.recordTelemetry(
 			domainName,
 			scope,
@@ -219,6 +256,7 @@ func (s *Service) BuildRequest(req BuildRequest) (*refresh.Snapshot, error) {
 			snap.Stats.BatchSize,
 			snap.Stats.IsFinalBatch,
 			snap.Stats.TimeToFirstRowMs,
+			syncWait.Milliseconds(),
 		)
 		s.storeCache(cacheKey, snap)
 		return snap, nil
@@ -229,21 +267,36 @@ func (s *Service) BuildRequest(req BuildRequest) (*refresh.Snapshot, error) {
 	return value.(*refresh.Snapshot), nil
 }
 
-func (s *Service) waitForInformerSync(ctx context.Context, domainName string) error {
-	if s == nil || s.informerHub == nil {
-		return nil
+// waitForInformerSync blocks until the domain's informers have settled, returning the
+// elapsed wait so the caller can record it as telemetry. The wait is the initial-LIST
+// gating cost a cold-start Build pays before any rows can be served; once the informers
+// have synced it returns ~0 immediately. The returned duration is reported even on the
+// error paths so a timeout's full wait is still attributed to the domain.
+func (s *Service) waitForInformerSync(ctx context.Context, domainName string) (time.Duration, error) {
+	if s == nil {
+		return 0, nil
 	}
+	if s.currentInformerHub() == nil {
+		return 0, nil
+	}
+	start := time.Now()
 	// A domain with declared readiness resources waits only on those informers;
-	// undeclared domains keep the conservative factory-wide gate.
+	// undeclared domains keep the conservative factory-wide gate. The hub is re-read
+	// on every poll, not captured once, so a runtime swap (the Cold-tier cooled-hub
+	// install) is observed by an already-blocked Build.
 	keys, scoped := s.domainReadiness[domainName]
 	settled := func() bool {
-		if scoped {
-			return s.informerHub.ResourcesSettled(keys)
+		hub := s.currentInformerHub()
+		if hub == nil {
+			return true
 		}
-		return s.informerHub.HasSynced(ctx)
+		if scoped {
+			return hub.ResourcesSettled(keys)
+		}
+		return hub.HasSynced(ctx)
 	}
 	if settled() {
-		return nil
+		return time.Since(start), nil
 	}
 	timeout := s.informerSyncTimeout
 	if timeout <= 0 {
@@ -259,12 +312,12 @@ func (s *Service) waitForInformerSync(ctx context.Context, domainName string) er
 	for {
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("refresh informer caches not synced: %w", ctx.Err())
+			return time.Since(start), fmt.Errorf("refresh informer caches not synced: %w", ctx.Err())
 		case <-deadline.C:
-			return fmt.Errorf("%w after %s; the cluster API may be unreachable or a watch may be unauthorized", errInformerSyncTimeout, timeout)
+			return time.Since(start), fmt.Errorf("%w after %s; the cluster API may be unreachable or a watch may be unauthorized", errInformerSyncTimeout, timeout)
 		case <-ticker.C:
 			if settled() {
-				return nil
+				return time.Since(start), nil
 			}
 		}
 	}
@@ -280,6 +333,13 @@ func (s *Service) ensurePermissions(ctx context.Context, domainName, scope strin
 	// Skip SSAR checks for domains already registered as permission-denied placeholders.
 	// The domain's BuildSnapshot will return a PermissionDeniedError on its own.
 	if s.registry != nil && s.registry.IsPermissionDenied(domainName) {
+		return ctx, "", nil
+	}
+	// A runtime-policy-exempt domain's data source needs no cluster
+	// permission in this configuration (the scoped namespaces domain serves
+	// synthesized names) — the serve-time gate must match the source exactly
+	// as the registration-time gate does (docs/plans/namespace-scope.md).
+	if s.registry != nil && s.registry.IsRuntimePolicyExempt(domainName) {
 		return ctx, "", nil
 	}
 	start := time.Now()
@@ -303,6 +363,7 @@ func (s *Service) ensurePermissions(ctx context.Context, domainName, scope strin
 			0,
 			true,
 			duration.Milliseconds(),
+			0,
 		)
 		return ctx, permissionCacheKey, err
 	}
@@ -324,6 +385,7 @@ func (s *Service) ensurePermissions(ctx context.Context, domainName, scope strin
 		0,
 		true,
 		duration.Milliseconds(),
+		0,
 	)
 	return ctx, permissionCacheKey, denied
 }
@@ -341,6 +403,7 @@ func (s *Service) recordTelemetry(
 	batchSize int,
 	isFinal bool,
 	timeToFirstRowMs int64,
+	informerSyncWaitMs int64,
 ) {
 	if s.telemetry == nil {
 		return
@@ -360,6 +423,7 @@ func (s *Service) recordTelemetry(
 		batchSize,
 		isFinal,
 		timeToFirstRowMs,
+		informerSyncWaitMs,
 	)
 }
 
@@ -401,6 +465,26 @@ func (s *Service) storeCache(key string, snap *refresh.Snapshot) {
 	s.cacheMu.Unlock()
 }
 
+// InvalidateDomainCache drops every cached snapshot for the domain. The
+// doorbell notifiers call this BEFORE broadcasting: the doorbell-triggered
+// refetch arrives well inside the cache TTL, and without invalidation it
+// would be served the PRE-change snapshot — permanently, because doorbells
+// fire once per change and polling skips while the stream is healthy.
+// Matching on the cached snapshot's Domain keeps this independent of the
+// cache-key format.
+func (s *Service) InvalidateDomainCache(domain string) {
+	if s == nil {
+		return
+	}
+	s.cacheMu.Lock()
+	for key, entry := range s.cache {
+		if entry.snapshot != nil && entry.snapshot.Domain == domain {
+			delete(s.cache, key)
+		}
+	}
+	s.cacheMu.Unlock()
+}
+
 func (s *Service) shouldCacheSnapshot(snap *refresh.Snapshot) bool {
 	if snap == nil {
 		return false
@@ -415,11 +499,82 @@ func (s *Service) shouldCacheSnapshot(snap *refresh.Snapshot) bool {
 	if snap.Stats.TotalBatches > 0 && !snap.Stats.IsFinalBatch {
 		return false
 	}
+	// A namespaces snapshot built before its workload ingest stores settled reports
+	// workload absence as not-yet-known and keeps the cluster readiness gate closed.
+	// Serving it from cache would pin that pre-sync state for the TTL; rebuilding on
+	// the next poll lets the corrected flags and the Ready flip land immediately
+	// after the stores settle.
+	if payload, ok := snap.Payload.(NamespaceSnapshot); ok && !payload.WorkloadsReady {
+		return false
+	}
 	return true
 }
 
 func (s *Service) shouldBypassSingleflight(domainName string) bool {
 	return domainName == "object-maintenance"
+}
+
+func (s *Service) shouldBypassSnapshotCache(domainName string) bool {
+	switch domainName {
+	case "pods", "namespace-workloads", "nodes":
+		return true
+	default:
+		return false
+	}
+}
+
+func newSourceVersionEpoch(meta ClusterMeta) string {
+	serial := atomic.AddUint64(&sourceVersionEpochSerial, 1)
+	return fmt.Sprintf("%s:%d:%d", meta.ClusterID, time.Now().UnixNano(), serial)
+}
+
+func (s *Service) finalizeSourceVersion(snap *refresh.Snapshot) {
+	if snap == nil {
+		return
+	}
+	if snap.SourceVersions == nil {
+		snap.SourceVersions = make(map[string]string)
+	}
+	if strings.TrimSpace(snap.SourceVersions["object"]) == "" {
+		snap.SourceVersions["object"] = strconv.FormatUint(snap.Version, 10)
+	}
+	snap.SourceVersion = s.sourceVersionToken(snap.Domain, snap.Scope, snap.SourceVersions)
+}
+
+func (s *Service) sourceVersionToken(domainName, scope string, sourceVersions map[string]string) string {
+	type sourceClock struct {
+		Source  string `json:"source"`
+		Version string `json:"version"`
+	}
+	payload := struct {
+		Epoch   string        `json:"epoch"`
+		Cluster string        `json:"cluster"`
+		Domain  string        `json:"domain"`
+		Scope   string        `json:"scope"`
+		Sources []sourceClock `json:"sources"`
+	}{
+		Epoch:   s.epoch,
+		Cluster: s.cluster.ClusterID,
+		Domain:  domainName,
+		Scope:   scope,
+	}
+	keys := make([]string, 0, len(sourceVersions))
+	for key, version := range sourceVersions {
+		if strings.TrimSpace(key) == "" || strings.TrimSpace(version) == "" {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		payload.Sources = append(payload.Sources, sourceClock{Source: key, Version: sourceVersions[key]})
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return "sv:" + hex.EncodeToString(sum[:])
 }
 
 func checksumBytes(data []byte) string {

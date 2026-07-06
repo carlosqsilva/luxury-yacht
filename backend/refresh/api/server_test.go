@@ -113,6 +113,46 @@ func TestSnapshotEndpoint(t *testing.T) {
 	}
 }
 
+func TestSnapshotEndpointUsesSourceVersionForETagAndNotModified(t *testing.T) {
+	svc := &fakeSnapshotService{snapshot: &refresh.Snapshot{
+		Version:       1,
+		SourceVersion: "src-v1",
+		Checksum:      "payload-checksum",
+		Payload:       map[string]int{"items": 1},
+	}}
+	server := api.NewServer(svc, &fakeQueue{}, nil, nil)
+
+	mux := http.NewServeMux()
+	server.Register(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v2/snapshots/nodes?scope=cluster-a|", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200 got %d", rr.Code)
+	}
+	if got := rr.Header().Get("ETag"); got != "src-v1" {
+		t.Fatalf("expected sourceVersion ETag, got %q", got)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v2/snapshots/nodes?scope=cluster-a|", nil)
+	req.Header.Set("If-None-Match", "payload-checksum")
+	rr = httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("checksum must not drive 304, got %d", rr.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v2/snapshots/nodes?scope=cluster-a|", nil)
+	req.Header.Set("If-None-Match", "src-v1")
+	rr = httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotModified {
+		t.Fatalf("expected status 304 got %d", rr.Code)
+	}
+}
+
 func TestSnapshotPermissionDenied(t *testing.T) {
 	svc := &errorSnapshotService{
 		err: refresh.NewPermissionDeniedError("nodes", "core/nodes"),
@@ -327,7 +367,7 @@ func TestOptionsPreflight(t *testing.T) {
 
 func TestTelemetrySummary(t *testing.T) {
 	recorder := telemetry.NewRecorder()
-	recorder.RecordSnapshot("nodes", "", "test-cluster", "test", 50*time.Millisecond, nil, false, 0, nil, 0, 0, 0, true, 50)
+	recorder.RecordSnapshot("nodes", "", "test-cluster", "test", 50*time.Millisecond, nil, false, 0, nil, 0, 0, 0, true, 50, 0)
 	recorder.RecordMetrics(25*time.Millisecond, time.Now(), nil, 0, true)
 
 	svc := snapshotService()

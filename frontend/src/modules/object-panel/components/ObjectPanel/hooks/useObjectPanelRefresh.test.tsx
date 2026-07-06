@@ -68,14 +68,18 @@ describe('useObjectPanelRefresh', () => {
     namespace: 'team-a',
   };
 
+  const basePanelId = 'obj:cluster-a:apps/v1/deployment:team-a:api';
+  const expectedRefresherName = `object-deployment:${basePanelId}`;
+
   const renderHook = async (
     override: Partial<Parameters<typeof useObjectPanelRefresh>[0]> = {}
   ) => {
     const propsRef = {
       current: {
-        detailScope: 'team-a:deployment:api',
+        detailScope: 'cluster-a|team-a:apps/v1:deployment:api',
         objectKind: 'deployment',
         objectData: baseObjectData,
+        panelId: basePanelId,
         isOpen: true,
         resourceDeleted: false,
         ...override,
@@ -143,20 +147,20 @@ describe('useObjectPanelRefresh', () => {
     await renderHook();
 
     expect(mockRefreshManager.register).toHaveBeenCalledWith(
-      expect.objectContaining({ name: 'object-deployment', interval: 5000 })
+      expect.objectContaining({ name: expectedRefresherName, interval: 5000 })
     );
     expect(mockUseRefreshWatcher).toHaveBeenCalledWith(
-      expect.objectContaining({ refresherName: 'object-deployment', enabled: true })
+      expect.objectContaining({ refresherName: expectedRefresherName, enabled: true })
     );
     expect(mockRefreshOrchestrator.setScopedDomainEnabled).toHaveBeenCalledWith(
       'object-details',
-      'team-a:deployment:api',
+      'cluster-a|team-a:apps/v1:deployment:api',
       true,
       { preserveState: true }
     );
     expect(mockRefreshOrchestrator.fetchScopedDomain).toHaveBeenCalledWith(
       'object-details',
-      'team-a:deployment:api',
+      'cluster-a|team-a:apps/v1:deployment:api',
       expect.objectContaining({ isManual: false })
     );
     expect(mockRefreshOrchestrator.updateContext).not.toHaveBeenCalled();
@@ -169,7 +173,7 @@ describe('useObjectPanelRefresh', () => {
       root.unmount();
     });
 
-    expect(mockRefreshManager.unregister).toHaveBeenCalledWith('object-deployment');
+    expect(mockRefreshManager.unregister).toHaveBeenCalledWith(expectedRefresherName);
     // Tier 1 responsiveness: stop refreshing this scope but keep the
     // cached snapshot in place. The cache is only freed via
     // ObjectPanelStateContext.closePanel when the user actually closes
@@ -177,13 +181,13 @@ describe('useObjectPanelRefresh', () => {
     // from cache.
     expect(mockRefreshOrchestrator.setScopedDomainEnabled).toHaveBeenCalledWith(
       'object-details',
-      'team-a:deployment:api',
+      'cluster-a|team-a:apps/v1:deployment:api',
       false,
       { preserveState: true }
     );
     expect(mockRefreshOrchestrator.resetScopedDomain).not.toHaveBeenCalledWith(
       'object-details',
-      'team-a:deployment:api'
+      'cluster-a|team-a:apps/v1:deployment:api'
     );
   });
 
@@ -198,7 +202,7 @@ describe('useObjectPanelRefresh', () => {
     await fetchResourceDetails('user');
     expect(mockRefreshOrchestrator.fetchScopedDomain).toHaveBeenCalledWith(
       'object-details',
-      'team-a:deployment:api',
+      'cluster-a|team-a:apps/v1:deployment:api',
       expect.objectContaining({ isManual: true })
     );
   });
@@ -216,5 +220,61 @@ describe('useObjectPanelRefresh', () => {
 
     expect(getResult().detailsLoading).toBe(false);
     expect(mockRefreshOrchestrator.fetchScopedDomain).not.toHaveBeenCalled();
+  });
+
+  it('registers a distinct refresher per panel so same-kind panels never clobber each other', async () => {
+    // Two simultaneously-open Deployment panels (the dockable multi-panel
+    // model mounts one ObjectPanel per open object). With a kind-only
+    // refresher name the second registration replaced the first and either
+    // panel's unmount unregistered the survivor's refresher + subscribers.
+    const otherPanelId = 'obj:cluster-a:apps/v1/deployment:team-a:web';
+    // Stable per-panel objectData, mirroring production where the panel ref
+    // identity does not change across renders.
+    const panelObjects: Record<string, PanelObjectData> = {
+      api: { ...baseObjectData, name: 'api' },
+      web: { ...baseObjectData, name: 'web' },
+    };
+    const PanelHarness: React.FC<{ panelId: string; name: string }> = ({ panelId, name }) => {
+      useObjectPanelRefresh({
+        detailScope: `cluster-a|team-a:apps/v1:deployment:${name}`,
+        objectKind: 'deployment',
+        objectData: panelObjects[name],
+        panelId,
+        isOpen: true,
+        resourceDeleted: false,
+      });
+      return null;
+    };
+
+    await act(async () => {
+      root.render(
+        <>
+          <PanelHarness key="api" panelId={basePanelId} name="api" />
+          <PanelHarness key="web" panelId={otherPanelId} name="web" />
+        </>
+      );
+      await Promise.resolve();
+    });
+
+    const registeredNames = mockRefreshManager.register.mock.calls.map(
+      (call) => (call[0] as { name: string }).name
+    );
+    expect(registeredNames).toContain(`object-deployment:${basePanelId}`);
+    expect(registeredNames).toContain(`object-deployment:${otherPanelId}`);
+    expect(new Set(registeredNames).size).toBe(registeredNames.length);
+
+    // Unmounting one panel must only unregister ITS refresher.
+    await act(async () => {
+      root.render(
+        <>
+          <PanelHarness key="api" panelId={basePanelId} name="api" />
+        </>
+      );
+      await Promise.resolve();
+    });
+    expect(mockRefreshManager.unregister).toHaveBeenCalledWith(`object-deployment:${otherPanelId}`);
+    expect(mockRefreshManager.unregister).not.toHaveBeenCalledWith(
+      `object-deployment:${basePanelId}`
+    );
   });
 });

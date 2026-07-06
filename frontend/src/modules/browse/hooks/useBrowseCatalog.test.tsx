@@ -295,6 +295,168 @@ describe('useBrowseCatalog', () => {
     expect(result?.loading).toBe(false);
   });
 
+  it('refetches the current catalog query when a catalog doorbell advances its signal clock', async () => {
+    const baseScope = 'cluster-1|limit=2&namespace=default';
+    const metadataScope = 'cluster-1|limit=1&namespace=default';
+    const first = makeItem({ uid: 'pod-a', name: 'pod-a' });
+    // Doorbells write signalVersions (never touched by payload applies) plus
+    // the folded sourceVersion — bumpSourceVersionOnly's exact shape.
+    let baseState = {
+      status: 'ready',
+      data: makePayload({ items: [first], total: 1, batchSize: 1 }),
+      scope: baseScope,
+      sourceVersion: 'catalog:1',
+      signalVersions: { catalog: 'catalog:1' },
+    };
+    const metadataState = {
+      status: 'ready',
+      data: makePayload({ items: [], total: 1, batchSize: 0 }),
+      scope: metadataScope,
+      sourceVersion: 'catalog:1',
+    };
+
+    mocks.useRefreshScopedDomain.mockImplementation((_domain: string, scope: string) => {
+      if (scope === baseScope) {
+        return baseState;
+      }
+      if (scope === metadataScope) {
+        return metadataState;
+      }
+      return { status: 'idle', data: null, scope };
+    });
+
+    await act(async () => {
+      root.render(<Harness />);
+      await Promise.resolve();
+    });
+
+    expect(result?.items.map((item) => item.name)).toEqual(['pod-a']);
+    mocks.requestRefreshDomain.mockClear();
+
+    baseState = {
+      ...baseState,
+      sourceVersion: 'catalog:2',
+      signalVersions: { catalog: 'catalog:2' },
+    };
+
+    await act(async () => {
+      root.render(<Harness />);
+      await Promise.resolve();
+    });
+
+    // 'stream-signal' is load-bearing: a 'background' fetch is skipped by the
+    // stream-healthy gate, silently swallowing the doorbell.
+    expect(mocks.requestRefreshDomain).toHaveBeenCalledWith({
+      domain: 'catalog',
+      scope: baseScope,
+      reason: 'stream-signal',
+    });
+  });
+
+  it('payload validator churn must NOT refire the doorbell effect (no echo refetch)', async () => {
+    const baseScope = 'cluster-1|limit=2&namespace=default';
+    const metadataScope = 'cluster-1|limit=1&namespace=default';
+    const first = makeItem({ uid: 'pod-a', name: 'pod-a' });
+    let baseState = {
+      status: 'ready',
+      data: makePayload({ items: [first], total: 1, batchSize: 1 }),
+      scope: baseScope,
+      sourceVersion: 'validator-1',
+      signalVersions: { catalog: 'catalog:1' },
+    };
+    const metadataState = {
+      status: 'ready',
+      data: makePayload({ items: [], total: 1, batchSize: 0 }),
+      scope: metadataScope,
+      sourceVersion: 'validator-1',
+    };
+    mocks.useRefreshScopedDomain.mockImplementation((_domain: string, scope: string) => {
+      if (scope === baseScope) {
+        return baseState;
+      }
+      if (scope === metadataScope) {
+        return metadataState;
+      }
+      return { status: 'idle', data: null, scope };
+    });
+
+    await act(async () => {
+      root.render(<Harness />);
+      await Promise.resolve();
+    });
+    mocks.requestRefreshDomain.mockClear();
+
+    // A fetch response applies: the folded validator changes but the doorbell
+    // clock does not. Keying on the folded sourceVersion turned every fetch
+    // response into another "signal" — an echo refetch per doorbell.
+    baseState = {
+      ...baseState,
+      sourceVersion: 'validator-2',
+    };
+
+    await act(async () => {
+      root.render(<Harness />);
+      await Promise.resolve();
+    });
+
+    expect(mocks.requestRefreshDomain).not.toHaveBeenCalled();
+  });
+
+  it('refetches on the FIRST doorbell after mount (no pre-doorbell signal value exists)', async () => {
+    const baseScope = 'cluster-1|limit=2&namespace=default';
+    const metadataScope = 'cluster-1|limit=1&namespace=default';
+    const first = makeItem({ uid: 'pod-a', name: 'pod-a' });
+    // Fresh mount: the scope has data (payload apply) but NO signalVersions —
+    // doorbell values exist only after the first doorbell rings.
+    let baseState = {
+      status: 'ready',
+      data: makePayload({ items: [first], total: 1, batchSize: 1 }),
+      scope: baseScope,
+      sourceVersion: 'validator-1',
+    };
+    const metadataState = {
+      status: 'ready',
+      data: makePayload({ items: [], total: 1, batchSize: 0 }),
+      scope: metadataScope,
+      sourceVersion: 'validator-1',
+    };
+    mocks.useRefreshScopedDomain.mockImplementation((_domain: string, scope: string) => {
+      if (scope === baseScope) {
+        return baseState;
+      }
+      if (scope === metadataScope) {
+        return metadataState;
+      }
+      return { status: 'idle', data: null, scope };
+    });
+
+    await act(async () => {
+      root.render(<Harness />);
+      await Promise.resolve();
+    });
+    mocks.requestRefreshDomain.mockClear();
+
+    // The FIRST doorbell arrives. An empty-string "previous" sentinel would
+    // swallow it — the doorbell effect must key on has-observed, not
+    // non-emptiness of the prior value.
+    baseState = {
+      ...baseState,
+      sourceVersion: 'catalog:1',
+      signalVersions: { catalog: 'catalog:1' },
+    } as typeof baseState;
+
+    await act(async () => {
+      root.render(<Harness />);
+      await Promise.resolve();
+    });
+
+    expect(mocks.requestRefreshDomain).toHaveBeenCalledWith({
+      domain: 'catalog',
+      scope: baseScope,
+      reason: 'stream-signal',
+    });
+  });
+
   it('replaces the current row window with the next cursor page', async () => {
     const baseScope = 'cluster-1|limit=2&namespace=default';
     const metadataScope = 'cluster-1|limit=1&namespace=default';
@@ -970,6 +1132,40 @@ describe('useBrowseCatalog', () => {
     expect(mocks.requestRefreshDomain).toHaveBeenCalledWith({
       domain: 'catalog',
       scope: metadataScope,
+      reason: 'startup',
+    });
+  });
+
+  it('refetches with the kind in scope when the kind filter changes on a cluster-scoped custom query', async () => {
+    const baseScope = 'cluster-1|limit=2&customOnly=true&namespace=cluster';
+    const metadataScope = 'cluster-1|limit=1&customOnly=true&namespace=cluster';
+    const filteredScope = 'cluster-1|limit=2&customOnly=true&kind=Widget&namespace=cluster';
+
+    mocks.useRefreshScopedDomain.mockImplementation((_domain: string, scope: string) => {
+      if (scope === baseScope || scope === metadataScope || scope === filteredScope) {
+        return { status: 'ready', data: makePayload({ items: [], total: 0, batchSize: 0 }), scope };
+      }
+      return { status: 'idle', data: null, scope };
+    });
+
+    await act(async () => {
+      root.render(<Harness pinnedNamespaces={[]} clusterScopedOnly customOnly />);
+      await Promise.resolve();
+    });
+
+    mocks.requestRefreshDomain.mockClear();
+
+    // Selecting a Kind must issue a NEW backend query whose scope carries the kind.
+    await act(async () => {
+      root.render(
+        <Harness pinnedNamespaces={[]} clusterScopedOnly customOnly kinds={['Widget']} />
+      );
+      await Promise.resolve();
+    });
+
+    expect(mocks.requestRefreshDomain).toHaveBeenCalledWith({
+      domain: 'catalog',
+      scope: filteredScope,
       reason: 'startup',
     });
   });

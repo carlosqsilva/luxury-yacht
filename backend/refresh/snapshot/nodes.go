@@ -15,23 +15,43 @@ import (
 	"github.com/luxury-yacht/app/backend/kind/streamrows"
 	"github.com/luxury-yacht/app/backend/refresh"
 	"github.com/luxury-yacht/app/backend/refresh/domain"
+	"github.com/luxury-yacht/app/backend/refresh/ingest"
 	"github.com/luxury-yacht/app/backend/refresh/metrics"
+	"github.com/luxury-yacht/app/backend/refresh/querypage"
 	nodepkg "github.com/luxury-yacht/app/backend/resources/nodes"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
-	informers "k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
-	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/klog/v2"
 )
 
-// NodeBuilder constructs node snapshots from informer caches.
+// nodeDomainIngestSource is everything the informer-backed nodes domain still reads from the
+// ingest manager AFTER the node OWN-rows moved to the maintained store: the cut pod kind's
+// projected aggregation rows (podAggregateIngestSource) and the node store RV for the version
+// watermark (nodeIngestSource — only StoreResourceVersion is still read here; the node-sync
+// gate stays for the cluster-overview consumer). *ingest.IngestManager satisfies both.
+type nodeDomainIngestSource interface {
+	nodeIngestSource
+	podAggregateIngestSource
+}
+
+// NodeBuilder constructs node snapshots from the cut node kind's projected OWN-fields rows
+// served straight from a per-cluster maintained store (fed by the node reflector's Table-half
+// ingest Sink — same pattern as pods) plus the cut pod kind's projected aggregation rows read
+// from the ingest manager, re-joining pod aggregates + metrics onto each node row at serve.
 type NodeBuilder struct {
-	lister    corelisters.NodeLister
-	podLister corelisters.PodLister
-	metrics   metrics.Provider
+	// maintained is the per-cluster store of node OWN-rows (NodeSummary), fed by the node
+	// reflector's Table-half Sink. Build serves own-rows straight from it. nil in a unit test
+	// with no store wired, in which case no nodes are served.
+	maintained *typedMaintainedStore[NodeSummary]
+	// ingest still supplies the per-node pod-aggregate join rows and the node store RV for the
+	// version watermark; the node OWN-rows no longer come from here.
+	ingest nodeDomainIngestSource
+	// metrics supplies the poller usage joined onto the served rows AT SERVE — usage is
+	// never written to the maintained store, so a metric tick cannot re-project stored
+	// rows. nil (a unit test) serves rows without usage.
+	metrics metrics.Provider
 }
 
 // NodeListBuilder assembles node payloads by issuing direct list calls.
@@ -40,13 +60,13 @@ type NodeListBuilder struct {
 	metrics metrics.Provider
 }
 
-// NodeSnapshot is the payload for the nodes domain.
+// NodeSnapshot is the payload for the nodes domain. Rows carry live usage joined at
+// serve from the metrics poller; Metrics is the poller's freshness/error metadata.
 type NodeSnapshot struct {
 	ClusterMeta
 	ResourceQueryEnvelope
-	Rows             []NodeSummary              `json:"rows"`
-	Metrics          NodeMetricsInfo            `json:"metrics"`
-	MetricsByCluster map[string]NodeMetricsInfo `json:"metricsByCluster,omitempty"`
+	Rows    []NodeSummary   `json:"rows"`
+	Metrics NodeMetricsInfo `json:"metrics"`
 }
 
 func nodeQueryCapabilities() ResourceQueryCapabilities {
@@ -58,10 +78,21 @@ func nodeQueryCapabilities() ResourceQueryCapabilities {
 	)
 }
 
+// nodesQuerypageSchema derives the querypage Schema for the nodes table from its
+// typed-table adapter (reusing the adapter's exact sort encoder + row key), so the
+// engine orders rows byte-identically to the live executor. cpu/memory sort the
+// live usage joined at serve.
+func nodesQuerypageSchema() querypage.Schema[NodeSummary] {
+	return querypageSchemaFromAdapter(nodeTableQueryAdapter(), []string{"name", "kind", "status", "roles", "version", "cpu", "memory", "pods", "restarts", "age"})
+}
+
 // NodeMetricsInfo captures metadata about metrics collection.
 type NodeMetricsInfo struct {
-	CollectedAt         int64  `json:"collectedAt,omitempty"`
-	Stale               bool   `json:"stale"`
+	CollectedAt int64 `json:"collectedAt,omitempty"`
+	Stale       bool  `json:"stale"`
+	// StaleAfterSeconds ships the staleness threshold so the frontend can flip
+	// the stale banner client-side; see PodMetricsInfo.StaleAfterSeconds.
+	StaleAfterSeconds   int64  `json:"staleAfterSeconds,omitempty"`
 	LastError           string `json:"lastError,omitempty"`
 	ConsecutiveFailures int    `json:"consecutiveFailures,omitempty"`
 	SuccessCount        uint64 `json:"successCount"`
@@ -78,12 +109,27 @@ type NodeTaint = streamrows.NodeTaint
 // NodePodMetric captures realtime usage for a pod scheduled on the node.
 type NodePodMetric = streamrows.NodePodMetric
 
-// RegisterNodeDomain registers the nodes snapshot domain.
-func RegisterNodeDomain(reg *domain.Registry, factory informers.SharedInformerFactory, provider metrics.Provider) error {
+// RegisterNodeDomain registers the nodes snapshot domain. Node and pods are both cut to the
+// ingest path. The node OWN-rows are served from a per-cluster maintained store fed by the
+// node reflector's Table-half ingest Sink — the SAME mechanism pods uses (RegisterPodDomain):
+// the bespoke node projector (NewNodeIngestProjector) builds the same OWN-fields NodeSummary
+// the maintained store holds, so the served own-rows are byte-identical and the serve-time
+// pod-aggregate join is unchanged. The Sink is registered BEFORE the ingest
+// manager starts (this runs during registration), so the snapshot sync gate guarantees the
+// store is populated before the first Build serves from it. The per-node pod aggregation still
+// comes from the ingest manager. ingestManager may be nil in a unit test, in which case the
+// store has no feed and no pods are read.
+func RegisterNodeDomain(reg *domain.Registry, provider metrics.Provider, clusterMeta ClusterMeta, ingestManager *ingest.IngestManager) error {
+	maintained := newTypedMaintainedStore(clusterMeta, nodesQuerypageSchema(), nodeTableQueryAdapter())
+	reg.RegisterMaintainedStore("nodes", maintained) // spill/restore/reconcile across Cold/re-warm
+	if ingestManager != nil {
+		ingestManager.AddBundleSink(NodeGVR, maintained.BundleSink())
+	}
+
 	builder := &NodeBuilder{
-		lister:    factory.Core().V1().Nodes().Lister(),
-		podLister: factory.Core().V1().Pods().Lister(),
-		metrics:   provider,
+		maintained: maintained,
+		ingest:     ingestManager,
+		metrics:    provider,
 	}
 	return reg.Register(refresh.DomainConfig{
 		Name:          "nodes",
@@ -106,21 +152,37 @@ func RegisterNodeDomainList(reg *domain.Registry, client kubernetes.Interface, p
 	})
 }
 
-// Build returns the node snapshot payload.
+// Build returns the node snapshot payload. The node OWN-rows and the per-node pod aggregation
+// both read the projected rows from ingest (node and pods are cut — no typed listers); the
+// per-node pod-aggregate join AND the latest poller usage are re-joined onto each own-row at
+// serve. The store rows stay usage-free: a metric tick changes only the served copies and the
+// metric source clock, never the object version.
 func (b *NodeBuilder) Build(ctx context.Context, scope string) (*refresh.Snapshot, error) {
-	list, err := b.lister.List(labels.Everything())
-	if err != nil {
-		return nil, err
+	nodeUsage, podUsage, metadata := latestNodeMetrics(b.metrics)
+	return buildNodeSnapshotFromIngestUsage(
+		ctx,
+		scope,
+		b.ownRows(),
+		// Two-store watermark (node + pod RVs): the rows join pod aggregates,
+		// so pod changes must advance the validator or refetches 304 with
+		// stale pod counts.
+		nodeDomainIngestVersion(b.ingest),
+		podAggregatesFromIngest(b.ingest),
+		nodeUsage,
+		podUsage,
+		metadata,
+	)
+}
+
+// ownRows returns the node OWN-fields NodeSummary rows from the maintained store (the rows the
+// node reflector's Table-half Sink feeds). Nodes are cluster-scoped (no namespace) and the
+// store holds the single node kind, so it reads every node row. A nil store (a unit test with
+// no store wired) yields no rows.
+func (b *NodeBuilder) ownRows() []NodeSummary {
+	if b.maintained == nil {
+		return nil
 	}
-	pods := []*corev1.Pod{}
-	if b.podLister != nil {
-		podList, err := b.podLister.List(labels.Everything())
-		if err != nil {
-			return nil, err
-		}
-		pods = append(pods, podList...)
-	}
-	return buildNodeSnapshot(ctx, scope, list, pods, b.metrics)
+	return b.maintained.rows("", map[string]bool{nodepkg.Identity.Kind: true})
 }
 
 // Build returns the node snapshot payload using direct list API calls.
@@ -170,152 +232,66 @@ func (b *NodeListBuilder) Build(ctx context.Context, scope string) (*refresh.Sna
 	if podsForbidden {
 		pods = nil
 	}
-	return buildNodeSnapshot(ctx, scope, nodes, pods, b.metrics)
-}
-
-// buildNodeSnapshot assembles node summaries with cluster metadata.
-func buildNodeSnapshot(ctx context.Context, scope string, nodes []*corev1.Node, pods []*corev1.Pod, provider metrics.Provider) (*refresh.Snapshot, error) {
-	var (
-		nodeMetrics map[string]metrics.NodeUsage
-		podMetrics  map[string]metrics.PodUsage
-		metaSrc     metrics.Metadata
-	)
-	if provider != nil {
-		nodeMetrics = provider.LatestNodeUsage()
-		podMetrics = provider.LatestPodUsage()
-		metaSrc = provider.Metadata()
+	// The list fallback projects its typed pods to the same PodAggregate rows the
+	// informer path reads from ingest, so the shared aggregation stays byte-equivalent.
+	// WorkloadKind is unused by the nodes domain, so a nil RS lister is correct here.
+	// Pod RVs fold into the version watermark for the same reason the ingest path
+	// folds the pod store RV: pod changes alter served aggregates and must
+	// advance the validator.
+	aggregates := make([]streamrows.PodAggregate, 0, len(pods))
+	var podsVersion uint64
+	for _, pod := range pods {
+		if pod == nil {
+			continue
+		}
+		aggregates = append(aggregates, projectPodAggregate(pod, nil))
+		if v := parsePodResourceVersion(pod); v > podsVersion {
+			podsVersion = v
+		}
 	}
-	return buildNodeSnapshotFromUsage(ctx, scope, nodes, pods, nodeUsageOrEmpty(nodeMetrics), podUsageOrEmpty(podMetrics), metaSrc)
+	nodeUsage, podUsage, metadata := latestNodeMetrics(b.metrics)
+	return buildNodeSnapshotFromUsage(ctx, scope, nodes, aggregates, podsVersion, nodeUsage, podUsage, metadata)
 }
 
 // buildNodeSnapshotFromUsage assembles node summaries using pre-resolved
 // metrics maps. This is the metrics-as-parameter path required by the
 // resource-stream projection contract: stream handlers fetch the usage
 // snapshot once and pass it in, so per-event row projection is
-// deterministic and tests can use fixture metrics.
+// deterministic and tests can use fixture metrics. The pod aggregation reads the
+// projected PodAggregate rows (the same rows the typed-pod path produced), so pods is
+// never touched here.
 func buildNodeSnapshotFromUsage(
 	ctx context.Context,
 	scope string,
 	nodes []*corev1.Node,
-	pods []*corev1.Pod,
+	podAggregates []streamrows.PodAggregate,
+	// podsVersion is the max RV of the pods the aggregates were projected from;
+	// it floors the version watermark so pod-driven aggregate changes advance
+	// the validator (0 when the caller has no pod versions, e.g. the
+	// single-node stream projection, which never reads the snapshot version).
+	podsVersion uint64,
 	nodeMetrics map[string]metrics.NodeUsage,
 	podMetrics map[string]metrics.PodUsage,
-	metricsMeta metrics.Metadata,
+	metricsMetadata metrics.Metadata,
 ) (*refresh.Snapshot, error) {
 	meta := ClusterMetaFromContext(ctx)
-	clusterID, trimmed := refresh.SplitClusterScope(scope)
-	_, query, err := parseTypedTableQueryScope(clusterID, strings.TrimSpace(trimmed), "nodes", "")
-	if err != nil {
-		// Every typed builder rejects a malformed query scope; silently serving
-		// default-ordered rows under the requested identity is a contract hole.
-		return nil, err
-	}
 	items := make([]NodeSummary, 0, len(nodes))
-	var version uint64
+	version := podsVersion
 
-	podsByNode := make(map[string][]*corev1.Pod)
-	for _, pod := range pods {
-		if pod == nil {
-			continue
-		}
-		if pod.Spec.NodeName != "" {
-			podsByNode[pod.Spec.NodeName] = append(podsByNode[pod.Spec.NodeName], pod)
-		}
-	}
+	podsByNode := podAggregatesByNode(podAggregates)
 
 	for _, node := range nodes {
 		if node == nil {
 			continue
 		}
-		model := nodepkg.BuildResourceModel(meta.ClusterID, node)
-		nodeFacts := nodepkg.BuildFacts(node)
-		ageTimestamp := int64(0)
-		if !node.CreationTimestamp.Time.IsZero() {
-			ageTimestamp = node.CreationTimestamp.Time.UnixMilli()
-		}
-		summary := NodeSummary{
-			ClusterMeta:        meta,
-			Name:               node.Name,
-			Status:             model.Status.Label,
-			StatusState:        model.Status.State,
-			StatusPresentation: model.Status.Presentation,
-			StatusReason:       model.Status.Reason,
-			Roles:              formatRoles(extractRoles(node.Labels)),
-			Age:                formatAge(node.CreationTimestamp.Time),
-			AgeTimestamp:       ageTimestamp,
-			Version:            node.Status.NodeInfo.KubeletVersion,
-			Labels:             copyStringMap(node.Labels),
-			Annotations:        copyStringMap(node.Annotations),
-			Kind:               "node",
-			Unschedulable:      nodeFacts.Unschedulable,
-		}
-
-		if ip := findNodeAddress(node, corev1.NodeInternalIP); ip != "" {
-			summary.InternalIP = ip
-		}
-		if ip := findNodeAddress(node, corev1.NodeExternalIP); ip != "" {
-			summary.ExternalIP = ip
-		}
-
-		cpuCapacity := node.Status.Capacity[corev1.ResourceCPU]
-		cpuAlloc := node.Status.Allocatable[corev1.ResourceCPU]
-		summary.CPUCapacity = cpuCapacity.String()
-		summary.CPUAllocatable = cpuAlloc.String()
-		summary.CPU = cpuCapacity.String()
-
-		memCapacity := node.Status.Capacity[corev1.ResourceMemory]
-		memAlloc := node.Status.Allocatable[corev1.ResourceMemory]
-		summary.MemoryCapacity = formatMemoryBytes(memCapacity.Value())
-		summary.MemoryAllocatable = formatMemoryBytes(memAlloc.Value())
-		summary.Memory = formatMemoryBytes(memCapacity.Value())
-
-		podsCapacity := node.Status.Capacity[corev1.ResourcePods]
-		podsAlloc := node.Status.Allocatable[corev1.ResourcePods]
-		summary.PodsCapacity = podsCapacity.String()
-		summary.PodsAllocatable = podsAlloc.String()
-
-		pods := podsByNode[node.Name]
-		cpuReq, cpuLim, memReq, memLim, restarts := aggregatePodResources(pods)
-		summary.CPURequests = formatCPUMilli(cpuReq)
-		summary.CPULimits = formatCPUMilli(cpuLim)
-		summary.MemRequests = formatMemoryBytes(memReq)
-		summary.MemLimits = formatMemoryBytes(memLim)
-		summary.Restarts = restarts
-
-		if len(pods) > 0 {
-			podSummaries := make([]NodePodMetric, 0, len(pods))
-			for _, pod := range pods {
-				if pod == nil {
-					continue
-				}
-				key := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
-				usage := podMetrics[key]
-				podSummaries = append(podSummaries, NodePodMetric{
-					Namespace:   pod.Namespace,
-					Name:        pod.Name,
-					CPUUsage:    formatCPUMilli(usage.CPUUsageMilli),
-					MemoryUsage: formatMemoryBytes(usage.MemoryUsageBytes),
-				})
-			}
-			if len(podSummaries) > 0 {
-				summary.PodMetrics = podSummaries
-			}
-		}
-		if capacity := podsCapacity.Value(); capacity > 0 {
-			summary.Pods = fmt.Sprintf("%d/%d", len(pods), capacity)
-		} else {
-			summary.Pods = fmt.Sprintf("%d", len(pods))
-		}
-
-		if usage, ok := nodeMetrics[node.Name]; ok {
-			summary.CPUUsage = formatCPUMilli(usage.CPUUsageMilli)
-			summary.MemoryUsage = formatMemoryBytes(usage.MemoryUsageBytes)
-		} else {
-			summary.CPUUsage = formatCPUMilli(0)
-			summary.MemoryUsage = formatMemoryBytes(0)
-		}
-
-		summary.Taints = convertTaints(node.Spec.Taints)
+		// The OWN-fields row (everything read from the node object alone — status, roles,
+		// capacity/allocatable, addresses, version, labels, taints, pods-capacity) is built
+		// by the SAME builder the ingest projector calls at intake, so the cut path and this
+		// serve path produce identical own fields. reaggregateNodeSummary overlays the only
+		// serve-side additions — the pod-aggregate join + per-pod/node metrics — re-joined
+		// here exactly as before.
+		own := buildNodeOwnSummary(meta, node)
+		summary := reaggregateNodeSummary(own, podsByNode[node.Name], podMetrics, nodeMetrics)
 
 		items = append(items, summary)
 		if v := parseNodeResourceVersion(node); v > version {
@@ -323,55 +299,100 @@ func buildNodeSnapshotFromUsage(
 		}
 	}
 
-	metricsInfo := NodeMetricsInfo{Stale: true}
-	dynamicRevision := ""
-	if !metricsMeta.CollectedAt.IsZero() {
-		dynamicRevision = strconv.FormatInt(metricsMeta.CollectedAt.UnixNano(), 10)
-		metricsInfo.CollectedAt = metricsMeta.CollectedAt.Unix()
-		metricsInfo.Stale = time.Since(metricsMeta.CollectedAt) > config.MetricsStaleThreshold
-	}
-	if metricsMeta.LastError != "" {
-		metricsInfo.LastError = metricsMeta.LastError
-	}
-	if metricsMeta.ConsecutiveFailures > 0 {
-		metricsInfo.ConsecutiveFailures = metricsMeta.ConsecutiveFailures
-	}
-	metricsInfo.SuccessCount = metricsMeta.SuccessCount
-	metricsInfo.FailureCount = metricsMeta.FailureCount
+	return finishNodeSnapshot(ctx, scope, items, version, metricsMetadata)
+}
 
+// buildNodeSnapshotFromIngestUsage assembles the node snapshot from the cut node kind's
+// projected OWN-fields NodeSummary rows (read from the ingest store) instead of typed nodes.
+// It re-joins the per-node pod aggregates + metrics onto each own-row exactly as the typed
+// serve loop does, so the resulting rows are byte-identical. The version watermark is the
+// ingest store's RV (in place of the per-node RV the dropped typed object no longer carries).
+func buildNodeSnapshotFromIngestUsage(
+	ctx context.Context,
+	scope string,
+	ownRows []NodeSummary,
+	storeVersion uint64,
+	podAggregates []streamrows.PodAggregate,
+	nodeMetrics map[string]metrics.NodeUsage,
+	podMetrics map[string]metrics.PodUsage,
+	metricsMetadata metrics.Metadata,
+) (*refresh.Snapshot, error) {
+	items := make([]NodeSummary, 0, len(ownRows))
+	podsByNode := podAggregatesByNode(podAggregates)
+	for _, own := range ownRows {
+		items = append(items, reaggregateNodeSummary(own, podsByNode[own.Name], podMetrics, nodeMetrics))
+	}
+	return finishNodeSnapshot(ctx, scope, items, storeVersion, metricsMetadata)
+}
+
+// podAggregatesByNode groups the projected pod aggregates by their NodeName for the per-node
+// resource/restart/metric join. An aggregate with no NodeName (an unscheduled pod) is dropped,
+// matching the pre-cut loop's `if agg.NodeName != ""` guard.
+func podAggregatesByNode(podAggregates []streamrows.PodAggregate) map[string][]streamrows.PodAggregate {
+	podsByNode := make(map[string][]streamrows.PodAggregate)
+	for _, agg := range podAggregates {
+		if agg.NodeName != "" {
+			podsByNode[agg.NodeName] = append(podsByNode[agg.NodeName], agg)
+		}
+	}
+	return podsByNode
+}
+
+// finishNodeSnapshot is the shared tail both node serve paths (typed list-fallback and ingest)
+// run after they assemble the per-node NodeSummary rows + version watermark: it resolves the
+// query page and builds the snapshot payload. This is the part of the build that is identical
+// regardless of whether the rows came from typed nodes or the ingest store. metricsMetadata is
+// the poller sample the rows were joined with: its revision is stamped as the snapshot's
+// metric source clock (so a metric tick breaks the 304 validator without moving the object
+// Version) and its freshness/error state is published as the payload's Metrics block.
+func finishNodeSnapshot(
+	ctx context.Context,
+	scope string,
+	items []NodeSummary,
+	version uint64,
+	metricsMetadata metrics.Metadata,
+) (*refresh.Snapshot, error) {
+	meta := ClusterMetaFromContext(ctx)
+	clusterID, trimmed := refresh.SplitClusterScope(scope)
+	revision := metricRevisionFromMetadata(metricsMetadata)
+	_, query, err := parseTypedTableQueryScope(clusterID, strings.TrimSpace(trimmed), "nodes", revision)
+	if err != nil {
+		// Every typed builder rejects a malformed query scope; silently serving
+		// default-ordered rows under the requested identity is a contract hole.
+		return nil, err
+	}
+
+	resolved := resolveTypedSnapshotPageViaStore(
+		"nodes",
+		items,
+		query,
+		nodeTableQueryAdapter(),
+		nodesQuerypageSchema(),
+		nodeQueryCapabilities(),
+		config.SnapshotClusterNodesEntryLimit,
+		"nodes",
+		func(NodeSummary) string { return nodepkg.Identity.Kind },
+		nil,
+	)
+	// The window snapshot is the canonical unscoped refresh payload; only the
+	// query page publishes the request scope.
+	snapshotScope := ""
 	if query.Enabled {
-		query.DynamicRevision = dynamicRevision
-		page := applyTypedTableQuery(items, query, nodeTableQueryAdapter())
-		return &refresh.Snapshot{
-			Domain:  "nodes",
-			Scope:   refresh.JoinClusterScope(clusterID, strings.TrimSpace(trimmed)),
-			Version: snapshotVersionWithDynamicRevision(version, dynamicRevision),
-			Payload: NodeSnapshot{
-				ClusterMeta:           meta,
-				ResourceQueryEnvelope: typedQueryEnvelope("nodes", page, nodeQueryCapabilities()),
-				Rows:                  page.Rows,
-				Metrics:               metricsInfo,
-			},
-			Stats: refresh.SnapshotStats{ItemCount: len(page.Rows)},
-		}, nil
+		snapshotScope = refresh.JoinClusterScope(clusterID, strings.TrimSpace(trimmed))
 	}
-
-	var totalItems int
-	items, totalItems = truncateSnapshotWindow(items, config.SnapshotClusterNodesEntryLimit)
-
-	snap := &refresh.Snapshot{
-		Domain:  "nodes",
-		Scope:   "",
-		Version: snapshotVersionWithDynamicRevision(version, dynamicRevision),
+	return &refresh.Snapshot{
+		Domain:         "nodes",
+		Scope:          snapshotScope,
+		Version:        version,
+		SourceVersions: metricSourceVersions(revision),
 		Payload: NodeSnapshot{
 			ClusterMeta:           meta,
-			ResourceQueryEnvelope: typedWindowEnvelope("nodes", totalItems, totalItems == len(items), snapshotSortedKinds(items, func(NodeSummary) string { return nodepkg.Identity.Kind }), nodeQueryCapabilities()),
-			Rows:                  items,
-			Metrics:               metricsInfo,
+			ResourceQueryEnvelope: resolved.Envelope,
+			Rows:                  resolved.Rows,
+			Metrics:               nodeMetricsInfoFromMetadata(metricsMetadata),
 		},
-		Stats: snapshotWindowStats(len(items), totalItems, "nodes"),
-	}
-	return snap, nil
+		Stats: resolved.Stats,
+	}, nil
 }
 
 func nodeUsageOrEmpty(m map[string]metrics.NodeUsage) map[string]metrics.NodeUsage {
@@ -471,47 +492,16 @@ func formatAge(t time.Time) string {
 var formatCPUMilli = streamrows.FormatCPUMilli
 var formatMemoryBytes = streamrows.FormatMemoryBytes
 
-func aggregatePodResources(pods []*corev1.Pod) (cpuReq, cpuLim, memReq, memLim int64, restarts int32) {
-	for _, pod := range pods {
-		if pod == nil {
-			continue
-		}
-		// Account for standard containers
-		for _, container := range pod.Spec.Containers {
-			if cpu := container.Resources.Requests.Cpu(); cpu != nil {
-				cpuReq += cpu.MilliValue()
-			}
-			if cpu := container.Resources.Limits.Cpu(); cpu != nil {
-				cpuLim += cpu.MilliValue()
-			}
-			if mem := container.Resources.Requests.Memory(); mem != nil {
-				memReq += mem.Value()
-			}
-			if mem := container.Resources.Limits.Memory(); mem != nil {
-				memLim += mem.Value()
-			}
-		}
-		// Include init containers which may reserve resources
-		for _, container := range pod.Spec.InitContainers {
-			if cpu := container.Resources.Requests.Cpu(); cpu != nil {
-				cpuReq += cpu.MilliValue()
-			}
-			if cpu := container.Resources.Limits.Cpu(); cpu != nil {
-				cpuLim += cpu.MilliValue()
-			}
-			if mem := container.Resources.Requests.Memory(); mem != nil {
-				memReq += mem.Value()
-			}
-			if mem := container.Resources.Limits.Memory(); mem != nil {
-				memLim += mem.Value()
-			}
-		}
-		for _, status := range pod.Status.ContainerStatuses {
-			restarts += status.RestartCount
-		}
-		for _, status := range pod.Status.InitContainerStatuses {
-			restarts += status.RestartCount
-		}
+func aggregatePodResources(pods []streamrows.PodAggregate) (cpuReq, cpuLim, memReq, memLim int64, restarts int32) {
+	for _, agg := range pods {
+		// Node capacity accounting sums regular AND init container reservations.
+		cpuReq += agg.CPURequestMilli + agg.InitCPURequestMilli
+		cpuLim += agg.CPULimitMilli + agg.InitCPULimitMilli
+		memReq += agg.MemRequestBytes + agg.InitMemRequestBytes
+		memLim += agg.MemLimitBytes + agg.InitMemLimitBytes
+		// Node restart total counts container + init statuses only (no ephemeral),
+		// which RestartCountContainersInit carries.
+		restarts += agg.RestartCountContainersInit
 	}
 	return
 }

@@ -8,6 +8,7 @@ import { act } from 'react';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildClusterScope } from '@/core/refresh/clusterScope';
 import { requestObjectPanelTab } from '@modules/object-panel/objectPanelTabRequests';
+import { resolveBuiltinGroupVersion } from '@shared/constants/builtinGroupVersions';
 
 type CapabilityState = {
   allowed: boolean;
@@ -319,14 +320,15 @@ describe('ObjectPanel tab availability', () => {
   const renderObjectPanel = async (options: PanelTestOptions) => {
     const clusterId = options.clusterId ?? defaultClusterId;
     const panelId = buildPanelId(clusterId, options.kind, options.namespace, options.name);
+    const builtinGVK = resolveBuiltinGroupVersion(options.kind);
     const objectRef = {
       kind: options.kind,
       name: options.name,
       namespace: options.namespace,
       kindAlias: options.kind,
       clusterId,
-      group: options.group,
-      version: options.version,
+      group: options.group ?? builtinGVK?.group,
+      version: options.version ?? builtinGVK?.version,
     };
 
     capabilityStateMap = options.capabilityOverrides ?? {};
@@ -395,13 +397,16 @@ describe('ObjectPanel tab availability', () => {
     });
 
     const detailScope = buildClusterScope(defaultClusterId, 'team-a:/v1:pod:api');
+    // Refresher names are panel-scoped (kind + panelId) so simultaneously-open
+    // same-kind panels register distinct refreshers.
+    const refresherName = `object-pod:${buildPanelId(defaultClusterId, 'Pod', 'team-a', 'api')}`;
 
     expect(mockRefreshManager.register).toHaveBeenCalledWith(
-      expect.objectContaining({ name: 'object-pod', interval: 2000 })
+      expect.objectContaining({ name: refresherName, interval: 2000 })
     );
     expect(mockUseRefreshWatcher).toHaveBeenCalledWith(
       expect.objectContaining({
-        refresherName: 'object-pod',
+        refresherName,
         enabled: true,
       })
     );
@@ -421,7 +426,7 @@ describe('ObjectPanel tab availability', () => {
       ctx.root.unmount();
     });
 
-    expect(mockRefreshManager.unregister).toHaveBeenCalledWith('object-pod');
+    expect(mockRefreshManager.unregister).toHaveBeenCalledWith(refresherName);
     // Tier 1 responsiveness: unmount disables refreshing but preserves
     // the cached snapshot so a remount (cluster switch round-trip)
     // renders instantly. Eviction now lives in

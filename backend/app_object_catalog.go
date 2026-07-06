@@ -11,9 +11,11 @@ import (
 
 	"github.com/luxury-yacht/app/backend/capabilities"
 	"github.com/luxury-yacht/app/backend/internal/applog"
+	"github.com/luxury-yacht/app/backend/internal/config"
 	"github.com/luxury-yacht/app/backend/internal/logsources"
 	"github.com/luxury-yacht/app/backend/objectcatalog"
 	refreshinformer "github.com/luxury-yacht/app/backend/refresh/informer"
+	"github.com/luxury-yacht/app/backend/refresh/resourcestream"
 	"github.com/luxury-yacht/app/backend/refresh/snapshot"
 	"github.com/luxury-yacht/app/backend/resources/customresource"
 	apiextinformers "k8s.io/apiextensions-apiserver/pkg/client/informers/externalversions"
@@ -180,6 +182,7 @@ func (a *App) startObjectCatalogForTarget(target catalogTarget) error {
 		APIExtensionsInformerFactory: subsystem.InformerFactory.APIExtensionsInformerFactory(),
 		GatewayInformerFactory:       subsystem.InformerFactory.GatewayInformerFactory(),
 		PermissionChecker:            subsystem.InformerFactory,
+		IngestSource:                 subsystem.IngestManager,
 		CapabilityFactory: func() *capabilities.Service {
 			return capabilities.NewService(capabilities.Dependencies{
 				Common:             commonDeps,
@@ -191,11 +194,27 @@ func (a *App) startObjectCatalogForTarget(target catalogTarget) error {
 		Now:         time.Now,
 		ClusterID:   target.meta.ID,
 		ClusterName: target.meta.Name,
+		// The cluster's namespace scope (docs/plans/namespace-scope.md):
+		// namespaced collection fans out per configured namespace.
+		AllowedNamespaces: a.allowedNamespacesForCluster(target.meta.ID),
+		// The catalog waits for informer caches INSIDE sync, between the RBAC
+		// preflight and the collect, so discovery + preflight overlap the factory's
+		// initial sync instead of running after it (see Dependencies.WaitForCaches).
+		WaitForCaches: func(waitCtx context.Context) error {
+			return a.waitForCatalogInformerCaches(waitCtx, subsystem.InformerFactory)
+		},
 	}
 
 	svc := objectcatalog.NewService(deps, nil)
 	ctx, cancel := context.WithCancel(a.CtxOrBackground())
 	done := make(chan struct{})
+	if subsystem.ResourceStream != nil {
+		catalogUpdates, cancelCatalogUpdates := svc.SubscribeStreaming()
+		go func() {
+			defer cancelCatalogUpdates()
+			runCatalogDoorbellBridge(ctx, catalogUpdates, subsystem.ResourceStream)
+		}()
+	}
 
 	a.storeObjectCatalogEntry(target.meta.ID, &objectCatalogEntry{
 		service: svc,
@@ -210,20 +229,34 @@ func (a *App) startObjectCatalogForTarget(target catalogTarget) error {
 
 	go func() {
 		defer close(done)
-		if err := a.waitForCatalogInformerCaches(ctx, subsystem.InformerFactory); err != nil {
-			if !errors.Is(err, context.Canceled) {
-				a.logger.Warn(fmt.Sprintf("Object catalog waiting for informer caches failed: %v", err), logsources.ObjectCatalog, target.meta.ID, target.meta.Name)
-			}
-			if ctx.Err() != nil {
-				return
-			}
-		}
+		// No cache wait here: the service starts immediately so discovery and the
+		// RBAC preflight overlap the informer factory's initial sync; sync() itself
+		// waits for caches just before the collect (deps.WaitForCaches above).
 		if err := svc.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			a.logger.Warn(fmt.Sprintf("Object catalog terminated unexpectedly: %v", err), logsources.ObjectCatalog, target.meta.ID, target.meta.Name)
 		}
 	}()
 
 	return nil
+}
+
+func runCatalogDoorbellBridge(ctx context.Context, updates <-chan objectcatalog.StreamingUpdate, manager *resourcestream.Manager) {
+	if manager == nil {
+		return
+	}
+	var sequence uint64
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case _, ok := <-updates:
+			if !ok {
+				return
+			}
+			sequence++
+			manager.BroadcastCatalogRefresh(fmt.Sprintf("%d", sequence))
+		}
+	}
 }
 
 func (a *App) stopObjectCatalog() {
@@ -237,10 +270,7 @@ func (a *App) stopObjectCatalog() {
 		}
 	}
 	for _, entry := range entries {
-		if entry == nil || entry.done == nil {
-			continue
-		}
-		<-entry.done
+		a.waitForObjectCatalogDone(entry)
 	}
 
 	if a.telemetryRecorder != nil {
@@ -303,8 +333,26 @@ func (a *App) stopObjectCatalogForCluster(clusterID string) {
 	if entry.cancel != nil {
 		entry.cancel()
 	}
-	if entry.done != nil {
+	a.waitForObjectCatalogDone(entry)
+}
+
+func (a *App) waitForObjectCatalogDone(entry *objectCatalogEntry) {
+	if entry == nil || entry.done == nil {
+		return
+	}
+	timeout := config.RefreshShutdownTimeout
+	if timeout <= 0 {
 		<-entry.done
+		return
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-entry.done:
+	case <-timer.C:
+		if a != nil && a.logger != nil {
+			a.logger.Warn("Timed out waiting for object catalog shutdown", logsources.ObjectCatalog, entry.meta.ID, entry.meta.Name)
+		}
 	}
 }
 
@@ -337,6 +385,13 @@ func (a *App) catalogNamespaceGroups() []snapshot.CatalogNamespaceGroup {
 			continue
 		}
 		namespaces := entry.service.Namespaces()
+		// A scoped cluster's namespace list is synthesized from the
+		// configured scope (docs/plans/namespace-scope.md) so Browse agrees
+		// with the sidebar even before anything is catalogued.
+		if scope := a.allowedNamespacesForCluster(entry.meta.ID); len(scope) > 0 {
+			namespaces = append([]string(nil), scope...)
+			sort.Strings(namespaces)
+		}
 		if len(namespaces) == 0 {
 			continue
 		}
@@ -694,8 +749,8 @@ func failedCatalogCustomHydrationSummary(meta snapshot.ClusterMeta, row snapshot
 		Kind:               row.Kind,
 		Name:               row.Name,
 		Namespace:          row.Namespace,
-		APIGroup:           row.Group,
-		APIVersion:         row.Version,
+		Group:              row.Group,
+		Version:            row.Version,
 		CRDName:            crdName,
 		Status:             "Hydration failed",
 		StatusState:        "warning",

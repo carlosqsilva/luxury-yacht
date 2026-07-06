@@ -91,6 +91,11 @@ type policySpec struct {
 	Reason  string
 	Runtime []Resource
 	Stream  []Resource
+	// RuntimeClusterWide marks the domain's runtime data source as
+	// cluster-wide regardless of any namespace scope
+	// (docs/plans/namespace-scope.md): its runtime checks bypass the scope so
+	// the gate matches the source.
+	RuntimeClusterWide bool
 }
 
 // Compositions returns the shared resource composition for refresh domains.
@@ -209,11 +214,17 @@ func PreflightRequirements() []permissions.ResourceRequirement {
 func buildPolicies() []Policy {
 	result := make([]Policy, 0, len(policySpecs))
 	for _, spec := range policySpecs {
+		runtime := listRequirements(spec.Runtime)
+		if spec.RuntimeClusterWide {
+			for i := range runtime {
+				runtime[i].ClusterWide = true
+			}
+		}
 		result = append(result, Policy{
 			Domain:  spec.Domain,
 			Mode:    spec.Mode,
 			Reason:  spec.Reason,
-			Runtime: listRequirements(spec.Runtime),
+			Runtime: runtime,
 			Stream:  listWatchRequirements(spec.Stream),
 		})
 	}
@@ -400,6 +411,10 @@ var policySpecs = []policySpec{
 		// storage path. Streams also watch ConfigMaps so configmap-backed Helm
 		// release storage can trigger namespace-level resyncs when permitted.
 		Stream: []Resource{fromIdentity(secretpkg.Identity), fromIdentity(configmap.Identity)},
+		// Helm releases are read from the label-filtered CLUSTER-WIDE
+		// helm-storage informer factory, not from per-namespace ingest — the
+		// gate must match that source under a namespace scope.
+		RuntimeClusterWide: true,
 	},
 	{
 		Domain:  "namespace-events",
@@ -419,9 +434,18 @@ var policySpecs = []policySpec{
 		Stream:  []Resource{fromIdentity(nodes.Identity)},
 	},
 	{
-		Domain:  "cluster-overview",
-		Mode:    ModeAll,
-		Runtime: []Resource{fromIdentity(nodes.Identity)},
+		// ModeAny: the overview stays useful for identities without node access
+		// (issue #244 — the standard view role has pods+namespaces but no nodes).
+		// The builder marks the denied sources in the payload instead of the
+		// domain failing outright.
+		Domain: "cluster-overview",
+		Mode:   ModeAny,
+		Reason: "Cluster Overview requires list and watch on nodes, pods, and namespaces",
+		Runtime: []Resource{
+			fromIdentity(nodes.Identity),
+			fromIdentity(pods.Identity),
+			fromIdentity(namespaces.Identity),
+		},
 	},
 	{
 		Domain:  "cluster-rbac",

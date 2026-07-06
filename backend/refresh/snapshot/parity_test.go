@@ -224,21 +224,6 @@ func toAnySlice[T any](rows []T) []any {
 	return out
 }
 
-// staticPodMetrics implements metrics.Provider for parity tests that need
-// a deterministic metrics snapshot. The snapshot builder reads
-// LatestPodUsage() directly; the per-row projectors take the same map as
-// a parameter — staticPodMetrics ensures both paths see identical data.
-type staticPodMetrics struct {
-	pods map[string]metrics.PodUsage
-	meta metrics.Metadata
-}
-
-func (s *staticPodMetrics) LatestPodUsage() map[string]metrics.PodUsage { return s.pods }
-func (s *staticPodMetrics) LatestNodeUsage() map[string]metrics.NodeUsage {
-	return map[string]metrics.NodeUsage{}
-}
-func (s *staticPodMetrics) Metadata() metrics.Metadata { return s.meta }
-
 // ---------- Pods ----------
 
 func parityPodsCase(meta ClusterMeta, withMetrics bool) parityCase {
@@ -287,26 +272,18 @@ func parityPodsCase(meta ClusterMeta, withMetrics bool) parityCase {
 			rsLister := testsupport.NewReplicaSetLister(t, rs)
 			podLister := testsupport.NewPodLister(t, podA, podB)
 
-			usage := map[string]metrics.PodUsage{}
-			if withMetrics {
-				usage = map[string]metrics.PodUsage{
-					"default/web-abc-1": {CPUUsageMilli: 250, MemoryUsageBytes: 64 * 1024 * 1024},
-				}
-			}
-			provider := &staticPodMetrics{pods: usage}
-
 			builder := &PodBuilder{
 				podLister: podLister,
 				rsLister:  rsLister,
-				metrics:   provider,
 			}
 			snap, err := builder.Build(WithClusterMeta(context.Background(), meta), "namespace:default")
 			require.NoError(t, err)
 			payload := snap.Payload.(PodSnapshot)
 
+			expectedUsage := map[string]metrics.PodUsage{}
 			expected := []PodSummary{
-				buildPodSummaryForTest(meta, podA, usage, rsLister),
-				buildPodSummaryForTest(meta, podB, usage, rsLister),
+				buildPodSummaryForTest(meta, podA, expectedUsage, rsLister),
+				buildPodSummaryForTest(meta, podB, expectedUsage, rsLister),
 			}
 			requireRowParity(t, toAnySlice(payload.Rows), toAnySlice(expected), func(r any) string {
 				row := r.(PodSummary)
@@ -366,14 +343,17 @@ func parityWorkloadsCase(meta ClusterMeta, withHPA bool) parityCase {
 			}
 
 			builder := &NamespaceWorkloadsBuilder{
-				deploymentLister: testsupport.NewDeploymentLister(t, deployment),
-				statefulLister:   testsupport.NewStatefulSetLister(t, statefulSet),
-				daemonLister:     testsupport.NewDaemonSetLister(t),
-				jobLister:        testsupport.NewJobLister(t),
-				cronJobLister:    testsupport.NewCronJobLister(t),
-				podLister:        testsupport.NewPodLister(t, pod),
-				hpaLister:        testsupport.NewHorizontalPodAutoscalerLister(t, hpas...),
+				workloadIngest:      newFakeWorkloadIngestSource(meta, deployment, statefulSet),
+				includeDeployments:  true,
+				includeStatefulSets: true,
+				includeDaemonSets:   true,
+				includeJobs:         true,
+				includeCronJobs:     true,
+				podIngest:           newFakePodWorkloadsIngestSource(meta, nil, pod),
+				includePods:         true,
+				hpaLister:           testsupport.NewHorizontalPodAutoscalerLister(t, hpas...),
 			}
+			seedWorkloadsFromBuilderSource(builder, meta)
 			snap, err := builder.Build(WithClusterMeta(context.Background(), meta), "namespace:default")
 			require.NoError(t, err)
 			payload := snap.Payload.(NamespaceWorkloadsSnapshot)
@@ -437,11 +417,21 @@ func parityServiceCase(meta ClusterMeta, withEndpoints bool) parityCase {
 				}}
 			}
 
-			builder := &NamespaceNetworkBuilder{
-				serviceLister:       testsupport.NewServiceLister(t, service),
-				endpointSliceLister: testsupport.NewEndpointSliceLister(t, slices...),
-				collectIndexer:      networkCollectIndexer(networkIndexers{}),
+			// Service and EndpointSlice are cut to the ingest path: the builder reads the
+			// Service OWN-row + EndpointSlice rows + join facts from the ingest source. The
+			// serve-side re-join must reproduce servicepkg.BuildStreamSummary(meta, svc,
+			// slices) — the typed reference — byte for byte, INCLUDING the endpoint count.
+			ingestObjects := []metav1.Object{service}
+			for _, slice := range slices {
+				ingestObjects = append(ingestObjects, slice)
 			}
+			builder := &NamespaceNetworkBuilder{
+				networkIngest:         newFakeNetworkIngestSource(meta, ingestObjects...),
+				includeServices:       true,
+				includeEndpointSlices: true,
+				collectIndexer:        networkCollectIndexer(networkIndexers{}),
+			}
+			seedNetworkMaintained(builder, meta)
 			snap, err := builder.Build(WithClusterMeta(context.Background(), meta), "namespace:default")
 			require.NoError(t, err)
 			payload := snap.Payload.(NamespaceNetworkSnapshot)
@@ -484,19 +474,22 @@ func parityNamespaceNetworkObjectsCase(meta ClusterMeta) parityCase {
 				},
 			}
 
-			// Ingress, NetworkPolicy, and the Gateway-API kinds are all
-			// descriptor-driven plain object→row projections; the builder lists
-			// them from their informer indexers and calls the same shared
+			// Ingress and NetworkPolicy are cut to the ingest path (plain object→row, fed
+			// from the generic ingest reflector); the Gateway-API kinds are NOT cut and stay
+			// indexer-driven. The builder reads Ingress/NetworkPolicy rows from the ingest
+			// source and Gateway rows from its test indexer, all via the same shared
 			// Build*StreamSummary helpers as the streaming path.
 			builder := &NamespaceNetworkBuilder{
-				serviceLister:       testsupport.NewServiceLister(t),
-				endpointSliceLister: testsupport.NewEndpointSliceLister(t),
+				networkIngest:          newFakeNetworkIngestSource(meta, ingress, policy),
+				includeIngresses:       true,
+				includeNetworkPolicies: true,
 				collectIndexer: networkCollectIndexer(networkIndexers{
-					ingress:       testsupport.NewNamespacedIndexer(t, ingress),
-					networkpolicy: testsupport.NewNamespacedIndexer(t, policy),
+					ingress:       ingestAvailabilityIndexer,
+					networkpolicy: ingestAvailabilityIndexer,
 					gateway:       testsupport.NewNamespacedIndexer(t, gateway),
 				}),
 			}
+			seedNetworkMaintained(builder, meta)
 			snap, err := builder.Build(WithClusterMeta(context.Background(), meta), "namespace:default")
 			require.NoError(t, err)
 			payload := snap.Payload.(NamespaceNetworkSnapshot)
@@ -711,7 +704,7 @@ func parityNamespaceCustomCollisionCase(meta ClusterMeta) parityCase {
 			rowA := customresource.BuildNamespaceStreamSummary(meta, crA, "rds.services.k8s.aws", "v1alpha1", "DBInstance", "dbinstances.rds.services.k8s.aws", "data")
 			rowB := customresource.BuildNamespaceStreamSummary(meta, crB, "databases.example.com", "v1", "DBInstance", "dbinstances.databases.example.com", "data")
 
-			require.NotEqual(t, rowA.APIGroup, rowB.APIGroup, "collision regression: rows with same kind/name but different GVKs must remain distinguishable")
+			require.NotEqual(t, rowA.Group, rowB.Group, "collision regression: rows with same kind/name but different GVKs must remain distinguishable")
 			require.NotEqual(t, rowA.CRDName, rowB.CRDName, "CRDName must differ for distinct CRDs")
 			require.Equal(t, "primary", rowA.Name)
 			require.Equal(t, "primary", rowB.Name)
@@ -721,7 +714,7 @@ func parityNamespaceCustomCollisionCase(meta ClusterMeta) parityCase {
 			rowARepeat := customresource.BuildNamespaceStreamSummary(meta, crA, "rds.services.k8s.aws", "v1alpha1", "DBInstance", "dbinstances.rds.services.k8s.aws", "data")
 			requireRowParity(t, []any{rowA}, []any{rowARepeat}, func(r any) string {
 				row := r.(NamespaceCustomSummary)
-				return row.APIGroup + "/" + row.APIVersion + "/" + row.Kind + "/" + row.Namespace + "/" + row.Name
+				return row.Group + "/" + row.Version + "/" + row.Kind + "/" + row.Namespace + "/" + row.Name
 			})
 		},
 	}
@@ -746,13 +739,13 @@ func parityClusterCustomCollisionCase(meta ClusterMeta) parityCase {
 			rowA := customresource.BuildClusterStreamSummary(meta, crA, "rds.services.k8s.aws", "v1alpha1", "DBCluster", "dbclusters.rds.services.k8s.aws")
 			rowB := customresource.BuildClusterStreamSummary(meta, crB, "databases.example.com", "v1", "DBCluster", "dbclusters.databases.example.com")
 
-			require.NotEqual(t, rowA.APIGroup, rowB.APIGroup)
+			require.NotEqual(t, rowA.Group, rowB.Group)
 			require.NotEqual(t, rowA.CRDName, rowB.CRDName)
 
 			rowARepeat := customresource.BuildClusterStreamSummary(meta, crA, "rds.services.k8s.aws", "v1alpha1", "DBCluster", "dbclusters.rds.services.k8s.aws")
 			requireRowParity(t, []any{rowA}, []any{rowARepeat}, func(r any) string {
 				row := r.(ClusterCustomSummary)
-				return row.APIGroup + "/" + row.APIVersion + "/" + row.Kind + "/" + row.Name
+				return row.Group + "/" + row.Version + "/" + row.Kind + "/" + row.Name
 			})
 		},
 	}
@@ -938,24 +931,16 @@ func parityNodesCase(meta ClusterMeta, withMetrics bool) parityCase {
 				Status:     corev1.PodStatus{Phase: corev1.PodRunning},
 			}
 
-			usage := map[string]metrics.PodUsage{}
-			if withMetrics {
-				usage = map[string]metrics.PodUsage{
-					"default/p1": {CPUUsageMilli: 100, MemoryUsageBytes: 32 * 1024 * 1024},
-				}
-			}
-			provider := &staticPodMetrics{pods: usage}
-
-			builder := &NodeBuilder{
-				lister:    testsupport.NewNodeLister(t, node),
-				podLister: testsupport.NewPodLister(t, pod),
-				metrics:   provider,
-			}
+			builder := newNodeBuilderForTest(
+				meta,
+				newFakePodAggregateSource(nil, pod).withNodes(meta, node.ResourceVersion, node),
+				node,
+			)
 			snap, err := builder.Build(WithClusterMeta(context.Background(), meta), "")
 			require.NoError(t, err)
 			payload := snap.Payload.(NodeSnapshot)
 
-			expectedRow, err := BuildNodeSummary(meta, node, []*corev1.Pod{pod}, provider.LatestNodeUsage(), provider.LatestPodUsage())
+			expectedRow, err := BuildNodeSummary(meta, node, []*corev1.Pod{pod}, map[string]metrics.NodeUsage{}, map[string]metrics.PodUsage{})
 			require.NoError(t, err)
 			expected := []NodeSummary{expectedRow}
 			requireRowParity(t, toAnySlice(payload.Rows), toAnySlice(expected), func(r any) string {

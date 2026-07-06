@@ -105,8 +105,11 @@ type networkIndexers struct {
 }
 
 // networkCollectIndexer resolves the namespace-network stream descriptors to the
-// supplied test indexers. Service and EndpointSlice are listed via the builder's
-// own listers, not here.
+// supplied test indexers. Service, EndpointSlice, Ingress, and NetworkPolicy are cut to
+// the ingest path: their availability resolves to the shared sentinel indexer (a non-nil
+// empty indexer) when the test supplies one, so the descriptor source gate marks them
+// Available without a typed informer — exactly as factoryIndexers does in production. Their
+// ROWS come from the builder's ingest source, not here.
 func networkCollectIndexer(idx networkIndexers) func(streamspec.Descriptor) cache.Indexer {
 	return func(d streamspec.Descriptor) cache.Indexer {
 		switch d.Resource {
@@ -507,13 +510,18 @@ func TestNamespaceNetworkBuilder(t *testing.T) {
 	}
 
 	builder := &NamespaceNetworkBuilder{
-		serviceLister:       testsupport.NewServiceLister(t, svc),
-		endpointSliceLister: testsupport.NewEndpointSliceLister(t, slice),
+		networkIngest:          newFakeNetworkIngestSource(ClusterMeta{}, svc, slice, ing, policy),
+		includeServices:        true,
+		includeEndpointSlices:  true,
+		includeIngresses:       true,
+		includeNetworkPolicies: true,
+		// Cut kinds resolve availability via the sentinel indexer; rows come from ingest.
 		collectIndexer: networkCollectIndexer(networkIndexers{
-			ingress:       testsupport.NewNamespacedIndexer(t, ing),
-			networkpolicy: testsupport.NewNamespacedIndexer(t, policy),
+			ingress:       ingestAvailabilityIndexer,
+			networkpolicy: ingestAvailabilityIndexer,
 		}),
 	}
+	seedNetworkMaintained(builder, ClusterMeta{})
 
 	snapshot, err := builder.Build(context.Background(), "namespace:default")
 	require.NoError(t, err)
@@ -526,6 +534,12 @@ func TestNamespaceNetworkBuilder(t *testing.T) {
 	endpointSliceSummary, ok := findNetworkSummary(payload.Rows, "EndpointSlice", "api-abcde")
 	require.True(t, ok)
 	require.Equal(t, "default", endpointSliceSummary.Namespace)
+	// The Service row's endpoint join is re-applied at serve from the EndpointSlice store:
+	// the single ready endpoint contributes "Addresses: 1" to the Service Details, exactly
+	// as the typed service.BuildStreamSummary(svc, slices) path produced.
+	serviceSummary, ok := findNetworkSummary(payload.Rows, "Service", "api")
+	require.True(t, ok)
+	require.Contains(t, serviceSummary.Details, "Addresses: 1")
 	for _, entry := range payload.Rows {
 		require.NotEmpty(t, entry.Age)
 	}
@@ -605,13 +619,17 @@ func TestNamespaceNetworkBuilderAllNamespaces(t *testing.T) {
 	}
 
 	builder := &NamespaceNetworkBuilder{
-		serviceLister:       testsupport.NewServiceLister(t, svcDefault, svcOther),
-		endpointSliceLister: testsupport.NewEndpointSliceLister(t, sliceDefault, sliceOther),
+		networkIngest:          newFakeNetworkIngestSource(ClusterMeta{}, svcDefault, svcOther, sliceDefault, sliceOther, ingDefault, policyOther),
+		includeServices:        true,
+		includeEndpointSlices:  true,
+		includeIngresses:       true,
+		includeNetworkPolicies: true,
 		collectIndexer: networkCollectIndexer(networkIndexers{
-			ingress:       testsupport.NewNamespacedIndexer(t, ingDefault),
-			networkpolicy: testsupport.NewNamespacedIndexer(t, policyOther),
+			ingress:       ingestAvailabilityIndexer,
+			networkpolicy: ingestAvailabilityIndexer,
 		}),
 	}
+	seedNetworkMaintained(builder, ClusterMeta{})
 
 	snapshot, err := builder.Build(context.Background(), "namespace:all")
 	require.NoError(t, err)
@@ -1369,6 +1387,21 @@ func TestNamespaceWorkloadsBuilder(t *testing.T) {
 				Controller: &replicaSetOwner,
 			}},
 		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name: "web",
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceCPU:    mustQuantity(t, "250m"),
+						corev1.ResourceMemory: mustQuantity(t, "96Mi"),
+					},
+					Limits: corev1.ResourceList{
+						corev1.ResourceCPU:    mustQuantity(t, "500m"),
+						corev1.ResourceMemory: mustQuantity(t, "192Mi"),
+					},
+				},
+			}},
+		},
 		Status: corev1.PodStatus{
 			Phase: corev1.PodRunning,
 			ContainerStatuses: []corev1.ContainerStatus{{
@@ -1379,28 +1412,22 @@ func TestNamespaceWorkloadsBuilder(t *testing.T) {
 		},
 	}
 
-	collectedAt := time.Unix(1000, 0)
-	provider := &workloadMetricsProvider{
-		pods: map[string]metrics.PodUsage{
-			"default/web-abc123": {CPUUsageMilli: 80, MemoryUsageBytes: 150 * 1024 * 1024},
-		},
-		metadata: metrics.Metadata{CollectedAt: collectedAt},
-	}
-
 	builder := &NamespaceWorkloadsBuilder{
-		podLister:        testsupport.NewPodLister(t, pod),
-		deploymentLister: testsupport.NewDeploymentLister(t, deployment),
-		statefulLister:   testsupport.NewStatefulSetLister(t),
-		daemonLister:     testsupport.NewDaemonSetLister(t),
-		jobLister:        testsupport.NewJobLister(t),
-		cronJobLister:    testsupport.NewCronJobLister(t),
-		metrics:          provider,
+		podIngest:           newFakePodWorkloadsIngestSource(ClusterMeta{}, nil, pod),
+		includePods:         true,
+		workloadIngest:      newFakeWorkloadIngestSource(ClusterMeta{}, deployment),
+		includeDeployments:  true,
+		includeStatefulSets: true,
+		includeDaemonSets:   true,
+		includeJobs:         true,
+		includeCronJobs:     true,
 	}
+	seedWorkloadsFromBuilderSource(builder, ClusterMeta{})
 
 	snapshot, err := builder.Build(context.Background(), "namespace:default")
 	require.NoError(t, err)
 	require.Equal(t, namespaceWorkloadsDomainName, snapshot.Domain)
-	require.Equal(t, snapshotVersionWithDynamicRevision(10, fmt.Sprint(collectedAt.UnixNano())), snapshot.Version)
+	require.Equal(t, uint64(10), snapshot.Version)
 
 	payload, ok := snapshot.Payload.(NamespaceWorkloadsSnapshot)
 	require.True(t, ok)
@@ -1423,6 +1450,183 @@ func TestNamespaceWorkloadsBuilder(t *testing.T) {
 
 }
 
+// TestNamespaceWorkloadsBuilderWindowScopeOrdersRowsByKindThenName pins the WINDOW
+// branch's (kind, name) ordering with deliberately scrambled input: the window
+// truncates input order, so an unsorted window would truncate a nondeterministic
+// subset. The query branch deliberately has no such pin — the querypage engine owns
+// its order and ignores the builder's.
+func TestNamespaceWorkloadsBuilderWindowScopeOrdersRowsByKindThenName(t *testing.T) {
+	replicas := int32(1)
+	deploymentSpec := func(name string) *appsv1.Deployment {
+		return &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            name,
+				Namespace:       "default",
+				ResourceVersion: "10",
+			},
+			Spec: appsv1.DeploymentSpec{
+				Replicas: &replicas,
+				Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": name}},
+			},
+		}
+	}
+	statefulSet := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "db",
+			Namespace:       "default",
+			ResourceVersion: "11",
+		},
+		Spec: appsv1.StatefulSetSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "db"}},
+		},
+	}
+
+	builder := &NamespaceWorkloadsBuilder{
+		podIngest:           newFakePodWorkloadsIngestSource(ClusterMeta{}, nil),
+		includePods:         true,
+		workloadIngest:      newFakeWorkloadIngestSource(ClusterMeta{}, deploymentSpec("web"), statefulSet, deploymentSpec("api")),
+		includeDeployments:  true,
+		includeStatefulSets: true,
+	}
+	seedWorkloadsFromBuilderSource(builder, ClusterMeta{})
+
+	snapshot, err := builder.Build(context.Background(), "namespace:default")
+	require.NoError(t, err)
+
+	payload, ok := snapshot.Payload.(NamespaceWorkloadsSnapshot)
+	require.True(t, ok)
+	require.Len(t, payload.Rows, 3)
+	got := make([]string, 0, len(payload.Rows))
+	for _, row := range payload.Rows {
+		got = append(got, row.Kind+"/"+row.Name)
+	}
+	require.Equal(t, []string{"Deployment/api", "Deployment/web", "StatefulSet/db"}, got)
+}
+
+func TestNamespaceWorkloadsBuilderSurfacesMetricMetadata(t *testing.T) {
+	collectedAt := time.Now().Add(-config.MetricsStaleThreshold - time.Second)
+	replicas := int32(1)
+	deployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "web",
+			Namespace:         "default",
+			ResourceVersion:   "10",
+			CreationTimestamp: metav1.NewTime(collectedAt.Add(-time.Hour)),
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "web"}},
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "web-abc123",
+			Namespace:         "default",
+			ResourceVersion:   "11",
+			CreationTimestamp: metav1.NewTime(collectedAt.Add(-30 * time.Minute)),
+			Labels:            map[string]string{"app": "web"},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	provider := &workloadMetricsProvider{
+		pods: map[string]metrics.PodUsage{
+			"default/web-abc123": {CPUUsageMilli: 80, MemoryUsageBytes: 150 * 1024 * 1024},
+		},
+		metadata: metrics.Metadata{
+			CollectedAt:         collectedAt,
+			LastError:           "metrics API forbidden",
+			ConsecutiveFailures: 2,
+			SuccessCount:        3,
+			FailureCount:        5,
+		},
+	}
+	builder := &NamespaceWorkloadsBuilder{
+		podIngest:           newFakePodWorkloadsIngestSource(ClusterMeta{}, nil, pod),
+		includePods:         true,
+		workloadIngest:      newFakeWorkloadIngestSource(ClusterMeta{}, deployment),
+		includeDeployments:  true,
+		includeStatefulSets: true,
+		includeDaemonSets:   true,
+		includeJobs:         true,
+		includeCronJobs:     true,
+		metrics:             provider,
+	}
+	seedWorkloadsFromBuilderSource(builder, ClusterMeta{})
+
+	snapshot, err := builder.Build(context.Background(), "namespace:default")
+	require.NoError(t, err)
+
+	payload := snapshot.Payload.(NamespaceWorkloadsSnapshot)
+	require.True(t, payload.Metrics.Stale)
+	require.Equal(t, "metrics API forbidden", payload.Metrics.LastError)
+	require.Equal(t, 2, payload.Metrics.ConsecutiveFailures)
+	require.Equal(t, uint64(3), payload.Metrics.SuccessCount)
+	require.Equal(t, uint64(5), payload.Metrics.FailureCount)
+	require.Equal(t, collectedAt.Unix(), payload.Metrics.CollectedAt)
+}
+
+func TestNamespaceWorkloadsBuilderAllNamespacesOverlayAggregatesPodMetrics(t *testing.T) {
+	now := time.Unix(1000, 0)
+	replicas := int32(1)
+	deployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "api",
+			Namespace:         "team-b",
+			ResourceVersion:   "10",
+			CreationTimestamp: metav1.NewTime(now.Add(-time.Hour)),
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "api"}},
+		},
+	}
+	replicaSetOwner := true
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "api-7d9c8b6f5-abcde",
+			Namespace:         "team-b",
+			ResourceVersion:   "20",
+			CreationTimestamp: metav1.NewTime(now.Add(-30 * time.Minute)),
+			OwnerReferences: []metav1.OwnerReference{{
+				Kind:       "ReplicaSet",
+				Name:       "api-7d9c8b6f5",
+				Controller: &replicaSetOwner,
+			}},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	provider := &workloadMetricsProvider{
+		pods: map[string]metrics.PodUsage{
+			"team-b/api-7d9c8b6f5-abcde": {
+				CPUUsageMilli:    250,
+				MemoryUsageBytes: 128 * 1024 * 1024,
+			},
+		},
+		metadata: metrics.Metadata{CollectedAt: now},
+	}
+	builder := &NamespaceWorkloadsBuilder{
+		podIngest:           newFakePodWorkloadsIngestSource(ClusterMeta{}, nil, pod),
+		includePods:         true,
+		workloadIngest:      newFakeWorkloadIngestSource(ClusterMeta{}, deployment),
+		includeDeployments:  true,
+		includeStatefulSets: true,
+		includeDaemonSets:   true,
+		includeJobs:         true,
+		includeCronJobs:     true,
+		metrics:             provider,
+	}
+	seedWorkloadsFromBuilderSource(builder, ClusterMeta{})
+
+	snapshot, err := builder.Build(context.Background(), "cluster-a|namespace:all?limit=50&sort=name&sortDirection=asc&search=api")
+	require.NoError(t, err)
+	payload := snapshot.Payload.(NamespaceWorkloadsSnapshot)
+	require.Len(t, payload.Rows, 1)
+	require.Equal(t, "api", payload.Rows[0].Name)
+	require.Equal(t, "250m", payload.Rows[0].CPUUsage)
+	require.Equal(t, "128Mi", payload.Rows[0].MemUsage)
+}
+
 func TestNamespaceWorkloadsBuilderSingleNamespaceCapsLargeSnapshots(t *testing.T) {
 	deployments := make([]*appsv1.Deployment, 0, config.SnapshotNamespaceWorkloadsEntryLimit+1)
 	for i := 0; i < config.SnapshotNamespaceWorkloadsEntryLimit+1; i++ {
@@ -1436,13 +1640,16 @@ func TestNamespaceWorkloadsBuilderSingleNamespaceCapsLargeSnapshots(t *testing.T
 	}
 
 	builder := &NamespaceWorkloadsBuilder{
-		podLister:        testsupport.NewPodLister(t),
-		deploymentLister: testsupport.NewDeploymentLister(t, deployments...),
-		statefulLister:   testsupport.NewStatefulSetLister(t),
-		daemonLister:     testsupport.NewDaemonSetLister(t),
-		jobLister:        testsupport.NewJobLister(t),
-		cronJobLister:    testsupport.NewCronJobLister(t),
+		podIngest:           newFakePodWorkloadsIngestSource(ClusterMeta{}, nil),
+		includePods:         true,
+		workloadIngest:      newFakeWorkloadIngestSource(ClusterMeta{}, workloadObjects(deployments)...),
+		includeDeployments:  true,
+		includeStatefulSets: true,
+		includeDaemonSets:   true,
+		includeJobs:         true,
+		includeCronJobs:     true,
 	}
+	seedWorkloadsFromBuilderSource(builder, ClusterMeta{})
 
 	snapshot, err := builder.Build(context.Background(), "namespace:team-a")
 	require.NoError(t, err)
@@ -1492,13 +1699,15 @@ func TestNamespaceWorkloadsBuilderMarksHPAManagedByFullGVK(t *testing.T) {
 	}
 
 	builder := &NamespaceWorkloadsBuilder{
-		deploymentLister: testsupport.NewDeploymentLister(t, deployment),
-		statefulLister:   testsupport.NewStatefulSetLister(t),
-		daemonLister:     testsupport.NewDaemonSetLister(t),
-		jobLister:        testsupport.NewJobLister(t),
-		cronJobLister:    testsupport.NewCronJobLister(t),
-		hpaLister:        testsupport.NewHorizontalPodAutoscalerLister(t, customTargetHPA),
+		workloadIngest:      newFakeWorkloadIngestSource(ClusterMeta{}, deployment),
+		includeDeployments:  true,
+		includeStatefulSets: true,
+		includeDaemonSets:   true,
+		includeJobs:         true,
+		includeCronJobs:     true,
+		hpaLister:           testsupport.NewHorizontalPodAutoscalerLister(t, customTargetHPA),
 	}
+	seedWorkloadsFromBuilderSource(builder, ClusterMeta{})
 
 	snapshot, err := builder.Build(context.Background(), "namespace:default")
 	require.NoError(t, err)
@@ -1574,6 +1783,21 @@ func TestNamespaceWorkloadsBuilderAllNamespaces(t *testing.T) {
 				Controller: &replicaSetOwner,
 			}},
 		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name: "web",
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceCPU:    mustQuantity(t, "250m"),
+						corev1.ResourceMemory: mustQuantity(t, "96Mi"),
+					},
+					Limits: corev1.ResourceList{
+						corev1.ResourceCPU:    mustQuantity(t, "500m"),
+						corev1.ResourceMemory: mustQuantity(t, "192Mi"),
+					},
+				},
+			}},
+		},
 		Status: corev1.PodStatus{
 			Phase: corev1.PodRunning,
 			ContainerStatuses: []corev1.ContainerStatus{{
@@ -1596,6 +1820,21 @@ func TestNamespaceWorkloadsBuilderAllNamespaces(t *testing.T) {
 				Controller: &replicaSetOwner,
 			}},
 		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name: "api",
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceCPU:    mustQuantity(t, "125m"),
+						corev1.ResourceMemory: mustQuantity(t, "64Mi"),
+					},
+					Limits: corev1.ResourceList{
+						corev1.ResourceCPU:    mustQuantity(t, "375m"),
+						corev1.ResourceMemory: mustQuantity(t, "160Mi"),
+					},
+				},
+			}},
+		},
 		Status: corev1.PodStatus{
 			Phase: corev1.PodRunning,
 			ContainerStatuses: []corev1.ContainerStatus{{
@@ -1607,14 +1846,16 @@ func TestNamespaceWorkloadsBuilderAllNamespaces(t *testing.T) {
 	}
 
 	builder := &NamespaceWorkloadsBuilder{
-		podLister:        testsupport.NewPodLister(t, webPod, apiPod),
-		deploymentLister: testsupport.NewDeploymentLister(t, webDeployment, apiDeployment),
-		statefulLister:   testsupport.NewStatefulSetLister(t),
-		daemonLister:     testsupport.NewDaemonSetLister(t),
-		jobLister:        testsupport.NewJobLister(t),
-		cronJobLister:    testsupport.NewCronJobLister(t),
-		metrics:          &workloadMetricsProvider{pods: map[string]metrics.PodUsage{}},
+		podIngest:           newFakePodWorkloadsIngestSource(ClusterMeta{}, nil, webPod, apiPod),
+		includePods:         true,
+		workloadIngest:      newFakeWorkloadIngestSource(ClusterMeta{}, webDeployment, apiDeployment),
+		includeDeployments:  true,
+		includeStatefulSets: true,
+		includeDaemonSets:   true,
+		includeJobs:         true,
+		includeCronJobs:     true,
 	}
+	seedWorkloadsFromBuilderSource(builder, ClusterMeta{})
 	snapshot, err := builder.Build(context.Background(), "namespace:all")
 	require.NoError(t, err)
 	require.Equal(t, namespaceWorkloadsDomainName, snapshot.Domain)
@@ -1626,11 +1867,29 @@ func TestNamespaceWorkloadsBuilderAllNamespaces(t *testing.T) {
 	require.Equal(t, []string{"Deployment"}, payload.Kinds)
 
 	namespaces := map[string]struct{}{}
+	summaries := map[string]WorkloadSummary{}
 	for _, summary := range payload.Rows {
 		require.NotEmpty(t, summary.Namespace)
 		namespaces[summary.Namespace] = struct{}{}
+		summaries[summary.Kind+"/"+summary.Namespace+"/"+summary.Name] = summary
 	}
 	require.Len(t, namespaces, 2)
+	webSummary, ok := summaries["Deployment/default/web"]
+	require.True(t, ok)
+	require.Equal(t, "250m", webSummary.CPURequest)
+	require.Equal(t, "500m", webSummary.CPULimit)
+	require.Equal(t, "96Mi", webSummary.MemRequest)
+	require.Equal(t, "192Mi", webSummary.MemLimit)
+	require.Equal(t, "1/1", webSummary.Ready)
+	require.Equal(t, int32(0), webSummary.Restarts)
+	apiSummary, ok := summaries["Deployment/staging/api"]
+	require.True(t, ok)
+	require.Equal(t, "125m", apiSummary.CPURequest)
+	require.Equal(t, "375m", apiSummary.CPULimit)
+	require.Equal(t, "64Mi", apiSummary.MemRequest)
+	require.Equal(t, "160Mi", apiSummary.MemLimit)
+	require.Equal(t, "1/1", apiSummary.Ready)
+	require.Equal(t, int32(1), apiSummary.Restarts)
 }
 
 func TestNamespaceWorkloadsBuilderAllNamespacesQuerySortsFiltersAndPagesByMetrics(t *testing.T) {
@@ -1712,18 +1971,21 @@ func TestNamespaceWorkloadsBuilderAllNamespacesQuerySortsFiltersAndPagesByMetric
 	}
 
 	builder := &NamespaceWorkloadsBuilder{
-		podLister:        testsupport.NewPodLister(t, pods...),
-		deploymentLister: testsupport.NewDeploymentLister(t, deployments...),
-		statefulLister:   testsupport.NewStatefulSetLister(t),
-		daemonLister:     testsupport.NewDaemonSetLister(t),
-		jobLister:        testsupport.NewJobLister(t),
-		cronJobLister:    testsupport.NewCronJobLister(t),
+		podIngest:           newFakePodWorkloadsIngestSource(ClusterMeta{}, nil, pods...),
+		includePods:         true,
+		workloadIngest:      newFakeWorkloadIngestSource(ClusterMeta{}, workloadObjects(deployments)...),
+		includeDeployments:  true,
+		includeStatefulSets: true,
+		includeDaemonSets:   true,
+		includeJobs:         true,
+		includeCronJobs:     true,
 		metrics: &workloadMetricsProvider{pods: map[string]metrics.PodUsage{
 			"team-a/alpha-pod":   {MemoryUsageBytes: 64 * 1024 * 1024},
 			"team-b/bravo-pod":   {MemoryUsageBytes: 512 * 1024 * 1024},
 			"team-b/charlie-pod": {MemoryUsageBytes: 128 * 1024 * 1024},
 		}},
 	}
+	seedWorkloadsFromBuilderSource(builder, ClusterMeta{})
 
 	snapshot, err := builder.Build(context.Background(), "cluster-a|namespace:all?namespaces=team-b&sort=memory&sortDirection=desc&limit=1")
 	require.NoError(t, err)
@@ -1807,14 +2069,17 @@ func TestNamespaceWorkloadsBuilderMetricCursorContinuesAcrossMetricsRefresh(t *t
 		metadata: metrics.Metadata{CollectedAt: now},
 	}
 	builder := &NamespaceWorkloadsBuilder{
-		podLister:        testsupport.NewPodLister(t, pods...),
-		deploymentLister: testsupport.NewDeploymentLister(t, deployments...),
-		statefulLister:   testsupport.NewStatefulSetLister(t),
-		daemonLister:     testsupport.NewDaemonSetLister(t),
-		jobLister:        testsupport.NewJobLister(t),
-		cronJobLister:    testsupport.NewCronJobLister(t),
-		metrics:          provider,
+		podIngest:           newFakePodWorkloadsIngestSource(ClusterMeta{}, nil, pods...),
+		includePods:         true,
+		workloadIngest:      newFakeWorkloadIngestSource(ClusterMeta{}, workloadObjects(deployments)...),
+		includeDeployments:  true,
+		includeStatefulSets: true,
+		includeDaemonSets:   true,
+		includeJobs:         true,
+		includeCronJobs:     true,
+		metrics:             provider,
 	}
+	seedWorkloadsFromBuilderSource(builder, ClusterMeta{})
 
 	first, err := builder.Build(context.Background(), "cluster-a|namespace:all?sort=memory&sortDirection=desc&limit=1")
 	require.NoError(t, err)
@@ -1862,13 +2127,16 @@ func TestNamespaceWorkloadsQueryMarksDeniedKindsPartial(t *testing.T) {
 		},
 	}
 	builder := &NamespaceWorkloadsBuilder{
-		podLister:        testsupport.NewPodLister(t),
-		deploymentLister: testsupport.NewDeploymentLister(t, deployment),
-		statefulLister:   testsupport.NewStatefulSetLister(t),
-		daemonLister:     testsupport.NewDaemonSetLister(t),
-		jobLister:        testsupport.NewJobLister(t, job),
-		cronJobLister:    testsupport.NewCronJobLister(t),
+		podIngest:           newFakePodWorkloadsIngestSource(ClusterMeta{}, nil),
+		includePods:         true,
+		workloadIngest:      newFakeWorkloadIngestSource(ClusterMeta{}, deployment, job),
+		includeDeployments:  true,
+		includeStatefulSets: true,
+		includeDaemonSets:   true,
+		includeJobs:         true,
+		includeCronJobs:     true,
 	}
+	seedWorkloadsFromBuilderSource(builder, ClusterMeta{})
 	ctx := domainpermissions.WithAllowedResources(context.Background(), namespaceWorkloadsDomainName, domainpermissions.AllowedResources{
 		"core/pods":         true,
 		"apps/deployments":  true,
@@ -1888,6 +2156,17 @@ func TestNamespaceWorkloadsQueryMarksDeniedKindsPartial(t *testing.T) {
 	require.Contains(t, payload.Issues[0].Message, "partial")
 	require.Len(t, payload.Rows, 1)
 	require.Equal(t, "Deployment", payload.Rows[0].Kind)
+}
+
+// workloadObjects converts a typed workload slice to the []metav1.Object the
+// fake workload ingest source's variadic accepts (Go can't spread []*T directly
+// into a ...metav1.Object parameter even though *T implements metav1.Object).
+func workloadObjects[T metav1.Object](items []T) []metav1.Object {
+	out := make([]metav1.Object, 0, len(items))
+	for _, item := range items {
+		out = append(out, item)
+	}
+	return out
 }
 
 func mustQuantity(t testing.TB, value string) resource.Quantity {
@@ -1923,4 +2202,12 @@ func (f *workloadMetricsProvider) LatestPodUsage() map[string]metrics.PodUsage {
 
 func (f *workloadMetricsProvider) Metadata() metrics.Metadata {
 	return f.metadata
+}
+
+func (f *workloadMetricsProvider) Sample() metrics.Sample {
+	return metrics.Sample{
+		NodeUsage: f.LatestNodeUsage(),
+		PodUsage:  f.LatestPodUsage(),
+		Metadata:  f.Metadata(),
+	}
 }

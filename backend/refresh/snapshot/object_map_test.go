@@ -3,8 +3,12 @@ package snapshot
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/luxury-yacht/app/backend/kind/objectmapnode"
+	"github.com/luxury-yacht/app/backend/objectcatalog"
 
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
@@ -17,7 +21,9 @@ import (
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/informers"
@@ -73,11 +79,130 @@ func newObjectMapTestBuilder(t *testing.T, client kubernetes.Interface) *objectM
 	syncCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	shared.WaitForCacheSync(syncCtx.Done())
-	return &objectMapBuilder{
+	builder := &objectMapBuilder{
 		client:      client,
 		shared:      shared,
 		permissions: allowAllPermissions{},
+		// Ingest-owned (cut) kinds are no longer read from the shared listers; project
+		// their object-map nodes through the same registry collector + edges the
+		// production ingest path uses, so the test stays byte-equivalent to a real
+		// reflector feeding the object map.
+		ingest: newFakeObjectMapIngestSource(t, shared),
 	}
+	// The object catalog is seeded with a Summary for every object the map collects,
+	// mirroring production: the catalog is fed from the SAME ingest/informer source the
+	// object map reads, so every collected record collides (by node id) with a
+	// catalog-seeded record that addCatalog adds first. Wiring it here means the whole
+	// object-map suite exercises that merge path — without it no test reproduced the
+	// production collision that once dropped `presented`/`ingestEdges` for cut kinds. The
+	// closure reads builder.permissions at Build time so a test that denies a resource
+	// (which production keeps out of the catalog too) sees it absent here as well.
+	builder.catalogService = func() *objectcatalog.Service {
+		return objectMapCatalogService(t, shared, builder.permissions)
+	}
+	return builder
+}
+
+// objectMapCatalogService builds an object-catalog Service seeded with a Summary for
+// every object the object map collects from the started factory, skipping resources the
+// permission checker denies. It mirrors production, where the catalog is fed from the
+// same permission-gated source the object map reads, so each Summary collides by node id
+// with the record the map collects for that object and the build exercises the
+// catalog-merge path. ClusterID and CreationTimestamp are left empty on purpose:
+// addRecord stamps the cluster id from the build meta (so the id collides whatever
+// cluster the test uses), and the merge keeps the collected record's creation timestamp.
+func objectMapCatalogService(t *testing.T, shared informers.SharedInformerFactory, permissions objectMapPermissionChecker) *objectcatalog.Service {
+	t.Helper()
+	var summaries []objectcatalog.Summary
+	for _, collector := range objectMapCollectors {
+		if permissions != nil && !permissions.CanListWatch(collector.Identity.Group, collector.Identity.Resource) {
+			continue
+		}
+		scope := objectcatalog.ScopeCluster
+		if collector.Identity.Namespaced {
+			scope = objectcatalog.ScopeNamespace
+		}
+		for _, obj := range fakeIngestCollectorItems(t, collector, shared, collector.Identity.GVR()) {
+			summaries = append(summaries, objectcatalog.Summary{
+				Kind:      collector.Identity.Kind,
+				Group:     collector.Identity.Group,
+				Version:   collector.Identity.Version,
+				Resource:  collector.Identity.Resource,
+				Namespace: obj.GetNamespace(),
+				Name:      obj.GetName(),
+				UID:       string(obj.GetUID()),
+				Scope:     scope,
+			})
+		}
+	}
+	return seedCatalogService(t, summaries)
+}
+
+// fakeObjectMapIngestSource projects the ingest-owned kinds' object-map nodes from
+// the started shared informer cache, exactly as a production ingest reflector would
+// (same collector Status/ActionFacts + same ObjectMapEdges). It lets the object-map
+// tests exercise the cut path without standing up a real reflector.
+type fakeObjectMapIngestSource struct {
+	rows map[schema.GroupVersionResource][]interface{}
+}
+
+func newFakeObjectMapIngestSource(t *testing.T, shared informers.SharedInformerFactory) *fakeObjectMapIngestSource {
+	t.Helper()
+	src := &fakeObjectMapIngestSource{rows: map[schema.GroupVersionResource][]interface{}{}}
+	for _, collector := range objectMapCollectors {
+		gvr := collector.Identity.GVR()
+		if _, cut := objectMapIngestOwnedGVRs[gvr]; !cut {
+			continue
+		}
+		// Pod's collector.List intentionally returns nil (its production object-map nodes
+		// come from the ingest reflector, not the shared informer), so list pods from the
+		// shared factory directly here to stand in for what the reflector would project.
+		items := fakeIngestCollectorItems(t, collector, shared, gvr)
+		projector := objectmapnode.NewNodeProjector(
+			collector.Status,
+			collector.ActionFacts,
+			objectMapEdgeBuilders[collector.Identity.Kind],
+		)
+		nodes := make([]interface{}, 0, len(items))
+		for _, obj := range items {
+			nodes = append(nodes, projector("cluster-a", obj))
+		}
+		src.rows[gvr] = nodes
+	}
+	return src
+}
+
+// fakeIngestCollectorItems lists a cut kind's objects from the shared factory for the
+// fake ingest source. Pod's collector.List is a no-op (production reads pod nodes from
+// the reflector), so pods are listed straight from the pod lister; every other cut kind
+// uses its collector.List as before.
+func fakeIngestCollectorItems(t *testing.T, collector objectmapnode.Collector, shared informers.SharedInformerFactory, gvr schema.GroupVersionResource) []metav1.Object {
+	t.Helper()
+	if gvr == PodGVR {
+		pods, err := shared.Core().V1().Pods().Lister().List(labels.Everything())
+		if err != nil {
+			t.Fatalf("fake ingest source list pods: %v", err)
+		}
+		return objectmapnode.Objects(pods)
+	}
+	if gvr == NodeGVR {
+		// Node's collector.List intentionally returns nil too (production reads node nodes
+		// from the ingest reflector), so list nodes from the shared factory directly here.
+		nodes, err := shared.Core().V1().Nodes().Lister().List(labels.Everything())
+		if err != nil {
+			t.Fatalf("fake ingest source list nodes: %v", err)
+		}
+		return objectmapnode.Objects(nodes)
+	}
+	items, err := collector.List(shared)
+	if err != nil {
+		t.Fatalf("fake ingest source list %s: %v", gvr, err)
+	}
+	return items
+}
+
+func (s *fakeObjectMapIngestSource) ObjectMapRows(gvr schema.GroupVersionResource) []interface{} {
+	return s.rows[gvr]
 }
 
 // denyPermissions denies CanListWatch for the named resources, for tests that
@@ -1296,4 +1421,52 @@ func stringPtr(value string) *string {
 func objectNamePtr(value string) *gatewayv1.ObjectName {
 	name := gatewayv1.ObjectName(value)
 	return &name
+}
+
+// Scoped clusters (docs/plans/namespace-scope.md): the object map's live-LIST
+// collectors run once per configured namespace and never cluster-wide — the
+// scoped identity could not perform that LIST. The fake clientset does not
+// enforce server-side namespace filtering, so the assertion is on the
+// namespaces REQUESTED (the contract this code owns).
+func TestObjectMapScopedGatewayCollectionListsOnlyScopeNamespaces(t *testing.T) {
+	client := fake.NewSimpleClientset(serviceFixture("default", "web", "svc-web-uid", nil))
+	gatewayClient := newObjectMapGatewayClient(t)
+
+	var mu sync.Mutex
+	requested := map[string]map[string]bool{}
+	gatewayClient.PrependReactor("list", "*", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		mu.Lock()
+		resource := action.GetResource().Resource
+		if requested[resource] == nil {
+			requested[resource] = map[string]bool{}
+		}
+		requested[resource][action.GetNamespace()] = true
+		mu.Unlock()
+		return false, nil, nil
+	})
+
+	builder := newObjectMapTestBuilder(t, client)
+	builder.gatewayClient = gatewayClient
+	builder.allowedNamespaces = []string{"default", "team-b"}
+	ctx := WithClusterMeta(context.Background(), ClusterMeta{ClusterID: "cluster-a", ClusterName: "Cluster A"})
+	if _, err := builder.Build(ctx, "default:gateway.networking.k8s.io/v1:Gateway:edge?maxDepth=5&maxNodes=100"); err != nil {
+		t.Fatalf("scoped build failed: %v", err)
+	}
+
+	for _, resource := range []string{"gateways", "httproutes", "tlsroutes", "grpcroutes"} {
+		got := requested[resource]
+		if got == nil {
+			t.Fatalf("no list recorded for %s", resource)
+		}
+		if got[""] {
+			t.Fatalf("%s was listed cluster-wide under a namespace scope: %v", resource, got)
+		}
+		if !got["default"] || !got["team-b"] {
+			t.Fatalf("%s must be listed in every scope namespace, got %v", resource, got)
+		}
+	}
+	// Cluster-scoped gateway kinds keep their single cluster-wide list.
+	if got := requested["gatewayclasses"]; got == nil || !got[""] || len(got) != 1 {
+		t.Fatalf("gatewayclasses must keep one cluster-wide list, got %v", got)
+	}
 }

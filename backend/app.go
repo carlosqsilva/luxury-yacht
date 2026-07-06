@@ -34,21 +34,49 @@ type App struct {
 	diagnosticsPanelVisible bool
 	appLogsPanelVisible     bool
 
-	refreshManager               *refresh.Manager
-	refreshHTTPServer            *http.Server
-	refreshListener              net.Listener
-	refreshCtx                   context.Context
-	refreshCancel                context.CancelFunc
-	refreshBaseURL               string
-	refreshServerDone            chan struct{}
-	telemetryRecorder            *telemetry.Recorder
+	refreshManager    *refresh.Manager
+	refreshHTTPServer *http.Server
+	refreshListener   net.Listener
+	refreshCtx        context.Context
+	refreshCancel     context.CancelFunc
+	refreshBaseURL    string
+	refreshServerDone chan struct{}
+	telemetryRecorder *telemetry.Recorder
+	// containerLogsTargetLimiter is lazily built by sharedContainerLogsTargetLimiter;
+	// its mutex guards the check-then-set because subsystem builds run concurrently
+	// per cluster. Access the limiter only through the accessor. The mutex is a LEAF
+	// lock: never lock anything else (settingsMu especially) or load settings while
+	// holding it — the settings paths call the accessor, some under settingsMu.
+	containerLogsTargetLimiterMu sync.Mutex
 	containerLogsTargetLimiter   *containerlogsstream.GlobalTargetLimiter
 	sharedInformerFactory        informers.SharedInformerFactory
 	apiExtensionsInformerFactory apiextinformers.SharedInformerFactory
 	refreshSubsystemsMu          sync.RWMutex
 	refreshSubsystems            map[string]*system.Subsystem
-	refreshAggregates            *refreshAggregateHandlers
+	refreshAggregates            atomic.Pointer[refreshAggregateHandlers]
 	refreshPermissionCancels     map[string]context.CancelFunc
+
+	// governor holds the process-wide resource governor state: which open
+	// clusters run Foreground/Background/Cold so RAM stays bounded when many
+	// clusters are open. All fields are guarded by governorMu.
+	governorMu       sync.Mutex
+	governorPolicy   system.GovernorPolicy
+	governorMRU      []string                       // open cluster IDs, most-recently-visible first
+	governorVisible  string                         // the cluster the user is currently viewing
+	governorApplied  map[string]system.ResourceTier // last-applied tier per cluster
+	governorPressure bool                           // memory-pressure signal (HeapInuse over budget)
+	governorBudget   uint64                         // HeapInuse byte budget; 0 disables pressure demotion
+	spillRoot        string                         // override for the maintained-store spill root; empty = user cache dir (tests set a temp dir)
+	spillFormat      string                         // override for the spill format version; empty = app Version (tests set a fixed value)
+
+	// cooledMmapClosers holds, per cooled cluster, the mmap closers returned by
+	// CoolMaintainedStoresToMmap. Each closer unmaps one domain's cooled column file and MUST
+	// outlive every Build that can read it; the re-warm/teardown paths take them (exactly once,
+	// under cooledMu) and call them only AFTER the cooled subsystem is unrouted, so no Build can
+	// still be reading the mapping. Guarded by cooledMu, independent of governorMu so closing
+	// never blocks the governor decision loop.
+	cooledMu          sync.Mutex
+	cooledMmapClosers map[string][]func() error
 
 	objectCatalogMu      sync.Mutex
 	objectCatalogEntries map[string]*objectCatalogEntry
@@ -83,6 +111,14 @@ type App struct {
 	selectionDiag       selectionDiagnosticsState
 	// settingsMu guards appSettings access in runtime watcher/selection/settings flows.
 	settingsMu sync.Mutex
+	// requestClusterScopeRebuildFn overrides the per-cluster rebuild request
+	// issued when a cluster's allowed-namespaces scope changes (tests inject a
+	// recorder). Nil selects the production teardown+rebuild path.
+	requestClusterScopeRebuildFn func(clusterID string)
+	// scopeRebuildQueued tracks clusters with a scope rebuild queued but not
+	// yet started, so rapid successive scope edits coalesce into one rebuild
+	// that reads the latest persisted scope.
+	scopeRebuildQueued sync.Map
 
 	clusterClientsMu sync.Mutex
 	clusterClients   map[string]*clusterClients
@@ -151,6 +187,7 @@ func NewApp() *App {
 	app.listenLoopback = defaultLoopbackListener
 	app.setupEnvironment()
 	app.initAuthManager()
+	app.initGovernor()
 	return app
 }
 

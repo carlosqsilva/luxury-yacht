@@ -11,13 +11,11 @@ import { resolveEmptyStateMessage } from '@/utils/emptyState';
 import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
 import { useNavigateToView } from '@shared/hooks/useNavigateToView';
 import { useObjectPanel } from '@modules/object-panel/hooks/useObjectPanel';
-import { useRefreshScopedDomain } from '@/core/refresh';
-import { buildClusterScope } from '@/core/refresh/clusterScope';
 import { useShortNames } from '@/hooks/useShortNames';
 import * as cf from '@shared/components/tables/columnFactories';
-import React, { useCallback, useMemo } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import ResourceInventoryTable from '@modules/resource-grid/ResourceInventoryTable';
-import type { ClusterNodeRow } from '@modules/cluster/contexts/ClusterResourcesContext';
+import type { ClusterNodeRow } from '@/core/refresh/types';
 import type { ContextMenuItem } from '@shared/components/ContextMenu';
 import { type GridColumnDefinition } from '@shared/components/tables/GridTable';
 import {
@@ -36,7 +34,8 @@ import {
 } from '@shared/utils/objectIdentity';
 import { backendStatusTextClass } from '@shared/utils/backendStatusPresentation';
 import { DrainIcon } from '@shared/components/icons/SharedIcons';
-import type { ClusterNodeSnapshotPayload } from '@/core/refresh/types';
+import { nodeRowCpuValue, nodeRowMemoryValue } from '@/core/resource-metrics';
+import type { ClusterNodeSnapshotPayload, NodeMetricsInfo } from '@/core/refresh/types';
 
 // Define props for NodesViewGrid component. The table is query-backed (sourced from
 // the typed query + replay cache); only `error` is consumed, for the empty-state text.
@@ -95,19 +94,7 @@ const NodesViewGrid: React.FC<NodesViewProps> = React.memo(({ error }) => {
   const { navigateToView } = useNavigateToView();
   const { selectedClusterId } = useKubeconfig();
   const useShortResourceNames = useShortNames();
-  // Foreground cluster views should resolve node metrics from the active cluster only.
-  const nodesScope = useMemo(
-    () => buildClusterScope(selectedClusterId ?? undefined, ''),
-    [selectedClusterId]
-  );
-  const nodesDomain = useRefreshScopedDomain('nodes', nodesScope);
-  const metricsInfo = useMemo(() => {
-    const metricsByCluster = nodesDomain.data?.metricsByCluster;
-    if (metricsByCluster) {
-      return selectedClusterId ? (metricsByCluster[selectedClusterId] ?? null) : null;
-    }
-    return nodesDomain.data?.metrics ?? null;
-  }, [nodesDomain.data?.metrics, nodesDomain.data?.metricsByCluster, selectedClusterId]);
+  const [metricsInfo, setMetricsInfo] = useState<NodeMetricsInfo | null>(null);
 
   const watchClusterIds = useMemo(
     () => (selectedClusterId ? [selectedClusterId] : []),
@@ -258,10 +245,10 @@ const NodesViewGrid: React.FC<NodesViewProps> = React.memo(({ error }) => {
         key: 'cpu',
         header: 'CPU',
         type: 'cpu',
-        getUsage: (row) => row.cpuUsage,
-        getRequest: (row) => row.cpuRequests,
-        getLimit: (row) => row.cpuLimits,
-        getAllocatable: (row) => row.cpuAllocatable,
+        getUsage: (row) => nodeRowCpuValue(row, 'usage'),
+        getRequest: (row) => nodeRowCpuValue(row, 'request'),
+        getLimit: (row) => nodeRowCpuValue(row, 'limit'),
+        getAllocatable: (row) => nodeRowCpuValue(row, 'allocatable'),
         getOvercommitPercent: (row) => {
           const value = calculateCpuOvercommitted(row.cpuLimits, row.cpuAllocatable);
           return value > 0 ? value : undefined;
@@ -278,10 +265,10 @@ const NodesViewGrid: React.FC<NodesViewProps> = React.memo(({ error }) => {
         key: 'memory',
         header: 'Memory',
         type: 'memory',
-        getUsage: (row) => row.memoryUsage,
-        getRequest: (row) => row.memRequests,
-        getLimit: (row) => row.memLimits,
-        getAllocatable: (row) => row.memoryAllocatable,
+        getUsage: (row) => nodeRowMemoryValue(row, 'usage'),
+        getRequest: (row) => nodeRowMemoryValue(row, 'request'),
+        getLimit: (row) => nodeRowMemoryValue(row, 'limit'),
+        getAllocatable: (row) => nodeRowMemoryValue(row, 'allocatable'),
         getOvercommitPercent: (row) => {
           const value = calculateMemoryOvercommitted(row.memLimits, row.memoryAllocatable);
           return value > 0 ? value : undefined;
@@ -345,7 +332,7 @@ const NodesViewGrid: React.FC<NodesViewProps> = React.memo(({ error }) => {
     [selectedClusterId]
   );
 
-  const { gridTableProps, favModal, source } = useQueryBackedClusterResourceGridTable<
+  const { gridTableProps, favModal, source, queryPayload } = useQueryBackedClusterResourceGridTable<
     ClusterNodeSnapshotPayload,
     ClusterNodeRow
   >({
@@ -369,6 +356,12 @@ const NodesViewGrid: React.FC<NodesViewProps> = React.memo(({ error }) => {
     diagnosticsLabel: 'Cluster Nodes',
     filterOptions: { isNamespaceScoped: false },
   });
+
+  // The base query payload carries the poller freshness block for the usage
+  // joined onto the rows at serve.
+  useEffect(() => {
+    setMetricsInfo(queryPayload?.metrics ?? null);
+  }, [queryPayload?.metrics]);
 
   // The maintenance hook owns the cordon and drain modals; pass its
   // handlers through to the controller so right-clicked Node rows route

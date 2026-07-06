@@ -136,6 +136,12 @@ export interface NamespaceSummary extends ClusterMeta {
   creationTimestamp: number;
   hasWorkloads?: boolean;
   workloadsUnknown?: boolean;
+  /**
+   * Flags a configured scope entry the identity cannot reach
+   * (docs/plans/namespace-scope.md): "not-found" is definitive; "no-access"
+   * may mean missing or denied. Absent for reachable/unscoped rows.
+   */
+  scopeStatus?: 'not-found' | 'no-access';
 }
 
 export interface NamespaceSnapshotPayload extends ClusterMeta {
@@ -223,6 +229,8 @@ export interface ClusterNodeSnapshotEntry extends ClusterMeta {
 export interface NodeMetricsInfo {
   collectedAt?: number;
   stale: boolean;
+  /** Staleness threshold (seconds) so the banner can flip client-side between doorbells. */
+  staleAfterSeconds?: number;
   lastError?: string;
   consecutiveFailures?: number;
   successCount: number;
@@ -231,8 +239,8 @@ export interface NodeMetricsInfo {
 
 export interface ClusterNodeSnapshotPayload extends ClusterMeta, ResourceQueryEnvelopeFields {
   rows: ClusterNodeSnapshotEntry[];
+  /** Poller freshness/error metadata for the usage joined onto the rows at serve. */
   metrics?: NodeMetricsInfo;
-  metricsByCluster?: Record<string, NodeMetricsInfo>;
 }
 
 export type ClusterNodeRow = ClusterNodeSnapshotEntry;
@@ -244,6 +252,9 @@ export interface ClusterOverviewMetrics {
   consecutiveFailures?: number;
   successCount: number;
   failureCount: number;
+  // Terminal "metrics unavailable" state (metrics API forbidden, or
+  // metrics-server absent); lastError then carries the permanent reason.
+  disabled?: boolean;
 }
 
 export interface WorkloadTypeResourceUsage {
@@ -298,6 +309,11 @@ export interface ClusterOverviewPayload {
   notReadyNodes: number;
   cordonedNodes: number;
   recentEvents: RecentEventEntry[];
+  // Canonical group/resource keys (core/nodes, core/pods, core/namespaces) the
+  // current identity cannot list; the affected cards render as
+  // permission-gated instead of zero-valued. Absent when all sources are
+  // readable.
+  unavailableResources?: string[];
 }
 
 export interface RecentEventEntry {
@@ -399,10 +415,10 @@ export interface ClusterCRDSnapshotPayload extends ClusterMeta, ResourceQueryEnv
 export interface ClusterCustomEntry extends ClusterMeta {
   kind: string;
   name: string;
-  apiGroup: string;
-  /** API version paired with apiGroup for GVK-aware resolution of the
+  group: string;
+  /** Version paired with group for GVK-aware resolution of the
    * owning CRD. */
-  apiVersion: string;
+  version: string;
   /**
    * Canonical Kubernetes name of the CustomResourceDefinition that
    * defines this resource's Kind, in the form `<plural>.<group>` (e.g.
@@ -698,6 +714,8 @@ export interface PodSnapshotEntry extends ClusterMeta {
 export interface PodMetricsInfo {
   collectedAt?: number;
   stale: boolean;
+  /** Staleness threshold (seconds) so the banner can flip client-side between doorbells. */
+  staleAfterSeconds?: number;
   lastError?: string;
   consecutiveFailures?: number;
   successCount: number;
@@ -706,13 +724,14 @@ export interface PodMetricsInfo {
 
 export interface PodSnapshotPayload extends ClusterMeta, ResourceQueryEnvelopeFields {
   rows: PodSnapshotEntry[];
+  /** Poller freshness/error metadata for the usage joined onto the rows at serve. */
   metrics?: PodMetricsInfo;
   // Scope-level counts (all pods in scope, before search/pagination) so a
   // query-backed view shows total/unhealthy badges and can decide whether a
   // pending health filter has matches — without retaining the live row set.
   // healthCounts keys match the "health" filter modes ('unhealthy', 'restarts',
   // 'not-ready'). Mirrors snapshot.PodSnapshot. See
-  // docs/architecture/notify-only-streams.md.
+  // docs/architecture/resource-stream-signals.md.
   totalCount?: number;
   healthCounts?: Record<string, number>;
 }
@@ -865,6 +884,8 @@ export interface NamespaceWorkloadSummary extends ClusterMeta {
 
 export interface NamespaceWorkloadSnapshotPayload extends ClusterMeta, ResourceQueryEnvelopeFields {
   rows: NamespaceWorkloadSummary[];
+  /** Poller freshness/error metadata for the usage joined onto the rows at serve. */
+  metrics?: PodMetricsInfo;
 }
 
 export interface NamespaceConfigSummary extends ClusterMeta {
@@ -999,10 +1020,10 @@ export interface NamespaceEventsSnapshotPayload extends ClusterMeta, ResourceQue
 export interface NamespaceCustomSummary extends ClusterMeta {
   kind: string;
   name: string;
-  apiGroup: string;
-  /** API version paired with apiGroup for GVK-aware resolution of the
+  group: string;
+  /** Version paired with group for GVK-aware resolution of the
    * owning CRD. */
-  apiVersion: string;
+  version: string;
   /**
    * Canonical Kubernetes name of the CustomResourceDefinition that
    * defines this resource's Kind, in the form `<plural>.<group>` (e.g.
@@ -1146,6 +1167,11 @@ export interface TelemetrySnapshotStatus {
   truncated?: boolean;
   totalItems?: number;
   warnings?: string[];
+  // Peak time a Build for this domain spent blocked waiting for its informers to
+  // settle (the initial-LIST gate) before building — the cold-start gating cost.
+  // Absent on warm payloads where the wait was always ~0. Mirrors backend
+  // telemetry.SnapshotStatus.MaxInformerSyncWaitMs.
+  maxInformerSyncWaitMs?: number;
 }
 
 export interface TelemetryMetricsStatus {

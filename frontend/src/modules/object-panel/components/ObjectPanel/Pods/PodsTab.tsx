@@ -21,7 +21,8 @@ import {
 import { useNavigateToView } from '@shared/hooks/useNavigateToView';
 import { useObjectLink } from '@shared/hooks/useObjectLink';
 import { useObjectPanel } from '@modules/object-panel/hooks/useObjectPanel';
-import { getMetricsBannerInfo } from '@shared/utils/metricsAvailability';
+import { useMetricsBannerInfo } from '@shared/hooks/useMetricsBannerInfo';
+import { podRowCpuValue, podRowMemoryValue } from '@/core/resource-metrics';
 import type { PodMetricsInfo, PodSnapshotEntry, PodSnapshotPayload } from '@/core/refresh/types';
 import { useViewState } from '@core/contexts/ViewStateContext';
 import { useNamespace } from '@modules/namespace/contexts/NamespaceContext';
@@ -210,9 +211,9 @@ export const PodsTab: React.FC<PodsTabProps> = ({ isActive }) => {
         key: 'cpu',
         header: 'CPU',
         type: 'cpu',
-        getUsage: (pod) => pod.cpuUsage,
-        getRequest: (pod) => pod.cpuRequest,
-        getLimit: (pod) => pod.cpuLimit,
+        getUsage: (pod) => podRowCpuValue(pod, 'usage'),
+        getRequest: (pod) => podRowCpuValue(pod, 'request'),
+        getLimit: (pod) => podRowCpuValue(pod, 'limit'),
         getVariant: () => 'compact',
         getMetricsStale: () => Boolean(metricsRef.current?.stale),
         getMetricsError: () => metricsRef.current?.lastError || undefined,
@@ -224,9 +225,9 @@ export const PodsTab: React.FC<PodsTabProps> = ({ isActive }) => {
         key: 'memory',
         header: 'Memory',
         type: 'memory',
-        getUsage: (pod) => pod.memUsage,
-        getRequest: (pod) => pod.memRequest,
-        getLimit: (pod) => pod.memLimit,
+        getUsage: (pod) => podRowMemoryValue(pod, 'usage'),
+        getRequest: (pod) => podRowMemoryValue(pod, 'request'),
+        getLimit: (pod) => podRowMemoryValue(pod, 'limit'),
         getVariant: () => 'compact',
         getMetricsStale: () => Boolean(metricsRef.current?.stale),
         getMetricsError: () => metricsRef.current?.lastError || undefined,
@@ -273,10 +274,11 @@ export const PodsTab: React.FC<PodsTabProps> = ({ isActive }) => {
     filterOptions: { isNamespaceScoped: false },
   });
 
-  // Payload-scoped metrics: same snapshot as the rows, same cluster.
+  // The base query payload carries the poller freshness block for the usage
+  // joined onto the rows at serve.
   const effectiveMetrics = queryPayload?.metrics ?? null;
   metricsRef.current = effectiveMetrics;
-  const metricsBanner = useMemo(() => getMetricsBannerInfo(effectiveMetrics), [effectiveMetrics]);
+  const metricsBanner = useMetricsBannerInfo(effectiveMetrics);
 
   // Query pod-action permissions for every (cluster, namespace) pair visible
   // in this tab. Workload-scoped pods share the panel object's namespace, but

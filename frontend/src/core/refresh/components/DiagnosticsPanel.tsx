@@ -27,6 +27,8 @@ import type {
 } from '../types';
 import { refreshManager } from '../RefreshManager';
 import { resourceStreamManager } from '../streaming/resourceStreamManager';
+import { refreshOrchestrator } from '../orchestrator';
+import { resolveModeDetails } from './diagnostics/modeDetails';
 import { useShortcut, useKeyboardSurface } from '@ui/shortcuts';
 import { KeyboardScopePriority } from '@ui/shortcuts/priorities';
 import {
@@ -68,7 +70,6 @@ import {
   CLUSTER_SCOPE,
   DOMAIN_REFRESHER_MAP,
   DOMAIN_STREAM_MAP,
-  METRICS_ONLY_DOMAINS,
   PAUSE_POLLING_WHEN_STREAMING_DOMAINS,
   PRIORITY_DOMAINS,
   STREAM_MODE_BY_NAME,
@@ -240,6 +241,20 @@ const parseScopeQueryParams = (scopeTail: string): URLSearchParams => {
   return new URLSearchParams(query);
 };
 
+const scopeTailHasQuery = (scopeTail: string): boolean =>
+  scopeTail.includes('?') || scopeTail.includes('=') || scopeTail.includes('&');
+
+const isTransientResourceTableQueryScope = (
+  domain: RefreshDomain,
+  scope: string | undefined
+): boolean => {
+  if (DOMAIN_STREAM_MAP[domain] !== 'resources') {
+    return false;
+  }
+  const { scope: scopeTail } = parseClusterScopeList((scope ?? '').trim());
+  return scopeTailHasQuery(scopeTail);
+};
+
 const resolveScopeRole = (
   domain: RefreshDomain,
   scope: string | undefined
@@ -247,8 +262,7 @@ const resolveScopeRole = (
   const trimmed = (scope ?? '').trim();
   const { scope: scopeTail } = parseClusterScopeList(trimmed);
   const normalizedTail = scopeTail.trim().toLowerCase();
-  const hasQueryScope =
-    scopeTail.includes('?') || scopeTail.includes('=') || scopeTail.includes('&');
+  const hasQueryScope = scopeTailHasQuery(scopeTail);
 
   if (domain === 'catalog') {
     const params = parseScopeQueryParams(scopeTail);
@@ -640,6 +654,7 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
         {
           domain: 'namespace-workloads' as RefreshDomain,
           label: 'Workloads',
+          hasMetrics: true,
           entries: namespaceWorkloadsScopeEntries,
         },
         {
@@ -824,9 +839,8 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
       refresherName?: (typeof DOMAIN_REFRESHER_MAP)[RefreshDomain];
       streamActive: boolean;
       streamHealthy: boolean;
-      metricsOnly: boolean;
     }): { label: string; tooltip?: string; enabled: boolean } => {
-      const { domain, refresherName, streamActive, streamHealthy, metricsOnly } = params;
+      const { domain, refresherName, streamActive, streamHealthy } = params;
       if (!refresherName) {
         return { label: '—', tooltip: 'No polling refresher', enabled: false };
       }
@@ -844,46 +858,12 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
         }
         return { label: 'disabled', tooltip: 'Polling disabled for this domain', enabled: false };
       }
-      const tooltipParts = [`State: ${refresherState.status}`];
-      if (metricsOnly) {
-        tooltipParts.push('Metrics-only polling');
-      }
-      return { label: 'enabled', tooltip: tooltipParts.join(' • '), enabled: true };
+      return { label: 'enabled', tooltip: `State: ${refresherState.status}`, enabled: true };
     };
 
-    const resolveModeDetails = (params: {
-      domain: RefreshDomain;
-      streamMode: 'streaming' | 'watch' | null;
-      streamActive: boolean;
-      streamHealthy: boolean;
-      pollingEnabled: boolean;
-      metricsOnly: boolean;
-    }): { label: string; tooltip?: string } => {
-      const { domain, streamMode, streamActive, streamHealthy, pollingEnabled, metricsOnly } =
-        params;
-      if (streamMode && STREAM_ONLY_DOMAINS.has(domain)) {
-        return { label: streamMode, tooltip: 'Stream-only domain' };
-      }
-      if (metricsOnly && streamHealthy) {
-        return {
-          label: 'metrics-only',
-          tooltip: 'Stream healthy; polling metrics snapshots only',
-        };
-      }
-      if (streamMode && streamActive && streamHealthy) {
-        return { label: streamMode, tooltip: 'Stream delivering updates' };
-      }
-      if (pollingEnabled) {
-        return { label: 'polling', tooltip: 'Snapshot polling active' };
-      }
-      if (streamMode && streamActive) {
-        return { label: streamMode, tooltip: 'Stream active but unhealthy' };
-      }
-      return { label: 'snapshot', tooltip: 'Snapshot fetched on demand' };
-    };
-
-    const baseRows = domainScopedStates.map<DiagnosticsRow>(
-      ({ domain, state, label, hasMetrics }) => {
+    const baseRows = domainScopedStates
+      .filter(({ domain, state }) => !isTransientResourceTableQueryScope(domain, state.scope))
+      .map<DiagnosticsRow>(({ domain, state, label, hasMetrics }) => {
         const effectiveScope = state.scope;
         const hasMetricsFlag = hasMetrics;
         const telemetryInfo = telemetrySummary?.snapshots.find((entry) => entry.domain === domain);
@@ -920,6 +900,12 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
         })();
         const durationLabel = telemetryInfo?.lastDurationMs
           ? `${telemetryInfo.lastDurationMs} ms`
+          : '—';
+        // Peak time this domain's Build blocked on the informer-sync gate (the
+        // initial-LIST gating cost). Surfaced so a slow cold-start load is visible
+        // here even though the build Duration column excludes the wait.
+        const syncWaitLabel = telemetryInfo?.maxInformerSyncWaitMs
+          ? `${telemetryInfo.maxInformerSyncWaitMs} ms`
           : '—';
         const telemetrySuccess = telemetryInfo?.successCount;
         const telemetryFailure = telemetryInfo?.failureCount;
@@ -1121,13 +1107,11 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
           ? Boolean(streamHealth && streamHealth.reason !== 'inactive')
           : Boolean(streamTelemetry?.activeSessions);
         const streamHealthy = streamHealth?.status === 'healthy';
-        const metricsOnly = METRICS_ONLY_DOMAINS.has(domain);
         const pollingDetails = resolvePollingDetails({
           domain,
           refresherName,
           streamActive,
           streamHealthy,
-          metricsOnly,
         });
         const modeDetails = resolveModeDetails({
           domain,
@@ -1135,7 +1119,8 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
           streamActive,
           streamHealthy,
           pollingEnabled: pollingDetails.enabled,
-          metricsOnly,
+          streamingBlocked: refreshOrchestrator.isStreamingBlocked(domain, effectiveScope),
+          streamOnly: STREAM_ONLY_DOMAINS.has(domain),
         });
         const healthDetails = resolveHealthDetails({
           domain,
@@ -1165,6 +1150,7 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
           metricsSuccess: successCount,
           metricsFailure: failureCount,
           duration: durationLabel,
+          syncWait: syncWaitLabel,
           telemetrySuccess,
           telemetryFailure,
           hasMetrics: hasMetricsFlag,
@@ -1188,12 +1174,10 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
           pollingStatus: pollingDetails.label,
           pollingTooltip: pollingDetails.tooltip,
         };
-      }
-    );
+      });
 
     const podRows = podScopeEntries.map<DiagnosticsRow>(([scope, state]) => {
       const payload = state.data as PodSnapshotPayload | null;
-      const metricsInfo = payload?.metrics;
       const lastUpdated = state.lastUpdated ?? state.lastAutoRefresh ?? state.lastManualRefresh;
       const isStale = lastUpdated ? Date.now() - lastUpdated > STALE_THRESHOLD_MS : false;
       const lastUpdatedInfo = formatLastUpdated(lastUpdated);
@@ -1214,27 +1198,6 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
         truncated && totalItems !== undefined ? `${count} / ${totalItems}` : String(count);
       const countTooltip = warnings.length > 0 ? warnings.join('\n') : undefined;
       const countClassName = warnings.length > 0 ? 'diagnostics-count-warning' : undefined;
-      const successCount = metricsInfo?.successCount ?? 0;
-      const failureCount = metricsInfo?.failureCount ?? 0;
-      const metricsStatus = metricsInfo
-        ? metricsInfo.lastError
-          ? `Error (${failureCount} fails)`
-          : metricsInfo.stale
-            ? `Unavailable (${failureCount} fails)`
-            : `OK (${successCount} polls)`
-        : 'N/A';
-      const metricsTooltipLines: string[] = [];
-      if (metricsInfo) {
-        metricsTooltipLines.push(`Successful polls: ${successCount}`);
-        metricsTooltipLines.push(`Failed polls: ${failureCount}`);
-        if (metricsInfo.lastError) {
-          metricsTooltipLines.push(`Last error: ${metricsInfo.lastError}`);
-        } else if (metricsInfo.stale) {
-          metricsTooltipLines.push('Metrics API unavailable (pods.metrics.k8s.io)');
-        } else if (metricsInfo.collectedAt) {
-          metricsTooltipLines.push('Metrics are up to date');
-        }
-      }
       const version = state.version != null ? String(state.version) : '—';
       const streamHealth = toStreamHealthSummary(
         resourceStreamManager.getHealthSnapshot('pods', scope)
@@ -1247,7 +1210,6 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
         refresherName: DOMAIN_REFRESHER_MAP.pods,
         streamActive,
         streamHealthy,
-        metricsOnly: true,
       });
       const modeDetails = resolveModeDetails({
         domain: 'pods',
@@ -1255,7 +1217,8 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
         streamActive,
         streamHealthy,
         pollingEnabled: pollingDetails.enabled,
-        metricsOnly: true,
+        streamingBlocked: refreshOrchestrator.isStreamingBlocked('pods', scope),
+        streamOnly: STREAM_ONLY_DOMAINS.has('pods'),
       });
       const healthDetails = resolveHealthDetails({
         domain: 'pods',
@@ -1319,15 +1282,9 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
         error: state.error ?? '—',
         telemetryStatus,
         telemetryTooltip,
-        metricsStatus,
-        metricsTooltip:
-          metricsTooltipLines.length > 0 ? metricsTooltipLines.join('\n') : 'No metrics available',
-        metricsStale: Boolean(metricsInfo?.stale),
-        metricsSuccess: successCount,
-        metricsFailure: failureCount,
-        telemetrySuccess: successCount,
-        telemetryFailure: failureCount,
-        hasMetrics: true,
+        metricsStatus: 'N/A',
+        metricsTooltip: 'Pod usage is joined onto the pods rows at serve',
+        hasMetrics: false,
         count,
         countDisplay,
         countTooltip,
@@ -1363,7 +1320,6 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
       refresherName: DOMAIN_REFRESHER_MAP['container-logs'],
       streamActive: containerLogsStreamActive,
       streamHealthy: containerLogsStreamHealthy,
-      metricsOnly: false,
     });
     const logModeDetails = resolveModeDetails({
       domain: 'container-logs',
@@ -1371,7 +1327,8 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
       streamActive: containerLogsStreamActive,
       streamHealthy: containerLogsStreamHealthy,
       pollingEnabled: logPollingDetails.enabled,
-      metricsOnly: false,
+      streamingBlocked: false,
+      streamOnly: STREAM_ONLY_DOMAINS.has('container-logs'),
     });
     const logRows = containerLogsScopeEntries.map<DiagnosticsRow>(([scope, state]) => {
       const payload = state.data as ContainerLogsSnapshotPayload | null;

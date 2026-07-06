@@ -14,6 +14,7 @@ import (
 
 	"github.com/luxury-yacht/app/backend/internal/config"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/discovery"
 )
 
 const (
@@ -67,8 +68,33 @@ type Service struct {
 	queryStore CatalogQueryStore
 	identity   *resourceIdentityResolver
 
-	promotedMu sync.RWMutex
-	promoted   map[string]*promotedDescriptor
+	// discoveryClient is the per-cluster discovery client the catalog re-discovers through.
+	// In production it is a disk-cached, ETag-revalidating, aggregated-discovery client
+	// (built once via ensureDiscovery → buildDiscoveryClient); tests pre-inject it.
+	// discoveryInvalidate is its cache-invalidation hook (nil for a plain, uncached client),
+	// and discoveryStale latches when a CRD change requires the cache to be invalidated on
+	// the next discover so a newly-created CRD is never hidden behind a stale document.
+	discoveryOnce       sync.Once
+	discoveryClient     discovery.DiscoveryInterface
+	discoveryInvalidate func()
+	discoveryStale      atomic.Bool
+
+	// dynamicIngested is the set of dynamic (CRD-backed) kinds the catalog has promoted
+	// onto the ingest path on demand (see maybePromote). collectViaIngest serves these from
+	// the ingest manager's CatalogRows once their reflector has synced; stopDynamicReflectors
+	// tears them down with the catalog.
+	dynamicMu       sync.RWMutex
+	dynamicIngested map[schema.GroupVersionResource]struct{}
+
+	// suspendCacheRebuilds batches the per-kind published-cache rebuild during
+	// registerIngestCatalogSinks: each sink registration replays a whole store, and
+	// rebuilding once per kind means 7+ full O(items) rebuilds back-to-back at
+	// startup. While set, the incremental appliers mutate the index but skip the
+	// rebuild+broadcast; the registration loop publishes once at the end.
+	suspendCacheRebuilds atomic.Bool
+	// cacheRebuilds counts published-cache rebuilds; it exists so the batched
+	// registration behavior is pinned by test rather than assumed.
+	cacheRebuilds atomic.Int64
 
 	healthMu sync.RWMutex
 	health   healthStatus
@@ -107,6 +133,7 @@ type summaryChunk struct {
 func NewService(deps Dependencies, opts *Options) *Service {
 	serviceOpts := Options{
 		ResyncInterval:             config.ObjectCatalogResyncInterval,
+		FailedSyncRetryInterval:    config.ObjectCatalogFailedSyncRetryInterval,
 		PageSize:                   config.ObjectCatalogPageSize,
 		ListWorkers:                adjustedListWorkers(),
 		NamespaceWorkers:           config.ObjectCatalogNamespaceWorkers,
@@ -119,6 +146,9 @@ func NewService(deps Dependencies, opts *Options) *Service {
 	if opts != nil {
 		if opts.ResyncInterval > 0 {
 			serviceOpts.ResyncInterval = opts.ResyncInterval
+		}
+		if opts.FailedSyncRetryInterval > 0 {
+			serviceOpts.FailedSyncRetryInterval = opts.FailedSyncRetryInterval
 		}
 		if opts.PageSize > 0 {
 			serviceOpts.PageSize = opts.PageSize
@@ -161,7 +191,7 @@ func NewService(deps Dependencies, opts *Options) *Service {
 		clusterName:       deps.ClusterName,
 		catalogIndex:      newCatalogIndex(),
 		identity:          newResourceIdentityResolver(deps.Common, deps.Logger),
-		promoted:          make(map[string]*promotedDescriptor),
+		dynamicIngested:   make(map[schema.GroupVersionResource]struct{}),
 		health:            healthStatus{State: HealthStateUnknown},
 		doneCh:            make(chan struct{}),
 		now:               nowFn,

@@ -107,6 +107,8 @@ export function GetBackendTLSPolicy(arg1:string,arg2:string,arg3:string):Promise
 
 export function GetCatalogDiagnostics():Promise<backend.CatalogDiagnostics>;
 
+export function GetClusterAllowedNamespaces(arg1:string):Promise<Array<string>>;
+
 export function GetClusterAuthState(arg1:string):Promise<string|string>;
 
 export function GetClusterPortForwardCount(arg1:string):Promise<number>;
@@ -287,6 +289,8 @@ export function SetAutoRefreshEnabled(arg1:boolean):Promise<void>;
 
 export function SetBackgroundRefreshEnabled(arg1:boolean):Promise<void>;
 
+export function SetClusterAllowedNamespaces(arg1:string,arg2:Array<string>):Promise<Array<string>>;
+
 export function SetClusterTabOrder(arg1:Array<string>):Promise<void>;
 
 export function SetDefaultObjectPanelPosition(arg1:string):Promise<void>;
@@ -336,6 +340,8 @@ export function SetSuppressNetworkErrorNotifications(arg1:boolean):Promise<void>
 export function SetTheme(arg1:string):Promise<void>;
 
 export function SetUseShortResourceNames(arg1:boolean):Promise<void>;
+
+export function SetVisibleCluster(arg1:string):Promise<void>;
 
 export function SetZoomLevel(arg1:number):Promise<void>;
 

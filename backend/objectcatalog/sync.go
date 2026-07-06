@@ -21,37 +21,70 @@ import (
 	authorizationv1 "k8s.io/api/authorization/v1"
 )
 
-// evaluateDescriptor checks if the given descriptor is allowed by the capabilities service.
+// preflightNamespaces returns the namespaces a descriptor's RBAC preflight
+// asks about: the configured scope for a namespaced kind under a namespace
+// scope (docs/plans/namespace-scope.md), otherwise the single cluster-wide
+// "" ask. The check's scope must match the collection's scope — a scoped
+// identity is typically denied cluster-wide but allowed per namespace, and a
+// cluster-wide-only preflight would skip collection for every kind.
+func (s *Service) preflightNamespaces(desc resourceDescriptor) []string {
+	scope := s.scopeNamespaces()
+	if !desc.Namespaced || len(scope) == 0 {
+		return []string{""}
+	}
+	return scope
+}
+
+// evaluateDescriptor checks if the given descriptor is allowed by the
+// capabilities service: allowed in ANY of its preflight namespaces.
 func (s *Service) evaluateDescriptor(ctx context.Context, svc *capabilities.Service, desc resourceDescriptor) (bool, error) {
 	if svc == nil {
 		return true, nil
 	}
-	reviews := []capabilities.ReviewAttributes{
-		{
-			ID: desc.GVR.String(),
+	targets := s.preflightNamespaces(desc)
+	reviews := make([]capabilities.ReviewAttributes, 0, len(targets))
+	for _, namespace := range targets {
+		reviews = append(reviews, capabilities.ReviewAttributes{
+			ID: desc.GVR.String() + "|" + namespace,
 			Attributes: &authorizationv1.ResourceAttributes{
-				Group:    desc.Group,
-				Version:  desc.Version,
-				Resource: desc.Resource,
-				Verb:     "list",
+				Group:     desc.Group,
+				Version:   desc.Version,
+				Resource:  desc.Resource,
+				Verb:      "list",
+				Namespace: namespace,
 			},
-		},
+		})
 	}
 	results, err := svc.Evaluate(ctx, reviews)
 	if err != nil {
 		return false, err
 	}
-	if len(results) == 0 {
+	var firstErr error
+	answered := false
+	for _, res := range results {
+		switch {
+		case res.Error != "":
+			if firstErr == nil {
+				firstErr = errors.New(res.Error)
+			}
+		case res.EvaluationError != "":
+			if firstErr == nil {
+				firstErr = errors.New(res.EvaluationError)
+			}
+		default:
+			answered = true
+			if res.Allowed {
+				return true, nil
+			}
+		}
+	}
+	if !answered {
+		if firstErr != nil {
+			return false, firstErr
+		}
 		return false, nil
 	}
-	res := results[0]
-	if res.Error != "" {
-		return false, errors.New(res.Error)
-	}
-	if res.EvaluationError != "" {
-		return false, errors.New(res.EvaluationError)
-	}
-	return res.Allowed, nil
+	return false, nil
 }
 
 // evaluateDescriptorsBatch checks if the given descriptors are allowed by the capabilities service.
@@ -68,19 +101,26 @@ func (s *Service) evaluateDescriptorsBatch(ctx context.Context, svc *capabilitie
 		return allowed, nil, nil
 	}
 
+	// One check per (descriptor × preflight namespace): a namespaced kind
+	// under a scope is allowed when ANY configured namespace allows it; a
+	// per-namespace error is ignored when another namespace gave a definitive
+	// answer, so one broken namespace never blanks the kind.
 	checks := make([]capabilities.ReviewAttributes, 0, len(descriptors))
 	indexes := make([]int, 0, len(descriptors))
 	for idx, desc := range descriptors {
-		checks = append(checks, capabilities.ReviewAttributes{
-			ID: desc.GVR.String(),
-			Attributes: &authorizationv1.ResourceAttributes{
-				Group:    desc.Group,
-				Version:  desc.Version,
-				Resource: desc.Resource,
-				Verb:     "list",
-			},
-		})
-		indexes = append(indexes, idx)
+		for _, namespace := range s.preflightNamespaces(desc) {
+			checks = append(checks, capabilities.ReviewAttributes{
+				ID: desc.GVR.String() + "|" + namespace,
+				Attributes: &authorizationv1.ResourceAttributes{
+					Group:     desc.Group,
+					Version:   desc.Version,
+					Resource:  desc.Resource,
+					Verb:      "list",
+					Namespace: namespace,
+				},
+			})
+			indexes = append(indexes, idx)
+		}
 	}
 
 	results, err := svc.Evaluate(ctx, checks)
@@ -89,6 +129,7 @@ func (s *Service) evaluateDescriptorsBatch(ctx context.Context, svc *capabilitie
 	}
 
 	errorsByIndex := make(map[int]error)
+	answered := make(map[int]bool, len(descriptors))
 	for i, res := range results {
 		if i >= len(indexes) {
 			break
@@ -96,12 +137,23 @@ func (s *Service) evaluateDescriptorsBatch(ctx context.Context, svc *capabilitie
 		idx := indexes[i]
 		switch {
 		case res.Error != "":
-			errorsByIndex[idx] = errors.New(res.Error)
+			if _, ok := errorsByIndex[idx]; !ok {
+				errorsByIndex[idx] = errors.New(res.Error)
+			}
 		case res.EvaluationError != "":
-			errorsByIndex[idx] = errors.New(res.EvaluationError)
+			if _, ok := errorsByIndex[idx]; !ok {
+				errorsByIndex[idx] = errors.New(res.EvaluationError)
+			}
 		default:
-			allowed[idx] = res.Allowed
+			answered[idx] = true
+			if res.Allowed {
+				allowed[idx] = true
+			}
 		}
+	}
+	// A definitive per-namespace answer outranks a sibling namespace's error.
+	for idx := range answered {
+		delete(errorsByIndex, idx)
 	}
 
 	allowedCount := 0
@@ -171,21 +223,50 @@ func (s *Service) ensureDependencies() error {
 	return nil
 }
 
+// nextCatalogResyncInterval schedules the next full resync. A successful sync uses
+// the normal (full) cadence. A failed/incomplete sync — typically the startup race
+// where ingest stores are not yet synced — retries on a short interval that backs
+// off (doubling) toward full, so a transient failure self-heals in seconds instead
+// of waiting up to the full interval (5 min with reactive updates), while a
+// persistent failure settles at the normal cadence without hammering the cluster.
+// A non-positive or too-large retry interval disables the fast-retry (keeps full).
+func nextCatalogResyncInterval(syncOK bool, current, retry, full time.Duration) time.Duration {
+	if syncOK || retry <= 0 || retry >= full {
+		return full
+	}
+	next := current * 2
+	if next < retry {
+		next = retry
+	}
+	if next > full {
+		next = full
+	}
+	return next
+}
+
 func (s *Service) runLoop(ctx context.Context) error {
 	defer close(s.doneCh)
-	defer s.stopPromotedInformers()
+	defer s.stopDynamicReflectors()
 
 	// Initial sync.
-	if err := s.sync(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		s.logWarn(fmt.Sprintf("initial catalog sync failed: %v", err))
+	initialSyncErr := s.sync(ctx)
+	if initialSyncErr != nil && !errors.Is(initialSyncErr, context.Canceled) {
+		s.logWarn(fmt.Sprintf("initial catalog sync failed: %v", initialSyncErr))
 	}
 
-	// Start reactive update notifier if enabled.
+	// Start the reactive update notifier OFF the resync loop's critical path: the
+	// sink-registration replay walks populated ingest stores and can take a while,
+	// and a failed initial sync — the startup race — is exactly when the fast retry
+	// below must fire promptly. Registration racing a sync is safe by design: the
+	// incremental appliers TryLock syncMu and DROP their update while a sync runs
+	// (the sync reconciles from the same stores).
 	if s.opts.EnableReactiveUpdates && s.deps.InformerFactory != nil {
 		notifier := newWatchNotifier(ctx, s)
-		registerWatchHandlers(s.deps.InformerFactory, s.deps.APIExtensionsInformerFactory, notifier, s)
-		go notifier.run()
-		s.logInfo("catalog reactive updates enabled")
+		go func() {
+			registerWatchHandlers(s.deps.InformerFactory, s.deps.APIExtensionsInformerFactory, notifier, s)
+			go notifier.run()
+			s.logInfo("catalog reactive updates enabled")
+		}()
 	}
 
 	if s.opts.ResyncInterval <= 0 {
@@ -200,7 +281,14 @@ func (s *Service) runLoop(ctx context.Context) error {
 			resyncInterval = config.ObjectCatalogReactiveMinResyncInterval
 		}
 	}
-	ticker := time.NewTicker(resyncInterval)
+	// After a failed/incomplete sync (e.g. a startup race where ingest stores are
+	// not yet synced), retry on a short interval that backs off toward the normal
+	// cadence, so the catalog recovers in seconds instead of staying degraded until
+	// the next full resync. A successful sync snaps back to the normal interval.
+	interval := nextCatalogResyncInterval(
+		initialSyncErr == nil, 0, s.opts.FailedSyncRetryInterval, resyncInterval,
+	)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
@@ -208,8 +296,15 @@ func (s *Service) runLoop(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			if err := s.sync(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			err := s.sync(ctx)
+			if err != nil && !errors.Is(err, context.Canceled) {
 				s.logWarn(fmt.Sprintf("catalog resync failed: %v", err))
+			}
+			if next := nextCatalogResyncInterval(
+				err == nil, interval, s.opts.FailedSyncRetryInterval, resyncInterval,
+			); next != interval {
+				interval = next
+				ticker.Reset(interval)
 			}
 		}
 	}
@@ -286,6 +381,12 @@ func (s *Service) sync(ctx context.Context) error {
 	s.items = newItems
 	s.lastSeen = newLastSeen
 	s.catalogIndex.replaceResources(nil)
+	// Reset the maintained query store before any collector emits, so this sync's incremental
+	// chunk upserts (streamingAggregator.emit) build the streaming view from scratch — the
+	// "this sync only" semantics the previous per-emit wholesale rebuild gave, without its
+	// O(N²) cost. This runs before parallel.RunLimited launches, so it cannot race the emits.
+	// Until the first emit the empty store serves via queryViaEngine's items-map fallback.
+	s.catalogIndex.resetQueryStore()
 	s.mu.Unlock()
 
 	var resultsMu sync.Mutex
@@ -305,6 +406,23 @@ func (s *Service) sync(ctx context.Context) error {
 					allowedSet[desc.GVR.String()] = desc
 				}
 			}
+		}
+	}
+
+	// Discovery and the batch RBAC preflight above are pure API calls; only the
+	// collect below reads informer caches. Waiting HERE — not before the service
+	// starts — lets those seconds overlap the factory's initial sync instead of
+	// running after it. A wait failure aborts the sync (retaining prior data, like
+	// any other sync failure): collecting from unsynced listers would publish an
+	// incomplete catalog as authoritative. On resyncs the factory is already synced
+	// and the wait returns immediately.
+	if wait := s.deps.WaitForCaches; wait != nil {
+		if err := wait(ctx); err != nil {
+			err = fmt.Errorf("waiting for informer caches: %w", err)
+			elapsed := s.now().Sub(start)
+			s.updateHealth(false, true, err, 0)
+			s.recordTelemetry(prevItemCount, prevResourceCount, elapsed, err)
+			return err
 		}
 	}
 
@@ -333,7 +451,7 @@ func (s *Service) sync(ctx context.Context) error {
 				return nil
 			}
 
-			summaries, err := s.collectResource(taskCtx, index, desc, nil, agg)
+			summaries, err := s.collectResource(taskCtx, index, desc, s.scopeNamespaces(), agg)
 			if err != nil {
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 					return err

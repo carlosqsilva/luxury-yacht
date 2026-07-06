@@ -20,6 +20,7 @@ import (
 	cgotesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 
+	"github.com/luxury-yacht/app/backend/refresh/domainpermissions"
 	"github.com/luxury-yacht/app/backend/refresh/metrics"
 	"github.com/luxury-yacht/app/backend/testsupport"
 )
@@ -43,6 +44,14 @@ func (f fakeClusterMetrics) LatestPodUsage() map[string]metrics.PodUsage {
 
 func (f fakeClusterMetrics) Metadata() metrics.Metadata {
 	return f.meta
+}
+
+func (f fakeClusterMetrics) Sample() metrics.Sample {
+	return metrics.Sample{
+		NodeUsage: f.LatestNodeUsage(),
+		PodUsage:  f.LatestPodUsage(),
+		Metadata:  f.Metadata(),
+	}
 }
 
 func TestClusterOverviewBuilder(t *testing.T) {
@@ -170,8 +179,7 @@ func TestClusterOverviewBuilder(t *testing.T) {
 	}
 	builder := &ClusterOverviewBuilder{
 		client:          nil,
-		nodeLister:      testsupport.NewNodeLister(t, nodeFargate, nodeEC2),
-		podLister:       testsupport.NewPodLister(t, podRunning, podPending, podCompleted),
+		ingest:          newFakePodAggregateSource(nil, podRunning, podPending, podCompleted).withNodes(ClusterMeta{}, "", nodeFargate, nodeEC2),
 		namespaceLister: testsupport.NewNamespaceLister(t, nsA, nsB),
 		metrics: fakeClusterMetrics{
 			pods: map[string]metrics.PodUsage{
@@ -238,14 +246,36 @@ func TestClusterOverviewBuilder(t *testing.T) {
 	require.Equal(t, overview.TotalNodes, snapshot.Stats.ItemCount)
 }
 
+// The pristine first-collection window (poller started, nothing collected
+// yet) must serve CollectedAt as ZERO — not Go's zero time as a Unix stamp
+// (-62135596800), which reads as truthy/present downstream and killed the
+// frontend's "Collecting metrics…" indication (observed live: the payload
+// carried collectedAt:-62135596800 while the utilization card showed hard
+// zeros with no banner).
+func TestClusterOverviewMetricsOmitsZeroCollectedAt(t *testing.T) {
+	builder := &ClusterOverviewBuilder{
+		ingest:          newFakePodAggregateSource(nil).withNodes(ClusterMeta{}, ""),
+		namespaceLister: testsupport.NewNamespaceLister(t),
+		metrics:         fakeClusterMetrics{},
+	}
+
+	snapshot, err := builder.Build(context.Background(), "cluster-a|")
+	require.NoError(t, err)
+	payload, ok := snapshot.Payload.(ClusterOverviewSnapshot)
+	require.True(t, ok)
+	require.Equal(t, int64(0), payload.Metrics.CollectedAt,
+		"zero collection time must serialize as 0/omitted, never as the epoch of Go's zero time")
+	require.Equal(t, uint64(0), payload.Metrics.SuccessCount)
+	require.Empty(t, payload.Metrics.LastError)
+}
+
 func TestClusterOverviewBuilderPreservesScopeAndClusterMeta(t *testing.T) {
 	ctx := WithClusterMeta(context.Background(), ClusterMeta{
 		ClusterID:   "cluster-a",
 		ClusterName: "prod",
 	})
 	builder := &ClusterOverviewBuilder{
-		nodeLister:      testsupport.NewNodeLister(t),
-		podLister:       testsupport.NewPodLister(t),
+		ingest:          newFakePodAggregateSource(nil).withNodes(ClusterMeta{}, ""),
 		namespaceLister: testsupport.NewNamespaceLister(t),
 		metrics:         fakeClusterMetrics{},
 	}
@@ -330,15 +360,10 @@ func TestClusterOverviewBuilderAggregatesWorkloadResourceUsage(t *testing.T) {
 	}
 
 	builder := &ClusterOverviewBuilder{
-		nodeLister:       testsupport.NewNodeLister(t),
-		podLister:        testsupport.NewPodLister(t, pods...),
-		namespaceLister:  testsupport.NewNamespaceLister(t),
-		replicaSetLister: testsupport.NewReplicaSetLister(t, replicaSet),
-		cachedVersion:    "v1.30.0",
-		versionFetched:   now,
-		replicaSetHasSynced: func() bool {
-			return true
-		},
+		ingest:          newFakePodAggregateSource(testsupport.NewReplicaSetLister(t, replicaSet), pods...),
+		namespaceLister: testsupport.NewNamespaceLister(t),
+		cachedVersion:   "v1.30.0",
+		versionFetched:  now,
 		metrics: fakeClusterMetrics{
 			pods: map[string]metrics.PodUsage{
 				"default/api-7c8d9-a": {
@@ -432,8 +457,7 @@ func TestClusterOverviewBuilderUsesCatalog(t *testing.T) {
 	}
 
 	builder := &ClusterOverviewBuilder{
-		nodeLister:      testsupport.NewNodeLister(t, nodes...),
-		podLister:       testsupport.NewPodLister(t, pods...),
+		ingest:          newFakePodAggregateSource(nil, pods...).withNodes(ClusterMeta{}, "", nodes...),
 		namespaceLister: testsupport.NewNamespaceLister(t, namespaces...),
 		metrics: fakeClusterMetrics{
 			pods: map[string]metrics.PodUsage{
@@ -468,8 +492,7 @@ func TestClusterOverviewBuilderSkipsOptionalCachesUntilSynced(t *testing.T) {
 	now := time.Now()
 
 	builder := &ClusterOverviewBuilder{
-		nodeLister:      testsupport.NewNodeLister(t, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}}),
-		podLister:       testsupport.NewPodLister(t),
+		ingest:          newFakePodAggregateSource(nil).withNodes(ClusterMeta{}, "", &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}}),
 		namespaceLister: testsupport.NewNamespaceLister(t),
 		eventLister: testsupport.NewEventLister(t, &corev1.Event{
 			ObjectMeta: metav1.ObjectMeta{Name: "warn-a", Namespace: "default", UID: "event-1"},
@@ -485,22 +508,14 @@ func TestClusterOverviewBuilderSkipsOptionalCachesUntilSynced(t *testing.T) {
 				UID:        "pod-uid-1",
 			},
 		}),
-		deploymentLister:  testsupport.NewDeploymentLister(t, &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "deploy-a", Namespace: "default"}}),
-		statefulSetLister: testsupport.NewStatefulSetLister(t, &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "stateful-a", Namespace: "default"}}),
-		daemonSetLister:   testsupport.NewDaemonSetLister(t, &appsv1.DaemonSet{ObjectMeta: metav1.ObjectMeta{Name: "daemon-a", Namespace: "default"}}),
-		cronJobLister:     testsupport.NewCronJobLister(t, &batchv1.CronJob{ObjectMeta: metav1.ObjectMeta{Name: "cron-a", Namespace: "default"}}),
 		hasSyncedFns: []cache.InformerSynced{
 			func() bool { return true },
 			func() bool { return true },
 			func() bool { return true },
 		},
-		eventHasSynced:       func() bool { return false },
-		deploymentHasSynced:  func() bool { return false },
-		statefulSetHasSynced: func() bool { return false },
-		daemonSetHasSynced:   func() bool { return false },
-		cronJobHasSynced:     func() bool { return false },
-		cachedVersion:        "v1.29.0",
-		versionFetched:       now,
+		eventHasSynced: func() bool { return false },
+		cachedVersion:  "v1.29.0",
+		versionFetched: now,
 	}
 
 	snapshot, err := builder.Build(context.Background(), "")
@@ -508,11 +523,50 @@ func TestClusterOverviewBuilderSkipsOptionalCachesUntilSynced(t *testing.T) {
 
 	payload, ok := snapshot.Payload.(ClusterOverviewSnapshot)
 	require.True(t, ok)
+	// The cut workload kinds' ingest stores are not synced in the fake source (default
+	// false), so the workload counts are zero — the ingest equivalent of the prior
+	// informer-not-synced gate.
 	require.Zero(t, payload.Overview.TotalDeployments)
 	require.Zero(t, payload.Overview.TotalStatefulSets)
 	require.Zero(t, payload.Overview.TotalDaemonSets)
 	require.Zero(t, payload.Overview.TotalCronJobs)
 	require.Empty(t, payload.Overview.RecentEvents)
+}
+
+func TestClusterOverviewBuilderWaitsForRequiredIngestStores(t *testing.T) {
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod-a", Namespace: "default", ResourceVersion: "20"}}
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a", ResourceVersion: "10"}}
+	source := newFakePodAggregateSource(nil, pod).withNodes(ClusterMeta{}, "", node).withPodSynced(false)
+
+	builder := &ClusterOverviewBuilder{
+		ingest:             source,
+		namespaceLister:    testsupport.NewNamespaceLister(t),
+		requiredIngestGVRs: []schema.GroupVersionResource{PodGVR, NodeGVR},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	_, err := builder.Build(ctx, "")
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
+func TestClusterOverviewBuilderProceedsWhenRequiredIngestStoresSynced(t *testing.T) {
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod-a", Namespace: "default", ResourceVersion: "20"}}
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a", ResourceVersion: "10"}}
+
+	builder := &ClusterOverviewBuilder{
+		ingest:             newFakePodAggregateSource(nil, pod).withNodes(ClusterMeta{}, "", node),
+		namespaceLister:    testsupport.NewNamespaceLister(t),
+		requiredIngestGVRs: []schema.GroupVersionResource{PodGVR, NodeGVR},
+	}
+
+	snapshot, err := builder.Build(context.Background(), "")
+	require.NoError(t, err)
+
+	payload, ok := snapshot.Payload.(ClusterOverviewSnapshot)
+	require.True(t, ok)
+	require.Equal(t, 1, payload.Overview.TotalNodes)
+	require.Equal(t, 1, payload.Overview.TotalPods)
 }
 
 func TestClusterOverviewListBuilderIncludesOptionalCountsAndRecentEvents(t *testing.T) {
@@ -586,6 +640,150 @@ func TestClusterOverviewListBuilderIncludesOptionalCountsAndRecentEvents(t *test
 	require.Equal(t, "pod-uid-1", event.InvolvedObject.Ref.UID)
 }
 
+// An identity without node access (issue #244) still gets an overview: the
+// informer path drops the node contribution and records the denied source so
+// the frontend can mark the affected cards instead of rendering zeros.
+func TestClusterOverviewBuilderMarksRuntimeDeniedNodes(t *testing.T) {
+	now := time.Now()
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-a", ResourceVersion: "5"},
+		Status: corev1.NodeStatus{
+			Allocatable: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("1000m"),
+				corev1.ResourceMemory: resource.MustParse("4Gi"),
+			},
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "pod-a", Namespace: "default", ResourceVersion: "9"},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default", ResourceVersion: "2"}}
+
+	builder := &ClusterOverviewBuilder{
+		ingest:          newFakePodAggregateSource(nil, pod).withNodes(ClusterMeta{}, "", node),
+		namespaceLister: testsupport.NewNamespaceLister(t, namespace),
+		metrics:         fakeClusterMetrics{},
+		cachedVersion:   "v1.28.1",
+		versionFetched:  now,
+	}
+
+	ctx := domainpermissions.WithAllowedResources(context.Background(), clusterOverviewDomainName, domainpermissions.AllowedResources{
+		"core/nodes":      false,
+		"core/pods":       true,
+		"core/namespaces": true,
+	})
+	snapshot, err := builder.Build(ctx, "")
+	require.NoError(t, err)
+
+	payload, ok := snapshot.Payload.(ClusterOverviewSnapshot)
+	require.True(t, ok)
+	require.Zero(t, payload.Overview.TotalNodes, "denied nodes must not be counted")
+	require.Equal(t, "0", payload.Overview.CPUAllocatable, "allocatable derives from nodes")
+	require.Equal(t, 1, payload.Overview.TotalPods)
+	require.Equal(t, 1, payload.Overview.TotalNamespaces)
+	require.Equal(t, []string{"core/nodes"}, payload.Overview.UnavailableResources)
+}
+
+// Runtime-denied pods and namespaces degrade the same way on the informer path.
+func TestClusterOverviewBuilderMarksRuntimeDeniedPodsAndNamespaces(t *testing.T) {
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a", ResourceVersion: "5"}}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "pod-a", Namespace: "default", ResourceVersion: "9"},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default", ResourceVersion: "2"}}
+
+	builder := &ClusterOverviewBuilder{
+		ingest:          newFakePodAggregateSource(nil, pod).withNodes(ClusterMeta{}, "", node),
+		namespaceLister: testsupport.NewNamespaceLister(t, namespace),
+		metrics:         fakeClusterMetrics{},
+	}
+
+	ctx := domainpermissions.WithAllowedResources(context.Background(), clusterOverviewDomainName, domainpermissions.AllowedResources{
+		"core/nodes":      true,
+		"core/pods":       false,
+		"core/namespaces": false,
+	})
+	snapshot, err := builder.Build(ctx, "")
+	require.NoError(t, err)
+
+	payload, ok := snapshot.Payload.(ClusterOverviewSnapshot)
+	require.True(t, ok)
+	require.Equal(t, 1, payload.Overview.TotalNodes)
+	require.Zero(t, payload.Overview.TotalPods)
+	require.Zero(t, payload.Overview.TotalNamespaces)
+	require.ElementsMatch(t, []string{"core/pods", "core/namespaces"}, payload.Overview.UnavailableResources)
+}
+
+// A kind whose ingest reflector was permission-skipped must be marked
+// unavailable even when the runtime list SSAR passes (an identity with list
+// but not watch): its store is settled but permanently empty for this
+// identity, and silent zeros would misread as an empty cluster.
+func TestClusterOverviewBuilderMarksPermissionSkippedIngestKinds(t *testing.T) {
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default", ResourceVersion: "2"}}
+
+	builder := &ClusterOverviewBuilder{
+		ingest: newFakePodAggregateSource(nil).
+			withPermissionSkipped(NodeGVR).
+			withPermissionSkipped(PodGVR),
+		namespaceLister: testsupport.NewNamespaceLister(t, namespace),
+		metrics:         fakeClusterMetrics{},
+	}
+
+	ctx := domainpermissions.WithAllowedResources(context.Background(), clusterOverviewDomainName, domainpermissions.AllowedResources{
+		"core/nodes":      true,
+		"core/pods":       true,
+		"core/namespaces": true,
+	})
+	snapshot, err := builder.Build(ctx, "")
+	require.NoError(t, err)
+
+	payload, ok := snapshot.Payload.(ClusterOverviewSnapshot)
+	require.True(t, ok)
+	require.Zero(t, payload.Overview.TotalNodes)
+	require.Zero(t, payload.Overview.TotalPods)
+	require.Equal(t, 1, payload.Overview.TotalNamespaces)
+	require.ElementsMatch(t, []string{"core/nodes", "core/pods"}, payload.Overview.UnavailableResources)
+}
+
+// The list fallback tolerates a forbidden nodes LIST (issue #244): a
+// namespaces- or pods-only identity gets a partial overview with the denied
+// source marked, instead of the whole domain failing.
+func TestClusterOverviewListBuilderToleratesForbiddenNodesAndMarksUnavailable(t *testing.T) {
+	client := kubefake.NewSimpleClientset(
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default"}},
+		&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "pod-a", Namespace: "default"},
+			Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+		},
+	)
+	client.PrependReactor("list", "nodes", func(cgotesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(
+			schema.GroupResource{Group: "", Resource: "nodes"},
+			"nodes",
+			errors.New("forbidden"),
+		)
+	})
+
+	builder := &ClusterOverviewListBuilder{
+		client:     client,
+		metrics:    fakeClusterMetrics{},
+		versionFn:  func(context.Context) string { return "v1.30.0" },
+		serverHost: "https://cluster.example.com",
+	}
+
+	snapshot, err := builder.Build(context.Background(), "cluster-a|")
+	require.NoError(t, err)
+
+	payload, ok := snapshot.Payload.(ClusterOverviewSnapshot)
+	require.True(t, ok)
+	require.Zero(t, payload.Overview.TotalNodes)
+	require.Equal(t, 1, payload.Overview.TotalPods)
+	require.Equal(t, 1, payload.Overview.TotalNamespaces)
+	require.Equal(t, []string{"core/nodes"}, payload.Overview.UnavailableResources)
+}
+
 func TestClusterOverviewListBuilderKeepsRequiredFallbackPartialWhenPodsAndNamespacesForbidden(t *testing.T) {
 	client := kubefake.NewSimpleClientset(
 		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}},
@@ -623,6 +821,7 @@ func TestClusterOverviewListBuilderKeepsRequiredFallbackPartialWhenPodsAndNamesp
 	require.Equal(t, 1, payload.Overview.TotalNodes)
 	require.Zero(t, payload.Overview.TotalPods)
 	require.Zero(t, payload.Overview.TotalNamespaces)
+	require.ElementsMatch(t, []string{"core/pods", "core/namespaces"}, payload.Overview.UnavailableResources)
 }
 
 func TestClusterOverviewListBuilderIgnoresForbiddenOptionalResources(t *testing.T) {
@@ -719,8 +918,7 @@ func TestClusterOverviewAKSVirtualNodes(t *testing.T) {
 	}
 
 	builder := &ClusterOverviewBuilder{
-		nodeLister:      testsupport.NewNodeLister(t, nodeVM, nodeVirtual),
-		podLister:       testsupport.NewPodLister(t),
+		ingest:          newFakePodAggregateSource(nil).withNodes(ClusterMeta{}, "", nodeVM, nodeVirtual),
 		namespaceLister: testsupport.NewNamespaceLister(t),
 		metrics:         fakeClusterMetrics{},
 		cachedVersion:   "v1.29.0",
@@ -765,8 +963,7 @@ func TestClusterOverviewGKEShowsOnlyTotal(t *testing.T) {
 	}
 
 	builder := &ClusterOverviewBuilder{
-		nodeLister:      testsupport.NewNodeLister(t, node),
-		podLister:       testsupport.NewPodLister(t),
+		ingest:          newFakePodAggregateSource(nil).withNodes(ClusterMeta{}, "", node),
 		namespaceLister: testsupport.NewNamespaceLister(t),
 		metrics:         fakeClusterMetrics{},
 		cachedVersion:   "v1.29.0-gke.1234",
@@ -793,8 +990,7 @@ func TestClusterOverviewGKEShowsOnlyTotal(t *testing.T) {
 
 func TestClusterOverviewSuppressesInitialMetricsErrors(t *testing.T) {
 	builder := &ClusterOverviewBuilder{
-		nodeLister:      testsupport.NewNodeLister(t),
-		podLister:       testsupport.NewPodLister(t),
+		ingest:          newFakePodAggregateSource(nil).withNodes(ClusterMeta{}, ""),
 		namespaceLister: testsupport.NewNamespaceLister(t),
 		metrics: fakeClusterMetrics{
 			meta: metrics.Metadata{
@@ -819,8 +1015,7 @@ func TestClusterOverviewSuppressesInitialMetricsErrors(t *testing.T) {
 
 func TestClusterOverviewSurfacesRepeatedMetricsErrors(t *testing.T) {
 	builder := &ClusterOverviewBuilder{
-		nodeLister:      testsupport.NewNodeLister(t),
-		podLister:       testsupport.NewPodLister(t),
+		ingest:          newFakePodAggregateSource(nil).withNodes(ClusterMeta{}, ""),
 		namespaceLister: testsupport.NewNamespaceLister(t),
 		metrics: fakeClusterMetrics{
 			meta: metrics.Metadata{
@@ -841,4 +1036,33 @@ func TestClusterOverviewSurfacesRepeatedMetricsErrors(t *testing.T) {
 	require.False(t, payload.Metrics.Stale)
 	require.Equal(t, uint64(5), payload.Metrics.FailureCount)
 	require.Equal(t, uint64(0), payload.Metrics.SuccessCount)
+}
+
+func TestClusterOverviewSurfacesDisabledMetricsReason(t *testing.T) {
+	// A DisabledPoller (metrics API forbidden, or metrics-server absent) reports
+	// the SAME counters as the pristine pre-first-poll window: SuccessCount 0, no
+	// failures, zero CollectedAt. Those trip the grace period, which would clear
+	// its LastError and strand the UI on "Collecting metrics…" forever. The
+	// Disabled flag must exempt it so the permanent reason reaches the payload.
+	builder := &ClusterOverviewBuilder{
+		ingest:          newFakePodAggregateSource(nil).withNodes(ClusterMeta{}, ""),
+		namespaceLister: testsupport.NewNamespaceLister(t),
+		metrics: fakeClusterMetrics{
+			meta: metrics.Metadata{
+				Disabled:            true,
+				LastError:           "Insufficient permissions for Metrics API",
+				FailureCount:        0,
+				ConsecutiveFailures: 0,
+				SuccessCount:        0,
+			},
+		},
+	}
+
+	snapshot, err := builder.Build(context.Background(), "")
+	require.NoError(t, err)
+
+	payload, ok := snapshot.Payload.(ClusterOverviewSnapshot)
+	require.True(t, ok)
+	require.Equal(t, "Insufficient permissions for Metrics API", payload.Metrics.LastError)
+	require.True(t, payload.Metrics.Disabled)
 }

@@ -153,8 +153,8 @@ const baseCustom = {
   kind: 'Widget',
   name: 'gizmo',
   namespace: '',
-  apiGroup: 'example.com',
-  apiVersion: 'v1',
+  group: 'example.com',
+  version: 'v1',
   age: '1d',
   clusterId: 'alpha:ctx',
   clusterName: 'alpha',
@@ -206,8 +206,8 @@ const catalogItemFromCustom = (
   resource: {
     kind: string;
     name: string;
-    apiGroup?: string;
-    apiVersion?: string;
+    group?: string;
+    version?: string;
     age?: string;
     clusterId: string;
     clusterName?: string;
@@ -221,8 +221,8 @@ const catalogItemFromCustom = (
       : (resource.age ?? '');
   return {
     kind: resource.kind,
-    group: resource.apiGroup ?? '',
-    version: resource.apiVersion ?? '',
+    group: resource.group ?? '',
+    version: resource.version ?? '',
     resource: 'widgets',
     name: resource.name,
     uid: `${resource.name}-uid`,
@@ -283,10 +283,11 @@ describe('ClusterViewCustom', () => {
       await Promise.resolve();
     });
 
-    // No in-table banner exists; an errored empty table reads "Unable to load
-    // data" instead of the generic empty message.
+    // No in-table banner exists. A permission-classified catalog error reads
+    // as the designed permission state; non-permission errors keep the
+    // "Unable to load data" treatment (covered by the inventory-table tests).
     expect(container.querySelector('[role="alert"]')).toBeNull();
-    expect(gridTablePropsRef.current?.emptyMessage).toBe('Unable to load data');
+    expect(gridTablePropsRef.current?.emptyMessage).toBe('Insufficient permissions');
   });
 
   it('passes the unfiltered total through to the filter options', async () => {
@@ -375,20 +376,20 @@ describe('ClusterViewCustom', () => {
         kind: 'Widget',
         name: 'gizmo',
         clusterId: 'alpha:ctx',
-        apiGroup: 'example.com',
-        apiVersion: 'v1',
+        group: 'example.com',
+        version: 'v1',
         crdName: 'widgets.example.com',
-        age: '1d',
+        ageTimestamp: expect.any(Number),
       }),
     ]);
-    expect(props.data[0].age).not.toContain('T');
+    expect(props.data[0].age).toBeUndefined();
 
     props.getCustomContextMenuItems(props.data[0], 'kind')[0].onClick();
     expect(openWithObjectMock).toHaveBeenCalledWith(
       expect.objectContaining({
         kind: 'Widget',
         name: 'gizmo',
-        age: '1d',
+        ageTimestamp: props.data[0].ageTimestamp,
         clusterId: 'alpha:ctx',
         group: 'example.com',
         version: 'v1',
@@ -416,8 +417,8 @@ describe('ClusterViewCustom', () => {
         kind: 'Widget',
         name: 'query-widget',
         clusterId: 'cluster-a',
-        apiGroup: 'example.com',
-        apiVersion: 'v1',
+        group: 'example.com',
+        version: 'v1',
         crdName: 'widgets.example.com',
       }),
     ]);
@@ -496,16 +497,16 @@ describe('ClusterViewCustom', () => {
 
   // Regression test mirroring NsViewCustom's colliding-CRD guardrail.
   // The cluster-scoped custom view has
-  // the same bug potential: if handleResourceClick drops apiGroup/apiVersion,
+  // the same bug potential: if handleResourceClick drops group/version,
   // a cluster-scoped custom resource whose Kind collides with another CRD
   // group would open against the wrong GVR.
-  it('forwards apiGroup and apiVersion into openWithObject for colliding CRDs', async () => {
+  it('forwards group and version into openWithObject for colliding CRDs', async () => {
     const clusterScopedCR = {
       kind: 'DBCluster',
       name: 'shared-pg',
       namespace: '',
-      apiGroup: 'postgresql.cnpg.io',
-      apiVersion: 'v1',
+      group: 'postgresql.cnpg.io',
+      version: 'v1',
       age: '3d',
       clusterId: 'alpha:ctx',
       clusterName: 'alpha',
@@ -545,15 +546,15 @@ describe('ClusterViewCustom', () => {
   // ( "I Should Have Done This Without Having
   // To Be Asked" item 2). Mirrors NsViewCustom's delete guardrail for the
   // cluster-scoped custom view.
-  it('routes delete through RunObjectAction when apiGroup/apiVersion are present', async () => {
+  it('routes delete through RunObjectAction when group/version are present', async () => {
     runObjectActionMock.mockResolvedValue(undefined);
 
     const clusterScopedCR = {
       kind: 'DBCluster',
       name: 'shared-pg',
       namespace: '',
-      apiGroup: 'postgresql.cnpg.io',
-      apiVersion: 'v1',
+      group: 'postgresql.cnpg.io',
+      version: 'v1',
       age: '3d',
       clusterId: 'alpha:ctx',
       clusterName: 'alpha',
@@ -609,8 +610,8 @@ describe('ClusterViewCustom', () => {
       ...baseCustom,
       kind: 'DBCluster',
       name: 'shared-pg',
-      apiGroup: 'postgresql.cnpg.io',
-      apiVersion: 'v1',
+      group: 'postgresql.cnpg.io',
+      version: 'v1',
       crdName: 'dbclusters.postgresql.cnpg.io',
     };
 

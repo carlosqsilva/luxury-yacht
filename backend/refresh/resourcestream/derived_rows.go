@@ -18,6 +18,7 @@ import (
 
 	podres "github.com/luxury-yacht/app/backend/resources/pods"
 
+	"github.com/luxury-yacht/app/backend/refresh/ingest"
 	"github.com/luxury-yacht/app/backend/refresh/metrics"
 	"github.com/luxury-yacht/app/backend/refresh/snapshot"
 	"github.com/luxury-yacht/app/backend/refresh/telemetry"
@@ -26,7 +27,6 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 )
 
 func (m *Manager) handlePod(obj interface{}, updateType MessageType) {
@@ -91,73 +91,70 @@ func (m *Manager) handlePodEvent(oldObj interface{}, newObj interface{}, updateT
 
 func (m *Manager) handleReplicaSetEvent(oldObj interface{}, newObj interface{}, updateType MessageType) {
 	switch updateType {
-	case MessageTypeAdded:
-		newRS := replicaSetFromObject(newObj)
-		m.refreshPodsForReplicaSet(newRS, replicaSetStaleWorkloadScopes(nil, newRS))
+	case MessageTypeAdded, MessageTypeModified:
+		m.healPodsForReplicaSet(replicaSetFromObject(newObj))
 	case MessageTypeDeleted:
-		oldRS := replicaSetFromObject(oldObj)
-		m.refreshPodsForReplicaSet(oldRS, replicaSetStaleWorkloadScopes(oldRS, nil))
-	case MessageTypeModified:
-		oldRS := replicaSetFromObject(oldObj)
-		newRS := replicaSetFromObject(newObj)
-		staleScopes := replicaSetStaleWorkloadScopes(oldRS, newRS)
-		seen := make(map[string]struct{})
-		m.refreshPodsForReplicaSetOnce(oldRS, staleScopes, seen)
-		m.refreshPodsForReplicaSetOnce(newRS, staleScopes, seen)
+		// Nothing to heal: a deleted RS cascades to its pods, whose own delete
+		// events clean every scope; an orphaned pod's owner-ref removal arrives
+		// as a pod update and re-projects its row.
 	}
 }
 
-func (m *Manager) refreshPodsForReplicaSet(rs *appsv1.ReplicaSet, staleScopes []string) {
-	m.refreshPodsForReplicaSetOnce(rs, staleScopes, make(map[string]struct{}))
-}
-
-func (m *Manager) refreshPodsForReplicaSetOnce(
-	rs *appsv1.ReplicaSet,
-	staleScopes []string,
-	seen map[string]struct{},
-) {
-	if rs == nil || m.podLister == nil {
+// healPodsForReplicaSet re-resolves stored pod bundles whose ReplicaSet->
+// Deployment owner could not be resolved when they were projected. The pod
+// projector reads the shared factory's RS lister, but the owned pod reflector
+// starts BEFORE the factory (ingest_hub.go), so pods projected in that window
+// carry the unresolved ReplicaSet as their collapsed owner — the Deployment's
+// workload-scoped pods query then serves nothing and its doorbell never rings,
+// and owned reflectors never resync to repair it. Healing on the RS informer's
+// events closes the race: the rewrite fans through the store's sinks like a
+// reflector update, and the pod notify sink signals every scope the healed row
+// belongs to — namespace, node, the NEW Deployment scope, and the ReplicaSet
+// scope, which the row still occupies through its direct owner.
+func (m *Manager) healPodsForReplicaSet(rs *appsv1.ReplicaSet) {
+	if rs == nil || m.podIngest == nil {
 		return
 	}
-	pods, err := m.podLister.Pods(rs.Namespace).List(labels.Everything())
-	if err != nil {
-		m.logWarn(fmt.Sprintf("resource stream: list pods for replicaset %s/%s failed: %v", rs.Namespace, rs.Name, err))
+	deployment := replicaSetDeploymentOwnerName(rs)
+	if deployment == "" {
+		// A standalone RS's pods correctly keep the ReplicaSet owner.
 		return
 	}
-	podUsage := m.podMetricsSnapshot()
-	for _, pod := range pods {
-		if !podOwnedByReplicaSet(pod, rs) {
-			continue
-		}
-		key := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		if len(staleScopes) > 0 {
-			m.broadcastPodRow(pod, MessageTypeDeleted, staleScopes, podUsage)
-		}
-		m.broadcastPodRow(pod, MessageTypeModified, nil, podUsage)
-	}
-}
-
-func (m *Manager) handleNode(obj interface{}, updateType MessageType) {
-	node := nodeFromObject(obj)
-	if node == nil {
-		return
-	}
-	// nodes is notify-only: emit the change signal and let the query-backed table
-	// refetch. The node row is rebuilt by the snapshot/query builder.
-	m.broadcastNodeNotification(node, updateType)
+	m.podIngest.RewriteBundlesByIndex(
+		podGVR,
+		snapshot.PodOwnerKeyIndexName,
+		snapshot.PodOwnerHealIndexValues(rs.Namespace, rs.Name, deployment),
+		func(bundle ingest.Bundle) (ingest.Bundle, bool) {
+			return snapshot.HealPodBundleReplicaSetOwner(bundle, rs.Namespace, rs.Name, deployment)
+		},
+	)
 }
 
 // broadcastNodeNotification emits a row-less node change notification on the
-// cluster scope. nodes is notify-only (see notify_only.go): the query-backed
-// table refetches on the bare signal and drift keys off Ref, so no NodeSummary
-// is projected.
+// cluster scope. The query-backed table refetches on the bare signal and drift
+// keys off Ref, so no NodeSummary is projected.
 func (m *Manager) broadcastNodeNotification(node metav1.Object, updateType MessageType) {
 	ref := m.resourceRefForObject(node, nodespkg.Identity.Group, nodespkg.Identity.Version, nodespkg.Identity.Kind, nodespkg.Identity.Resource)
 	update := m.newObjectRowUpdate(updateType, domainNodes, node, ref, nil)
+	m.broadcast(domainNodes, []string{""}, update)
+}
+
+// broadcastNodeNotificationRef is the ref-only form of broadcastNodeNotification for the
+// ingest notify path, which has no typed node object: the change signal is built directly
+// from the Ref + resourceVersion (read from the node's projected catalog half), scoped to the
+// cluster. The Update is identical to the typed path's for the same node.
+func (m *Manager) broadcastNodeNotificationRef(ref resourcemodel.ResourceRef, resourceVersion string, updateType MessageType) {
+	if ref.ClusterID == "" {
+		ref.ClusterID = m.clusterMeta.ClusterID
+	}
+	update := Update{
+		Type:            updateType,
+		Domain:          domainNodes,
+		ClusterID:       m.clusterMeta.ClusterID,
+		ClusterName:     m.clusterMeta.ClusterName,
+		ResourceVersion: resourceVersion,
+		Ref:             &ref,
+	}
 	m.broadcast(domainNodes, []string{""}, update)
 }
 
@@ -167,7 +164,7 @@ func (m *Manager) handleWorkload(obj interface{}, updateType MessageType) {
 		return
 	}
 
-	// namespace-workloads is notify-only: emit the change signal (Ref/RV) and let
+	// namespace-workloads emits the change signal (Ref/RV) and lets
 	// the query-backed table refetch. The row is rebuilt by the snapshot/query
 	// builder, so no per-event WorkloadSummary is projected here.
 	m.broadcastWorkloadNotification(workload, m.workloadRef(workload, kind), workload.GetNamespace(), "", updateType)
@@ -207,35 +204,39 @@ func (m *Manager) handleWorkloadFromPod(pod *corev1.Pod, updateType MessageType,
 		return
 	}
 
-	workload, err := m.lookupWorkload(kind, namespace, name)
-	if err != nil || workload == nil {
+	ref, ok := m.lookupWorkloadRef(kind, namespace, name)
+	if !ok {
 		m.handleStandalonePodWorkload(pod, updateType, usage)
 		return
 	}
 
 	// A pod change means its owner workload's row may have changed; notify so the
 	// query-backed table refetches. The pod's resourceVersion carries the change.
-	m.broadcastWorkloadNotification(workload, m.workloadRef(workload, kind), namespace, pod.ResourceVersion, MessageTypeModified)
+	m.broadcastWorkloadNotificationRef(ref, namespace, pod.ResourceVersion, MessageTypeModified)
 }
 
 func (m *Manager) broadcastWorkloadRow(kind, namespace, name, resourceVersion string) {
-	workload, err := m.lookupWorkload(kind, namespace, name)
-	if err != nil || workload == nil {
+	ref, ok := m.lookupWorkloadRef(kind, namespace, name)
+	if !ok {
 		return
 	}
-	m.broadcastWorkloadNotification(workload, m.workloadRef(workload, kind), namespace, resourceVersion, MessageTypeModified)
+	m.broadcastWorkloadNotificationRef(ref, namespace, resourceVersion, MessageTypeModified)
 }
 
 func (m *Manager) broadcastStandalonePodWorkloadRow(namespace, name, resourceVersion string) {
-	if m.podLister == nil {
+	// Pods is cut: resolve the targeted pod's identity from the ingest store (the
+	// projected catalog half carries its UID) instead of a typed lister. A pod not in
+	// the store is skipped, matching the typed path's Get-error skip.
+	_, catalog, ok := m.lookupPodBundle(namespace, name)
+	if !ok {
 		return
 	}
-	pod, err := m.podLister.Pods(namespace).Get(name)
-	if err != nil || pod == nil {
-		return
-	}
-	ref := m.resourceRefForObject(pod, podres.Identity.Group, podres.Identity.Version, podres.Identity.Kind, podres.Identity.Resource)
-	m.broadcastWorkloadNotification(pod, ref, namespace, resourceVersion, MessageTypeModified)
+	ref := resourcemodel.NewResourceRef(
+		m.clusterMeta.ClusterID,
+		podres.Identity.Group, podres.Identity.Version, podres.Identity.Kind, podres.Identity.Resource,
+		namespace, name, catalog.UID,
+	)
+	m.broadcastWorkloadNotificationRef(ref, namespace, resourceVersion, MessageTypeModified)
 }
 
 func (m *Manager) handleStandalonePodWorkload(pod *corev1.Pod, updateType MessageType, _ map[string]metrics.PodUsage) {
@@ -251,16 +252,93 @@ func (m *Manager) handleStandalonePodWorkload(pod *corev1.Pod, updateType Messag
 }
 
 // broadcastWorkloadNotification emits a row-less workload change notification on
-// the namespace scope. namespace-workloads is notify-only (see notify_only.go):
-// the query-backed table refetches on the bare signal and drift keys off Ref, so
-// no WorkloadSummary is projected. resourceVersion overrides the object's own RV
-// when the trigger differs from the workload (a pod or HPA event).
+// the namespace scope. The query-backed table refetches on the bare signal and
+// drift keys off Ref, so no WorkloadSummary is projected. resourceVersion
+// overrides the object's own RV when the trigger differs from the workload (a
+// pod or HPA event).
 func (m *Manager) broadcastWorkloadNotification(obj metav1.Object, ref resourcemodel.ResourceRef, namespace, resourceVersion string, updateType MessageType) {
 	update := m.newObjectRowUpdate(updateType, domainWorkloads, obj, ref, nil)
 	if resourceVersion != "" {
 		update.ResourceVersion = resourceVersion
 	}
 	m.broadcast(domainWorkloads, scopesForNamespace(namespace), update)
+}
+
+// broadcastWorkloadNotificationRef is the ref-only form of broadcastWorkloadNotification
+// for the ingest notify path, which has no typed workload object: the change signal is
+// built directly from the Ref + resourceVersion (a standalone pod's own row), scoped to
+// the namespace. The Update is identical to the typed path's for a standalone pod whose
+// own resourceVersion drove the signal.
+func (m *Manager) broadcastWorkloadNotificationRef(ref resourcemodel.ResourceRef, namespace, resourceVersion string, updateType MessageType) {
+	if ref.ClusterID == "" {
+		ref.ClusterID = m.clusterMeta.ClusterID
+	}
+	update := Update{
+		Type:            updateType,
+		Domain:          domainWorkloads,
+		ClusterID:       m.clusterMeta.ClusterID,
+		ClusterName:     m.clusterMeta.ClusterName,
+		ResourceVersion: resourceVersion,
+		Ref:             &ref,
+	}
+	m.broadcast(domainWorkloads, scopesForNamespace(namespace), update)
+}
+
+// broadcastWorkloadFromPodSummary re-derives the owner-workload change signal from a
+// pod's projected PodSummary (the ingest notify path, which has no typed pod). It mirrors
+// handleWorkloadFromPod: a pod with a resolved controlling owner (OwnerKind/OwnerName,
+// ReplicaSet already collapsed to its Deployment by the projection) signals that
+// workload's row; an owner-less pod signals itself as a standalone workload row. The
+// workload Ref is resolved from the ingest catalog half (those kinds are cut too).
+// resourceVersion is the pod's, so the query-backed workloads table refetches.
+func (m *Manager) broadcastWorkloadFromPodSummary(summary snapshot.PodSummary, resourceVersion string, updateType MessageType) {
+	if summary.OwnerKind != "" && summary.OwnerKind != "None" && summary.OwnerName != "" && summary.OwnerName != "None" {
+		if ref, ok := m.lookupWorkloadRef(summary.OwnerKind, summary.Namespace, summary.OwnerName); ok {
+			m.broadcastWorkloadNotificationRef(ref, summary.Namespace, resourceVersion, MessageTypeModified)
+			return
+		}
+	}
+	m.broadcastStandalonePodWorkloadFromSummary(summary, updateType)
+}
+
+// broadcastStandalonePodWorkloadFromSummary signals a standalone pod's own workload row
+// from its PodSummary, mirroring handleStandalonePodWorkload: a Succeeded/Failed pod
+// (terminal status presentation) is a DELETED row, otherwise the supplied update type.
+func (m *Manager) broadcastStandalonePodWorkloadFromSummary(summary snapshot.PodSummary, updateType MessageType) {
+	if podSummaryTerminal(summary) {
+		updateType = MessageTypeDeleted
+	}
+	ref := resourcemodel.NewResourceRef(
+		m.clusterMeta.ClusterID,
+		podres.Identity.Group, podres.Identity.Version, podres.Identity.Kind, podres.Identity.Resource,
+		summary.Namespace, summary.Name, "",
+	)
+	m.broadcastWorkloadNotificationRef(ref, summary.Namespace, "", updateType)
+}
+
+// podSummaryTerminal reports whether a pod's projected status presentation marks it as a
+// completed (Succeeded) or failed pod — the standalone-workload DELETED condition. The
+// resource model presents PodSucceeded/PodFailed as the "completed"/"error" states; the
+// stream's standalone path keyed off PodSucceeded/PodFailed phase, which the resource
+// model's "completed"/"failed" status labels reflect for a standalone pod.
+func podSummaryTerminal(summary snapshot.PodSummary) bool {
+	return summary.StatusState == string(corev1.PodSucceeded) || summary.StatusState == string(corev1.PodFailed)
+}
+
+// broadcastNodeFromPodNode re-derives the node change signal from a pod's node name (the
+// ingest notify path). It mirrors handleNodeFromPod: the node row may have changed, so
+// notify the query-backed nodes table to refetch. The node's identity Ref is resolved from
+// the ingest node store (the node kind is cut — no typed lister); a node not in the store is
+// skipped (it may have been removed), matching the typed path's Get-error skip.
+func (m *Manager) broadcastNodeFromPodNode(nodeName string) {
+	if nodeName == "" {
+		return
+	}
+	ref, resourceVersion, ok := m.lookupNodeRef(nodeName)
+	if !ok {
+		return
+	}
+	m.broadcastNodeNotificationRef(ref, resourceVersion, MessageTypeModified)
 }
 
 func (m *Manager) handleNodeFromPod(pod *corev1.Pod) {

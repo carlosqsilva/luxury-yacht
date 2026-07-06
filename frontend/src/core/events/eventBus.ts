@@ -29,6 +29,16 @@ type ResourceStreamDomain =
   | 'cluster-crds'
   | 'cluster-custom'
   | 'nodes';
+
+type DoorbellStreamDomain =
+  | ResourceStreamDomain
+  | 'catalog'
+  | 'cluster-events'
+  | 'namespace-events'
+  | 'namespaces'
+  | 'object-events'
+  | 'cluster-overview';
+
 type ResourceStreamHealthStatus = 'healthy' | 'degraded' | 'unhealthy';
 type ResourceStreamConnectionStatus = 'connected' | 'disconnected';
 
@@ -43,6 +53,12 @@ export interface AppEvents {
   // Auth events — bridged from Wails runtime by AuthErrorContext.
   'cluster:auth:failed': { clusterId: string };
   'cluster:auth:recovered': { clusterId: string };
+
+  // A cluster's namespace scope changed and its refresh subsystem finished
+  // rebuilding (docs/plans/namespace-scope.md) — bridged from the Wails
+  // cluster:scope:changed event by KubeconfigContext. Streams must restart
+  // and the cluster's domains refetch.
+  'cluster:scope-changed': { clusterId: string };
 
   // View events
   'view:reset': void;
@@ -61,6 +77,13 @@ export interface AppEvents {
   'refresh:registered': { name: string };
   'refresh:start': { name: string; isManual: boolean };
   'refresh:complete': { name: string; isManual: boolean; success: boolean; error?: unknown };
+  /** A stream scope got a permission-denied error frame: streaming for it is
+   *  blocked (settled) until scope change / auth recovery clears the block. */
+  'refresh:resource-stream-permission-denied': {
+    domain: DoorbellStreamDomain;
+    scope: string;
+    reason: string;
+  };
   'refresh:resource-stream-drift': {
     domain: ResourceStreamDomain;
     scope: string;
@@ -71,7 +94,7 @@ export interface AppEvents {
     extraKeys: number;
   };
   'refresh:resource-stream-health': {
-    domain: ResourceStreamDomain;
+    domain: DoorbellStreamDomain;
     scope: string;
     status: ResourceStreamHealthStatus;
     reason: string;
@@ -87,7 +110,6 @@ export interface AppEvents {
   'settings:dim-inactive-namespaces': boolean;
   'settings:exclusive-namespaces': boolean;
   'settings:appearance-mode': 'light' | 'dark' | 'system';
-  'settings:metrics-interval': number;
   'settings:kubernetes-client-qps': number;
   'settings:default-table-page-size': number;
   'settings:kubernetes-client-burst': number;

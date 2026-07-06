@@ -53,51 +53,6 @@
   -webkit-user-select: none;
 }
 
-.overview-update-banner-wrap {
-  display: flex;
-  justify-content: center;
-  margin-bottom: 1rem;
-}
-
-.overview-update-banner {
-  appearance: none;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: center;
-  gap: 0.75rem 1rem;
-  padding: 0.75rem 1rem;
-  margin: 0;
-  background: var(--color-bg-secondary);
-  border: 1px solid var(--color-border);
-  border-radius: var(--border-radius-lg);
-  cursor: pointer;
-  font: inherit;
-  color: inherit;
-}
-
-.overview-update-text {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.35rem;
-  text-align: center;
-}
-
-.overview-update-title {
-  font-weight: 600;
-  color: var(--color-text);
-}
-
-.overview-update-meta {
-  color: var(--color-accent);
-  font-size: 1rem;
-}
-
-.overview-update-banner:hover .overview-update-meta {
-  text-decoration: underline;
-}
-
 .overview-header {
   display: flex;
   flex-direction: column;
@@ -206,6 +161,53 @@
   text-transform: uppercase;
   user-select: none;
   -webkit-user-select: none;
+}
+
+/* Header row for cards with an upper-right indicator (Resource Utilization's
+   metrics state). The row absorbs the h2's bottom margin so the card's
+   content sits at the same height whether or not the indicator is present. */
+.overview-section-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 1.2rem;
+}
+
+.overview-section-header h2 {
+  margin-bottom: 0;
+}
+
+/* Compact header indicator (metrics collection state): small muted text with a
+   status dot, truncating long messages (the title tooltip carries the full
+   text). Access restrictions are NOT shown here — they render in the
+   .overview-restriction callout below the header so their reasons stay fully
+   readable. */
+.overview-section-header .metrics-warning-banner {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+  max-width: 60%;
+  font-size: var(--font-size-small);
+  color: var(--color-text-secondary);
+}
+
+/* Ellipsis must live on the text span: anonymous text in a flex container
+   cannot be ellipsized. Full text stays available via the title tooltip. */
+.overview-section-header .metrics-warning-banner__text {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.overview-section-header .metrics-warning-banner__dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-warning, #f59e0b);
 }
 
 .overview-section h3 {
@@ -581,24 +583,172 @@
   padding: 2rem 0;
 }
 
-.cluster-overview-error {
+/* Permission-gated data (issue #244): every affected card explains its own gap
+   with the same standardized callout so the reasons read consistently, draw the
+   eye, and never truncate. Reuses the shared warning tokens (defined per
+   appearance mode) so the tinted surface tracks light/dark automatically —
+   matching the warning surfaces in NsViewRBAC / ObjectMap / Settings. */
+.overview-restriction {
   display: flex;
   flex-direction: column;
+  gap: 0.6rem;
+  margin: 0 0 1.2rem 0;
+  padding: 0.65rem 0.8rem;
+  border: 1px solid var(--color-warning-border);
+  border-radius: var(--border-radius-md);
+  background: var(--color-warning-bg);
+}
+
+/* Each restriction is a two-line row: an icon spanning both lines, a bold
+   headline, and a wrapping detail. The grid keeps the detail left-aligned under
+   the headline (not under the icon) and lets it wrap to as many lines as
+   needed. */
+.overview-restriction__item {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 0.5rem;
+  row-gap: 0.15rem;
+  align-items: start;
+}
+
+.overview-restriction__icon {
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  align-self: start;
+  margin-top: 0.1rem;
+  flex: none;
+  color: var(--color-warning);
+}
+
+.overview-restriction__headline {
+  grid-column: 2;
+  font-size: 0.83rem;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--color-text-primary);
+}
+
+.overview-restriction__detail {
+  grid-column: 2;
+  font-size: 0.8rem;
+  line-height: 1.4;
+  color: var(--color-text-secondary);
+}
+
+/* Collapsible legend explaining the utilization bar vocabulary. Swatches
+   reuse the ResourceBar theme variables so they can never drift from the
+   bar's actual rendering. Divider matches the card's other sub-sections
+   (.pod-status / .node-health) so the row reads as part of the card. */
+.utilization-legend {
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--color-border);
+}
+
+/* Toggle text matches the CPU/MEMORY group headers (.metric-header h3 in
+   ResourceBar.css) so the legend reads as a peer section. */
+.utilization-legend__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.utilization-legend__toggle:hover {
+  color: var(--color-text);
+}
+
+.utilization-legend__chevron {
+  width: 0;
+  height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid currentColor;
+  transition: transform 0.15s ease;
+}
+
+.utilization-legend__chevron--open {
+  transform: rotate(90deg);
+}
+
+.utilization-legend__items {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 0.6rem;
+  font-size: var(--font-size-small);
+  color: var(--color-text-secondary);
+}
+
+.utilization-legend__item {
+  display: flex;
   align-items: center;
   gap: 0.5rem;
-  color: var(--color-text-secondary);
-  text-align: center;
-  max-width: 420px;
 }
 
-.cluster-overview-error .error-icon {
-  font-size: 1.8rem;
+.utilization-legend__swatch {
+  flex: none;
+  width: 26px;
+  height: 10px;
+  border-radius: 2px;
+  background-color: var(--resourcebar-track-bg);
+  position: relative;
+  overflow: hidden;
 }
 
-.cluster-overview-error .error-detail {
-  font-size: 0.85rem;
-  color: var(--color-error);
-  margin-top: 0.5rem;
+.utilization-legend__swatch--usage-normal {
+  background: var(--resourcebar-usage-normal);
+}
+
+.utilization-legend__swatch--usage-high {
+  background: var(--resourcebar-usage-warning);
+}
+
+.utilization-legend__swatch--usage-critical {
+  background: var(--resourcebar-usage-critical);
+}
+
+.utilization-legend__footnote {
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-small);
+  margin-bottom: 0.5rem;
+}
+
+.utilization-legend__swatch--reserved {
+  background: var(--resourcebar-reserved-fill);
+}
+
+.utilization-legend__swatch--overlimit {
+  background: var(--resourcebar-overlimit-fill), var(--resourcebar-usage-critical);
+}
+
+.utilization-legend__swatch--request-marker::after,
+.utilization-legend__swatch--limit-marker::after {
+  content: "";
+  position: absolute;
+  left: 12px;
+  top: 0;
+  width: 2px;
+  height: 100%;
+}
+
+.utilization-legend__swatch--request-marker::after {
+  background-color: var(--resourcebar-marker-request);
+  box-shadow: var(--resourcebar-marker-request-shadow);
+}
+
+.utilization-legend__swatch--limit-marker::after {
+  background-color: var(--resourcebar-marker-limit);
+  box-shadow: var(--resourcebar-marker-limit-shadow);
 }
 
 .cluster-overview-loading-inline {

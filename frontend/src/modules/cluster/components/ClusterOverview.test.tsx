@@ -271,13 +271,6 @@ describe('ClusterOverview', () => {
       secondsUntilRetry: 0,
       errorClass: '' as const,
     };
-    getAppInfoMock.mockResolvedValue({
-      version: '1.0.0',
-      buildTime: 'dev',
-      gitCommit: 'dev',
-      isBeta: false,
-      update: { isUpdateAvailable: false },
-    });
     canResolveEventObjectReferenceMock.mockReturnValue(false);
     resolveEventObjectReferenceMock.mockReset();
     cleanupRoot = null;
@@ -305,14 +298,19 @@ describe('ClusterOverview', () => {
     expect(mockRefreshOrchestrator.setScopedDomainEnabled).toHaveBeenCalledWith(
       'cluster-overview',
       'cluster-1|',
-      true
+      true,
+      // preserveState pins the tab-switch fix: the streaming enable path
+      // resets scoped state without it, blanking the overview per switch.
+      { preserveState: true }
     );
     expect(container.querySelector('.cluster-overview')?.classList.contains('selectable')).toBe(
       true
     );
     expect(statValueFor(container, 'total')).toBe('—');
     expect(statValueFor(container, 'namespaces')).toBe('—');
-    expect(container.querySelector('.cluster-overview .cluster-overview-error') ?? null).toBeNull();
+    expect(
+      container.querySelector('.cluster-overview .cluster-overview-loading-inline') ?? null
+    ).toBeNull();
   });
 
   it('hydrates with overview data once the domain resolves', async () => {
@@ -488,7 +486,10 @@ describe('ClusterOverview', () => {
     expect(mockRefreshOrchestrator.setScopedDomainEnabled).toHaveBeenCalledWith(
       'cluster-overview',
       'cluster-1|',
-      true
+      true,
+      // preserveState pins the tab-switch fix: the streaming enable path
+      // resets scoped state without it, blanking the overview per switch.
+      { preserveState: true }
     );
     expect(mockRefreshOrchestrator.fetchScopedDomain).toHaveBeenCalledWith(
       'cluster-overview',
@@ -667,32 +668,6 @@ describe('ClusterOverview', () => {
     ).toContain('256.0 Mi');
   });
 
-  it('renders an update banner when a newer release is available', async () => {
-    getAppInfoMock.mockResolvedValue({
-      version: '1.0.0',
-      buildTime: 'dev',
-      gitCommit: 'dev',
-      isBeta: false,
-      update: {
-        isUpdateAvailable: true,
-        latestVersion: '1.2.0',
-        releaseUrl: 'https://github.com/luxury-yacht/app/releases/latest',
-      },
-    });
-
-    const { container, cleanup } = renderClusterOverview();
-    cleanupRoot = cleanup;
-
-    await act(async () => {
-      await Promise.resolve();
-    });
-
-    const banner = container.querySelector('.overview-update-banner');
-    expect(banner).not.toBeNull();
-    expect(banner?.textContent).toMatch(/update available/i);
-    expect(banner?.textContent).toContain('1.2.0');
-  });
-
   it('shows an inline error while retaining the zero skeleton when permissions fail', async () => {
     mockLifecycleState = 'loading';
     domainStateRef.current = createDomainState('error', { error: 'forbidden' });
@@ -701,7 +676,7 @@ describe('ClusterOverview', () => {
     cleanupRoot = cleanup;
     await flushEffects();
 
-    expect(container.textContent).toContain('Failed to load cluster overview');
+    expect(container.textContent).toContain('Failed to load Cluster Overview data');
     expect(container.textContent).toContain('forbidden');
     expect(statValueFor(container, 'total')).toBe('0');
     expect(container.textContent).not.toContain('Loading cluster overview...');
@@ -878,6 +853,232 @@ describe('ClusterOverview', () => {
     );
   });
 
+  it('renders the nodes card as permission-gated when nodes are unavailable', async () => {
+    const { container, rerender, cleanup } = renderClusterOverview();
+    cleanupRoot = cleanup;
+
+    domainStateRef.current = createDomainState('ready', {
+      overview: {
+        ...EMPTY_OVERVIEW_DATA,
+        clusterType: 'Unmanaged',
+        cpuUsage: '400m',
+        cpuLimits: '1000m',
+        memoryUsage: '2Gi',
+        memoryLimits: '8Gi',
+        totalPods: 42,
+        totalNamespaces: 6,
+        unavailableResources: ['core/nodes'],
+      },
+    });
+
+    rerender();
+    await flushEffects();
+
+    // The Nodes card shows the restriction notice above its graph and dashes out
+    // the node counts (the graph is never hidden). "list, watch" are the actual
+    // RBAC verbs the app needs for node data — never "view", which is a
+    // ClusterRole name, not a permission.
+    expect(
+      container.querySelector('[data-testid="cluster-nodes-permission-note"]')?.textContent
+    ).toContain('Node permissions: list, watch');
+    expect(container.querySelector('[data-testid="cluster-nodes-total"]')).not.toBeNull();
+    expect(statValueFor(container, 'total')).toBe('—');
+
+    // Capacity-derived values have no denominator without nodes: the usage
+    // summaries drop the "of <allocatable>" part and the percentages dash out
+    // (calculateResourceMetrics would silently rescale them against limits).
+    expect(container.textContent).toContain('400m used');
+    expect(container.textContent).toContain('2.0Gi used');
+    expect(
+      Array.from(container.querySelectorAll('.metric-header__percent')).map(
+        (element) => element.textContent
+      )
+    ).toEqual(['—', '—']);
+
+    // The warning lives in the affected card: the Resource Utilization card
+    // carries a capacity notice (no page-level banner).
+    expect(container.querySelector('[data-testid="overview-permission-banner"]')).toBeNull();
+    const capacityChip = container.querySelector(
+      '[data-testid="utilization-capacity-permission-chip"]'
+    );
+    expect(capacityChip?.textContent).toContain('Capacity unavailable');
+    // The explanation is visible inline text in the standardized notice, not an
+    // invisible title attribute or a hover-only tooltip.
+    expect(capacityChip?.getAttribute('title')).toBeNull();
+    expect(capacityChip?.textContent).toContain('Node permissions: list, watch');
+
+    // Pod and namespace data still render, with no pods/namespaces warnings.
+    expect(statValueFor(container, 'pods')).toBe('42');
+    expect(statValueFor(container, 'namespaces')).toBe('6');
+    expect(
+      container.querySelector('[data-testid="utilization-requests-permission-chip"]')
+    ).toBeNull();
+    expect(container.querySelector('[data-testid="workloads-pods-permission-note"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="workloads-namespaces-permission-note"]')
+    ).toBeNull();
+  });
+
+  it('warns inside the affected cards when pods and namespaces are hidden, keeping the nodes card', async () => {
+    const { container, rerender, cleanup } = renderClusterOverview();
+    cleanupRoot = cleanup;
+
+    domainStateRef.current = createDomainState('ready', {
+      overview: {
+        ...EMPTY_OVERVIEW_DATA,
+        clusterType: 'Unmanaged',
+        totalNodes: 2,
+        readyNodes: 2,
+        cpuUsage: '400m',
+        cpuAllocatable: '2000m',
+        unavailableResources: ['core/pods', 'core/namespaces'],
+      },
+    });
+
+    rerender();
+    await flushEffects();
+
+    // Requests/limits derive from pods: the Resource Utilization header says so.
+    const requestsChip = container.querySelector(
+      '[data-testid="utilization-requests-permission-chip"]'
+    );
+    expect(requestsChip?.textContent).toContain('Requests and limits unavailable');
+    expect(requestsChip?.getAttribute('title')).toBeNull();
+    expect(requestsChip?.textContent).toContain('Pod permissions: list, watch');
+    expect(requestsChip?.textContent).toContain('Only current usage is shown');
+
+    // The Workloads card explains its hidden counts in place.
+    expect(
+      container.querySelector('[data-testid="workloads-pods-permission-note"]')?.textContent
+    ).toContain('Pod permissions: list, watch');
+    expect(
+      container.querySelector('[data-testid="workloads-namespaces-permission-note"]')?.textContent
+    ).toContain('Namespace permission: list');
+
+    // Nodes remain fully rendered, including capacity-derived percentages.
+    expect(container.querySelector('[data-testid="cluster-nodes-permission-note"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="utilization-capacity-permission-chip"]')
+    ).toBeNull();
+    expect(statValueFor(container, 'total')).toBe('2');
+    expect(container.textContent).toContain('400m of 2 cores');
+    expect(container.textContent).toContain('20.0%');
+  });
+
+  it('surfaces disabled metrics as an in-card notice and suppresses the transient pill', async () => {
+    const { container, rerender, cleanup } = renderClusterOverview();
+    cleanupRoot = cleanup;
+
+    domainStateRef.current = {
+      status: 'ready',
+      data: {
+        overview: {
+          ...EMPTY_OVERVIEW_DATA,
+          clusterType: 'Unmanaged',
+          totalNodes: 2,
+          readyNodes: 2,
+        },
+        // A DisabledPoller ships disabled:true with the terminal reason.
+        metrics: {
+          disabled: true,
+          lastError: 'Insufficient permissions for Metrics API',
+          stale: true,
+          successCount: 0,
+          failureCount: 0,
+        },
+      } as any,
+      error: null,
+    };
+
+    rerender();
+    await flushEffects();
+
+    // The permanent state reads as the standardized in-card restriction notice…
+    const metricsNote = container.querySelector(
+      '[data-testid="utilization-metrics-permission-note"]'
+    );
+    expect(metricsNote?.textContent).toContain('Metrics unavailable');
+    expect(metricsNote?.textContent).toContain('Insufficient permissions for Metrics API');
+
+    // …not the transient "Collecting metrics…" header pill (which is suppressed).
+    expect(container.querySelector('.metrics-warning-banner')).toBeNull();
+    expect(container.textContent).not.toContain('Collecting metrics');
+  });
+
+  it('explains the utilization bar vocabulary in a collapsible legend', async () => {
+    const { container, rerender, cleanup } = renderClusterOverview();
+    cleanupRoot = cleanup;
+
+    domainStateRef.current = createDomainState('ready', {
+      overview: {
+        ...EMPTY_OVERVIEW_DATA,
+        totalNodes: 1,
+      },
+    });
+
+    rerender();
+    await flushEffects();
+
+    const toggle = container.querySelector<HTMLButtonElement>(
+      '[data-testid="utilization-legend-toggle"]'
+    );
+    expect(toggle).not.toBeNull();
+    expect(toggle?.getAttribute('aria-expanded')).toBe('false');
+    expect(container.querySelector('[data-testid="utilization-legend"]')).toBeNull();
+
+    act(() => {
+      toggle?.click();
+    });
+
+    expect(toggle?.getAttribute('aria-expanded')).toBe('true');
+    const legend = container.querySelector('[data-testid="utilization-legend"]');
+    expect(legend).not.toBeNull();
+    // The striping introduced for over-limit usage must be named — it is the
+    // one visual with no other in-UI explanation.
+    expect(legend?.textContent).toContain('limits');
+    expect(legend?.textContent).toContain('Total requests marker');
+    // One row per usage color, stating the capacity percentage where the
+    // color changes (single-sourced with the bar's threshold logic).
+    expect(legend?.querySelectorAll('.utilization-legend__swatch--usage-normal')).toHaveLength(1);
+    expect(legend?.querySelectorAll('.utilization-legend__swatch--usage-high')).toHaveLength(1);
+    expect(legend?.querySelectorAll('.utilization-legend__swatch--usage-critical')).toHaveLength(1);
+    expect(legend?.textContent).toContain('81');
+    expect(legend?.textContent).toContain('95');
+
+    act(() => {
+      toggle?.click();
+    });
+    expect(toggle?.getAttribute('aria-expanded')).toBe('false');
+    expect(container.querySelector('[data-testid="utilization-legend"]')).toBeNull();
+  });
+
+  it('shows no permission warnings when every source is readable', async () => {
+    const { container, rerender, cleanup } = renderClusterOverview();
+    cleanupRoot = cleanup;
+
+    domainStateRef.current = createDomainState('ready', {
+      overview: {
+        ...EMPTY_OVERVIEW_DATA,
+        totalNodes: 1,
+      },
+    });
+
+    rerender();
+    await flushEffects();
+
+    expect(container.querySelector('[data-testid="cluster-nodes-permission-note"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="utilization-capacity-permission-chip"]')
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-testid="utilization-requests-permission-chip"]')
+    ).toBeNull();
+    expect(container.querySelector('[data-testid="workloads-pods-permission-note"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="workloads-namespaces-permission-note"]')
+    ).toBeNull();
+  });
+
   it('keeps cluster-overview disabled before data services start and suppresses the transient unavailable error', async () => {
     mockLifecycleState = 'connecting';
     domainStateRef.current = createDomainState('error', {
@@ -891,10 +1092,13 @@ describe('ClusterOverview', () => {
     expect(mockRefreshOrchestrator.setScopedDomainEnabled).toHaveBeenCalledWith(
       'cluster-overview',
       'cluster-1|',
-      false
+      false,
+      // preserveState pins the tab-switch fix: the streaming enable path
+      // resets scoped state without it, blanking the overview per switch.
+      { preserveState: true }
     );
     expect(mockRefreshOrchestrator.fetchScopedDomain).not.toHaveBeenCalled();
-    expect(container.textContent).not.toContain('Failed to load cluster overview');
+    expect(container.textContent).not.toContain('Failed to load Cluster Overview data');
     expect(statValueFor(container, 'total')).toBe('—');
   });
 });

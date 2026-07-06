@@ -38,6 +38,12 @@ type DomainConfig struct {
 	BuildSnapshot    func(ctx context.Context, scope string) (*Snapshot, error)
 	ManualRefresh    func(ctx context.Context, scope string) (*ManualRefreshResult, error)
 	PermissionDenied bool // Set when domain is registered as a permission-denied placeholder.
+	// RuntimePolicyExempt marks a domain whose data source needs no cluster
+	// permission in this configuration (the scoped namespaces domain serves
+	// synthesized names, docs/plans/namespace-scope.md). The snapshot
+	// service's per-request policy gate skips exempt domains, exactly as the
+	// registration-time gate does — the gate must match the source.
+	RuntimePolicyExempt bool
 }
 
 // InformerHub exposes informer lifecycle hooks used by the refresh manager.
@@ -103,14 +109,16 @@ const (
 
 // Snapshot represents the payload returned to clients.
 type Snapshot struct {
-	Domain      string        `json:"domain"`
-	Scope       string        `json:"scope,omitempty"`
-	Version     uint64        `json:"version"`
-	Checksum    string        `json:"checksum"`
-	GeneratedAt int64         `json:"generatedAt"` // unix millis
-	Sequence    uint64        `json:"sequence"`
-	Payload     interface{}   `json:"payload"`
-	Stats       SnapshotStats `json:"stats"`
+	Domain         string            `json:"domain"`
+	Scope          string            `json:"scope,omitempty"`
+	Version        uint64            `json:"version"`
+	SourceVersion  string            `json:"sourceVersion,omitempty"`
+	SourceVersions map[string]string `json:"sourceVersions,omitempty"`
+	Checksum       string            `json:"checksum"`
+	GeneratedAt    int64             `json:"generatedAt"` // unix millis
+	Sequence       uint64            `json:"sequence"`
+	Payload        interface{}       `json:"payload"`
+	Stats          SnapshotStats     `json:"stats"`
 }
 
 // SnapshotStats captures simple metrics for a snapshot build.
@@ -194,6 +202,18 @@ func (m *Manager) SetMetricsActive(active bool) {
 	}
 	if controller, ok := m.metricsPoller.(interface{ SetActive(bool) }); ok {
 		controller.SetActive(active)
+	}
+}
+
+// SetMetricsInterval retimes the metrics poll cadence when supported. The
+// cadence is server-owned (the metric doorbell rides collections), so the
+// user's metrics-interval preference must reach running pollers live.
+func (m *Manager) SetMetricsInterval(interval time.Duration) {
+	if m == nil || m.metricsPoller == nil {
+		return
+	}
+	if controller, ok := m.metricsPoller.(interface{ SetInterval(time.Duration) }); ok {
+		controller.SetInterval(interval)
 	}
 }
 

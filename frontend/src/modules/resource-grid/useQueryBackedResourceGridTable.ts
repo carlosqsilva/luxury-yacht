@@ -3,6 +3,7 @@ import type { RefreshDomain } from '@/core/refresh/types';
 import { useRefreshScopedDomain } from '@/core/refresh';
 import { useScopedRefreshDomainLifecycle } from '@/core/data-access';
 import { buildClusterScope } from '@/core/refresh/clusterScope';
+import { doorbellSourceClocks } from '@/core/refresh/streaming/resourceStreamDomains';
 import type { GridTableFilterOptions } from '@shared/components/tables/GridTable';
 import type { SortConfig } from '@/hooks/useTableSort';
 import { useDefaultTablePageSize } from '@/hooks/useDefaultTablePageSize';
@@ -47,25 +48,34 @@ export const typedQueryPageLimitOrDefault = (
   fallback: TablePageSize
 ): TablePageSize => (isTablePageSize(value) ? value : fallback);
 
-// The live-data identity the typed query watches to decide when to refetch. It
-// uses ONLY the data identity (version + checksum/etag) — deliberately NOT a
-// refresh timestamp. Including a timestamp made it change on every poll tick even
-// when the data was identical, so the query refetched continuously (~5×/sec while
-// idle on the view) and intermittently raced into a transient "returned no data"
-// that blanked the table. Keyed on data identity, it refetches only on real change.
-export const liveDomainVersion = (state: {
-  version?: number | string;
-  checksum?: string;
-  etag?: string;
-  // Bumped by the stream manager when streamed row updates change the data
-  // without a new backend snapshot version — a real data change, not a tick.
-  streamRevision?: number;
-  // Accepted from the scoped domain state but deliberately IGNORED below — see comment.
-  lastUpdated?: number;
-  lastAutoRefresh?: number;
-  lastManualRefresh?: number;
-}): string =>
-  [state.version ?? '', state.checksum ?? state.etag ?? '', state.streamRevision ?? ''].join(':');
+// The live-data identity the typed query watches to decide when to refetch.
+// For domains with declared doorbell clocks it keys on signalVersions — the
+// field ONLY the stream manager's doorbell path writes — never the folded
+// sourceVersion, which payload applies rewrite: any OTHER consumer fetching
+// the same base scope would flip the folded value and echo a pointless 304
+// refetch out of this table (observed live as 0-byte 304s trailing every
+// metric-tick 200 pair). Domains without doorbell clocks (plain snapshot
+// domains) keep the folded token.
+export const liveDomainVersion = (
+  domain: RefreshDomain,
+  state: {
+    sourceVersion?: string;
+    signalVersions?: Partial<Record<string, string>>;
+    version?: number | string;
+    checksum?: string;
+    etag?: string;
+    streamRevision?: number;
+    lastUpdated?: number;
+    lastAutoRefresh?: number;
+    lastManualRefresh?: number;
+  }
+): string => {
+  const clocks = doorbellSourceClocks(domain);
+  if (clocks.length === 0) {
+    return state.sourceVersion ?? state.etag ?? '';
+  }
+  return clocks.map((clock) => clock + ':' + (state.signalVersions?.[clock] ?? '')).join(' ');
+};
 
 // Derives the controller source state (data/loading/loaded/error) for a query-backed
 // resource grid. Sourced ONLY from the typed query — never the live snapshot, which is the
@@ -103,8 +113,19 @@ export function deriveQueryBackedData<TRow>({
   };
 }
 
-const isLiveDomainInitialLoadPending = (state: { status?: string; data?: unknown }): boolean =>
-  !state.data && (state.status === 'loading' || state.status === 'initialising');
+// A permission-denied live scope is SETTLED, not pending: gating the typed
+// query on it would hold the table in its loading state for as long as the
+// (blocked) stream machinery takes to move — observed live as a 7s spinner
+// before "Insufficient permissions". The query issues its own fetch and gets
+// the same typed 403 immediately.
+export const isLiveDomainInitialLoadPending = (state: {
+  status?: string;
+  data?: unknown;
+  permissionDenied?: boolean;
+}): boolean =>
+  !state.data &&
+  !state.permissionDenied &&
+  (state.status === 'loading' || state.status === 'initialising');
 
 export interface QueryBackedNamespaceGridResult<
   T extends ResourceGridTableRow,
@@ -206,7 +227,7 @@ function useTypedQueryLifecycle<
     fetchOnEnable: false,
   });
   const liveDomain = useRefreshScopedDomain(domain, liveScope);
-  const liveDataVersion = liveDomainVersion(liveDomain);
+  const liveDataVersion = liveDomainVersion(domain, liveDomain);
   const liveDomainInitialLoadPending = isLiveDomainInitialLoadPending(liveDomain);
   const hydratedRef = useRef(persistence.hydrated);
   hydratedRef.current = persistence.hydrated;
@@ -230,6 +251,9 @@ function useTypedQueryLifecycle<
   const queryEnabled =
     Boolean(clusterId) && tableStateReady && persistence.hydrated && !liveDomainInitialLoadPending;
 
+  // One query serves every sort, including cpu/memory: the backend joins live
+  // usage onto the rows at serve and sorts by it, so there is no separate
+  // metric-domain query and no row-key hydration leg.
   const query = useTypedResourceQuery<TPayload, TRow>({
     enabled: queryEnabled,
     clusterId,

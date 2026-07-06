@@ -7,14 +7,12 @@
 
 import './NsViewWorkloads.css';
 import { resolveEmptyStateMessage } from '@/utils/emptyState';
-import { useRefreshScopedDomain } from '@/core/refresh';
-import { buildClusterScope } from '@/core/refresh/clusterScope';
 import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
 import { useObjectPanel } from '@modules/object-panel/hooks/useObjectPanel';
 import { useNavigateToView } from '@shared/hooks/useNavigateToView';
 import { useShortNames } from '@/hooks/useShortNames';
-import { getMetricsBannerInfo } from '@shared/utils/metricsAvailability';
-import React, { useCallback, useMemo } from 'react';
+import { useMetricsBannerInfo } from '@shared/hooks/useMetricsBannerInfo';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import ResourceInventoryTable from '@modules/resource-grid/ResourceInventoryTable';
 import type { ContextMenuItem } from '@shared/components/ContextMenu';
 import type { GridColumnDefinition } from '@shared/components/tables/GridTable.types';
@@ -49,13 +47,8 @@ const WorkloadsViewGrid: React.FC<WorkloadsViewProps> = React.memo(
     const { navigateToView } = useNavigateToView();
     const useShortResourceNames = useShortNames();
     const { selectedClusterId } = useKubeconfig();
-    // Foreground namespace views should resolve node metrics from the active cluster only.
-    const nodesScope = useMemo(
-      () => buildClusterScope(selectedClusterId ?? undefined, ''),
-      [selectedClusterId]
-    );
-    const nodesDomain = useRefreshScopedDomain('nodes', nodesScope);
-    const metricsInfo = metrics ?? nodesDomain.data?.metrics ?? null;
+    const [tableMetricsInfo, setTableMetricsInfo] = useState<PodMetricsInfo | null>(null);
+    const metricsInfo = tableMetricsInfo ?? metrics ?? null;
 
     const handleWorkloadClick = useCallback(
       (workload: WorkloadData) => {
@@ -148,7 +141,7 @@ const WorkloadsViewGrid: React.FC<WorkloadsViewProps> = React.memo(
       [selectedClusterId]
     );
 
-    const metricsBanner = useMemo(() => getMetricsBannerInfo(metricsInfo), [metricsInfo]);
+    const metricsBanner = useMetricsBannerInfo(metricsInfo);
 
     const tableColumns = useWorkloadTableColumns({
       handleWorkloadClick,
@@ -172,6 +165,7 @@ const WorkloadsViewGrid: React.FC<WorkloadsViewProps> = React.memo(
       gridTableProps: resolvedGridTableProps,
       favModal,
       source,
+      queryPayload,
     } = useQueryBackedNamespaceResourceGridTable<NamespaceWorkloadSnapshotPayload, WorkloadData>({
       queryTableMode: 'Query Backed Dynamic',
       clusterId: selectedClusterId,
@@ -194,6 +188,12 @@ const WorkloadsViewGrid: React.FC<WorkloadsViewProps> = React.memo(
       diagnosticsLabel,
       filterOptions: { isNamespaceScoped: namespace !== ALL_NAMESPACES_SCOPE },
     });
+
+    // The base query payload carries the poller freshness block for the usage
+    // joined onto the rows at serve.
+    useEffect(() => {
+      setTableMetricsInfo(queryPayload?.metrics ?? null);
+    }, [queryPayload?.metrics]);
 
     const getContextMenuItems = useCallback(
       (row: WorkloadData): ContextMenuItem[] => {

@@ -15,13 +15,14 @@ type objectMapAssembler struct {
 
 func (b *objectMapBuilder) newObjectMapAssembler(ctx context.Context) (*objectMapAssembler, error) {
 	meta := ClusterMetaFromContext(ctx)
-	index := newObjectMapIndex(meta)
+	index := newObjectMapIndex(meta, b.allowedNamespaces)
 	index.addCatalog(b.catalog())
 	index.collectTyped(objectMapTypedSource{
 		ctx:         ctx,
 		client:      b.client,
 		shared:      b.shared,
 		permissions: b.permissions,
+		ingest:      b.ingest,
 	})
 	index.collectGatewayTyped(ctx, b.gatewayClient, b.gatewayPresence)
 	if err := index.listError(); err != nil {

@@ -360,6 +360,63 @@ describe('NsViewWorkloads', () => {
     );
   });
 
+  it('renders all-namespaces workload rows with usage joined at serve by the single base query', async () => {
+    const queryWorkload = {
+      kind: 'Deployment',
+      name: 'api',
+      namespace: 'team-b',
+      status: 'Running',
+      ready: '1/1',
+      restarts: 0,
+      age: '5m',
+      clusterId: 'path:context',
+      clusterName: 'ctx',
+      cpuUsage: '250m',
+      memUsage: '128Mi',
+    };
+    requestRefreshDomainStateMock.mockResolvedValue({
+      status: 'executed',
+      data: {
+        status: 'ready',
+        data: {
+          rows: [queryWorkload],
+          total: 1,
+          totalIsExact: true,
+          namespaces: ['team-b'],
+          kinds: ['Deployment'],
+          facetsExact: true,
+          metrics: { stale: false, collectedAt: 1_700_000_000 },
+        },
+      },
+    });
+
+    await act(async () => {
+      root.render(
+        <NsViewWorkloads
+          namespace={ALL_NAMESPACES_SCOPE}
+          showNamespaceColumn={true}
+          metrics={null}
+        />
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(gridTablePropsRef.current?.data).toEqual([queryWorkload]);
+    // Exactly one domain serves the table: no metric-domain query and no
+    // rowKeys hydration leg ride alongside the base query.
+    const queriedRequests = requestRefreshDomainStateMock.mock.calls.map(
+      (call) => call[0] as { domain?: string; scope?: string } | undefined
+    );
+    expect(new Set(queriedRequests.map((request) => request?.domain))).toEqual(
+      new Set(['namespace-workloads'])
+    );
+    expect(
+      queriedRequests.some((request) => (request?.scope ?? '').includes('predicate.rowKeys='))
+    ).toBe(false);
+  });
+
   it('renders the backend-published kind vocabulary even when facets collapse to the selection', async () => {
     // The Kinds dropdown options are the family's capabilities-published
     // vocabulary. Facets collapse to the active selection by design; selecting
@@ -471,16 +528,21 @@ describe('NsViewWorkloads', () => {
     expect(gridTablePropsRef.current?.data).toEqual([]);
   });
 
-  it('resolves node metrics from the active cluster scope only', async () => {
+  it('resolves workload metrics from the active namespace cluster scope only', async () => {
     await act(async () => {
       root.render(<NsViewWorkloads namespace="team-a" metrics={null} />);
       await Promise.resolve();
     });
 
-    expect(scopedDomainCallsRef.current).toContainEqual(['nodes', 'path:context|']);
+    // Metrics ride the namespace-workloads domain now; the lease must stay
+    // pinned to the active cluster scope.
+    expect(scopedDomainCallsRef.current).toContainEqual([
+      'namespace-workloads',
+      'path:context|namespace:team-a',
+    ]);
     expect(scopedDomainCallsRef.current).not.toContainEqual([
-      'nodes',
-      'clusters=path:context,other:context|',
+      'namespace-workloads',
+      'clusters=path:context,other:context|namespace:team-a',
     ]);
   });
 

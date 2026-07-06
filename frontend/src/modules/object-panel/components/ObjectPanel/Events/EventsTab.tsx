@@ -15,7 +15,8 @@ import {
   createTextColumn,
 } from '@shared/components/tables/columnFactories';
 import { useTableSort } from '@hooks/useTableSort';
-import { formatAge, formatFullDate } from '@utils/ageFormatter';
+import { formatAge } from '@utils/ageFormatter';
+import { formatLiveAgeText, LiveAgeText } from '@shared/components/LiveAgeText';
 import { errorHandler } from '@/utils/errorHandler';
 import { buildLocalPartialDataLabel } from '@modules/resource-grid/tablePartialState';
 import { boundedRowsSource } from '@modules/resource-grid/boundedRowsSource';
@@ -26,8 +27,8 @@ import { refreshManager } from '@/core/refresh';
 import { useAutoRefreshLoadingState } from '@/core/refresh/hooks/useAutoRefreshLoadingState';
 import { applyPassiveLoadingPolicy } from '@/core/refresh/loadingPolicy';
 import { useRefreshScopedDomain } from '@/core/refresh/store';
+import { useStreamSignalRefetch } from '@/core/refresh/hooks/useStreamSignalRefetch';
 import { useRefreshWatcher } from '@/core/refresh/hooks/useRefreshWatcher';
-import type { ObjectEventsRefresherName } from '@/core/refresh/refresherTypes';
 import { useObjectPanel } from '@modules/object-panel/hooks/useObjectPanel';
 import { useNavigateToView } from '@shared/hooks/useNavigateToView';
 import {
@@ -42,7 +43,7 @@ import {
 } from '@shared/events/eventGridModel';
 import type { ResolvedObjectReference } from '@shared/utils/objectIdentity';
 import type { PanelObjectData } from '../types';
-import { CLUSTER_SCOPE, INACTIVE_SCOPE } from '../constants';
+import { CLUSTER_SCOPE, INACTIVE_SCOPE, getObjectEventsRefresherName } from '../constants';
 import { useObjectPanelScopedDomainLifecycle } from '../hooks/useObjectPanelScopedDomainLifecycle';
 import './EventsTab.css';
 
@@ -54,6 +55,10 @@ interface EventsTabProps {
   // ObjectPanelContent (which handles full-cleanup on panel close)
   // cannot drift apart on the same scope key.
   eventsScope: string | null;
+  // The panel's canonical identity (objectPanelId), scoping the events
+  // refresher name to THIS panel so simultaneously-open same-kind panels
+  // register distinct refreshers (see getObjectEventsRefresherName).
+  panelId: string | null;
 }
 
 function normalizeEventSource(source: ObjectEventSummary['source'] | undefined): string {
@@ -95,7 +100,7 @@ interface EventDisplay {
   clusterName?: string;
 }
 
-const EventsTab: React.FC<EventsTabProps> = ({ objectData, isActive, eventsScope }) => {
+const EventsTab: React.FC<EventsTabProps> = ({ objectData, isActive, eventsScope, panelId }) => {
   const { isPaused, isManualRefreshActive } = useAutoRefreshLoadingState();
   const { openWithObject } = useObjectPanel();
   const { navigateToView } = useNavigateToView();
@@ -111,6 +116,15 @@ const EventsTab: React.FC<EventsTabProps> = ({ objectData, isActive, eventsScope
     scope: eventsScope,
     enabled: Boolean(isActive && objectData),
   });
+
+  // The per-object events doorbell only advances the scoped event clock; the
+  // poll that used to refresh this scope skips while the stream is healthy.
+  // Without this refetch-on-signal the tab freezes at its first load.
+  const eventSignalScopes = useMemo(
+    () => (isActive && eventsScope ? [eventsScope] : []),
+    [isActive, eventsScope]
+  );
+  useStreamSignalRefetch('object-events', eventSignalScopes);
 
   const fetchEvents = useCallback(
     async (reason: DataRequestReason = 'startup') => {
@@ -139,11 +153,8 @@ const EventsTab: React.FC<EventsTabProps> = ({ objectData, isActive, eventsScope
   }, [fetchEvents, isActive, objectData, eventsScope]);
 
   const eventsRefresherName = useMemo(
-    () =>
-      objectData?.kind
-        ? (`object-${objectData.kind.toLowerCase()}-events` as ObjectEventsRefresherName)
-        : null,
-    [objectData?.kind]
+    () => getObjectEventsRefresherName(objectData?.kind, panelId),
+    [objectData?.kind, panelId]
   );
 
   useEffect(() => {
@@ -420,11 +431,19 @@ const EventsTab: React.FC<EventsTabProps> = ({ objectData, isActive, eventsScope
         const column = createTextColumn<EventDisplay>(
           'age',
           'Age',
-          (item) => formatAge(item.ageTimestamp),
+          (item) => formatLiveAgeText(item.ageTimestamp, Date.now(), item.age),
           {
             getClassName: () => 'age-cell',
-            getTitle: (item) => formatFullDate(item.ageTimestamp),
           }
+        );
+        column.render = (item) => (
+          <LiveAgeText
+            timestamp={item.ageTimestamp}
+            fallback={item.age}
+            fullDateTitle
+            className="age-cell"
+            data-gridtable-export-text={formatLiveAgeText(item.ageTimestamp, Date.now(), item.age)}
+          />
         );
         column.sortValue = (item) => item.ageTimestamp.getTime();
         return column;

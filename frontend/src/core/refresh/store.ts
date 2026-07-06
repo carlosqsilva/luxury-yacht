@@ -9,6 +9,7 @@ import { useSyncExternalStore } from 'react';
 
 import type { DomainPayloadMap, RefreshDomain } from './types';
 import type { SnapshotStats } from './client';
+import type { RefreshSourceClock } from './domainRegistry';
 
 export type DomainStatus = 'idle' | 'loading' | 'initialising' | 'updating' | 'ready' | 'error';
 
@@ -17,14 +18,24 @@ export interface DomainSnapshotState<TPayload> {
   data: TPayload | null;
   stats: SnapshotStats | null;
   version?: number;
+  sourceVersion?: string;
+  sourceVersions?: Partial<Record<RefreshSourceClock, string>>;
+  // Doorbell clock values, written ONLY by the stream manager
+  // (bumpSourceVersionOnly) and never by payload applies — the structural
+  // guarantee that signal-driven refetch keys move exactly when a doorbell
+  // delivers them. Payload applies own sourceVersions (the backend back-fills
+  // an object clock into every snapshot, so sourceVersions churn on every
+  // fetch and CANNOT be a signal key — that was the echo-refetch bug).
+  signalVersions?: Partial<Record<RefreshSourceClock, string>>;
+  // The backend refused this scope for lack of RBAC permission (typed 403).
+  // TERMINAL for the session: background refetches skip the scope entirely
+  // (permission is checked once; recovery is an app restart). Cleared only by
+  // a successful fetch or a scoped-state reset.
+  permissionDenied?: boolean;
   checksum?: string;
   etag?: string;
-  /**
-   * Monotonic counter bumped by the resource stream manager whenever streamed
-   * row updates change the data WITHOUT a new backend snapshot version. Part of
-   * the live-data identity (see liveDomainVersion) so typed queries refetch on
-   * streamed changes.
-   */
+  // Retained for stream diagnostics/backward-compatible tests only. Query-backed
+  // table identity no longer reads it; sourceVersion is the live-data token.
   streamRevision?: number;
   lastUpdated?: number;
   lastManualRefresh?: number;
@@ -143,8 +154,7 @@ export const getScopedDomainState = <K extends RefreshDomain>(
   scope: string
 ): DomainSnapshotState<DomainPayloadMap[K]> => {
   const domainMap = state.scopedDomains[domain] as
-    | Record<string, DomainSnapshotState<DomainPayloadMap[K]>>
-    | undefined;
+    Record<string, DomainSnapshotState<DomainPayloadMap[K]>> | undefined;
   if (!domainMap) {
     return EMPTY_SCOPED_STATE as DomainSnapshotState<DomainPayloadMap[K]>;
   }
@@ -155,8 +165,7 @@ export const getScopedDomainStates = <K extends RefreshDomain>(
   domain: K
 ): Record<string, DomainSnapshotState<DomainPayloadMap[K]>> => {
   const domainMap = state.scopedDomains[domain] as
-    | Record<string, DomainSnapshotState<DomainPayloadMap[K]>>
-    | undefined;
+    Record<string, DomainSnapshotState<DomainPayloadMap[K]>> | undefined;
   return domainMap
     ? domainMap
     : (EMPTY_SCOPED_MAP as unknown as Record<string, DomainSnapshotState<DomainPayloadMap[K]>>);
@@ -166,8 +175,7 @@ export const getScopedDomainEntries = <K extends RefreshDomain>(
   domain: K
 ): Array<[string, DomainSnapshotState<DomainPayloadMap[K]>]> => {
   const entries = state.scopedDomainEntries[domain] as
-    | Array<[string, DomainSnapshotState<DomainPayloadMap[K]>]>
-    | undefined;
+    Array<[string, DomainSnapshotState<DomainPayloadMap[K]>]> | undefined;
   return entries
     ? entries
     : (EMPTY_SCOPED_ENTRIES as unknown as Array<
@@ -212,8 +220,7 @@ export const setScopedDomainState = <K extends RefreshDomain>(
   ) => DomainSnapshotState<DomainPayloadMap[K]>
 ): void => {
   const currentMap = state.scopedDomains[domain] as
-    | Record<string, DomainSnapshotState<DomainPayloadMap[K]>>
-    | undefined;
+    Record<string, DomainSnapshotState<DomainPayloadMap[K]>> | undefined;
   const previousState = (currentMap?.[scope] ?? EMPTY_SCOPED_STATE) as DomainSnapshotState<
     DomainPayloadMap[K]
   >;
@@ -243,8 +250,7 @@ export const setScopedDomainState = <K extends RefreshDomain>(
 
 export const resetScopedDomainState = <K extends RefreshDomain>(domain: K, scope: string): void => {
   const currentMap = state.scopedDomains[domain] as
-    | Record<string, DomainSnapshotState<DomainPayloadMap[K]>>
-    | undefined;
+    Record<string, DomainSnapshotState<DomainPayloadMap[K]>> | undefined;
 
   if (!currentMap || !(scope in currentMap)) {
     return;
@@ -283,6 +289,31 @@ export const resetAllScopedDomainStates = <K extends RefreshDomain>(domain: K): 
   const { [domain]: __, ...restEntries } = state.scopedDomainEntries;
   state.scopedDomainEntries = restEntries as ScopedDomainEntriesMap;
   notify();
+};
+
+/**
+ * Drops every scoped domain state latched permission-denied, so those scopes
+ * re-ask on their next (non-manual) refresh. Permission-denied is normally
+ * settled for the session, but a namespace-scope rebuild
+ * (docs/plans/namespace-scope.md) is a real permission epoch change: domains
+ * denied cluster-wide may now be served per-namespace. Denied scopes hold no
+ * data, so dropping them never blanks a rendered view; every other scope
+ * state is untouched.
+ */
+export const resetPermissionDeniedScopedDomainStates = (): void => {
+  const denied: Array<{ domain: RefreshDomain; scope: string }> = [];
+  for (const [domain, scopes] of Object.entries(state.scopedDomains)) {
+    for (const [scope, snapshot] of Object.entries(
+      scopes as Record<string, DomainSnapshotState<unknown>>
+    )) {
+      if (snapshot.permissionDenied) {
+        denied.push({ domain: domain as RefreshDomain, scope });
+      }
+    }
+  }
+  for (const entry of denied) {
+    resetScopedDomainState(entry.domain, entry.scope);
+  }
 };
 
 export const markPendingRequest = (delta: number): void => {

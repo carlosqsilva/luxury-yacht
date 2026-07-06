@@ -2,43 +2,170 @@ package snapshot
 
 import (
 	"context"
+	"fmt"
+	"hash/fnv"
 	"sort"
 	"strconv"
 	"strings"
-
-	appslisters "k8s.io/client-go/listers/apps/v1"
-	batchlisters "k8s.io/client-go/listers/batch/v1"
+	"sync"
+	"time"
 
 	apimachineryerrors "k8s.io/apimachinery/pkg/api/errors"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	informers "k8s.io/client-go/informers"
+	"k8s.io/client-go/kubernetes"
 	corelisters "k8s.io/client-go/listers/core/v1"
+	"k8s.io/client-go/tools/cache"
 
-	"github.com/luxury-yacht/app/backend/internal/parallel"
+	"github.com/luxury-yacht/app/backend/internal/config"
+	"github.com/luxury-yacht/app/backend/kind/streamrows"
+	"github.com/luxury-yacht/app/backend/objectcatalog"
 	"github.com/luxury-yacht/app/backend/refresh"
 	"github.com/luxury-yacht/app/backend/refresh/domain"
+	"github.com/luxury-yacht/app/backend/refresh/ingest"
 	"github.com/luxury-yacht/app/backend/resourcemodel"
 	namespacepkg "github.com/luxury-yacht/app/backend/resources/namespaces"
 )
 
-// NamespaceBuilder constructs namespace snapshots from informer caches.
+// NamespaceBuilder constructs namespace snapshots from informer caches. Pods AND the five
+// workload kinds are cut to the ingest path, so the legacy per-namespace workload-detection
+// count reads each kind's projected rows from the ingest manager rather than a typed lister.
 type NamespaceBuilder struct {
-	namespaces   corelisters.NamespaceLister
-	pods         corelisters.PodLister
-	deployments  appslisters.DeploymentLister
-	statefulsets appslisters.StatefulSetLister
-	daemonsets   appslisters.DaemonSetLister
-	jobs         batchlisters.JobLister
-	cronJobs     batchlisters.CronJobLister
-	tracker      *NamespaceWorkloadTracker
+	namespaces corelisters.NamespaceLister
+	ingest     namespacePodIngestSource
+	tracker    *NamespaceWorkloadTracker
+	// scope is the cluster's configured namespace scope
+	// (docs/plans/namespace-scope.md). Non-empty means the rows are
+	// synthesized from these names instead of read from the (cluster-wide,
+	// permission-gated) namespace lister; empty means today's lister path.
+	scope []string
+
+	// client backs the scoped-mode per-namespace GET probe that enriches
+	// rows and flags configured names the identity cannot reach. nil (the
+	// unscoped path, unit tests) disables probing.
+	client kubernetes.Interface
+	// now/probeTTL are injectable for tests; zero values mean time.Now and
+	// the permission-cache TTL.
+	now      func() time.Time
+	probeTTL time.Duration
+
+	probeMu sync.Mutex
+	probes  map[string]namespaceProbe
+}
+
+// Scope-probe outcomes surfaced on NamespaceSummary.ScopeStatus. A permitted
+// GET returning 404 is definitive ("not-found"); a 403 stays honest — a
+// restricted identity cannot distinguish a missing namespace from a denied
+// one ("no-access").
+const (
+	scopeStatusNotFound = "not-found"
+	scopeStatusNoAccess = "no-access"
+)
+
+// namespaceProbe caches one configured name's GET outcome: the real object
+// when it exists and is readable, else the flag; checkedAt drives the TTL.
+type namespaceProbe struct {
+	ns        *corev1.Namespace
+	status    string
+	checkedAt time.Time
+}
+
+// probeScopedNamespace resolves one configured name: the real namespace
+// object (row enrichment) or a flag. Results are TTL-cached so builds do not
+// issue one GET per name per refresh tick; a transient error serves the
+// previous result (or nothing) rather than flapping a flag.
+func (b *NamespaceBuilder) probeScopedNamespace(ctx context.Context, name string) (*corev1.Namespace, string) {
+	if b.client == nil {
+		return nil, ""
+	}
+	nowFn := b.now
+	if nowFn == nil {
+		nowFn = time.Now
+	}
+	ttl := b.probeTTL
+	if ttl <= 0 {
+		ttl = config.PermissionCacheTTL
+	}
+	b.probeMu.Lock()
+	if probe, ok := b.probes[name]; ok && nowFn().Sub(probe.checkedAt) < ttl {
+		b.probeMu.Unlock()
+		return probe.ns, probe.status
+	}
+	b.probeMu.Unlock()
+
+	got, err := b.client.CoreV1().Namespaces().Get(ctx, name, metav1.GetOptions{})
+	var probe namespaceProbe
+	switch {
+	case err == nil:
+		probe = namespaceProbe{ns: got}
+	case apimachineryerrors.IsNotFound(err):
+		probe = namespaceProbe{status: scopeStatusNotFound}
+	case apimachineryerrors.IsForbidden(err):
+		probe = namespaceProbe{status: scopeStatusNoAccess}
+	default:
+		b.probeMu.Lock()
+		previous, ok := b.probes[name]
+		b.probeMu.Unlock()
+		if ok {
+			return previous.ns, previous.status
+		}
+		return nil, ""
+	}
+	probe.checkedAt = nowFn()
+	b.probeMu.Lock()
+	if b.probes == nil {
+		b.probes = make(map[string]namespaceProbe)
+	}
+	b.probes[name] = probe
+	b.probeMu.Unlock()
+	return probe.ns, probe.status
+}
+
+// scopeProbeSignature fingerprints the per-name probe flags so a flag
+// transition (a namespace created, deleted, or newly accessible) changes the
+// snapshot's cache validator — synthesized rows carry no RV clock to do it.
+func scopeProbeSignature(statuses map[string]string) string {
+	names := make([]string, 0, len(statuses))
+	for name := range statuses {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	h := fnv.New64a()
+	for _, name := range names {
+		_, _ = h.Write([]byte(name))
+		_, _ = h.Write([]byte{'='})
+		_, _ = h.Write([]byte(statuses[name]))
+		_, _ = h.Write([]byte{0})
+	}
+	return strconv.FormatUint(h.Sum64(), 16)
+}
+
+// namespacePodIngestSource is the ingest surface the namespace domain reads: the per-kind sync
+// gate (Tracks/HasSyncedFor, used by NewNamespaceWorkloadTracker) plus the projected rows the
+// per-build workload-presence set is computed from (the cut workload kinds' Catalog rows and the
+// pod kind's Aggregate rows).
+type namespacePodIngestSource interface {
+	Tracks(gvr schema.GroupVersionResource) bool
+	HasSyncedFor(gvr schema.GroupVersionResource) bool
+	CatalogRows(gvr schema.GroupVersionResource) []interface{}
+	AggregateRows(gvr schema.GroupVersionResource) []interface{}
 }
 
 // NamespaceSnapshot payload returned to clients.
 type NamespaceSnapshot struct {
 	ClusterMeta
 	Namespaces []NamespaceSummary `json:"namespaces"`
+	// WorkloadsReady reports whether the pod + workload ingest stores this snapshot's
+	// workload-presence flags derive from have SETTLED (synced/degraded/permission-skipped).
+	// It is a backend-internal readiness signal — the cluster lifecycle gate flips a cluster
+	// to Ready only on a namespace snapshot with this true, so "Ready" means data has loaded
+	// rather than merely "the namespace list served" (which is immediate). Not serialized: the
+	// frontend derives per-namespace state from workloadsUnknown, not this whole-snapshot flag.
+	WorkloadsReady bool `json:"-"`
 }
 
 // NamespaceSummary provides high level namespace metadata.
@@ -55,26 +182,103 @@ type NamespaceSummary struct {
 	CreationUnix       int64                     `json:"creationTimestamp"`
 	HasWorkloads       bool                      `json:"hasWorkloads"`
 	WorkloadsUnknown   bool                      `json:"workloadsUnknown,omitempty"`
+	// ScopeStatus flags a configured scope entry the identity cannot reach:
+	// "not-found" (definitive) or "no-access" (may not exist). Empty for
+	// reachable namespaces and for every unscoped row.
+	ScopeStatus string `json:"scopeStatus,omitempty"`
 }
 
-// RegisterNamespaceDomain registers the namespace domain with the registry.
-func RegisterNamespaceDomain(reg *domain.Registry, factory informers.SharedInformerFactory) error {
-	tracker := NewNamespaceWorkloadTracker(factory)
+// RegisterNamespaceDomain registers the namespace domain with the registry. The cut workload +
+// pod kinds' projected rows come from the ingest manager (read per build for workload presence);
+// the tracker only gates the read on those stores having synced. ingestManager may be nil in a
+// unit test.
+//
+// It returns the change notifier that replaces the frontend's namespaces poll: namespace
+// informer events and workload/pod ingest events feed it (handlers/sinks registered HERE,
+// before the informer factory and ingest manager start), and the subsystem wires its
+// broadcast to the resource-stream doorbell once the stream manager exists.
+func RegisterNamespaceDomain(reg *domain.Registry, factory informers.SharedInformerFactory, ingestManager namespacePodIngestSource, allowedNamespaces []string, client kubernetes.Interface) (*NamespaceChangeNotifier, error) {
+	tracker := NewNamespaceWorkloadTracker(ingestManager)
 	builder := &NamespaceBuilder{
-		namespaces:   factory.Core().V1().Namespaces().Lister(),
-		pods:         factory.Core().V1().Pods().Lister(),
-		deployments:  factory.Apps().V1().Deployments().Lister(),
-		statefulsets: factory.Apps().V1().StatefulSets().Lister(),
-		daemonsets:   factory.Apps().V1().DaemonSets().Lister(),
-		jobs:         factory.Batch().V1().Jobs().Lister(),
-		cronJobs:     factory.Batch().V1().CronJobs().Lister(),
-		tracker:      tracker,
+		ingest:  ingestManager,
+		tracker: tracker,
+		scope:   append([]string(nil), allowedNamespaces...),
 	}
-	return reg.Register(refresh.DomainConfig{
+	if len(builder.scope) > 0 {
+		// The probe client is scoped-mode only: unscoped rows come from the
+		// lister and must not issue per-name GETs.
+		builder.client = client
+	}
+	notifier := NewNamespaceChangeNotifier(ingestManager, tracker)
+	// Scoped clusters synthesize rows from the configured names: the
+	// (cluster-scoped, typically denied) namespaces informer is never
+	// instantiated, and namespace add/delete events cannot occur — the row
+	// set only changes through a settings-triggered subsystem rebuild.
+	if len(builder.scope) == 0 {
+		builder.namespaces = factory.Core().V1().Namespaces().Lister()
+		if _, err := factory.Core().V1().Namespaces().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+			AddFunc: func(interface{}) { notifier.NamespaceChanged() },
+			UpdateFunc: func(oldObj, newObj interface{}) {
+				// Informer resyncs re-deliver every namespace with an unchanged
+				// ResourceVersion; only real updates ring the doorbell.
+				if namespaceUpdateIsEcho(oldObj, newObj) {
+					return
+				}
+				notifier.NamespaceChanged()
+			},
+			DeleteFunc: func(interface{}) { notifier.NamespaceChanged() },
+		}); err != nil {
+			return nil, fmt.Errorf("namespaces: register namespace handler: %w", err)
+		}
+	}
+	// Bundle sinks fire on every Upsert/Delete/Replace for their GVR, which is all
+	// the notifier needs: the flush decides via the presence signature whether the
+	// event actually flipped a namespace's workload presence. AddBundleSink returns
+	// false for an untracked GVR (permission-skipped) — those kinds then simply
+	// never contribute events, matching the builder's per-build read.
+	if sinks, ok := ingestManager.(interface {
+		AddBundleSink(gvr schema.GroupVersionResource, sink ingest.BundleSink) bool
+	}); ok {
+		for _, gvr := range []schema.GroupVersionResource{
+			DeploymentGVR, StatefulSetGVR, DaemonSetGVR, JobGVR, CronJobGVR, PodGVR,
+		} {
+			sinks.AddBundleSink(gvr, namespaceNotifierSink{notifier: notifier})
+		}
+	}
+	if err := reg.Register(refresh.DomainConfig{
 		Name:          "namespaces",
 		BuildSnapshot: builder.Build,
-	})
+		// Scoped rows are synthesized from configuration: no cluster
+		// permission is needed, so BOTH permission gates (registration-time
+		// and the snapshot service's per-request check) must stand down.
+		RuntimePolicyExempt: len(builder.scope) > 0,
+	}); err != nil {
+		return nil, err
+	}
+	return notifier, nil
 }
+
+// namespaceUpdateIsEcho reports whether an informer Update delivery is a resync
+// echo (unchanged ResourceVersion) rather than a real object change. Unrecognized
+// objects are treated as real updates — suppression must never lose a signal.
+func namespaceUpdateIsEcho(oldObj, newObj interface{}) bool {
+	oldNs, okOld := oldObj.(*corev1.Namespace)
+	newNs, okNew := newObj.(*corev1.Namespace)
+	if !okOld || !okNew {
+		return false
+	}
+	return oldNs.ResourceVersion != "" && oldNs.ResourceVersion == newNs.ResourceVersion
+}
+
+// namespaceNotifierSink adapts the change notifier to the ingest BundleSink (and
+// bulk Replace) contract: every delivery is just "a workload event happened".
+type namespaceNotifierSink struct {
+	notifier *NamespaceChangeNotifier
+}
+
+func (s namespaceNotifierSink) UpsertBundle(ingest.Bundle)     { s.notifier.WorkloadChanged() }
+func (s namespaceNotifierSink) DeleteBundle(ingest.Bundle)     { s.notifier.WorkloadChanged() }
+func (s namespaceNotifierSink) ReplaceBundles([]ingest.Bundle) { s.notifier.WorkloadChanged() }
 
 // Build returns the namespace snapshot payload.
 func (b *NamespaceBuilder) Build(ctx context.Context, scope string) (*refresh.Snapshot, error) {
@@ -85,7 +289,29 @@ func (b *NamespaceBuilder) Build(ctx context.Context, scope string) (*refresh.Sn
 		err        error
 	)
 
-	if strings.TrimSpace(scopeValue) != "" {
+	scopeStatuses := make(map[string]string)
+	switch {
+	case len(b.scope) > 0:
+		// Scoped cluster: rows come from the configured scope. A
+		// per-namespace GET probe enriches each row from the real object
+		// where permitted and flags names the identity cannot reach
+		// (not-found / no-access); without a probe result the row stays
+		// name-only.
+		for _, name := range b.scope {
+			if strings.TrimSpace(scopeValue) != "" && name != scopeValue {
+				continue
+			}
+			probed, status := b.probeScopedNamespace(ctx, name)
+			scopeStatuses[name] = status
+			if probed != nil {
+				namespaces = append(namespaces, probed)
+				continue
+			}
+			namespaces = append(namespaces, &corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{Name: name},
+			})
+		}
+	case strings.TrimSpace(scopeValue) != "":
 		var ns *corev1.Namespace
 		ns, err = b.namespaces.Get(scopeValue)
 		if err != nil {
@@ -98,7 +324,7 @@ func (b *NamespaceBuilder) Build(ctx context.Context, scope string) (*refresh.Sn
 		} else {
 			namespaces = []*corev1.Namespace{ns}
 		}
-	} else {
+	default:
 		namespaces, err = b.namespaces.List(labels.Everything())
 		if err != nil {
 			return nil, err
@@ -111,17 +337,28 @@ func (b *NamespaceBuilder) Build(ctx context.Context, scope string) (*refresh.Sn
 		})
 	}
 
-	trackerReady := false
+	trackerReady := true
+	// Non-blocking: read whether the cut workload + pod ingest stores have synced rather than
+	// waiting on them. The namespace list must paint without blocking on the pod/workload initial
+	// LIST. Positive workload rows are usable immediately; a namespace's absence of workloads is
+	// authoritative only once the tracked stores settle, so before then it is reported as
+	// not-yet-known and the workload-presence source clock re-delivers the corrected snapshot.
 	if b.tracker != nil {
-		trackerReady = b.tracker.WaitForSync(ctx)
+		trackerReady = b.tracker.Synced()
 	}
+	workloadNamespaces := b.namespacesWithWorkloads()
 
 	items := make([]NamespaceSummary, 0, len(namespaces))
 	var version uint64
 	for _, ns := range namespaces {
-		hasWorkloads, workloadsUnknown := b.namespaceWorkloadsStatus(ns.Name, trackerReady)
-		model := namespacepkg.BuildResourceModel(meta.ClusterID, ns, hasWorkloads, !workloadsUnknown, nil, nil)
-		facts := namespacepkg.BuildFacts(meta.ClusterID, ns, hasWorkloads, !workloadsUnknown, nil, nil, resourcemodel.ResourceModelBuildOptions{})
+		_, hasWorkloads := workloadNamespaces[ns.Name]
+		// In scoped mode a tracker that latched synced because NOTHING is
+		// tracked (every workload kind permission-skipped) means presence is
+		// genuinely unknown — reporting it as authoritative would dim every
+		// configured namespace. Unscoped behavior is unchanged.
+		workloadsKnown := hasWorkloads || (trackerReady && (len(b.scope) == 0 || b.tracksAnyWorkloadKind()))
+		model := namespacepkg.BuildResourceModel(meta.ClusterID, ns, hasWorkloads, workloadsKnown, nil, nil)
+		facts := namespacepkg.BuildFacts(meta.ClusterID, ns, hasWorkloads, workloadsKnown, nil, nil, resourcemodel.ResourceModelBuildOptions{})
 		items = append(items, NamespaceSummary{
 			ClusterMeta:        meta,
 			Ref:                model.Ref,
@@ -135,6 +372,7 @@ func (b *NamespaceBuilder) Build(ctx context.Context, scope string) (*refresh.Sn
 			CreationUnix:       model.Metadata.CreationTimestamp.Unix(),
 			HasWorkloads:       facts.HasWorkloads,
 			WorkloadsUnknown:   !facts.WorkloadsKnown,
+			ScopeStatus:        scopeStatuses[ns.Name],
 		})
 		if v := parseResourceVersion(ns); v > version {
 			version = v
@@ -145,141 +383,106 @@ func (b *NamespaceBuilder) Build(ctx context.Context, scope string) (*refresh.Sn
 		Domain:  "namespaces",
 		Scope:   scope,
 		Version: version,
-		Payload: NamespaceSnapshot{ClusterMeta: meta, Namespaces: items},
+		Payload: NamespaceSnapshot{ClusterMeta: meta, Namespaces: items, WorkloadsReady: trackerReady},
 		Stats: refresh.SnapshotStats{
 			ItemCount: len(items),
 		},
+		// The per-namespace workload flag is content that the namespace resourceVersions
+		// (Version, the "object" source clock) do NOT capture — a workload added/removed changes
+		// presence without changing any namespace's RV, and the empty→populated transition as the
+		// ingest stores sync is exactly such a change. Publish the workload-presence set as its
+		// own source clock so the cache validator (SourceVersion) changes when presence or
+		// readiness changes; otherwise an unchanged validator makes the delivery layer return
+		// 304 Not Modified and the client keeps a stale (e.g. the first, pre-sync) snapshot.
+		SourceVersions: map[string]string{
+			"workloads": workloadPresenceSignature(workloadNamespaces, trackerReady),
+		},
+	}
+	if len(b.scope) > 0 {
+		// Probe flags are content the namespace RV clock cannot carry (a
+		// flagged row has no RV at all) — publish them as their own source
+		// clock so transitions are delivered instead of 304'd.
+		snap.SourceVersions["scope-probe"] = scopeProbeSignature(scopeStatuses)
 	}
 	return snap, nil
 }
 
-func (b *NamespaceBuilder) namespaceWorkloadsStatus(namespace string, trackerReady bool) (bool, bool) {
-	if namespace == "" {
-		return false, false
+// workloadPresenceSignature is a stable fingerprint of the set of namespaces that have at least
+// one workload and whether empty absence is authoritative yet. It changes when that set or the
+// sync-readiness state changes, so a workload-presence or unknown→known change yields a new
+// snapshot validator and is delivered to the client instead of being 304'd.
+func workloadPresenceSignature(set map[string]struct{}, ready bool) string {
+	names := make([]string, 0, len(set))
+	for ns := range set {
+		names = append(names, ns)
 	}
-
-	if trackerReady && b.tracker != nil {
-		if has, known := b.tracker.HasWorkloads(namespace); known {
-			return has, false
-		}
-		legacy, err := b.namespaceHasWorkloadsLegacy(namespace)
-		if err != nil {
-			b.tracker.MarkUnknown(namespace)
-			return false, true
-		}
-		b.tracker.MarkUnknown(namespace)
-		return legacy, true
+	sort.Strings(names)
+	h := fnv.New64a()
+	if ready {
+		_, _ = h.Write([]byte("ready"))
+	} else {
+		_, _ = h.Write([]byte("not-ready"))
 	}
-
-	legacy, err := b.namespaceHasWorkloadsLegacy(namespace)
-	if err != nil {
-		if b.tracker != nil {
-			b.tracker.MarkUnknown(namespace)
-		}
-		return false, true
+	_, _ = h.Write([]byte{0})
+	for _, ns := range names {
+		_, _ = h.Write([]byte(ns))
+		_, _ = h.Write([]byte{0})
 	}
-	return legacy, false
+	return strconv.FormatUint(h.Sum64(), 16)
 }
 
-func (b *NamespaceBuilder) namespaceHasWorkloadsLegacy(namespace string) (bool, error) {
-	if namespace == "" {
-		return false, nil
+// tracksAnyWorkloadKind reports whether the ingest manager runs a reflector for
+// at least one workload/pod kind — i.e. whether workload presence is knowable
+// at all for this identity. False when every workload kind was
+// permission-skipped (or there is no ingest), which in scoped mode must read
+// as "unknown", never as "authoritatively empty".
+func (b *NamespaceBuilder) tracksAnyWorkloadKind() bool {
+	if b.ingest == nil {
+		return false
 	}
-
-	selector := labels.Everything()
-
-	type checkResult struct {
-		has bool
-		err error
-	}
-
-	var tasks []func(context.Context) error
-	var results []*checkResult
-
-	addTask := func(run func() (int, error)) {
-		res := &checkResult{}
-		results = append(results, res)
-		tasks = append(tasks, func(context.Context) error {
-			count, err := run()
-			if err != nil {
-				if apimachineryerrors.IsNotFound(err) {
-					return nil
-				}
-				res.err = err
-				return err
-			}
-			if count > 0 {
-				res.has = true
-			}
-			return nil
-		})
-	}
-
-	if b.deployments != nil {
-		addTask(func() (int, error) {
-			list, err := b.deployments.Deployments(namespace).List(selector)
-			return len(list), err
-		})
-	}
-
-	if b.statefulsets != nil {
-		addTask(func() (int, error) {
-			list, err := b.statefulsets.StatefulSets(namespace).List(selector)
-			return len(list), err
-		})
-	}
-
-	if b.daemonsets != nil {
-		addTask(func() (int, error) {
-			list, err := b.daemonsets.DaemonSets(namespace).List(selector)
-			return len(list), err
-		})
-	}
-
-	if b.jobs != nil {
-		addTask(func() (int, error) {
-			list, err := b.jobs.Jobs(namespace).List(selector)
-			return len(list), err
-		})
-	}
-
-	if b.cronJobs != nil {
-		addTask(func() (int, error) {
-			list, err := b.cronJobs.CronJobs(namespace).List(selector)
-			return len(list), err
-		})
-	}
-
-	if b.pods != nil {
-		addTask(func() (int, error) {
-			list, err := b.pods.Pods(namespace).List(selector)
-			return len(list), err
-		})
-	}
-
-	if len(tasks) == 0 {
-		return false, nil
-	}
-
-	if err := parallel.RunLimited(context.Background(), 3, tasks...); err != nil {
-		for _, res := range results {
-			if res.err != nil {
-				return false, res.err
-			}
-		}
-		return false, err
-	}
-
-	for _, res := range results {
-		if res.err != nil {
-			return false, res.err
-		}
-		if res.has {
-			return true, nil
+	for _, gvr := range []schema.GroupVersionResource{
+		DeploymentGVR, StatefulSetGVR, DaemonSetGVR, JobGVR, CronJobGVR, PodGVR,
+	} {
+		if b.ingest.Tracks(gvr) {
+			return true
 		}
 	}
+	return false
+}
 
-	return false, nil
+// namespacesWithWorkloads returns the set of namespaces that have at least one workload, read
+// directly from the ingest stores in a single pass: the five cut workload kinds' projected
+// Catalog rows (Deployment/StatefulSet/DaemonSet/Job/CronJob) plus the pod aggregate rows. It
+// is the authoritative, drift-free source the per-namespace workload flag is derived from —
+// the same projected rows Browse reads (objectcatalog collectViaIngest), so a namespace whose
+// workloads are ingested is never wrongly reported as empty.
+func (b *NamespaceBuilder) namespacesWithWorkloads() map[string]struct{} {
+	return namespacesWithWorkloadsFromIngest(b.ingest)
+}
+
+// namespacesWithWorkloadsFromIngest is the shared presence computation: the
+// builder derives per-namespace flags from it, and the change notifier hashes
+// it to decide whether an ingest event actually flipped presence.
+func namespacesWithWorkloadsFromIngest(ingest namespacePodIngestSource) map[string]struct{} {
+	set := make(map[string]struct{})
+	if ingest == nil {
+		return set
+	}
+	for _, gvr := range []schema.GroupVersionResource{
+		DeploymentGVR, StatefulSetGVR, DaemonSetGVR, JobGVR, CronJobGVR,
+	} {
+		for _, row := range ingest.CatalogRows(gvr) {
+			if summary, ok := row.(objectcatalog.Summary); ok && summary.Namespace != "" {
+				set[summary.Namespace] = struct{}{}
+			}
+		}
+	}
+	for _, row := range ingest.AggregateRows(PodGVR) {
+		if agg, ok := row.(streamrows.PodAggregate); ok && agg.Namespace != "" {
+			set[agg.Namespace] = struct{}{}
+		}
+	}
+	return set
 }
 
 func parseResourceVersion(obj *corev1.Namespace) uint64 {
@@ -290,6 +493,11 @@ func parseResourceVersion(obj *corev1.Namespace) uint64 {
 		if parsed, err := strconv.ParseUint(rv, 10, 64); err == nil {
 			return parsed
 		}
+	}
+	// Synthesized scoped rows carry neither RV nor creation time; a zero
+	// timestamp must not wrap into a huge bogus version.
+	if obj.CreationTimestamp.IsZero() {
+		return 0
 	}
 	return uint64(obj.CreationTimestamp.UnixNano())
 }

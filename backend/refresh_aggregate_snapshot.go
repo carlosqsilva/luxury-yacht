@@ -6,8 +6,12 @@ import (
 	"maps"
 	"sort"
 	"sync"
+	"time"
+
+	"k8s.io/klog/v2"
 
 	"github.com/luxury-yacht/app/backend/refresh"
+	"github.com/luxury-yacht/app/backend/refresh/snapshot"
 	"github.com/luxury-yacht/app/backend/refresh/system"
 )
 
@@ -71,16 +75,40 @@ func (s *aggregateSnapshotService) Build(ctx context.Context, domain, scope stri
 	scoped := refresh.JoinClusterScope(target, scopeValue)
 	snapshotData, err := service.Build(ctx, domain, scoped)
 	if err != nil {
+		// A permission-denied namespaces domain is a SETTLED answer to "is the
+		// cluster's data loaded" — there is no namespace list this user may
+		// load. The Ready transition only ever fires from the namespaces
+		// domain, so without this signal a restricted-RBAC cluster wedges in
+		// "loading" forever. The error still propagates: the client renders
+		// the permission message instead of a namespace list.
+		if domain == "namespaces" && refresh.IsPermissionDenied(err) {
+			s.notifyNamespaceSnapshot(target)
+		}
 		return nil, err
 	}
 
-	// Notify the lifecycle module on every successful namespace snapshot.
-	// The lifecycle callback is state-gated, so this also recovers clusters
-	// that re-enter loading after an in-place subsystem rebuild.
-	if domain == "namespaces" {
+	// Notify the lifecycle module only on a namespace snapshot whose pod/workload ingest
+	// stores have SETTLED (WorkloadsReady). The namespace list serves immediately (it no longer
+	// blocks on that sync — the sidebar paints fast), so firing on every namespace serve would
+	// flip the cluster to Ready before any data has loaded. Gating on WorkloadsReady restores
+	// the pre-fast-paint meaning of Ready ("data is loaded") while keeping the fast list. The
+	// callback is itself state-gated, so this also recovers clusters that re-enter loading after
+	// an in-place subsystem rebuild once their stores re-settle.
+	if domain == "namespaces" && namespaceSnapshotWorkloadsReady(snapshotData) {
 		s.notifyNamespaceSnapshot(target)
 	}
 	return snapshotData, nil
+}
+
+// namespaceSnapshotWorkloadsReady reports whether a namespaces snapshot's pod/workload ingest
+// stores have settled, so the readiness gate fires only when the cluster's data has actually
+// loaded. A snapshot with a non-namespace payload (defensive) is treated as not ready.
+func namespaceSnapshotWorkloadsReady(snap *refresh.Snapshot) bool {
+	if snap == nil {
+		return false
+	}
+	payload, ok := snap.Payload.(snapshot.NamespaceSnapshot)
+	return ok && payload.WorkloadsReady
 }
 
 // resolveTarget chooses which cluster should handle the requested domain/scope pair.
@@ -129,4 +157,37 @@ func (s *aggregateSnapshotService) notifyNamespaceSnapshot(clusterID string) {
 		return
 	}
 	s.onNamespaceSnapshot(clusterID)
+}
+
+// runNamespacesReadinessSelfBuild closes the cluster-Ready loop server-side.
+// The Ready transition only ever fires from a namespaces snapshot build
+// (Build → notifyNamespaceSnapshot above), and historically that build was
+// requested by the FRONTEND — a chain of lifecycle-event relays, scope
+// derivation, and fetch machinery whose failure wedged clusters in
+// loading/loading_slow with no retry (observed in the field: app opened on
+// the Overview view, zero namespaces requests, status stuck until a view
+// switch). The namespaces doorbell notifier re-arms until a post-settle
+// build lands, so self-building here on each pre-Ready doorbell converges to
+// Ready with no frontend involvement — and pre-warms the cache the doorbell
+// just invalidated. In steady state (ready) it is a no-op.
+func runNamespacesReadinessSelfBuild(
+	lifecycle *clusterLifecycle,
+	aggregate *aggregateSnapshotService,
+	clusterID string,
+) {
+	if lifecycle == nil || aggregate == nil || clusterID == "" {
+		return
+	}
+	state := lifecycle.GetState(clusterID)
+	if state != ClusterStateLoading && state != ClusterStateLoadingSlow {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := aggregate.Build(ctx, "namespaces", refresh.JoinClusterScope(clusterID, "")); err != nil {
+		// The doorbell re-arms until a settled build lands; the next ring
+		// retries. Permission-denied namespaces flip readiness via the
+		// error path inside Build.
+		klog.V(2).Infof("namespaces readiness self-build for %s: %v", clusterID, err)
+	}
 }

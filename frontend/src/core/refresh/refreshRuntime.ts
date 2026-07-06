@@ -9,19 +9,33 @@ export type InFlightRequest = {
   contextVersion: number;
   domain: RefreshDomain;
   scope?: string;
+  // Set when a stream-signal fetch arrived while this request was in flight:
+  // the signal proves this response predates the change, so its finally block
+  // runs exactly ONE trailing stream-signal fetch. Latching (instead of
+  // aborting) keeps busy scopes progressing — signals can arrive faster than
+  // a round trip, and abort-and-replace would starve the scope.
+  rerunStreamSignal?: boolean;
 };
 
-type StreamingFetchMode = 'snapshot' | 'metrics-only' | 'skip';
+type StreamingFetchMode = 'snapshot' | 'skip';
 
 type StreamingFetchDecisionInput = {
   domain: RefreshDomain;
   scope: string;
   shouldStream: boolean;
   isManual: boolean;
-  metricsOnly: boolean;
+  // A fetch triggered BY a stream signal (doorbell). It must never be skipped
+  // for stream health — the signal is the stream announcing changed data.
+  streamSignal?: boolean;
   streamingHealthy: boolean;
-  metricsMinIntervalMs: number;
-  now?: number;
+  /**
+   * Whether the scope already holds an applied snapshot. A scope with no data yet
+   * (a brand-new filter/page/scope) must fetch its first page regardless of stream
+   * health: the notify-only stream carries change signals, not the new query's
+   * initial snapshot. Skipping is only safe once the scope has data the stream keeps
+   * fresh.
+   */
+  hasData: boolean;
 };
 
 export const makeInFlightKey = (domain: RefreshDomain, scope?: string) =>
@@ -76,7 +90,6 @@ export class ClusterRefreshRuntime {
   private readonly cancelledStreaming = new Set<string>();
   private readonly streamHealth = new Map<string, AppEvents['refresh:resource-stream-health']>();
   private readonly blockedStreaming = new Set<string>();
-  private readonly lastMetricsRefreshAt = new Map<string, number>();
   private readonly scopedEnabledState = new Map<RefreshDomain, Map<string, boolean>>();
   // Reference counts of mounted lifecycle consumers that need a (domain, scope)
   // enabled. Leases let a newer consumer keep a scope alive across an old
@@ -401,35 +414,27 @@ export class ClusterRefreshRuntime {
       return 'snapshot';
     }
 
-    if (!input.metricsOnly) {
-      return input.streamingHealthy ? 'skip' : 'snapshot';
-    }
-
-    if (!this.isStreamingActive(input.domain, input.scope) || !input.streamingHealthy) {
+    // A scope with no applied data yet must load its first page even when the stream
+    // is healthy — the notify-only stream signals changes, it does not deliver a new
+    // query's initial snapshot. Without this, a filter/scope change never fetches.
+    if (!input.hasData) {
       return 'snapshot';
     }
 
-    return this.isMetricsRefreshFresh(
-      input.domain,
-      input.scope,
-      input.metricsMinIntervalMs,
-      input.now
-    )
-      ? 'skip'
-      : 'metrics-only';
-  }
+    // A doorbell-triggered fetch IS the stream refresh: skipping it for a
+    // "healthy stream" swallows the very signal the stream sent.
+    if (input.streamSignal) {
+      return 'snapshot';
+    }
 
-  recordMetricsRefresh(domain: RefreshDomain, scope: string, now = Date.now()): void {
-    this.lastMetricsRefreshAt.set(makeInFlightKey(domain, scope), now);
-  }
-
-  clearMetricsRefreshTracking(): void {
-    this.lastMetricsRefreshAt.clear();
+    // While the stream is healthy, streaming IS the refresh: change signals
+    // (object clock) and doorbells (metric/event/catalog clocks) drive refetch;
+    // the poll runs only as the stream-down fallback.
+    return input.streamingHealthy ? 'skip' : 'snapshot';
   }
 
   resetTransientState(): void {
     this.blockedStreaming.clear();
-    this.lastMetricsRefreshAt.clear();
     this.streamHealth.clear();
     this.pendingStreaming.clear();
     this.cancelledStreaming.clear();
@@ -442,15 +447,5 @@ export class ClusterRefreshRuntime {
     this.scopedEnabledState.clear();
     this.scopedLeases.clear();
     this.resetTransientState();
-  }
-
-  private isMetricsRefreshFresh(
-    domain: RefreshDomain,
-    scope: string,
-    minIntervalMs: number,
-    now = Date.now()
-  ): boolean {
-    const last = this.lastMetricsRefreshAt.get(makeInFlightKey(domain, scope));
-    return last !== undefined && now - last < minIntervalMs;
   }
 }

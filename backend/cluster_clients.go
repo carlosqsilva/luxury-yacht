@@ -5,16 +5,15 @@ import (
 	"fmt"
 	"net/http"
 	"runtime"
-	"strings"
 	"sync"
 
 	appconfig "github.com/luxury-yacht/app/backend/internal/config"
 	"github.com/luxury-yacht/app/backend/internal/logsources"
 	"github.com/luxury-yacht/app/backend/internal/parallel"
+	informerpkg "github.com/luxury-yacht/app/backend/refresh/informer"
 	"github.com/luxury-yacht/app/backend/resources/common"
 	"github.com/luxury-yacht/app/backend/resources/gatewayapi"
 	apiextensionsclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
-	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -24,6 +23,7 @@ import (
 	gatewayinformers "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions"
 
 	"github.com/luxury-yacht/app/backend/internal/authstate"
+	"github.com/luxury-yacht/app/backend/internal/credentialerrors"
 )
 
 // clusterClients stores Kubernetes clients scoped to a specific cluster selection.
@@ -315,13 +315,18 @@ func (a *App) buildClusterClientsWithManager(
 		return nil, err
 	}
 
-	clientset, err := kubernetes.NewForConfig(config)
+	// Built-in kinds negotiate Protobuf (with a JSON fallback the SERVER picks per
+	// endpoint), cutting the initial-sync transfer and decode cost. The dynamic and
+	// gateway clients below keep the base config: custom resources are JSON-only.
+	typedConfig := protobufRestConfig(config)
+
+	clientset, err := kubernetes.NewForConfig(typedConfig)
 	if err != nil {
 		shutdownOwned()
 		return nil, fmt.Errorf("failed to create clientset: %w", err)
 	}
 
-	apiextensionsClient, err := apiextensionsclientset.NewForConfig(config)
+	apiextensionsClient, err := apiextensionsclientset.NewForConfig(typedConfig)
 	if err != nil {
 		shutdownOwned()
 		return nil, fmt.Errorf("failed to create apiextensions clientset: %w", err)
@@ -334,7 +339,7 @@ func (a *App) buildClusterClientsWithManager(
 	}
 
 	var metrics *metricsclient.Clientset
-	metricsClient, err := metricsclient.NewForConfig(config)
+	metricsClient, err := metricsclient.NewForConfig(typedConfig)
 	if err != nil {
 		a.logger.Info(fmt.Sprintf("Metrics client not available for cluster %s: %v", meta.ID, err), logsources.KubernetesClient, meta.ID, meta.Name)
 	} else {
@@ -354,7 +359,7 @@ func (a *App) buildClusterClientsWithManager(
 			return nil, fmt.Errorf("failed to create gateway api clientset: %w", err)
 		}
 		gatewayClient = gatewayClientset
-		gatewayInformerFactory = gatewayinformers.NewSharedInformerFactory(gatewayClientset, appconfig.RefreshResyncInterval)
+		gatewayInformerFactory = gatewayinformers.NewSharedInformerFactoryWithOptions(gatewayClientset, appconfig.RefreshResyncInterval, gatewayinformers.WithTransform(informerpkg.StripManagedFields))
 	}
 
 	// Configure the recovery test to rebuild credentials from kubeconfig.
@@ -395,9 +400,12 @@ func (a *App) buildClusterClientsWithManager(
 	var authFailedOnInit bool
 	if err := a.preflightClusterClientWithContext(ctx, clientset); err != nil {
 		a.logger.Warn(fmt.Sprintf("Pre-flight check failed for cluster %s: %v", meta.Name, err), logsources.Auth, meta.ID, meta.Name)
-		if isCredentialError(err) {
+		// Capture the kubeconfig exec command (if any) from the rest config so the
+		// diagnostic can name the credential helper. This is the reliable source —
+		// it is never scraped from the error string.
+		if d := credentialerrors.Classify(err, credentialerrors.Context{ExecCommand: execDisplayCommand(config)}); d.IsAuth() {
 			a.logger.Warn(fmt.Sprintf("Detected credential error for cluster %s, reporting auth failure", meta.Name), logsources.Auth, meta.ID, meta.Name)
-			clusterAuthMgr.ReportFailure(err.Error())
+			clusterAuthMgr.ReportFailureDiagnostic(authstate.NewFailureDiagnostic(err.Error(), d))
 			authFailedOnInit = true
 		}
 		// Don't return error - the cluster clients are valid, auth just needs recovery.
@@ -455,8 +463,8 @@ func (a *App) createClusterAuthManager(meta ClusterMeta) *authstate.Manager {
 		ClassifyError:             classifyRecoveryError,
 		ConnectivityRetryInterval: appconfig.ClusterAuthConnectivityRetryInterval,
 		SteadyRetryInterval:       appconfig.ClusterAuthSteadyRetryInterval,
-		OnStateChange: func(state authstate.State, reason string) {
-			a.handleClusterAuthStateChange(meta.ID, state, reason)
+		OnStateChange: func(state authstate.State, diag authstate.FailureDiagnostic) {
+			a.handleClusterAuthStateChange(meta.ID, state, diag)
 		},
 		OnRecoveryProgress: func(progress authstate.RecoveryProgress) {
 			a.handleClusterAuthRecoveryProgress(meta.ID, progress)
@@ -472,20 +480,32 @@ func (a *App) createClusterAuthManager(meta ClusterMeta) *authstate.Manager {
 // refused, timeouts, DNS, TLS) means the cluster could not be reached, which
 // says nothing about credential validity, so the recovery loop keeps probing.
 func classifyRecoveryError(err error) authstate.ErrorClass {
-	if err == nil {
+	switch credentialerrors.Classify(err, credentialerrors.Context{}).Class {
+	case credentialerrors.ClassAuth:
+		return authstate.ErrorClassAuth
+	case credentialerrors.ClassConnectivity:
+		return authstate.ErrorClassConnectivity
+	default:
 		return authstate.ErrorClassUnknown
 	}
-	if k8sErrors.IsUnauthorized(err) || k8sErrors.IsForbidden(err) {
-		return authstate.ErrorClassAuth
-	}
-	if isCredentialError(err) {
-		return authstate.ErrorClassAuth
-	}
-	return authstate.ErrorClassConnectivity
 }
 
 // buildRestConfigForSelection loads a REST config for the provided kubeconfig path/context.
 // The clusterAuthMgr parameter is the per-cluster auth manager that will be used to wrap
+// protobufRestConfig returns a COPY of base that negotiates Protobuf for built-in
+// kinds: the Accept header offers protobuf-then-JSON, so the server picks protobuf
+// where it can (every conformant apiserver serves it for built-ins — the control
+// plane itself speaks it) and answers JSON where it cannot (third-party aggregated
+// APIs) — the fallback is byte-for-byte the old behavior. Copying keeps the shared
+// base config pristine for the dynamic and gateway clients, whose custom resources
+// are JSON-only.
+func protobufRestConfig(base *rest.Config) *rest.Config {
+	cfg := rest.CopyConfig(base)
+	cfg.AcceptContentTypes = "application/vnd.kubernetes.protobuf,application/json"
+	cfg.ContentType = "application/vnd.kubernetes.protobuf"
+	return cfg
+}
+
 // the transport for auth state tracking.
 func (a *App) buildRestConfigForSelection(selection kubeconfigSelection, meta ClusterMeta, clusterAuthMgr *authstate.Manager) (*rest.Config, error) {
 	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
@@ -526,34 +546,4 @@ func (a *App) buildRestConfigForSelection(selection kubeconfigSelection, meta Cl
 	}
 
 	return config, nil
-}
-
-// isCredentialError checks if an error indicates a credential/auth failure.
-// This catches exec credential provider failures (like AWS SSO) that happen
-// before an HTTP request is made.
-func isCredentialError(err error) bool {
-	if err == nil {
-		return false
-	}
-	errStr := strings.ToLower(err.Error())
-	// Patterns that indicate credential/auth failures from exec providers
-	credentialPatterns := []string{
-		"getting credentials",
-		"exec: executable",
-		"failed with exit code",
-		"token has expired",
-		"token is expired",
-		"sso session",
-		"refresh token",
-		"authentication required",
-		"unauthorized",
-		"access denied",
-		"permission denied",
-	}
-	for _, pattern := range credentialPatterns {
-		if strings.Contains(errStr, pattern) {
-			return true
-		}
-	}
-	return false
 }

@@ -13,6 +13,10 @@ import (
 type Registry struct {
 	mu      sync.RWMutex
 	domains map[string]refresh.DomainConfig
+
+	// maintained collects the domains' spillable maintained stores so the governor can
+	// flush them to disk on Cold and re-paint + reconcile on re-warm (see maintained_stores.go).
+	maintained maintainedStoreSet
 }
 
 // New creates an empty Registry instance.
@@ -67,6 +71,17 @@ func (r *Registry) IsPermissionDenied(name string) bool {
 		return false
 	}
 	return cfg.PermissionDenied
+}
+
+// IsRuntimePolicyExempt reports whether a domain was registered with its
+// runtime permission policy exempted (its data source needs no cluster
+// permission in this configuration).
+func (r *Registry) IsRuntimePolicyExempt(name string) bool {
+	cfg, ok := r.Get(name)
+	if !ok {
+		return false
+	}
+	return cfg.RuntimePolicyExempt
 }
 
 // Build invokes the domain-specific builder.

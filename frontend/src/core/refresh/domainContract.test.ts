@@ -1,9 +1,8 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   DOMAIN_REFRESHER_MAP,
   DOMAIN_STREAM_MAP,
-  METRICS_INTERVAL_REFRESHERS,
   REFRESH_DOMAIN_DESCRIPTORS,
   getRefreshDomainDescriptor,
   refreshDomainContract,
@@ -20,6 +19,12 @@ const refreshManagerMocks = vi.hoisted(() => ({
   registerMock: vi.fn(),
   updateContextMock: vi.fn(),
   triggerManualRefreshForContextMock: vi.fn(),
+}));
+
+const streamManagerMocks = vi.hoisted(() => ({
+  resourceStart: vi.fn(),
+  resourceStop: vi.fn(),
+  resourceRefreshOnce: vi.fn(),
 }));
 
 vi.mock('./RefreshManager', () => ({
@@ -48,31 +53,11 @@ vi.mock('./streaming/containerLogsStreamManager', () => ({
   },
 }));
 
-vi.mock('./streaming/eventStreamManager', () => ({
-  eventStreamManager: {
-    startCluster: vi.fn(),
-    stopCluster: vi.fn(),
-    refreshCluster: vi.fn(),
-    startNamespace: vi.fn(),
-    stopNamespace: vi.fn(),
-    refreshNamespace: vi.fn(),
-  },
-}));
-
 vi.mock('./streaming/resourceStreamManager', () => ({
   resourceStreamManager: {
-    start: vi.fn(),
-    stop: vi.fn(),
-    refreshOnce: vi.fn(),
-    isHealthy: vi.fn(() => true),
-  },
-}));
-
-vi.mock('./streaming/catalogStreamManager', () => ({
-  catalogStreamManager: {
-    start: vi.fn(),
-    stop: vi.fn(),
-    refreshOnce: vi.fn(),
+    start: streamManagerMocks.resourceStart,
+    stop: streamManagerMocks.resourceStop,
+    refreshOnce: streamManagerMocks.resourceRefreshOnce,
     isHealthy: vi.fn(() => true),
   },
 }));
@@ -81,6 +66,7 @@ type DomainCategory = 'system' | 'cluster' | 'namespace';
 type DiagnosticsStream = 'resources' | 'events' | 'catalog' | 'container-logs';
 type OrchestratorKind =
   | 'snapshot'
+  | 'doorbell-snapshot'
   | 'resource-stream'
   | 'event-stream'
   | 'catalog-stream'
@@ -89,11 +75,14 @@ type OrchestratorKind =
 type ContractDomain = {
   domain: RefreshDomain;
   category: DomainCategory;
+  sourceClocks?: Array<'object' | 'metric' | 'event' | 'catalog'>;
+  backend: {
+    resourceStream: boolean;
+  };
   frontend: {
     refresherName: string;
     orchestrator: OrchestratorKind;
     diagnosticsStream: DiagnosticsStream | null;
-    metricsInterval: boolean;
     timing: {
       interval: number;
       cooldown: number;
@@ -107,7 +96,7 @@ type RegisteredDomain = {
   category: DomainCategory;
   refresherName: string;
   streaming?: {
-    metricsOnly?: boolean;
+    start?: (scope: string) => Promise<(() => void) | void> | (() => void);
   };
 };
 
@@ -152,7 +141,7 @@ const CACHE_POLICIES = new Set([
   'stream-only',
 ]);
 const STREAM_SEMANTICS = new Set([
-  'row-update',
+  'change-signal',
   'complete-resync',
   'append-merge',
   'snapshot-replace',
@@ -161,7 +150,7 @@ const STREAM_SEMANTICS = new Set([
 ]);
 const COVERAGE_CONTRACTS = new Set([
   'snapshot-table-payload',
-  'resource-stream-row-parity',
+  'query-refetch-on-signal',
   'complete-resync-only',
   'catalog-consistency',
   'catalog-snapshot-query',
@@ -184,8 +173,8 @@ const COVERAGE_PROOF_FAMILIES: Array<{
     behaviorClasses: new Set(['aggregate-snapshot']),
   },
   {
-    coverageContract: 'resource-stream-row-parity',
-    behaviorClasses: new Set(['resource-stream-table']),
+    coverageContract: 'query-refetch-on-signal',
+    behaviorClasses: new Set(['resource-stream-table', 'event-stream']),
   },
   {
     coverageContract: 'complete-resync-only',
@@ -193,7 +182,6 @@ const COVERAGE_PROOF_FAMILIES: Array<{
   },
   { coverageContract: 'catalog-consistency', behaviorClasses: new Set(['catalog-stream']) },
   { coverageContract: 'catalog-snapshot-query', behaviorClasses: new Set(['catalog-snapshot']) },
-  { coverageContract: 'event-resume-merge', behaviorClasses: new Set(['event-stream']) },
   { coverageContract: 'event-snapshot-payload', behaviorClasses: new Set(['event-snapshot']) },
   { coverageContract: 'log-stream-lifecycle', behaviorClasses: new Set(['log-stream']) },
   { coverageContract: 'detail-payload-shape', behaviorClasses: new Set(['detail-payload']) },
@@ -232,10 +220,15 @@ const enforcedCoverageProofs = (): Record<string, Set<RefreshDomain>> => {
 };
 
 describe('refresh domain contract', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it('keeps the authored contract within supported frontend values', () => {
     const categories = new Set<DomainCategory>(['system', 'cluster', 'namespace']);
     const orchestrators = new Set<OrchestratorKind>([
       'snapshot',
+      'doorbell-snapshot',
       'resource-stream',
       'event-stream',
       'catalog-stream',
@@ -250,8 +243,8 @@ describe('refresh domain contract', () => {
 
     expect(refreshDomainContract.version).toBe(2);
     expect(refreshDomainContract.resourceStream.updateIdentity).toEqual({
-      rowUpdates: 'ref',
-      rowDeletes: 'ref',
+      changeSignals: 'ref',
+      deleteSignals: 'ref',
       legacyFieldsDuringMigration: [],
       completeSemantics: 'scope-level-resync',
       completeIdentity: 'diagnostic-only',
@@ -265,7 +258,6 @@ describe('refresh domain contract', () => {
         expect(diagnosticsStreams.has(entry.frontend.diagnosticsStream)).toBe(true);
       }
       expect(entry.frontend.refresherName).toEqual(expect.any(String));
-      expect(entry.frontend.metricsInterval).toEqual(expect.any(Boolean));
       expect(entry.frontend.timing.interval).toBeGreaterThan(0);
       expect(entry.frontend.timing.cooldown).toBeGreaterThan(0);
       expect(entry.frontend.timing.timeout).toBeGreaterThan(0);
@@ -299,34 +291,52 @@ describe('refresh domain contract', () => {
       expect(descriptor.diagnosticsStream).toBe(entry.frontend.diagnosticsStream ?? undefined);
       expect(descriptor.timing).toEqual(entry.frontend.timing);
       expect(descriptor.priority).toBe(entry.frontend.priority);
-      expect(METRICS_INTERVAL_REFRESHERS.has(descriptor.refresherName)).toBe(
-        entry.frontend.metricsInterval
-      );
 
       switch (entry.frontend.orchestrator) {
         case 'snapshot':
           expect(registration?.streaming).toBeUndefined();
           expect(resourceStreamDomains.has(entry.domain)).toBe(false);
           break;
+        case 'doorbell-snapshot':
+          // Doorbell-refetched snapshot domains (namespaces, object-events,
+          // cluster-overview): streaming wiring exists for the signal-only
+          // doorbell, but they are not resource table domains. Each declares
+          // exactly the one clock its doorbell rides (namespaces: object;
+          // object-events: event; cluster-overview: metric — and its polls
+          // STAY ON, since metric doorbells only ring on successful
+          // collections). The doorbell rides the resources WebSocket, so
+          // diagnostics reflect that stream instead of mislabeling the
+          // domain as polling.
+          expect(registration?.streaming).toBeDefined();
+          expect(resourceStreamDomains.has(entry.domain)).toBe(false);
+          expect(entry.sourceClocks).toEqual(
+            entry.domain === 'object-events'
+              ? ['event']
+              : entry.domain === 'cluster-overview'
+                ? ['metric']
+                : ['object']
+          );
+          expect(entry.frontend.diagnosticsStream).toBe('resources');
+          break;
         case 'resource-stream':
           expect(registration?.streaming).toBeDefined();
           expect(resourceStreamDomains.has(entry.domain)).toBe(true);
           expect(entry.frontend.diagnosticsStream).toBe('resources');
-          expect(Boolean(registration?.streaming?.metricsOnly)).toBe(
-            entry.frontend.metricsInterval
-          );
+          expect(entry.sourceClocks).toContain('object');
           break;
         case 'event-stream':
           expect(registration?.streaming).toBeDefined();
           expect(resourceStreamDomains.has(entry.domain)).toBe(false);
           expect(EVENT_STREAM_DOMAINS.has(entry.domain)).toBe(true);
           expect(entry.frontend.diagnosticsStream).toBe('events');
+          expect(entry.sourceClocks).toEqual(['event']);
           break;
         case 'catalog-stream':
           expect(registration?.streaming).toBeDefined();
           expect(resourceStreamDomains.has(entry.domain)).toBe(false);
           expect(entry.domain).toBe('catalog');
           expect(entry.frontend.diagnosticsStream).toBe('catalog');
+          expect(entry.sourceClocks).toEqual(['catalog']);
           break;
         case 'container-logs-stream':
           expect(registration?.streaming).toBeDefined();
@@ -338,6 +348,24 @@ describe('refresh domain contract', () => {
           expect.fail(`Unknown orchestrator kind ${entry.frontend.orchestrator}`);
       }
     }
+  });
+
+  it('routes catalog and events through the unified resource stream manager', async () => {
+    await registeredDomains().get('catalog')?.streaming?.start?.('cluster-a|cluster');
+    await registeredDomains().get('cluster-events')?.streaming?.start?.('cluster-a|cluster');
+    await registeredDomains()
+      .get('namespace-events')
+      ?.streaming?.start?.('cluster-a|namespace:prod');
+
+    expect(streamManagerMocks.resourceStart).toHaveBeenCalledWith('catalog', 'cluster-a|cluster');
+    expect(streamManagerMocks.resourceStart).toHaveBeenCalledWith(
+      'cluster-events',
+      'cluster-a|cluster'
+    );
+    expect(streamManagerMocks.resourceStart).toHaveBeenCalledWith(
+      'namespace-events',
+      'cluster-a|namespace:prod'
+    );
   });
 
   it('covers every domain with inventory metadata and known enum values', () => {
@@ -392,11 +420,12 @@ describe('refresh domain contract', () => {
         const streamContract = refreshDomainContract.resourceStream.domains[entry.domain];
         if (inventory.behaviorClass === 'complete-resync-stream') {
           expect(streamContract.rowProjection).toBe('scope-level-complete-only');
-          expect(inventory.streamSemantics).not.toContain('row-update');
+          expect(inventory.streamSemantics).not.toContain('change-signal');
           expect(inventory.coverageContract).toBe('complete-resync-only');
         } else {
           expect(streamContract.rowProjection).toBeUndefined();
-          expect(inventory.streamSemantics).toContain('row-update');
+          expect(inventory.streamSemantics).toContain('change-signal');
+          expect(inventory.coverageContract).toBe('query-refetch-on-signal');
         }
       } else {
         expect(resourceStreamDomains.has(entry.domain)).toBe(false);
@@ -418,8 +447,8 @@ describe('refresh domain contract', () => {
           expect(inventory.scopeContract.kind).toBe('event-stream-scope');
           expect(inventory.payloadOwner).toBe('backend/refresh/eventstream');
           expect(inventory.cachePolicy).toBe('snapshot-cache');
-          expect(inventory.streamSemantics).toEqual(['append-merge']);
-          expect(inventory.coverageContract).toBe('event-resume-merge');
+          expect(inventory.streamSemantics).toEqual(['snapshot-replace', 'change-signal']);
+          expect(inventory.coverageContract).toBe('query-refetch-on-signal');
           break;
         case 'catalog-stream':
           expect(inventory.behaviorClass).toBe('catalog-stream');
@@ -429,7 +458,7 @@ describe('refresh domain contract', () => {
           expect(inventory.payloadOwner).toBe('backend/objectcatalog.Service');
           expect(inventory.cachePolicy).toBe('external-catalog-cache');
           expect(inventory.streamSemantics).toEqual(
-            expect.arrayContaining(['snapshot-replace', 'append-merge'])
+            expect.arrayContaining(['snapshot-replace', 'change-signal'])
           );
           expect(inventory.coverageContract).toBe('catalog-consistency');
           break;
@@ -442,6 +471,21 @@ describe('refresh domain contract', () => {
           expect(inventory.cachePolicy).toBe('stream-only');
           expect(inventory.streamSemantics).toEqual(['line-stream']);
           expect(inventory.coverageContract).toBe('log-stream-lifecycle');
+          break;
+        case 'doorbell-snapshot':
+          // A snapshot payload whose refetch trigger includes a signal-only
+          // doorbell: namespaces (snapshot-table, object doorbell),
+          // object-events (event-snapshot, per-object event doorbell), and
+          // cluster-overview (aggregate-snapshot, metric doorbell with polls
+          // kept on).
+          expect(['namespaces', 'object-events', 'cluster-overview']).toContain(entry.domain);
+          expect(inventory.behaviorClass).toBe(
+            entry.domain === 'object-events'
+              ? 'event-snapshot'
+              : entry.domain === 'cluster-overview'
+                ? 'aggregate-snapshot'
+                : 'snapshot-table'
+          );
           break;
         case 'snapshot':
           expect(['resource-stream-table', 'complete-resync-stream', 'log-stream']).not.toContain(

@@ -1,19 +1,15 @@
 import { buildClusterScope, parseClusterScopeList } from '../clusterScope';
-import {
-  getResourceStreamDomainDescriptor,
-  normalizeResourceScope,
-  type ResourceDomain,
-} from './resourceStreamDomains';
+import { normalizeResourceScope, type DoorbellDomain } from './resourceStreamDomains';
 import type { ResourceStreamClientMessage } from './resourceStreamConnection';
-
-type StreamMessageType = ResourceStreamClientMessage['type'];
-
 export type ResourceStreamUpdateMessage = {
-  type: StreamMessageType;
+  type?: string;
   clusterId?: string;
   clusterName?: string;
-  domain: ResourceDomain;
+  domain: DoorbellDomain;
   scope: string;
+  source?: string;
+  signal?: string;
+  version?: string;
   resourceVersion?: string;
   sequence?: string;
   uid?: string;
@@ -27,9 +23,10 @@ export type ResourceStreamUpdateMessage = {
 
 export type StreamSubscription = {
   key: string;
-  domain: ResourceDomain;
+  domain: DoorbellDomain;
   storeScope: string;
   reportScope: string;
+  reportScopes: Set<string>;
   normalizedScope: string;
   clusterId: string;
   clusterName?: string;
@@ -40,6 +37,10 @@ export type StreamSubscription = {
   lastMessageAt?: number;
   lastDeliveryAt?: number;
   lastDeliveryEpoch?: number;
+  // The connection epoch on which this subscription last completed a resync (or
+  // resumed via its sequence token). Connected + synchronized counts as healthy
+  // even with zero deliveries — a quiet domain is not an unhealthy one.
+  lastSyncedEpoch?: number;
   lastErrorAt?: number;
   lastErrorReason?: string;
   updateQueue: ResourceStreamUpdateMessage[];
@@ -47,10 +48,6 @@ export type StreamSubscription = {
   pendingReset: boolean;
   resyncInFlight: boolean;
   lastResyncAt: number;
-  preserveMetrics: boolean;
-  shadowKeys: Set<string>;
-  hasBaseline: boolean;
-  driftDetected: boolean;
 };
 
 type PendingUnsubscribe = {
@@ -59,12 +56,27 @@ type PendingUnsubscribe = {
 
 export const resourceStreamSubscriptionKey = (
   clusterId: string,
-  domain: ResourceDomain,
+  domain: DoorbellDomain,
   scope: string
 ): string => `${clusterId}::${domain}::${scope}`;
 
+const catalogDoorbellSubscriptionScope = (
+  clusterId: string,
+  scope: string
+): { normalizedScope: string; reportScope: string } => {
+  const trimmed = scope.trim();
+  const reportTail =
+    !trimmed || trimmed.toLowerCase() === 'cluster' || trimmed.toLowerCase() === 'cluster:'
+      ? ''
+      : trimmed;
+  return {
+    normalizedScope: '',
+    reportScope: buildClusterScope(clusterId, reportTail),
+  };
+};
+
 export const resolveResourceStreamSubscriptionScope = (
-  domain: ResourceDomain,
+  domain: DoorbellDomain,
   scope: string
 ): { clusterIds: string[]; normalizedScope: string; reportScope: string } => {
   const parsed = parseClusterScopeList(scope);
@@ -74,8 +86,17 @@ export const resolveResourceStreamSubscriptionScope = (
   if (parsed.isMultiCluster) {
     throw new Error('Resource streaming requires a single cluster scope');
   }
-  const normalizedScope = normalizeResourceScope(domain, parsed.scope);
-  const reportScope = buildClusterScope(parsed.clusterIds[0], normalizedScope);
+  let normalizedScope: string;
+  let reportScope: string;
+  if (domain === 'catalog') {
+    ({ normalizedScope, reportScope } = catalogDoorbellSubscriptionScope(
+      parsed.clusterIds[0],
+      parsed.scope
+    ));
+  } else {
+    normalizedScope = normalizeResourceScope(domain, parsed.scope);
+    reportScope = buildClusterScope(parsed.clusterIds[0], normalizedScope);
+  }
   return { clusterIds: parsed.clusterIds, normalizedScope, reportScope };
 };
 
@@ -104,7 +125,7 @@ export class ResourceStreamSubscriptionStore {
     return this.subscriptions.get(key);
   }
 
-  ensure(domain: ResourceDomain, scope: string): StreamSubscription[] {
+  ensure(domain: DoorbellDomain, scope: string): StreamSubscription[] {
     const { clusterIds, normalizedScope, reportScope } = resolveResourceStreamSubscriptionScope(
       domain,
       scope
@@ -114,26 +135,54 @@ export class ResourceStreamSubscriptionStore {
     );
   }
 
-  getForScope(domain: ResourceDomain, scope: string): StreamSubscription[] {
-    const parsed = parseClusterScopeList(scope);
-    if (parsed.clusterIds.length === 0 || parsed.isMultiCluster) {
-      return [];
-    }
-    let normalizedScope = '';
+  getForScope(domain: DoorbellDomain, scope: string): StreamSubscription[] {
+    let resolved: { clusterIds: string[]; normalizedScope: string; reportScope: string };
     try {
-      normalizedScope = normalizeResourceScope(domain, parsed.scope);
+      resolved = resolveResourceStreamSubscriptionScope(domain, scope);
     } catch (_err) {
       return [];
     }
 
-    return parsed.clusterIds
+    return resolved.clusterIds
       .map((clusterId) =>
-        this.subscriptions.get(resourceStreamSubscriptionKey(clusterId, domain, normalizedScope))
+        this.subscriptions.get(
+          resourceStreamSubscriptionKey(clusterId, domain, resolved.normalizedScope)
+        )
       )
-      .filter((subscription): subscription is StreamSubscription => Boolean(subscription));
+      .filter(
+        (subscription): subscription is StreamSubscription =>
+          subscription !== undefined && subscription.reportScopes.has(resolved.reportScope)
+      );
   }
 
-  findByScope(domain: ResourceDomain, scope: string): StreamSubscription | undefined {
+  release(domain: DoorbellDomain, scope: string): StreamSubscription[] {
+    let resolved: { clusterIds: string[]; normalizedScope: string; reportScope: string };
+    try {
+      resolved = resolveResourceStreamSubscriptionScope(domain, scope);
+    } catch (_err) {
+      return [];
+    }
+
+    return resolved.clusterIds
+      .map((clusterId) =>
+        this.subscriptions.get(
+          resourceStreamSubscriptionKey(clusterId, domain, resolved.normalizedScope)
+        )
+      )
+      .filter((subscription): subscription is StreamSubscription => {
+        if (!subscription || !subscription.reportScopes.has(resolved.reportScope)) {
+          return false;
+        }
+        subscription.reportScopes.delete(resolved.reportScope);
+        if (subscription.reportScope === resolved.reportScope) {
+          subscription.reportScope =
+            subscription.reportScopes.values().next().value ?? resolved.reportScope;
+        }
+        return subscription.reportScopes.size === 0;
+      });
+  }
+
+  findByScope(domain: DoorbellDomain, scope: string): StreamSubscription | undefined {
     let match: StreamSubscription | undefined;
     for (const subscription of this.subscriptions.values()) {
       if (subscription.domain !== domain || subscription.normalizedScope !== scope) {
@@ -226,7 +275,7 @@ export class ResourceStreamSubscriptionStore {
   }
 
   private ensureForCluster(
-    domain: ResourceDomain,
+    domain: DoorbellDomain,
     clusterId: string,
     normalizedScope: string,
     reportScope: string
@@ -234,6 +283,7 @@ export class ResourceStreamSubscriptionStore {
     const key = resourceStreamSubscriptionKey(clusterId, domain, normalizedScope);
     const existing = this.subscriptions.get(key);
     if (existing) {
+      existing.reportScopes.add(reportScope);
       this.cancelPendingUnsubscribe(existing);
       return existing;
     }
@@ -244,6 +294,7 @@ export class ResourceStreamSubscriptionStore {
       domain,
       storeScope,
       reportScope,
+      reportScopes: new Set([reportScope]),
       normalizedScope,
       clusterId,
       updateQueue: [],
@@ -251,10 +302,6 @@ export class ResourceStreamSubscriptionStore {
       pendingReset: false,
       resyncInFlight: false,
       lastResyncAt: 0,
-      preserveMetrics: getResourceStreamDomainDescriptor(domain).preserveMetrics,
-      shadowKeys: new Set(),
-      hasBaseline: false,
-      driftDetected: false,
     };
     this.subscriptions.set(key, subscription);
     this.logInfo(

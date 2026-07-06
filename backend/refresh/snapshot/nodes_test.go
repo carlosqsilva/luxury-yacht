@@ -2,18 +2,23 @@ package snapshot
 
 import (
 	"context"
-	"fmt"
+	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 
 	"github.com/luxury-yacht/app/backend/internal/config"
+	"github.com/luxury-yacht/app/backend/kind/streamrows"
 	"github.com/luxury-yacht/app/backend/refresh/metrics"
-	"github.com/luxury-yacht/app/backend/testsupport"
+	"k8s.io/client-go/kubernetes/fake"
+	ktesting "k8s.io/client-go/testing"
 )
 
 type fakeMetricsProvider struct {
@@ -42,8 +47,63 @@ func (f fakeMetricsProvider) Metadata() metrics.Metadata {
 	return f.metadata
 }
 
+func (f fakeMetricsProvider) Sample() metrics.Sample {
+	return metrics.Sample{
+		NodeUsage: f.LatestNodeUsage(),
+		PodUsage:  f.LatestPodUsage(),
+		Metadata:  f.Metadata(),
+	}
+}
+
+// A pod add/delete changes the served per-node aggregates (pod counts,
+// requests/limits), so it MUST advance the snapshot Version — the object
+// validator. Folding only the node store RV made those rebuilds answer 304
+// against the client's unchanged validator, silently keeping stale pod counts
+// until an unrelated node change or metric tick (observed live as 0-byte 304
+// responses that should have carried data).
+func TestNodeSnapshotVersionAdvancesOnPodStoreChanges(t *testing.T) {
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-1", ResourceVersion: "42"},
+	}
+	ingest := newFakePodAggregateSource(nil).withNodes(ClusterMeta{}, "42", node)
+	ingest.resourceVersion = "100" // pod store RV
+	builder := newNodeBuilderForTest(ClusterMeta{}, ingest, node)
+
+	first, err := builder.Build(context.Background(), "")
+	require.NoError(t, err)
+
+	// A pod lands on the node: the pod store RV advances, the node RV does not.
+	bumped := ingest
+	bumped.resourceVersion = "150"
+	builder.ingest = bumped
+
+	second, err := builder.Build(context.Background(), "")
+	require.NoError(t, err)
+	require.Greater(t, second.Version, first.Version,
+		"pod-driven aggregate changes must advance the nodes validator")
+}
+
+// newNodeBuilderForTest builds a NodeBuilder wired the production way: node OWN-rows are served
+// from a maintained store fed the SAME Table-half NodeSummary rows the node reflector projects
+// (via the store's Sink, mirroring pods_store_scope_test.go), while the ingest source still
+// supplies the per-node pod aggregates. meta stamps the store + own-row cluster
+// identity, and the typed pods come from the caller through ingest.
+func newNodeBuilderForTest(meta ClusterMeta, ingest nodeDomainIngestSource, nodes ...*corev1.Node) *NodeBuilder {
+	maintained := newTypedMaintainedStore(meta, nodesQuerypageSchema(), nodeTableQueryAdapter())
+	sink := maintained.Sink()
+	for _, node := range nodes {
+		if node == nil {
+			continue
+		}
+		sink.Upsert(buildNodeOwnSummary(meta, node))
+	}
+	return &NodeBuilder{
+		maintained: maintained,
+		ingest:     ingest,
+	}
+}
+
 func TestNodeBuilderBuild(t *testing.T) {
-	collectedAt := time.Now().Add(-30 * time.Second)
 	node := &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              "node-1",
@@ -158,33 +218,8 @@ func TestNodeBuilderBuild(t *testing.T) {
 		},
 	}
 
-	builder := &NodeBuilder{
-		lister:    testsupport.NewNodeLister(t, node),
-		podLister: testsupport.NewPodLister(t, podA, podB, podOther),
-		metrics: fakeMetricsProvider{
-			usage: map[string]metrics.NodeUsage{
-				"node-1": {
-					CPUUsageMilli:    650,
-					MemoryUsageBytes: 512 * 1024 * 1024,
-				},
-			},
-			podUsage: map[string]metrics.PodUsage{
-				"default/pod-a": {
-					CPUUsageMilli:    125,
-					MemoryUsageBytes: 128 * 1024 * 1024,
-				},
-				"kube-system/pod-b": {
-					CPUUsageMilli:    250,
-					MemoryUsageBytes: 64 * 1024 * 1024,
-				},
-			},
-			metadata: metrics.Metadata{
-				CollectedAt:  collectedAt,
-				SuccessCount: 7,
-				FailureCount: 2,
-			},
-		},
-	}
+	ingest := newFakePodAggregateSource(nil, podA, podB, podOther).withNodes(ClusterMeta{}, "42", node)
+	builder := newNodeBuilderForTest(ClusterMeta{}, ingest, node)
 
 	snapshot, err := builder.Build(context.Background(), "")
 	require.NoError(t, err)
@@ -208,13 +243,13 @@ func TestNodeBuilderBuild(t *testing.T) {
 
 	require.Equal(t, "8", summary.CPUCapacity)
 	require.Equal(t, "7", summary.CPUAllocatable)
-	require.Equal(t, "650m", summary.CPUUsage)
+	require.Equal(t, streamrows.MetricsNoData, summary.CPUUsage)
 	require.Equal(t, "1200m", summary.CPULimits)
 	require.Equal(t, "750m", summary.CPURequests)
 
 	require.Equal(t, "32.0 GB", summary.MemoryCapacity)
 	require.Equal(t, "30.0 GB", summary.MemoryAllocatable)
-	require.Equal(t, "512 MB", summary.MemoryUsage)
+	require.Equal(t, streamrows.MetricsNoData, summary.MemoryUsage)
 	require.Equal(t, "768 MB", summary.MemRequests)
 	require.Equal(t, "1.5 GB", summary.MemLimits)
 
@@ -230,22 +265,15 @@ func TestNodeBuilderBuild(t *testing.T) {
 	require.Contains(t, summary.PodMetrics, NodePodMetric{
 		Namespace:   "default",
 		Name:        "pod-a",
-		CPUUsage:    "125m",
-		MemoryUsage: "128 MB",
+		CPUUsage:    streamrows.MetricsNoData,
+		MemoryUsage: streamrows.MetricsNoData,
 	})
 	require.Contains(t, summary.PodMetrics, NodePodMetric{
 		Namespace:   "kube-system",
 		Name:        "pod-b",
-		CPUUsage:    "250m",
-		MemoryUsage: "64 MB",
+		CPUUsage:    streamrows.MetricsNoData,
+		MemoryUsage: streamrows.MetricsNoData,
 	})
-
-	require.False(t, payload.Metrics.Stale)
-	require.Equal(t, collectedAt.Unix(), payload.Metrics.CollectedAt)
-	require.Equal(t, 0, payload.Metrics.ConsecutiveFailures)
-	require.Empty(t, payload.Metrics.LastError)
-	require.Equal(t, uint64(7), payload.Metrics.SuccessCount)
-	require.Equal(t, uint64(2), payload.Metrics.FailureCount)
 
 	require.Len(t, summary.Taints, 1)
 	require.Equal(t, NodeTaint{
@@ -258,18 +286,53 @@ func TestNodeBuilderBuild(t *testing.T) {
 	node.Annotations["example"] = "mutated"
 	require.Equal(t, "annotation", summary.Annotations["example"])
 
-	require.Equal(t, snapshotVersionWithDynamicRevision(42, fmt.Sprint(collectedAt.UnixNano())), snapshot.Version)
+	require.Equal(t, uint64(42), snapshot.Version)
+}
+
+func TestNodeListFallbackKeepsRowsWhenPodListForbidden(t *testing.T) {
+	collectedAt := time.Now()
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "node-1",
+			ResourceVersion:   "42",
+			CreationTimestamp: metav1.NewTime(collectedAt.Add(-time.Hour)),
+		},
+	}
+	client := fake.NewSimpleClientset(node)
+	client.PrependReactor("list", "pods", func(ktesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(corev1.Resource("pods"), "", errors.New("list pods denied"))
+	})
+	builder := &NodeListBuilder{
+		client: client,
+		metrics: fakeMetricsProvider{
+			usage: map[string]metrics.NodeUsage{"node-1": {CPUUsageMilli: 650}},
+			metadata: metrics.Metadata{
+				CollectedAt:  collectedAt,
+				SuccessCount: 1,
+			},
+		},
+	}
+
+	snapshot, err := builder.Build(context.Background(), "")
+	require.NoError(t, err)
+
+	payload := snapshot.Payload.(NodeSnapshot)
+	require.Len(t, payload.Rows, 1)
+	require.Equal(t, "node-1", payload.Rows[0].Name)
+	require.Equal(t, "650m", payload.Rows[0].CPUUsage)
+	require.Empty(t, payload.Rows[0].PodMetrics)
+	require.False(t, payload.Metrics.Stale)
+	require.Equal(t, uint64(1), payload.Metrics.SuccessCount)
 }
 
 // A malformed query scope must be rejected like every other typed builder does
 // — silently serving default-ordered rows under the requested identity is a
 // boundary contract hole.
 func TestNodeBuilderRejectsMalformedQueryScope(t *testing.T) {
-	builder := &NodeBuilder{
-		lister:    testsupport.NewNodeLister(t),
-		podLister: testsupport.NewPodLister(t),
-		metrics:   fakeMetricsProvider{},
-	}
+	builder := newNodeBuilderForTest(
+		ClusterMeta{},
+		newFakePodAggregateSource(nil).withNodes(ClusterMeta{}, ""),
+	)
 
 	// `%zz` is an invalid percent-encoding, so the query string cannot parse.
 	_, err := builder.Build(context.Background(), "cluster-a|?limit=%zz")
@@ -299,11 +362,11 @@ func TestNodeBuilderCapsLargeSnapshots(t *testing.T) {
 		})
 	}
 
-	builder := &NodeBuilder{
-		lister:    testsupport.NewNodeLister(t, nodes...),
-		podLister: testsupport.NewPodLister(t),
-		metrics:   fakeMetricsProvider{},
-	}
+	builder := newNodeBuilderForTest(
+		ClusterMeta{},
+		newFakePodAggregateSource(nil).withNodes(ClusterMeta{}, "", nodes...),
+		nodes...,
+	)
 
 	snapshot, err := builder.Build(context.Background(), "")
 	require.NoError(t, err)
@@ -312,4 +375,51 @@ func TestNodeBuilderCapsLargeSnapshots(t *testing.T) {
 	require.True(t, snapshot.Stats.Truncated)
 	require.Equal(t, config.SnapshotClusterNodesEntryLimit+1, snapshot.Stats.TotalItems)
 	require.Contains(t, snapshot.Stats.Warnings[0], "nodes")
+}
+
+// TestNodeMaintainedStoreSpillRestoreRoundTrip proves the nodes maintained store — the new
+// per-cluster store of node OWN-rows fed by the node reflector's Sink — spills to disk and
+// restores into a fresh store with identical rows, the warm-paint capability the governor's
+// Cold/re-warm uses. It goes through the nodes schema + adapter (nodesQuerypageSchema /
+// nodeTableQueryAdapter), so it proves the node store wiring round-trips, not just the raw
+// querypage.Store. The registry-level spill (domain/maintained_stores_test.go) covers nodes
+// generically once RegisterNodeDomain registers it; this pins the node-specific row schema.
+func TestNodeMaintainedStoreSpillRestoreRoundTrip(t *testing.T) {
+	meta := ClusterMeta{ClusterID: "c1", ClusterName: "cluster-one"}
+	available := map[string]bool{"node": true}
+
+	nodeFor := func(name string) *corev1.Node {
+		return &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: name, ResourceVersion: "1"},
+			Status: corev1.NodeStatus{
+				NodeInfo:  corev1.NodeSystemInfo{KubeletVersion: "v1.30.0"},
+				Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "10.0.0.1"}},
+				Capacity: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("4"),
+					corev1.ResourceMemory: resource.MustParse("8Gi"),
+					corev1.ResourcePods:   resource.MustParse("110"),
+				},
+				Allocatable: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("4"),
+					corev1.ResourceMemory: resource.MustParse("8Gi"),
+					corev1.ResourcePods:   resource.MustParse("110"),
+				},
+			},
+		}
+	}
+
+	orig := newTypedMaintainedStore(meta, nodesQuerypageSchema(), nodeTableQueryAdapter())
+	sink := orig.Sink()
+	sink.Upsert(buildNodeOwnSummary(meta, nodeFor("node-a")))
+	sink.Upsert(buildNodeOwnSummary(meta, nodeFor("node-b")))
+	sink.Upsert(buildNodeOwnSummary(meta, nodeFor("node-c")))
+
+	path := filepath.Join(t.TempDir(), "nodes.spill")
+	require.NoError(t, orig.SpillTo(path))
+
+	restored := newTypedMaintainedStore(meta, nodesQuerypageSchema(), nodeTableQueryAdapter())
+	require.NoError(t, restored.RestoreFrom(path))
+
+	require.ElementsMatch(t, orig.rows("", available), restored.rows("", available),
+		"restored nodes maintained store must hold the same own-rows as the spilled one")
 }

@@ -10,7 +10,6 @@
  */
 import React from 'react';
 import { NamespaceViewType } from '@/types/navigation/views';
-import type { PodMetricsInfo } from '@/core/refresh/types';
 import NsViewAutoscaling from '@modules/namespace/components/NsViewAutoscaling';
 import NsViewConfig from '@modules/namespace/components/NsViewConfig';
 import NsViewCustom from '@modules/namespace/components/NsViewCustom';
@@ -41,29 +40,7 @@ interface NamespaceResourcesViewsProps {
   activeTab: NamespaceViewType;
   onTabChange?: (tab: NamespaceViewType) => void;
 
-  // Pods metrics (pod rows are query-backed; the live pod row set is not threaded in)
-  nsPodsMetrics?: PodMetricsInfo | null;
-
-  // Workloads kind filter options
-
-  // Config kind filter options
-
-  // Network kind filter options
-
-  // RBAC kind filter options
-
-  // Storage data
-
-  // Autoscaling kind filter options
-
-  // Quotas kind filter options
-
-  // Helm data
-
-  // Events data
-
   // Object panel element to render
-  objectPanel?: React.ReactNode;
 }
 
 /**
@@ -74,10 +51,6 @@ const NamespaceResourcesViews: React.FC<NamespaceResourcesViewsProps> = ({
   namespace,
   activeTab,
   onTabChange: _onTabChange,
-
-  nsPodsMetrics = null,
-
-  objectPanel,
 }) => {
   const renderTabContent = () => {
     switch (activeTab) {
@@ -108,7 +81,7 @@ const NamespaceResourcesViews: React.FC<NamespaceResourcesViewsProps> = ({
             resetKeys={[namespace]}
             fallback={(_, reset) => <ViewErrorFallback viewName="Pods" reset={reset} />}
           >
-            <NsViewPods namespace={namespace} metrics={nsPodsMetrics} />
+            <NsViewPods namespace={namespace} />
           </ErrorBoundary>
         );
       case 'workloads':
@@ -118,7 +91,7 @@ const NamespaceResourcesViews: React.FC<NamespaceResourcesViewsProps> = ({
             resetKeys={[namespace]}
             fallback={(_, reset) => <ViewErrorFallback viewName="Workloads" reset={reset} />}
           >
-            <NsViewWorkloads namespace={namespace} metrics={nsPodsMetrics} />
+            <NsViewWorkloads namespace={namespace} />
           </ErrorBoundary>
         );
       case 'config':
@@ -216,12 +189,7 @@ const NamespaceResourcesViews: React.FC<NamespaceResourcesViewsProps> = ({
     }
   };
 
-  return (
-    <div className="view-content">
-      {renderTabContent()}
-      {objectPanel}
-    </div>
-  );
+  return <div className="view-content">{renderTabContent()}</div>;
 };
 
 export default React.memo(NamespaceResourcesViews);

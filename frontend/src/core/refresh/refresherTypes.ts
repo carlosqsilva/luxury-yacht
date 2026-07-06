@@ -52,8 +52,6 @@ type NamespaceRefreshersRecord = typeof NAMESPACE_REFRESHERS;
 type ClusterRefreshersRecord = typeof CLUSTER_REFRESHERS;
 type SystemRefreshersRecord = typeof SYSTEM_REFRESHERS;
 
-export type NamespaceRefresherKey = keyof NamespaceRefreshersRecord;
-
 export type NamespaceRefresherName = ValueOf<NamespaceRefreshersRecord>;
 export type ClusterRefresherName = ValueOf<ClusterRefreshersRecord>;
 export type SystemRefresherName = ValueOf<SystemRefreshersRecord>;
@@ -71,9 +69,7 @@ export type ObjectRefresherName =
   | ObjectHelmValuesRefresherName;
 
 export type StaticRefresherName =
-  | NamespaceRefresherName
-  | ClusterRefresherName
-  | SystemRefresherName;
+  NamespaceRefresherName | ClusterRefresherName | SystemRefresherName;
 
 export type RefresherName = StaticRefresherName | ObjectRefresherName;
 

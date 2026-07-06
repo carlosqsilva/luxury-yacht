@@ -130,6 +130,10 @@ export function GetCatalogDiagnostics() {
   return window['go']['backend']['App']['GetCatalogDiagnostics']();
 }
 
+export function GetClusterAllowedNamespaces(arg1) {
+  return window['go']['backend']['App']['GetClusterAllowedNamespaces'](arg1);
+}
+
 export function GetClusterAuthState(arg1) {
   return window['go']['backend']['App']['GetClusterAuthState'](arg1);
 }
@@ -490,6 +494,10 @@ export function SetBackgroundRefreshEnabled(arg1) {
   return window['go']['backend']['App']['SetBackgroundRefreshEnabled'](arg1);
 }
 
+export function SetClusterAllowedNamespaces(arg1, arg2) {
+  return window['go']['backend']['App']['SetClusterAllowedNamespaces'](arg1, arg2);
+}
+
 export function SetClusterTabOrder(arg1) {
   return window['go']['backend']['App']['SetClusterTabOrder'](arg1);
 }
@@ -588,6 +596,10 @@ export function SetTheme(arg1) {
 
 export function SetUseShortResourceNames(arg1) {
   return window['go']['backend']['App']['SetUseShortResourceNames'](arg1);
+}
+
+export function SetVisibleCluster(arg1) {
+  return window['go']['backend']['App']['SetVisibleCluster'](arg1);
 }
 
 export function SetZoomLevel(arg1) {

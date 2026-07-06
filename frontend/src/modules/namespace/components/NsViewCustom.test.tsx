@@ -162,8 +162,8 @@ const baseResource: CustomResourceData = {
   namespace: 'ops',
   clusterId: 'alpha:ctx',
   clusterName: 'alpha',
-  apiGroup: 'batch',
-  apiVersion: 'v1',
+  group: 'batch',
+  version: 'v1',
   age: '10m',
   labels: { team: 'platform' },
   annotations: { owner: 'ops' },
@@ -214,8 +214,8 @@ const catalogItemFromResource = (
   overrides: Partial<CatalogItem> = {}
 ): CatalogItem => ({
   kind: resource.kind || resource.kindAlias || 'CustomResource',
-  group: resource.apiGroup ?? '',
-  version: resource.apiVersion ?? '',
+  group: resource.group ?? '',
+  version: resource.version ?? '',
   resource: 'cronjobs',
   namespace: resource.namespace,
   name: resource.name,
@@ -236,8 +236,6 @@ const catalogItemToCustomResourceData = (item: CatalogItem): CustomResourceData 
   namespace: item.namespace ?? '',
   clusterId: item.clusterId,
   clusterName: item.clusterName,
-  apiGroup: item.group,
-  apiVersion: item.version,
   group: item.group,
   version: item.version,
   resource: item.resource,
@@ -290,8 +288,6 @@ describe('NsViewCustom', () => {
   const renderComponent = async (props: Partial<NsViewCustomProps> = {}) => {
     const mergedProps: NsViewCustomProps = {
       namespace: 'team-a',
-      loading: false,
-      loaded: false,
       showNamespaceColumn: false,
       ...props,
     };
@@ -313,7 +309,7 @@ describe('NsViewCustom', () => {
       browseCatalogResult([catalogItemFromResource(baseResource)])
     );
 
-    await renderComponent({ loaded: true, showNamespaceColumn: true });
+    await renderComponent({ showNamespaceColumn: true });
 
     expect(gridTableMock).toHaveBeenCalled();
 
@@ -324,8 +320,8 @@ describe('NsViewCustom', () => {
         name: 'nightly-cleanup',
         namespace: 'ops',
         clusterId: 'alpha:ctx',
-        apiGroup: 'batch',
-        apiVersion: 'v1',
+        group: 'batch',
+        version: 'v1',
         crdName: 'cronjobs.batch',
       }),
     ]);
@@ -362,7 +358,6 @@ describe('NsViewCustom', () => {
 
     await renderComponent({
       namespace: 'team-a',
-      loaded: true,
       showNamespaceColumn: false,
     });
 
@@ -380,8 +375,8 @@ describe('NsViewCustom', () => {
         name: 'query-custom',
         namespace: 'team-a',
         clusterId: 'cluster-a',
-        apiGroup: 'batch',
-        apiVersion: 'v1',
+        group: 'batch',
+        version: 'v1',
         crdName: 'cronjobs.batch',
       }),
     ]);
@@ -403,7 +398,6 @@ describe('NsViewCustom', () => {
 
     await renderComponent({
       namespace: ALL_NAMESPACES_SCOPE,
-      loaded: true,
       showNamespaceColumn: true,
     });
 
@@ -421,8 +415,8 @@ describe('NsViewCustom', () => {
         name: 'query-all-custom',
         namespace: 'team-b',
         clusterId: 'cluster-a',
-        apiGroup: 'batch',
-        apiVersion: 'v1',
+        group: 'batch',
+        version: 'v1',
         crdName: 'cronjobs.batch',
       }),
     ]);
@@ -434,7 +428,6 @@ describe('NsViewCustom', () => {
   it('enables searchable kind dropdown bulk actions in all-namespaces custom view', async () => {
     await renderComponent({
       namespace: ALL_NAMESPACES_SCOPE,
-      loaded: true,
       showNamespaceColumn: true,
     });
 
@@ -461,9 +454,7 @@ describe('NsViewCustom', () => {
       },
     });
 
-    await renderComponent({
-      loaded: true,
-    });
+    await renderComponent({});
 
     const gridProps = getLastGridProps();
     expect(gridProps?.filters?.options?.kinds).toEqual(['DBCluster', 'Widget']);
@@ -484,7 +475,7 @@ describe('NsViewCustom', () => {
       },
     ]);
 
-    await renderComponent({ loaded: true });
+    await renderComponent();
 
     const gridProps = getLastGridProps();
     expect(gridProps?.data?.[0]).toEqual(
@@ -500,7 +491,6 @@ describe('NsViewCustom', () => {
   it('preserves the column definitions across rerenders with unchanged inputs', async () => {
     await renderComponent({
       namespace: 'team-a',
-      loaded: true,
       showNamespaceColumn: true,
     });
 
@@ -508,7 +498,6 @@ describe('NsViewCustom', () => {
 
     await renderComponent({
       namespace: 'team-a',
-      loaded: true,
       showNamespaceColumn: true,
     });
 
@@ -518,7 +507,6 @@ describe('NsViewCustom', () => {
   it('preserves the filters config across rerenders with unchanged inputs', async () => {
     await renderComponent({
       namespace: 'team-a',
-      loaded: true,
       showNamespaceColumn: true,
     });
 
@@ -526,7 +514,6 @@ describe('NsViewCustom', () => {
 
     await renderComponent({
       namespace: 'team-a',
-      loaded: true,
       showNamespaceColumn: true,
     });
 
@@ -537,7 +524,7 @@ describe('NsViewCustom', () => {
   // resource whose Kind collides with another CRD from a different API
   // group (e.g. DBInstance from rds.services.k8s.aws vs DBInstance from
   // documentdb.services.k8s.aws), handleResourceClick MUST forward both
-  // apiGroup and apiVersion into openWithObject. Without them, the panel
+  // group and version into openWithObject. Without them, the panel
   // state has no group/version to emit in the refresh-domain scope, the
   // backend falls back to first-match-wins kind-only GVR resolution, and
   // the user sees the wrong DBInstance's YAML.
@@ -549,21 +536,21 @@ describe('NsViewCustom', () => {
   //
   // Keeping this as a permanent regression guardrail so we don't
   // silently drop these fields again in a future refactor.
-  it('forwards apiGroup and apiVersion into openWithObject for colliding CRDs', async () => {
+  it('forwards group and version into openWithObject for colliding CRDs', async () => {
     const dbInstance: CustomResourceData = {
       kind: 'DBInstance',
       name: 'db-dc-test-1-v4',
       namespace: 'team-a',
       clusterId: 'alpha:ctx',
       clusterName: 'alpha',
-      apiGroup: 'documentdb.services.k8s.aws',
-      apiVersion: 'v1alpha1',
+      group: 'documentdb.services.k8s.aws',
+      version: 'v1alpha1',
       age: '2h',
       labels: {},
       annotations: {},
     };
 
-    await renderComponent({ loaded: true, showNamespaceColumn: true });
+    await renderComponent({ showNamespaceColumn: true });
 
     const gridProps = gridTableMock.mock.calls[0][0];
     const contextItems = gridProps.getCustomContextMenuItems(dbInstance, 'kind');
@@ -596,16 +583,15 @@ describe('NsViewCustom', () => {
     runObjectActionMock.mockResolvedValue(undefined);
 
     // Every custom resource row the backend catalog produces carries
-    // apiGroup/apiVersion — the delete path is GVK-only after the
+    // group/version — the delete path is GVK-only after the
     // kind-only-objects fix.
     const resourceWithGVK: CustomResourceData = {
       ...baseResource,
-      apiGroup: 'batch',
-      apiVersion: 'v1',
+      group: 'batch',
+      version: 'v1',
     };
 
     await renderComponent({
-      loaded: true,
       showNamespaceColumn: true,
     });
 
@@ -644,7 +630,7 @@ describe('NsViewCustom', () => {
   // resource whose Kind collides with another CRD from a different API
   // group (e.g. two DBInstance CRDs), handleDeleteConfirm must carry the
   // strict GVK through the action boundary so the backend targets the exact object.
-  it('routes delete through RunObjectAction when apiGroup/apiVersion are present', async () => {
+  it('routes delete through RunObjectAction when group/version are present', async () => {
     runObjectActionMock.mockResolvedValue(undefined);
 
     const dbInstance: CustomResourceData = {
@@ -653,14 +639,14 @@ describe('NsViewCustom', () => {
       namespace: 'team-a',
       clusterId: 'alpha:ctx',
       clusterName: 'alpha',
-      apiGroup: 'documentdb.services.k8s.aws',
-      apiVersion: 'v1alpha1',
+      group: 'documentdb.services.k8s.aws',
+      version: 'v1alpha1',
       age: '2h',
       labels: {},
       annotations: {},
     };
 
-    await renderComponent({ loaded: true, showNamespaceColumn: true });
+    await renderComponent({ showNamespaceColumn: true });
 
     const gridProps = gridTableMock.mock.calls[0][0];
     const contextItems = gridProps.getCustomContextMenuItems(dbInstance, 'kind');
@@ -696,18 +682,18 @@ describe('NsViewCustom', () => {
   });
 
   // Characterization of the post-fix contract: after the kind-only-objects
-  // cleanup, CustomResourceData is required to carry apiGroup/apiVersion.
-  // A row that's missing apiVersion is a programming bug, and handleDelete
+  // cleanup, CustomResourceData is required to carry group/version.
+  // A row that's missing version is a programming bug, and handleDelete
   // must fail loud rather than silently fall back to first-match-wins
   // discovery. The errorHandler should see the thrown error.
-  it('throws instead of falling back when apiGroup/apiVersion are missing', async () => {
+  it('throws instead of falling back when group/version are missing', async () => {
     const missingGVK: CustomResourceData = {
       ...baseResource,
-      apiGroup: undefined,
-      apiVersion: undefined,
+      group: undefined,
+      version: undefined,
     };
 
-    await renderComponent({ loaded: true, showNamespaceColumn: true });
+    await renderComponent({ showNamespaceColumn: true });
 
     const gridProps = gridTableMock.mock.calls[0][0];
     const contextItems = gridProps.getCustomContextMenuItems(missingGVK, 'kind');
@@ -725,7 +711,7 @@ describe('NsViewCustom', () => {
 
     expect(runObjectActionMock).not.toHaveBeenCalled();
     expect(errorHandlerMock.handle).toHaveBeenCalledWith(
-      expect.objectContaining({ message: expect.stringContaining('apiVersion missing') }),
+      expect.objectContaining({ message: expect.stringContaining('version missing') }),
       { action: 'delete', kind: 'CronJob', name: 'nightly-cleanup' }
     );
 
@@ -738,12 +724,11 @@ describe('NsViewCustom', () => {
 
     const resourceWithGVK: CustomResourceData = {
       ...baseResource,
-      apiGroup: 'batch',
-      apiVersion: 'v1',
+      group: 'batch',
+      version: 'v1',
     };
 
     await renderComponent({
-      loaded: true,
       showNamespaceColumn: true,
     });
 
@@ -787,7 +772,6 @@ describe('NsViewCustom', () => {
     useShortNamesMock.mockReturnValue(true);
 
     await renderComponent({
-      loaded: true,
       showNamespaceColumn: true,
     });
 
@@ -799,8 +783,8 @@ describe('NsViewCustom', () => {
       namespace: 'tools',
       kindAlias: 'CR',
       clusterId: 'alpha:ctx',
-      apiGroup: 'batch',
-      apiVersion: 'v1',
+      group: 'batch',
+      version: 'v1',
     } as CustomResourceData);
     expect(generatedKey).toBe('alpha:ctx|batch/v1/CronJob/tools/svc');
   });
@@ -821,13 +805,13 @@ describe('NsViewCustom', () => {
     it('adds a CRD column that renders the row crdName', async () => {
       const resource: CustomResourceData = {
         ...baseResource,
-        apiGroup: 'rds.services.k8s.aws',
-        apiVersion: 'v1alpha1',
+        group: 'rds.services.k8s.aws',
+        version: 'v1alpha1',
         kind: 'DBInstance',
         crdName: 'dbinstances.rds.services.k8s.aws',
       };
 
-      await renderComponent({ loaded: true });
+      await renderComponent();
 
       const gridProps = gridTableMock.mock.calls[0][0];
       const crdCol = findColumn(gridProps, 'crd');
@@ -847,13 +831,13 @@ describe('NsViewCustom', () => {
     it('opens the CRD in the object panel when the CRD cell is clicked', async () => {
       const resource: CustomResourceData = {
         ...baseResource,
-        apiGroup: 'rds.services.k8s.aws',
-        apiVersion: 'v1alpha1',
+        group: 'rds.services.k8s.aws',
+        version: 'v1alpha1',
         kind: 'DBInstance',
         crdName: 'dbinstances.rds.services.k8s.aws',
       };
 
-      await renderComponent({ loaded: true });
+      await renderComponent();
 
       const gridProps = gridTableMock.mock.calls[0][0];
       const crdCol = findColumn(gridProps, 'crd');
@@ -891,7 +875,7 @@ describe('NsViewCustom', () => {
         crdName: 'dbinstances.rds.services.k8s.aws',
       };
 
-      await renderComponent({ loaded: true });
+      await renderComponent();
 
       const gridProps = gridTableMock.mock.calls[0][0];
       const crdCol = findColumn(gridProps, 'crd');
@@ -910,7 +894,7 @@ describe('NsViewCustom', () => {
     });
 
     it('publishes only catalog-backed sortable keys', async () => {
-      await renderComponent({ loaded: true, showNamespaceColumn: true });
+      await renderComponent({ showNamespaceColumn: true });
 
       const gridProps = gridTableMock.mock.calls[0][0];
       const sortableKeys = gridProps.columns
@@ -929,13 +913,13 @@ describe('NsViewCustom', () => {
       // when the cell is non-interactive.
       const resource: CustomResourceData = {
         ...baseResource,
-        apiGroup: 'batch',
-        apiVersion: 'v1',
+        group: 'batch',
+        version: 'v1',
         kind: 'CronJob',
         // crdName intentionally omitted
       };
 
-      await renderComponent({ loaded: true });
+      await renderComponent();
 
       const gridProps = gridTableMock.mock.calls[0][0];
       const crdCol = findColumn(gridProps, 'crd');
@@ -949,15 +933,15 @@ describe('NsViewCustom', () => {
     it('uses backend statusPresentation for custom-resource status styling', async () => {
       const resource: CustomResourceData = {
         ...baseResource,
-        apiGroup: 'rds.services.k8s.aws',
-        apiVersion: 'v1alpha1',
+        group: 'rds.services.k8s.aws',
+        version: 'v1alpha1',
         kind: 'DBInstance',
         status: 'Not Ready',
         statusState: 'false',
         statusPresentation: 'warning',
       };
 
-      await renderComponent({ loaded: true });
+      await renderComponent();
 
       const gridProps = gridTableMock.mock.calls[0][0];
       const statusCol = findColumn(gridProps, 'status');

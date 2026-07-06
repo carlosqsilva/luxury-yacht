@@ -14,6 +14,7 @@ import (
 
 	"github.com/luxury-yacht/app/backend/capabilities"
 	"github.com/luxury-yacht/app/backend/internal/applog"
+	"github.com/luxury-yacht/app/backend/refresh/ingest"
 	"github.com/luxury-yacht/app/backend/refresh/permissions"
 	"github.com/luxury-yacht/app/backend/resources/common"
 	apiextinformers "k8s.io/apiextensions-apiserver/pkg/client/informers/externalversions"
@@ -125,8 +126,44 @@ type Dependencies struct {
 	APIExtensionsInformerFactory apiextinformers.SharedInformerFactory  // Kubernetes API extensions informer factory
 	GatewayInformerFactory       gatewayinformers.SharedInformerFactory // Gateway API informer factory
 	PermissionChecker            permissions.ListWatchChecker           // optional; if nil, assumes all permissions granted
+	IngestSource                 IngestSource                           // optional; supplies catalog rows for ingest-owned kinds
 	ClusterID                    string                                 // stable identifier for the source cluster
 	ClusterName                  string                                 // display name for the source cluster
+	// WaitForCaches blocks until the informer caches the collect reads from are
+	// synced. sync() calls it between the RBAC preflight and the collect fan-out, so
+	// discovery + preflight (pure API calls) overlap the factory's initial sync
+	// instead of running after it. nil skips the wait (tests, no factory).
+	WaitForCaches func(ctx context.Context) error
+	// AllowedNamespaces is the cluster's namespace scope
+	// (docs/plans/namespace-scope.md): when non-empty, collection of
+	// namespaced kinds runs per configured namespace instead of
+	// cluster-wide, and a namespace the identity cannot list is skipped
+	// without blanking the others. Empty means cluster-wide (today).
+	AllowedNamespaces []string
+}
+
+// IngestSource supplies the object-catalog Summaries for ingest-owned (cut) kinds,
+// whose objects are no longer cached by the shared informer factory. The catalog
+// reads cut kinds' rows from CatalogRows on a full collect, and stays current
+// between collects via the Catalog-half sink registered through AddCatalogSink.
+// *ingest.IngestManager satisfies it. Reads return Summaries the catalog's own
+// projector built at intake (see SummaryProjector), so they are byte-equivalent to
+// the shared-informer collect path.
+type IngestSource interface {
+	CatalogRows(gvr schema.GroupVersionResource) []interface{}
+	AddCatalogSink(gvr schema.GroupVersionResource, sink ingest.Sink) bool
+	// RegisterDynamicCatalogReflector starts an on-demand reflector for a dynamic
+	// (CRD-backed) kind, projecting each object to its catalog Summary via project. The
+	// catalog calls it when a CR kind crosses its promotion threshold (maybePromote),
+	// consolidating the former catalog-owned dynamic informer onto the ingest path.
+	RegisterDynamicCatalogReflector(gvr schema.GroupVersionResource, gvk schema.GroupVersionKind, project ingest.CatalogProjector, namespaced bool) bool
+	// StopReflectorFor stops and evicts the on-demand reflector for gvr, the teardown half
+	// of the dynamic path (stopDynamicReflectors).
+	StopReflectorFor(gvr schema.GroupVersionResource)
+	// HasSyncedFor reports whether gvr's store has synced, so the catalog serves a promoted
+	// dynamic kind from CatalogRows only once its reflector's initial relist has landed
+	// (else it keeps listing — no empty flash).
+	HasSyncedFor(gvr schema.GroupVersionResource) bool
 }
 
 // Logger is the minimal logging contract required by the catalog, aliased to
@@ -144,6 +181,7 @@ type Telemetry interface {
 // Options tunes catalog behaviour; zero values fall back to sensible defaults.
 type Options struct {
 	ResyncInterval             time.Duration     // interval between resyncs
+	FailedSyncRetryInterval    time.Duration     // short retry after a failed/incomplete sync (default config.ObjectCatalogFailedSyncRetryInterval)
 	PageSize                   int               // number of items per page
 	ListWorkers                int               // number of workers for listing resources
 	NamespaceWorkers           int               // number of workers for processing namespaces

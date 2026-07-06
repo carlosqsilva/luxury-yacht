@@ -14,6 +14,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
+	"github.com/luxury-yacht/app/backend/internal/config"
+	"github.com/luxury-yacht/app/backend/kind/streamrows"
 	"github.com/luxury-yacht/app/backend/refresh/metrics"
 	podres "github.com/luxury-yacht/app/backend/resources/pods"
 	"github.com/luxury-yacht/app/backend/testsupport"
@@ -38,6 +40,88 @@ func (f fakePodMetricsProvider) LatestPodUsage() map[string]metrics.PodUsage {
 
 func (f fakePodMetricsProvider) Metadata() metrics.Metadata {
 	return f.metadata
+}
+
+func (f fakePodMetricsProvider) Sample() metrics.Sample {
+	return metrics.Sample{
+		NodeUsage: f.LatestNodeUsage(),
+		PodUsage:  f.LatestPodUsage(),
+		Metadata:  f.Metadata(),
+	}
+}
+
+// TestOverlayPodMetricsMissingSampleRendersNoData proves a row whose pod has NO
+// metrics sample renders the no-data marker, never "0m"/"0Mi" — so "metrics
+// unknown" is distinguishable from a real zero (Risk #9 / §3.6).
+func TestOverlayPodMetricsMissingSampleRendersNoData(t *testing.T) {
+	created := time.Date(2026, 6, 25, 9, 0, 0, 0, time.UTC)
+	rows := []PodSummary{{
+		Name:         "lonely",
+		Namespace:    "default",
+		AgeTimestamp: created.UnixMilli(),
+	}}
+	overlayPodMetrics(rows, map[string]metrics.PodUsage{}) // no sample for this pod
+
+	require.Equal(t, streamrows.MetricsNoData, rows[0].CPUUsage)
+	require.Equal(t, streamrows.MetricsNoData, rows[0].MemUsage)
+}
+
+// TestOverlayPodMetricsPresentSampleRendersNumbers proves a fresh sample (taken
+// after the object's creation) overlays the formatted numbers.
+func TestOverlayPodMetricsPresentSampleRendersNumbers(t *testing.T) {
+	created := time.Date(2026, 6, 25, 9, 0, 0, 0, time.UTC)
+	rows := []PodSummary{{
+		Name:         "api",
+		Namespace:    "default",
+		AgeTimestamp: created.UnixMilli(),
+	}}
+	overlayPodMetrics(rows, map[string]metrics.PodUsage{
+		"default/api": {CPUUsageMilli: 125, MemoryUsageBytes: 256 * 1024 * 1024, Timestamp: created.Add(30 * time.Second)},
+	})
+
+	require.Equal(t, "125m", rows[0].CPUUsage)
+	require.Equal(t, "256 MB", rows[0].MemUsage)
+}
+
+// TestOverlayPodMetricsDropsStaleSampleFromPriorIncarnation is the Risk #9 / §3.6
+// property test: a pod deleted and recreated under the SAME name (a new object with
+// a LATER creationTimestamp) must NOT inherit the prior incarnation's numbers. A
+// sample whose Timestamp predates the object's creation is dropped (renders no-data)
+// until a fresh sample arrives. This expresses the "a metric cell's UID matches its
+// object row's UID" invariant through the timestamp/recreate path (metrics-server
+// exposes no UID; the sample-vs-creation timestamp comparison is the sound proxy).
+func TestOverlayPodMetricsDropsStaleSampleFromPriorIncarnation(t *testing.T) {
+	oldCreated := time.Date(2026, 6, 25, 9, 0, 0, 0, time.UTC)
+	// The stale sample belongs to the FIRST incarnation, scraped before deletion.
+	staleSample := metrics.PodUsage{
+		CPUUsageMilli:    900,
+		MemoryUsageBytes: 4 * 1024 * 1024 * 1024,
+		Timestamp:        oldCreated.Add(time.Minute),
+	}
+	// The pod is recreated under the same name with a LATER creationTimestamp.
+	newCreated := oldCreated.Add(time.Hour)
+	rows := []PodSummary{{
+		Name:         "churned",
+		Namespace:    "default",
+		AgeTimestamp: newCreated.UnixMilli(),
+	}}
+
+	overlayPodMetrics(rows, map[string]metrics.PodUsage{"default/churned": staleSample})
+
+	// The recreated pod must NOT show the deleted pod's 900m / 4Gi numbers.
+	require.NotEqual(t, "900m", rows[0].CPUUsage)
+	require.Equal(t, streamrows.MetricsNoData, rows[0].CPUUsage)
+	require.Equal(t, streamrows.MetricsNoData, rows[0].MemUsage)
+
+	// Once a fresh sample (after the new creation) arrives, the numbers appear.
+	freshSample := metrics.PodUsage{
+		CPUUsageMilli:    50,
+		MemoryUsageBytes: 128 * 1024 * 1024,
+		Timestamp:        newCreated.Add(30 * time.Second),
+	}
+	overlayPodMetrics(rows, map[string]metrics.PodUsage{"default/churned": freshSample})
+	require.Equal(t, "50m", rows[0].CPUUsage)
+	require.Equal(t, "128 MB", rows[0].MemUsage)
 }
 
 func TestPodBuilderNodeScope(t *testing.T) {
@@ -113,32 +197,16 @@ func TestPodBuilderNodeScope(t *testing.T) {
 		Spec: appsv1.ReplicaSetSpec{},
 	}
 
-	collectedAt := time.Now().Add(-10 * time.Second)
 	builder := &PodBuilder{
 		podLister: testsupport.NewPodLister(t, podA, podB),
 		rsLister:  testsupport.NewReplicaSetLister(t, rs),
-		metrics: fakePodMetricsProvider{
-			usage: map[string]metrics.PodUsage{
-				"default/pod-a": {
-					CPUUsageMilli:    150,
-					MemoryUsageBytes: 196 * 1024 * 1024,
-				},
-			},
-			metadata: metrics.Metadata{
-				CollectedAt:         collectedAt,
-				SuccessCount:        5,
-				FailureCount:        1,
-				LastError:           "",
-				ConsecutiveFailures: 0,
-			},
-		},
 	}
 
 	snapshot, err := builder.Build(context.Background(), "node:node-1")
 	require.NoError(t, err)
 	require.Equal(t, podDomainName, snapshot.Domain)
 	require.Equal(t, "node:node-1", snapshot.Scope)
-	require.Equal(t, snapshotVersionWithDynamicRevision(15, fmt.Sprint(collectedAt.UnixNano())), snapshot.Version)
+	require.Equal(t, uint64(15), snapshot.Version)
 
 	payload, ok := snapshot.Payload.(PodSnapshot)
 	require.True(t, ok)
@@ -149,13 +217,10 @@ func TestPodBuilderNodeScope(t *testing.T) {
 	require.Equal(t, "Deployment", first.OwnerKind)
 	require.Equal(t, "deploy-a", first.OwnerName)
 	require.Equal(t, "apps/v1", first.OwnerAPIVersion, "ReplicaSet→Deployment collapse must produce apps/v1")
-	require.Equal(t, "150m", first.CPUUsage)
-	require.Equal(t, "196 MB", first.MemUsage)
+	require.Equal(t, streamrows.MetricsNoData, first.CPUUsage)
+	require.Equal(t, streamrows.MetricsNoData, first.MemUsage)
 	require.True(t, strings.HasPrefix(first.Ready, "1/"))
 
-	require.False(t, payload.Metrics.Stale)
-	require.Equal(t, uint64(5), payload.Metrics.SuccessCount)
-	require.Equal(t, uint64(1), payload.Metrics.FailureCount)
 }
 
 func TestPodBuilderWorkloadScope(t *testing.T) {
@@ -197,7 +262,6 @@ func TestPodBuilderWorkloadScope(t *testing.T) {
 	builder := &PodBuilder{
 		podLister: testsupport.NewPodLister(t, pod),
 		rsLister:  testsupport.NewReplicaSetLister(t, rs),
-		metrics:   fakePodMetricsProvider{},
 	}
 
 	snapshot, err := builder.Build(context.Background(), "workload:prod:apps:v1:Deployment:orders")
@@ -211,6 +275,21 @@ func TestPodBuilderWorkloadScope(t *testing.T) {
 	require.Equal(t, "Deployment", payload.Rows[0].OwnerKind)
 	require.Equal(t, "orders", payload.Rows[0].OwnerName)
 	require.Equal(t, "apps/v1", payload.Rows[0].OwnerAPIVersion)
+}
+
+func TestParseWorkloadScopeRejectsMissingIdentitySegments(t *testing.T) {
+	for _, value := range []string{
+		":apps:v1:Deployment:orders",
+		"prod::v1:Deployment:orders",
+		"prod:apps::Deployment:orders",
+		"prod:apps:v1::orders",
+		"prod:apps:v1:Deployment:",
+	} {
+		t.Run(value, func(t *testing.T) {
+			_, err := parseWorkloadScope(value)
+			require.ErrorContains(t, err, "invalid workload scope")
+		})
+	}
 }
 
 // TestResolvePodOwnerThreadsCRDOwnerAPIVersion verifies that the snapshot
@@ -275,33 +354,62 @@ func TestPodBuilderNamespaceScope(t *testing.T) {
 	builder := &PodBuilder{
 		podLister: testsupport.NewPodLister(t, podA, podB),
 		rsLister:  testsupport.NewReplicaSetLister(t),
-		metrics: fakePodMetricsProvider{
-			usage: map[string]metrics.PodUsage{
-				"team-a/team-a-pod-1": {
-					CPUUsageMilli:    25,
-					MemoryUsageBytes: 32 * 1024 * 1024,
-				},
-			},
-			metadata: metrics.Metadata{
-				CollectedAt: now,
-			},
-		},
 	}
 
 	snapshot, err := builder.Build(context.Background(), "namespace:team-a")
 	require.NoError(t, err)
 	require.Equal(t, podDomainName, snapshot.Domain)
 	require.Equal(t, "namespace:team-a", snapshot.Scope)
-	require.Equal(t, snapshotVersionWithDynamicRevision(101, fmt.Sprint(now.UnixNano())), snapshot.Version)
+	require.Equal(t, uint64(101), snapshot.Version)
 
 	payload, ok := snapshot.Payload.(PodSnapshot)
 	require.True(t, ok)
 	require.Len(t, payload.Rows, 2)
 	require.Equal(t, "team-a", payload.Rows[0].Namespace)
 	require.Equal(t, "team-a-pod-1", payload.Rows[0].Name)
-	require.Equal(t, "25m", payload.Rows[0].CPUUsage)
-	require.Equal(t, "32 MB", payload.Rows[0].MemUsage)
+	require.Equal(t, streamrows.MetricsNoData, payload.Rows[0].CPUUsage)
+	require.Equal(t, streamrows.MetricsNoData, payload.Rows[0].MemUsage)
 	require.Equal(t, "team-a-pod-2", payload.Rows[1].Name)
+}
+
+func TestPodBuilderSurfacesMetricMetadata(t *testing.T) {
+	collectedAt := time.Now().Add(-config.MetricsStaleThreshold - time.Second)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "api",
+			Namespace:         "team-a",
+			ResourceVersion:   "101",
+			CreationTimestamp: metav1.NewTime(collectedAt.Add(-time.Minute)),
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	builder := &PodBuilder{
+		podLister: testsupport.NewPodLister(t, pod),
+		rsLister:  testsupport.NewReplicaSetLister(t),
+		metrics: fakePodMetricsProvider{
+			usage: map[string]metrics.PodUsage{
+				"team-a/api": {CPUUsageMilli: 25, MemoryUsageBytes: 32 * 1024 * 1024},
+			},
+			metadata: metrics.Metadata{
+				CollectedAt:         collectedAt,
+				LastError:           "metrics API forbidden",
+				ConsecutiveFailures: 2,
+				SuccessCount:        3,
+				FailureCount:        5,
+			},
+		},
+	}
+
+	snapshot, err := builder.Build(context.Background(), "namespace:team-a")
+	require.NoError(t, err)
+
+	payload := snapshot.Payload.(PodSnapshot)
+	require.True(t, payload.Metrics.Stale)
+	require.Equal(t, "metrics API forbidden", payload.Metrics.LastError)
+	require.Equal(t, 2, payload.Metrics.ConsecutiveFailures)
+	require.Equal(t, uint64(3), payload.Metrics.SuccessCount)
+	require.Equal(t, uint64(5), payload.Metrics.FailureCount)
+	require.Equal(t, collectedAt.Unix(), payload.Metrics.CollectedAt)
 }
 
 func benchmarkPods(tb testing.TB, n int) ([]*corev1.Pod, map[string]metrics.PodUsage, time.Time) {
@@ -346,11 +454,10 @@ func benchmarkPods(tb testing.TB, n int) ([]*corev1.Pod, map[string]metrics.PodU
 // BenchmarkPodBuilderBuildCold measures one full query build (project every pod)
 // for a large scope — the cold-open / cache-miss cost we'd target with an index.
 func BenchmarkPodBuilderBuildCold(b *testing.B) {
-	pods, usage, now := benchmarkPods(b, 10000)
+	pods, _, _ := benchmarkPods(b, 10000)
 	builder := &PodBuilder{
 		podLister: testsupport.NewPodLister(b, pods...),
 		rsLister:  testsupport.NewReplicaSetLister(b),
-		metrics:   fakePodMetricsProvider{usage: usage, metadata: metrics.Metadata{CollectedAt: now}},
 	}
 	ctx := WithClusterMeta(context.Background(), ClusterMeta{ClusterID: "c1", ClusterName: "cluster"})
 	scope := "namespace:all?limit=50&sort=name&sortDirection=asc"
@@ -366,8 +473,8 @@ func BenchmarkPodBuilderBuildCold(b *testing.B) {
 // BenchmarkPodBuilderBuildWarm measures a refetch when nothing changed — the
 // memo cache should reuse projections (the busy-cluster steady state).
 func BenchmarkPodBuilderBuildWarm(b *testing.B) {
-	pods, usage, now := benchmarkPods(b, 10000)
-	builder := newPodBuilder(testsupport.NewPodLister(b, pods...), nil, testsupport.NewReplicaSetLister(b), fakePodMetricsProvider{usage: usage, metadata: metrics.Metadata{CollectedAt: now}})
+	pods, _, _ := benchmarkPods(b, 10000)
+	builder := newPodBuilder(testsupport.NewPodLister(b, pods...), nil, testsupport.NewReplicaSetLister(b))
 	ctx := WithClusterMeta(context.Background(), ClusterMeta{ClusterID: "c1", ClusterName: "cluster"})
 	scope := "namespace:all?limit=50&sort=name&sortDirection=asc"
 	if _, err := builder.Build(ctx, scope); err != nil {
@@ -400,7 +507,6 @@ func TestPodBuilderReusesProjectionsAcrossBuilds(t *testing.T) {
 		testsupport.NewPodLister(t, mkPod("a"), mkPod("b")),
 		nil,
 		testsupport.NewReplicaSetLister(t),
-		fakePodMetricsProvider{metadata: metrics.Metadata{CollectedAt: now}},
 	)
 	projections := 0
 	builder.buildSummary = func(meta ClusterMeta, pod *corev1.Pod, cpu, mem int64, rsMap map[string]string) PodSummary {
@@ -450,7 +556,6 @@ func TestPodBuilderReportsScopeCounts(t *testing.T) {
 	builder := &PodBuilder{
 		podLister: testsupport.NewPodLister(t, healthy("ok-1"), healthy("ok-2"), evicted),
 		rsLister:  testsupport.NewReplicaSetLister(t),
-		metrics:   fakePodMetricsProvider{metadata: metrics.Metadata{CollectedAt: now}},
 	}
 
 	snapshot, err := builder.Build(context.Background(), "namespace:team-a")
@@ -458,7 +563,7 @@ func TestPodBuilderReportsScopeCounts(t *testing.T) {
 	payload, ok := snapshot.Payload.(PodSnapshot)
 	require.True(t, ok)
 
-	// Scope-level counts travel on the payload so a query-backed (notify-only)
+	// Scope-level counts travel on the payload so a query-backed (signal-only)
 	// view can show unhealthy/total badges without retaining the live row set.
 	require.Equal(t, 3, payload.TotalCount)
 	require.Equal(t, 1, payload.HealthCounts["unhealthy"])
@@ -488,24 +593,53 @@ func TestPodBuilderAllNamespacesScope(t *testing.T) {
 	builder := &PodBuilder{
 		podLister: testsupport.NewPodLister(t, podA, podB),
 		rsLister:  testsupport.NewReplicaSetLister(t),
-		metrics: fakePodMetricsProvider{
-			usage: map[string]metrics.PodUsage{},
-			metadata: metrics.Metadata{
-				CollectedAt: now,
-			},
-		},
 	}
 
 	snapshot, err := builder.Build(context.Background(), "namespace:all")
 	require.NoError(t, err)
 	require.Equal(t, podDomainName, snapshot.Domain)
 	require.Equal(t, "namespace:all", snapshot.Scope)
-	require.Equal(t, snapshotVersionWithDynamicRevision(25, fmt.Sprint(now.UnixNano())), snapshot.Version)
+	require.Equal(t, uint64(25), snapshot.Version)
 
 	payload, ok := snapshot.Payload.(PodSnapshot)
 	require.True(t, ok)
 	require.Len(t, payload.Rows, 2)
 	require.Equal(t, []string{"team-a", "team-b"}, []string{payload.Rows[0].Namespace, payload.Rows[1].Namespace})
+}
+
+// TestPodBuilderWindowScopeOrdersRowsByNamespaceThenName pins the WINDOW branch's
+// (namespace, name) ordering with deliberately scrambled input: the window truncates
+// input order, so an unsorted window would truncate a nondeterministic subset. The
+// query branch deliberately has no such pin — the querypage engine owns its order and
+// ignores the builder's.
+func TestPodBuilderWindowScopeOrdersRowsByNamespaceThenName(t *testing.T) {
+	scrambled := []*corev1.Pod{
+		{ObjectMeta: metav1.ObjectMeta{Name: "zulu", Namespace: "team-b", ResourceVersion: "1"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "mike", Namespace: "team-a", ResourceVersion: "2"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "alpha", Namespace: "team-b", ResourceVersion: "3"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "zulu", Namespace: "team-a", ResourceVersion: "4"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "alpha", Namespace: "team-a", ResourceVersion: "5"}},
+	}
+
+	builder := &PodBuilder{
+		podLister: testsupport.NewPodLister(t, scrambled...),
+		rsLister:  testsupport.NewReplicaSetLister(t),
+	}
+
+	snapshot, err := builder.Build(context.Background(), "namespace:all")
+	require.NoError(t, err)
+
+	payload, ok := snapshot.Payload.(PodSnapshot)
+	require.True(t, ok)
+	require.Len(t, payload.Rows, 5)
+	got := make([]string, 0, len(payload.Rows))
+	for _, row := range payload.Rows {
+		got = append(got, row.Namespace+"/"+row.Name)
+	}
+	require.Equal(t, []string{
+		"team-a/alpha", "team-a/mike", "team-a/zulu",
+		"team-b/alpha", "team-b/zulu",
+	}, got)
 }
 
 func TestPodBuilderAllNamespacesQuerySortsFiltersAndPagesByMetrics(t *testing.T) {
@@ -542,9 +676,9 @@ func TestPodBuilderAllNamespacesQuerySortsFiltersAndPagesByMetrics(t *testing.T)
 		rsLister:  testsupport.NewReplicaSetLister(t),
 		metrics: fakePodMetricsProvider{
 			usage: map[string]metrics.PodUsage{
-				"team-a/alpha":   {CPUUsageMilli: 25},
-				"team-b/bravo":   {CPUUsageMilli: 300},
-				"team-b/charlie": {CPUUsageMilli: 100},
+				"team-a/alpha":   {CPUUsageMilli: 25, Timestamp: now},
+				"team-b/bravo":   {CPUUsageMilli: 300, Timestamp: now},
+				"team-b/charlie": {CPUUsageMilli: 100, Timestamp: now},
 			},
 			metadata: metrics.Metadata{CollectedAt: now},
 		},
@@ -595,8 +729,8 @@ func TestPodBuilderAllNamespacesMetricCursorContinuesAcrossMetricsRefresh(t *tes
 		rsLister:  testsupport.NewReplicaSetLister(t),
 		metrics: fakePodMetricsProvider{
 			usage: map[string]metrics.PodUsage{
-				"team-b/bravo":   {CPUUsageMilli: 300},
-				"team-b/charlie": {CPUUsageMilli: 100},
+				"team-b/bravo":   {CPUUsageMilli: 300, Timestamp: now},
+				"team-b/charlie": {CPUUsageMilli: 100, Timestamp: now},
 			},
 			metadata: metrics.Metadata{CollectedAt: now},
 		},
@@ -611,8 +745,8 @@ func TestPodBuilderAllNamespacesMetricCursorContinuesAcrossMetricsRefresh(t *tes
 
 	builder.metrics = fakePodMetricsProvider{
 		usage: map[string]metrics.PodUsage{
-			"team-b/bravo":   {CPUUsageMilli: 320},
-			"team-b/charlie": {CPUUsageMilli: 110},
+			"team-b/bravo":   {CPUUsageMilli: 320, Timestamp: now.Add(5 * time.Second)},
+			"team-b/charlie": {CPUUsageMilli: 110, Timestamp: now.Add(5 * time.Second)},
 		},
 		metadata: metrics.Metadata{CollectedAt: now.Add(5 * time.Second)},
 	}

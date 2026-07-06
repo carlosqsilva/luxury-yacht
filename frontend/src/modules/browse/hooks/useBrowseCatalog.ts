@@ -7,7 +7,11 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { requestRefreshDomainState, useRefreshDomainHandle } from '@/core/data-access';
+import {
+  requestRefreshDomainState,
+  useRefreshDomainHandle,
+  type DataRequestReason,
+} from '@/core/data-access';
 import { useCatalogDiagnostics } from '@/core/refresh/diagnostics/useCatalogDiagnostics';
 import { walkQueryCursorPages } from '@modules/resource-grid/cursorPageWalk';
 import { useAutoRefreshLoadingState } from '@/core/refresh/hooks/useAutoRefreshLoadingState';
@@ -416,7 +420,11 @@ export function useBrowseCatalog({
   catalogScopeRef.current = catalogScope;
 
   const requestPage = useCallback(
-    (token: string | null, direction: 'next' | 'previous' | 'current') => {
+    (
+      token: string | null,
+      direction: 'next' | 'previous' | 'current',
+      reason: DataRequestReason = 'user'
+    ) => {
       if (!token || isRequestingMore) {
         return;
       }
@@ -440,7 +448,7 @@ export function useBrowseCatalog({
           const result = await requestRefreshDomainState({
             domain: 'catalog',
             scope: normalizedScope,
-            reason: 'user',
+            reason,
           });
           if (result.status !== 'executed' || catalogScopeRef.current !== baseScopeAtRequest) {
             return;
@@ -512,6 +520,52 @@ export function useBrowseCatalog({
       refreshCatalogScope,
     ]
   );
+
+  // Doorbell values live in signalVersions, which payload applies never touch
+  // — so this only moves when the catalog doorbell rings. (Keying on the
+  // folded sourceVersion turned every content-changing fetch response into
+  // another "signal": an echo refetch per doorbell.)
+  const catalogLiveVersion = domain.signalVersions?.catalog ?? '';
+  // has-observed flag, not an empty-string sentinel: before the first doorbell
+  // the value IS empty, and a falsiness check would swallow the first ring.
+  const lastCatalogLiveVersionRef = useRef<{ observed: boolean; value: string }>({
+    observed: false,
+    value: '',
+  });
+  useEffect(() => {
+    const previous = lastCatalogLiveVersionRef.current;
+    lastCatalogLiveVersionRef.current = { observed: true, value: catalogLiveVersion };
+    if (
+      !enabled ||
+      !catalogLiveVersion ||
+      !previous.observed ||
+      previous.value === catalogLiveVersion ||
+      !hasLoadedOnceRef.current
+    ) {
+      return;
+    }
+
+    const currentPageToken = currentPageTokenRef.current;
+    // These fetches are triggered BY the catalog doorbell: 'stream-signal' is
+    // the one non-manual reason the skip-while-stream-healthy gate never
+    // swallows. With 'background' the refetch was skipped for a loaded scope
+    // while the stream was healthy — the doorbell silently did nothing.
+    if (currentPageToken) {
+      requestPage(currentPageToken, 'current', 'stream-signal');
+    } else {
+      void refreshCatalogScope('stream-signal');
+    }
+    if (!metadataUsesActiveScope) {
+      void refreshMetadataScope('stream-signal');
+    }
+  }, [
+    catalogLiveVersion,
+    enabled,
+    metadataUsesActiveScope,
+    refreshCatalogScope,
+    refreshMetadataScope,
+    requestPage,
+  ]);
 
   const handleLoadMore = useCallback(() => {
     requestPage(continueToken, 'next');

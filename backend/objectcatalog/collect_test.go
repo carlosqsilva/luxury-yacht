@@ -8,10 +8,13 @@ package objectcatalog
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/luxury-yacht/app/backend/refresh/ingest"
 	"github.com/luxury-yacht/app/backend/resources/common"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -97,6 +100,188 @@ func TestServiceSyncCollectsResources(t *testing.T) {
 	}
 	if summary.LabelsDigest == "" {
 		t.Errorf("expected labels digest to be set")
+	}
+}
+
+// fakeCatalogIngestSource is a test IngestSource that serves pre-seeded Summaries for
+// a cut GVR, so the catalog ingest collect path can be exercised without a real
+// reflector.
+type fakeCatalogIngestSource struct {
+	rows   map[schema.GroupVersionResource][]interface{}
+	synced map[schema.GroupVersionResource]bool
+}
+
+func (f *fakeCatalogIngestSource) CatalogRows(gvr schema.GroupVersionResource) []interface{} {
+	return f.rows[gvr]
+}
+
+func (f *fakeCatalogIngestSource) AddCatalogSink(schema.GroupVersionResource, ingest.Sink) bool {
+	return true
+}
+
+// The dynamic-CRD path is not exercised by the static-cut-kind tests below, so these
+// satisfy the IngestSource interface as no-ops.
+func (f *fakeCatalogIngestSource) RegisterDynamicCatalogReflector(schema.GroupVersionResource, schema.GroupVersionKind, ingest.CatalogProjector, bool) bool {
+	return false
+}
+
+func (f *fakeCatalogIngestSource) StopReflectorFor(schema.GroupVersionResource) {}
+
+func (f *fakeCatalogIngestSource) HasSyncedFor(gvr schema.GroupVersionResource) bool {
+	if f.synced == nil {
+		return true
+	}
+	return f.synced[gvr]
+}
+
+func TestIngestCatalogSinkBulkReplaceScopesGVR(t *testing.T) {
+	now := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
+	svc := NewService(Dependencies{Now: func() time.Time { return now }}, nil)
+	cmGVR := schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}
+	secGVR := schema.GroupVersionResource{Version: "v1", Resource: "secrets"}
+	cmDesc := resourceDescriptor{GVR: cmGVR, Version: "v1", Kind: "ConfigMap", Resource: "configmaps", Namespaced: true, Scope: ScopeNamespace}
+	secDesc := resourceDescriptor{GVR: secGVR, Version: "v1", Kind: "Secret", Resource: "secrets", Namespaced: true, Scope: ScopeNamespace}
+	svc.resources = map[string]resourceDescriptor{
+		cmGVR.String():  cmDesc,
+		secGVR.String(): secDesc,
+	}
+	sec := Summary{Kind: "Secret", Version: "v1", Resource: "secrets", Namespace: "default", Name: "sec-a", Scope: ScopeNamespace}
+	oldCM := Summary{Kind: "ConfigMap", Version: "v1", Resource: "configmaps", Namespace: "default", Name: "cm-old", Scope: ScopeNamespace}
+	svc.items = map[string]Summary{
+		catalogKey(secDesc, sec.Namespace, sec.Name):    sec,
+		catalogKey(cmDesc, oldCM.Namespace, oldCM.Name): oldCM,
+	}
+	svc.catalogIndex.rebuildCacheFromItems(cloneSummaryMap(svc.items), svc.Descriptors())
+
+	sink := ingestCatalogSink{service: svc, gvr: cmGVR}
+	bulk, ok := interface{}(sink).(ingest.ReplaceSink)
+	if !ok {
+		t.Fatal("ingest catalog sink must support bulk replace")
+	}
+	newCM := Summary{Kind: "ConfigMap", Version: "v1", Resource: "configmaps", Namespace: "default", Name: "cm-new", Scope: ScopeNamespace}
+	bulk.Replace([]interface{}{newCM})
+
+	if _, ok := svc.items[catalogKey(cmDesc, "default", "cm-old")]; ok {
+		t.Fatal("old ConfigMap summary survived bulk replace")
+	}
+	if _, ok := svc.items[catalogKey(cmDesc, "default", "cm-new")]; !ok {
+		t.Fatal("new ConfigMap summary missing after bulk replace")
+	}
+	if _, ok := svc.items[catalogKey(secDesc, "default", "sec-a")]; !ok {
+		t.Fatal("Secret summary was removed by ConfigMap bulk replace")
+	}
+
+	bulk.Replace(nil)
+	if _, ok := svc.items[catalogKey(cmDesc, "default", "cm-new")]; ok {
+		t.Fatal("ConfigMap summary survived empty bulk replace")
+	}
+	if _, ok := svc.items[catalogKey(secDesc, "default", "sec-a")]; !ok {
+		t.Fatal("Secret summary was removed by empty ConfigMap bulk replace")
+	}
+}
+
+// TestCollectViaIngestServesCutKindSummaries proves a cut kind's collect is served
+// from the ingest manager's CatalogRows (projected at intake), scoped to the
+// requested namespaces, and byte-identical to the catalog's own summaryFromObject —
+// the catalog-quotas-Summaries gate for the owned-reflector cutover.
+func TestCollectViaIngestServesCutKindSummaries(t *testing.T) {
+	// A real ingest-owned GVR from the registry's facet, so the cut-set membership
+	// check passes exactly as in production.
+	var cutGVR schema.GroupVersionResource
+	for gvr := range catalogIngestOwnedGVRs {
+		if gvr.Resource == "resourcequotas" {
+			cutGVR = gvr
+		}
+	}
+	if cutGVR.Empty() {
+		t.Fatal("expected resourcequotas in the ingest-owned cut set")
+	}
+
+	desc := builtinDescriptor(cutGVR.Group, cutGVR.Version, "ResourceQuota", cutGVR.Resource, true)
+	obj := &metav1.PartialObjectMetadata{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "compute", ResourceVersion: "7"},
+	}
+	want := summaryFromObject("c1", "cluster-one", desc, obj)
+	other := summaryFromObject("c1", "cluster-one", desc,
+		&metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Namespace: "team-b", Name: "other", ResourceVersion: "8"}})
+
+	source := &fakeCatalogIngestSource{
+		rows: map[schema.GroupVersionResource][]interface{}{cutGVR: {want, other}},
+	}
+	svc := NewService(Dependencies{IngestSource: source, ClusterID: "c1", ClusterName: "cluster-one"}, nil)
+
+	// Namespace-scoped request to team-a returns only the team-a summary, byte-identical.
+	summaries, handled, err := svc.collectViaIngest(0, desc, []string{"team-a"}, nil)
+	if err != nil || !handled {
+		t.Fatalf("collectViaIngest handled=%v err=%v, want handled=true err=nil", handled, err)
+	}
+	if len(summaries) != 1 {
+		t.Fatalf("got %d summaries, want 1 (scoped to team-a)", len(summaries))
+	}
+	if summaries[0] != want {
+		t.Fatalf("summary = %#v, want byte-identical %#v", summaries[0], want)
+	}
+
+	// An all-namespaces request returns both, proving no scoping when none requested.
+	all, handled, err := svc.collectViaIngest(0, desc, nil, nil)
+	if err != nil || !handled || len(all) != 2 {
+		t.Fatalf("all-namespaces collectViaIngest handled=%v err=%v len=%d, want true/nil/2", handled, err, len(all))
+	}
+}
+
+// TestCollectViaIngestAlwaysHandlesCutKind proves a cut kind's collect is ALWAYS
+// served by ingest — even with no rows yet — so the catalog never falls through to
+// the shared factory for a GVR the factory no longer registers (which would lazily
+// create an unstarted informer). An uncut GVR is not handled, so the factory/list
+// path still serves it.
+func TestCollectViaIngestAlwaysHandlesCutKind(t *testing.T) {
+	var cutGVR schema.GroupVersionResource
+	for gvr := range catalogIngestOwnedGVRs {
+		if gvr.Resource == "resourcequotas" {
+			cutGVR = gvr
+		}
+	}
+	cutDesc := builtinDescriptor(cutGVR.Group, cutGVR.Version, "ResourceQuota", cutGVR.Resource, true)
+	source := &fakeCatalogIngestSource{
+		rows: map[schema.GroupVersionResource][]interface{}{cutGVR: {}},
+	}
+	svc := NewService(Dependencies{IngestSource: source}, nil)
+	if summaries, handled, err := svc.collectViaIngest(0, cutDesc, nil, nil); !handled || err != nil || len(summaries) != 0 {
+		t.Fatalf("cut kind collectViaIngest handled=%v err=%v len=%d, want true/nil/0", handled, err, len(summaries))
+	}
+
+	// HorizontalPodAutoscaler is NOT cut (it keeps its typed informer — no v2 shared informer
+	// for the ingest path), so its collect must NOT be handled by ingest — the factory/list
+	// path still serves it.
+	uncutDesc := builtinDescriptor("autoscaling", "v2", "HorizontalPodAutoscaler", "horizontalpodautoscalers", false)
+	if _, handled, _ := svc.collectViaIngest(0, uncutDesc, nil, nil); handled {
+		t.Fatal("uncut kind must not be handled by ingest")
+	}
+}
+
+func TestCollectViaIngestReportsUnsyncedStaticCutKind(t *testing.T) {
+	var cutGVR schema.GroupVersionResource
+	for gvr := range catalogIngestOwnedGVRs {
+		if gvr.Resource == "resourcequotas" {
+			cutGVR = gvr
+		}
+	}
+	cutDesc := builtinDescriptor(cutGVR.Group, cutGVR.Version, "ResourceQuota", cutGVR.Resource, true)
+	source := &fakeCatalogIngestSource{
+		rows:   map[schema.GroupVersionResource][]interface{}{cutGVR: {}},
+		synced: map[schema.GroupVersionResource]bool{cutGVR: false},
+	}
+	svc := NewService(Dependencies{IngestSource: source}, nil)
+
+	summaries, handled, err := svc.collectViaIngest(0, cutDesc, nil, nil)
+	if !handled {
+		t.Fatal("unsynced static cut kind must still be handled by ingest")
+	}
+	if err == nil {
+		t.Fatal("unsynced static cut kind must report an incomplete collect")
+	}
+	if len(summaries) != 0 {
+		t.Fatalf("unsynced static cut kind returned %d summaries, want 0", len(summaries))
 	}
 }
 
@@ -380,5 +565,62 @@ func TestBuildSummaryClusterScope(t *testing.T) {
 	}
 	if summary.CreationTimestamp != "2023-01-02T03:04:05Z" {
 		t.Fatalf("unexpected creation timestamp %s", summary.CreationTimestamp)
+	}
+}
+
+// Scoped clusters (docs/plans/namespace-scope.md): one forbidden namespace
+// must not blank the other configured namespaces' results — the Lens dual-path
+// pitfall (b) this plan explicitly avoids.
+func TestListResourceSkipsForbiddenNamespaceTargets(t *testing.T) {
+	scheme := runtime.NewScheme()
+	cfgGVK := schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"}
+	listKinds := map[schema.GroupVersionResource]string{
+		{Group: "apps", Version: "v1", Resource: "deployments"}: "DeploymentList",
+	}
+
+	objA := &unstructured.Unstructured{}
+	objA.SetGroupVersionKind(cfgGVK)
+	objA.SetNamespace("alpha")
+	objA.SetName("sample-a")
+
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, listKinds, objA)
+	dyn.PrependReactor("list", "deployments", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if action.GetNamespace() == "beta" {
+			return true, nil, k8serrors.NewForbidden(schema.GroupResource{Group: "apps", Resource: "deployments"}, "", errors.New("denied"))
+		}
+		return false, nil, nil
+	})
+
+	svc := NewService(Dependencies{Common: common.Dependencies{KubernetesClient: kubernetesfake.NewClientset(), DynamicClient: dyn}}, &Options{PageSize: 10})
+
+	desc := resourceDescriptor{
+		GVR:        schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"},
+		Namespaced: true,
+		Kind:       "Deployment",
+		Group:      "apps",
+		Version:    "v1",
+		Resource:   "deployments",
+		Scope:      ScopeNamespace,
+	}
+
+	items, err := svc.listResource(context.Background(), 0, desc, []string{"alpha", "beta"}, nil)
+	if err != nil {
+		t.Fatalf("a forbidden namespace must be skipped, not fail the kind: %v", err)
+	}
+	if len(items) != 1 || items[0].Name != "sample-a" {
+		t.Fatalf("expected only alpha's item, got %#v", items)
+	}
+}
+
+func TestServiceScopeNamespacesComeFromDependencies(t *testing.T) {
+	svc := NewService(Dependencies{AllowedNamespaces: []string{"prod", "dev"}, Common: common.Dependencies{}}, nil)
+	got := svc.scopeNamespaces()
+	if len(got) != 2 || got[0] != "prod" || got[1] != "dev" {
+		t.Fatalf("scopeNamespaces = %#v, want configured scope", got)
+	}
+
+	unscoped := NewService(Dependencies{Common: common.Dependencies{}}, nil)
+	if ns := unscoped.scopeNamespaces(); ns != nil {
+		t.Fatalf("unscoped service must report nil scope, got %#v", ns)
 	}
 }

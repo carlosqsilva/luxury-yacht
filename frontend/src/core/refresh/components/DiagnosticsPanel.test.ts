@@ -575,11 +575,129 @@ describe('DiagnosticsPanel component', () => {
 
     expect(markup).toContain('Cluster Overview');
     expect(markup).toContain('OK (5 polls)');
+    const nodesRow = Array.from(
+      rendered.container.querySelectorAll('.diagnostics-table tbody tr')
+    ).find((row) => row.querySelector('td')?.textContent?.includes('Nodes'));
+    // Sync Wait (no informer-sync-wait telemetry → em dash); Metrics shifted to 15.
+    // Nodes carries the joined-usage freshness block on its base payload now,
+    // so the Metrics column reflects it directly.
+    expect(nodesRow?.querySelectorAll('td')[14]?.textContent?.trim()).toBe('—');
+    expect(nodesRow?.querySelectorAll('td')[15]?.textContent?.trim()).toBe('OK (2 polls)');
 
     const clusterIndex = markup.indexOf('Cluster Overview');
     const podsIndex = markup.indexOf('Pods');
     expect(clusterIndex).toBeGreaterThan(-1);
     expect(podsIndex).toBeGreaterThan(clusterIndex);
+
+    await rendered.unmount();
+  });
+
+  test('renders joined metrics freshness on the base domain rows', async () => {
+    seedBaseDomainStates();
+    mockKubeconfigState.selectedClusterId = 'cluster-a';
+    const now = Date.now();
+    const namespaceScope = buildClusterScope('cluster-a', 'namespace:team-a');
+    const clusterScope = buildClusterScope('cluster-a', '');
+
+    // The metric refresh domains were deleted: the base payloads carry the
+    // poller freshness block alongside their rows.
+    setScopedEntries('pods', [
+      [
+        namespaceScope,
+        {
+          ...createReadyState({
+            rows: [],
+            metrics: {
+              collectedAt: now,
+              stale: false,
+              lastError: '',
+              consecutiveFailures: 0,
+              successCount: 4,
+              failureCount: 0,
+            },
+          }),
+          scope: namespaceScope,
+        },
+      ],
+    ]);
+    setScopedEntries('nodes', [
+      [
+        clusterScope,
+        {
+          ...createReadyState({
+            rows: [],
+            metrics: {
+              collectedAt: now,
+              stale: true,
+              lastError: '',
+              consecutiveFailures: 2,
+              successCount: 1,
+              failureCount: 2,
+            },
+          }),
+          scope: clusterScope,
+        },
+      ],
+    ]);
+    setScopedEntries('namespace-workloads', [
+      [
+        namespaceScope,
+        {
+          ...createReadyState({
+            rows: [],
+            metrics: {
+              collectedAt: now,
+              stale: false,
+              lastError: 'workload metrics failed',
+              consecutiveFailures: 1,
+              successCount: 2,
+              failureCount: 1,
+            },
+          }),
+          scope: namespaceScope,
+        },
+      ],
+    ]);
+
+    const { DiagnosticsPanel } = await import('./DiagnosticsPanel');
+    const rendered = await renderDiagnosticsPanel(DiagnosticsPanel, { isOpen: true });
+    await selectRefreshDomainsTab(rendered.container);
+
+    const rows = Array.from(
+      rendered.container.querySelectorAll<HTMLTableRowElement>('.diagnostics-table tbody tr')
+    ).map((row) => {
+      const cells = row.querySelectorAll<HTMLTableCellElement>('td');
+      return {
+        label: cells[0]?.textContent?.replace(/\s+/g, ' ').trim() ?? '',
+        scope: cells[1]?.textContent?.replace(/\s+/g, ' ').trim() ?? '',
+        metrics: cells[15]?.textContent?.trim() ?? '',
+        metricsTooltip: cells[15]?.getAttribute('title') ?? '',
+      };
+    });
+
+    expect(rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: 'Nodes',
+          scope: 'cluster-a (active)',
+          metrics: 'Unavailable (2 fails)',
+        }),
+        expect.objectContaining({
+          label: 'Workloads',
+          scope: 'cluster-a (active) - namespace:team-a',
+          metrics: 'Error (1 fails)',
+          metricsTooltip: expect.stringContaining('Last error: workload metrics failed'),
+        }),
+        // pods rows point at the joined usage instead of rendering their own
+        // freshness column.
+        expect.objectContaining({
+          label: 'ObjPanel - Pods - team-a',
+          scope: 'cluster-a (active) - namespace:team-a',
+          metrics: 'N/A',
+          metricsTooltip: 'Pod usage is joined onto the pods rows at serve',
+        }),
+      ])
+    );
 
     await rendered.unmount();
   });
@@ -856,7 +974,7 @@ describe('DiagnosticsPanel component', () => {
       return {
         scope: cells[1]?.textContent?.replace(/\s+/g, ' ').trim() ?? '',
         count: cells[9]?.textContent?.trim() ?? '',
-        metrics: cells[14]?.textContent?.trim() ?? '',
+        metrics: cells[15]?.textContent?.trim() ?? '',
       };
     });
     expect(overviewSummaries).toEqual(
@@ -870,7 +988,7 @@ describe('DiagnosticsPanel component', () => {
     await rendered.unmount();
   });
 
-  test('disambiguates query-backed refresh scopes and collapses cluster aliases', async () => {
+  test('disambiguates durable query-backed scopes and hides transient resource table query scopes', async () => {
     mockKubeconfigState.selectedClusterId = 'cluster-a';
 
     const catalogScope = buildClusterScope('cluster-a', 'limit=200&namespace=default');
@@ -950,13 +1068,10 @@ describe('DiagnosticsPanel component', () => {
     );
 
     const nodeRows = rows.filter((row) => row.label === 'Nodes');
-    expect(nodeRows).toHaveLength(2);
-    expect(new Set(nodeRows.map((row) => row.scope)).size).toBe(2);
+    expect(nodeRows).toHaveLength(1);
     expect(nodeRows.some((row) => row.scope === 'cluster-a (active)')).toBe(true);
-    expect(nodeRows.some((row) => row.scope.includes('limit=50'))).toBe(true);
-    expect(nodeRows.map((row) => row.role)).toEqual(
-      expect.arrayContaining(['Live Scope', 'Table Query'])
-    );
+    expect(nodeRows.some((row) => row.scope.includes('limit=50'))).toBe(false);
+    expect(nodeRows.map((row) => row.role)).toEqual(['Live Scope']);
 
     await rendered.unmount();
   });
@@ -1081,7 +1196,7 @@ describe('DiagnosticsPanel component', () => {
 
     scopedEntriesMap['container-logs'] = [
       [
-        'workload:default:deployment:web',
+        'cluster-a|default:apps/v1:deployment:web',
         {
           ...createReadyState({}),
           status: 'ready',
@@ -1089,7 +1204,7 @@ describe('DiagnosticsPanel component', () => {
         },
       ],
       [
-        'workload:default:deployment:api',
+        'cluster-a|default:apps/v1:deployment:api',
         {
           ...createReadyState({}),
           status: 'error',
@@ -1172,6 +1287,54 @@ describe('DiagnosticsPanel component', () => {
 
     await rendered.unmount();
     resourceStreamSpy.mockRestore();
+  });
+
+  test('renders the recorded informer-sync-gate wait in the Sync Wait column', async () => {
+    const clusterScope = buildClusterScope('cluster-a', '');
+    mockKubeconfigState.selectedClusterId = 'cluster-a';
+
+    setScopedEntries('namespaces', [
+      [clusterScope, { ...createReadyState({ namespaces: [] }), scope: clusterScope }],
+    ]);
+
+    fetchTelemetrySummaryMock.mockResolvedValueOnce({
+      snapshots: [
+        {
+          domain: 'namespaces',
+          scope: clusterScope,
+          lastStatus: 'success',
+          lastDurationMs: 12,
+          lastUpdated: Date.now(),
+          successCount: 1,
+          failureCount: 0,
+          // Cold-start build blocked 1500ms on the initial-LIST gate.
+          maxInformerSyncWaitMs: 1500,
+        },
+      ],
+      metrics: {
+        lastCollected: Date.now(),
+        lastDurationMs: 0,
+        consecutiveFailures: 0,
+        successCount: 1,
+        failureCount: 0,
+      },
+      streams: [],
+    });
+
+    const { DiagnosticsPanel } = await import('./DiagnosticsPanel');
+    const rendered = await renderDiagnosticsPanel(DiagnosticsPanel, { isOpen: true });
+    await selectRefreshDomainsTab(rendered.container);
+    await flushAsync();
+    await flushAsync();
+
+    const namespaceRow = Array.from(
+      rendered.container.querySelectorAll('.diagnostics-table tbody tr')
+    ).find((row) => row.querySelector('td')?.textContent?.includes('Namespaces'));
+    expect(namespaceRow).toBeDefined();
+    // Sync Wait column (index 14, after Duration at 13).
+    expect(namespaceRow?.querySelectorAll('td')[14]?.textContent?.trim()).toBe('1500 ms');
+
+    await rendered.unmount();
   });
 
   test('renders Kubernetes API client diagnostics on the K8s API tab', async () => {

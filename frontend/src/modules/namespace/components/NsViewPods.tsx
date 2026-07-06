@@ -11,12 +11,12 @@ import { useClusterMetricsAvailability } from '@/core/refresh/hooks/useMetricsAv
 import type { IconBarItem } from '@shared/components/IconBar/IconBar';
 import { useObjectPanel } from '@modules/object-panel/hooks/useObjectPanel';
 import * as cf from '@shared/components/tables/columnFactories';
-import { getMetricsBannerInfo } from '@shared/utils/metricsAvailability';
+import { useMetricsBannerInfo } from '@shared/hooks/useMetricsBannerInfo';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ResourceInventoryTable from '@modules/resource-grid/ResourceInventoryTable';
 import type { ContextMenuItem } from '@shared/components/ContextMenu';
 import { type GridColumnDefinition } from '@shared/components/tables/GridTable';
-import type { PodSnapshotEntry, PodMetricsInfo } from '@/core/refresh/types';
+import type { PodMetricsInfo, PodSnapshotEntry } from '@/core/refresh/types';
 import { ALL_NAMESPACES_SCOPE } from '@modules/namespace/constants';
 import {
   getPodsUnhealthyStorageKey,
@@ -44,6 +44,7 @@ import {
 import { backendStatusTextClass } from '@shared/utils/backendStatusPresentation';
 import { parseCpuToMillicores, parseMemToMB } from '@utils/resourceCalculations';
 import { WarningTriangleIcon } from '@shared/components/icons/SharedIcons';
+import { podRowCpuValue, podRowMemoryValue } from '@/core/resource-metrics';
 import type { PodSnapshotPayload } from '@/core/refresh/types';
 
 interface PodsViewProps {
@@ -75,6 +76,12 @@ const getReadySortValue = (value?: string | null): number => {
   }
   return counts.ready * 1000000 + counts.total;
 };
+
+const podMetricsState = (info: PodMetricsInfo | null | undefined) => ({
+  stale: Boolean(info?.stale),
+  lastError: info?.lastError || undefined,
+  lastUpdated: info?.collectedAt ? new Date(info.collectedAt * 1000) : undefined,
+});
 
 // The backend owns pod health semantics; this filter only reads the presentation token.
 const isPodUnhealthy = (pod: PodSnapshotEntry): boolean => {
@@ -118,7 +125,7 @@ const NsViewPods: React.FC<PodsViewProps> = React.memo(
     const { navigateToView } = useNavigateToView();
     const namespaceColumnLink = useNamespaceColumnLink<PodSnapshotEntry>('pods');
     const clusterMetrics = useClusterMetricsAvailability();
-    const effectiveMetrics = metrics ?? clusterMetrics ?? null;
+    const fallbackMetrics = metrics ?? clusterMetrics ?? null;
     const { selectedClusterId } = useKubeconfig();
     const { selectedNamespaceClusterId } = useNamespace();
     const queryClusterId = selectedNamespaceClusterId ?? selectedClusterId;
@@ -247,34 +254,11 @@ const NsViewPods: React.FC<PodsViewProps> = React.memo(
       [selectedClusterId]
     );
 
-    const metricsBanner = useMemo(
-      () => getMetricsBannerInfo(effectiveMetrics ?? null),
-      [effectiveMetrics]
-    );
-
-    const metricsLastUpdated = useMemo(() => {
-      if (!effectiveMetrics?.collectedAt) {
-        return undefined;
-      }
-      return new Date(effectiveMetrics.collectedAt * 1000);
-    }, [effectiveMetrics?.collectedAt]);
     const metricsStateRef = useRef<{
       stale: boolean;
       lastError?: string;
       lastUpdated?: Date;
-    }>({
-      stale: Boolean(effectiveMetrics?.stale),
-      lastError: effectiveMetrics?.lastError || undefined,
-      lastUpdated: metricsLastUpdated,
-    });
-
-    useEffect(() => {
-      metricsStateRef.current = {
-        stale: Boolean(effectiveMetrics?.stale),
-        lastError: effectiveMetrics?.lastError || undefined,
-        lastUpdated: metricsLastUpdated,
-      };
-    }, [effectiveMetrics?.lastError, effectiveMetrics?.stale, metricsLastUpdated]);
+    }>(podMetricsState(fallbackMetrics));
 
     const columns: GridColumnDefinition<PodSnapshotEntry>[] = useMemo(() => {
       // Use the same warning styling as workloads when restarts are non-zero.
@@ -382,9 +366,9 @@ const NsViewPods: React.FC<PodsViewProps> = React.memo(
           header: 'CPU',
           key: 'cpu',
           type: 'cpu',
-          getUsage: (pod) => pod.cpuUsage,
-          getRequest: (pod) => pod.cpuRequest,
-          getLimit: (pod) => pod.cpuLimit,
+          getUsage: (pod) => podRowCpuValue(pod, 'usage'),
+          getRequest: (pod) => podRowCpuValue(pod, 'request'),
+          getLimit: (pod) => podRowCpuValue(pod, 'limit'),
           getMetricsStale: () => metricsStateRef.current.stale,
           getMetricsError: () => metricsStateRef.current.lastError,
           getMetricsLastUpdated: () => metricsStateRef.current.lastUpdated,
@@ -396,9 +380,9 @@ const NsViewPods: React.FC<PodsViewProps> = React.memo(
           header: 'Memory',
           key: 'memory',
           type: 'memory',
-          getUsage: (pod) => pod.memUsage,
-          getRequest: (pod) => pod.memRequest,
-          getLimit: (pod) => pod.memLimit,
+          getUsage: (pod) => podRowMemoryValue(pod, 'usage'),
+          getRequest: (pod) => podRowMemoryValue(pod, 'request'),
+          getLimit: (pod) => podRowMemoryValue(pod, 'limit'),
           getMetricsStale: () => metricsStateRef.current.stale,
           getMetricsError: () => metricsStateRef.current.lastError,
           getMetricsLastUpdated: () => metricsStateRef.current.lastUpdated,
@@ -474,7 +458,7 @@ const NsViewPods: React.FC<PodsViewProps> = React.memo(
 
     // Scope counts come from the query payload (backend, scope-level), mirrored
     // into state below once the query page lands, so they stay correct for a
-    // query-backed/notify-only view without retaining the live row set.
+    // query-backed signal-only view without retaining the live row set.
     const unhealthyCount = scopeCounts.unhealthy;
     const scopeTotalCount = scopeCounts.total;
 
@@ -536,6 +520,16 @@ const NsViewPods: React.FC<PodsViewProps> = React.memo(
       filterOptions: { isNamespaceScoped: namespace !== ALL_NAMESPACES_SCOPE },
     });
 
+    // The base query payload carries the poller freshness block for the usage
+    // joined onto the rows at serve.
+    const tableMetrics = queryPayload?.metrics ?? null;
+    const effectiveMetrics = tableMetrics ?? fallbackMetrics;
+    const metricsBanner = useMetricsBannerInfo(effectiveMetrics ?? null);
+
+    useEffect(() => {
+      metricsStateRef.current = podMetricsState(effectiveMetrics);
+    }, [effectiveMetrics]);
+
     // Non-display reads come from the single source of truth (the controller
     // source); the wrapper no longer re-exposes rows/error separately.
     const displayedPods = source.rows;
@@ -550,8 +544,7 @@ const NsViewPods: React.FC<PodsViewProps> = React.memo(
     }, [payloadTotalCount, payloadUnhealthyCount]);
 
     // The pending-filter guard (single namespace) reads the per-mode scope counts
-    // from the latest query payload, not the live row set (pods is notify-only, so
-    // live rows are static at baseline). A ref keeps the guard effect from
+    // from the latest query payload, not the live row set. A ref keeps the guard effect from
     // re-running on every count change.
     const healthCountsRef = useRef<Record<string, number>>({});
     healthCountsRef.current = queryPayload?.healthCounts ?? {};

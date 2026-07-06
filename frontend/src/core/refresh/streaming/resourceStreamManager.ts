@@ -1,31 +1,32 @@
 /**
  * frontend/src/core/refresh/streaming/resourceStreamManager.ts
  *
- * Coordinates resource WebSocket subscriptions, row delivery, resyncs, and
- * stream fallback behavior for refresh domains that receive live updates.
+ * Coordinates resource WebSocket subscriptions and resyncs for refresh domains
+ * that receive live change signals. Every streamed table is query-backed, so a
+ * delta (or a resync) advances the domain source token to trigger a refetch
+ * rather than delivering rows over the bridge.
  */
 
-import { fetchSnapshot, type Snapshot, type SnapshotStats } from '../client';
 import { setScopedDomainState } from '../store';
 import type { PermissionDeniedStatus } from '../types';
 import { stripClusterScope } from '../clusterScope';
 import { eventBus } from '@/core/events';
 import {
   APP_LOG_SOURCES,
+  logAppLogsDebug,
   logAppLogsInfo,
-  logAppLogsWarn,
   type AppLogsClusterMeta,
 } from '@/core/logging/appLogsClient';
-import { resolvePermissionDeniedMessage } from '../permissionErrors';
+import { isPermissionDeniedStatus, resolvePermissionDeniedMessage } from '../permissionErrors';
 import {
-  getResourceStreamDomainDescriptor,
+  domainSupportsSourceClock,
+  isResourceStreamSourceClock,
   isCompleteResyncStreamDomain,
   isClusterScopedDomain,
-  isNotifyOnlyStreamDomain,
   isSupportedDomain,
-  type ResourceDomain,
+  type DoorbellDomain,
+  type ResourceStreamSourceClock,
 } from './resourceStreamDomains';
-import { applyResourceRowUpdates, mergeSnapshotRows } from './resourceStreamRows';
 import { ResourceStreamConnection } from './resourceStreamConnection';
 import {
   ResourceStreamSubscriptionStore,
@@ -42,23 +43,11 @@ import {
   type ResourceStreamHealthStatus,
 } from './resourceStreamHealth';
 
-export {
-  normalizeResourceScope,
-  sortNodeRows,
-  sortPodRows,
-  sortWorkloadRows,
-} from './resourceStreamDomains';
-export {
-  mergeNodeMetricsRow,
-  mergePodMetricsRow,
-  mergeWorkloadMetricsRow,
-} from './resourceStreamRows';
+export { normalizeResourceScope } from './resourceStreamDomains';
 
 const UPDATE_COALESCE_MS = 150;
 const RESYNC_COOLDOWN_MS = 1000;
 const RESYNC_MESSAGE = 'Stream resyncing';
-const STREAM_ERROR_NOTIFY_THRESHOLD = 3;
-const DRIFT_SAMPLE_SIZE = 5;
 // Linger stream stops briefly to avoid rapid subscribe/unsubscribe churn.
 const STREAM_UNSUBSCRIBE_DEBOUNCE_MS = 500;
 // Cap queued updates to avoid unbounded memory growth under bursty streams.
@@ -68,14 +57,16 @@ const logInfo = (message: string, cluster?: AppLogsClusterMeta): void => {
   logAppLogsInfo(message, APP_LOG_SOURCES.ResourceStream, cluster);
 };
 
-const logWarning = (message: string, cluster?: AppLogsClusterMeta): void => {
-  logAppLogsWarn(message, APP_LOG_SOURCES.ResourceStream, cluster);
+const logDebug = (message: string, cluster?: AppLogsClusterMeta): void => {
+  logAppLogsDebug(message, APP_LOG_SOURCES.ResourceStream, cluster);
 };
 
 const MESSAGE_TYPES = {
   request: 'REQUEST',
   cancel: 'CANCEL',
   heartbeat: 'HEARTBEAT',
+  // Server confirmation of an accepted subscribe; anchors 'synchronized' health.
+  ack: 'ACK',
   reset: 'RESET',
   complete: 'COMPLETE',
   error: 'ERROR',
@@ -86,12 +77,30 @@ const MESSAGE_TYPES = {
 
 type StreamMessageType = (typeof MESSAGE_TYPES)[keyof typeof MESSAGE_TYPES];
 
+const SIGNAL_TYPES = {
+  changed: 'changed',
+  reset: 'reset',
+  error: 'error',
+} as const;
+
+type StreamSignalType = (typeof SIGNAL_TYPES)[keyof typeof SIGNAL_TYPES];
+
+type SignalEnvelope = {
+  clusterId: string;
+  source: ResourceStreamSourceClock;
+  signal: StreamSignalType;
+  version: string;
+};
+
 type ServerMessage = {
-  type: StreamMessageType;
+  type?: StreamMessageType;
   clusterId?: string;
   clusterName?: string;
   domain?: string;
   scope?: string;
+  source?: string;
+  signal?: string;
+  version?: string;
   resourceVersion?: string;
   sequence?: string;
   ref?: {
@@ -104,17 +113,23 @@ type ServerMessage = {
     name?: string;
     uid?: string;
   };
-  row?: unknown;
   error?: string;
   errorDetails?: PermissionDeniedStatus;
 };
 
-type UpdateMessage = ServerMessage & { domain: ResourceDomain; scope: string };
+type UpdateMessage = ServerMessage & {
+  domain: DoorbellDomain;
+  scope: string;
+  signalEnvelope?: SignalEnvelope;
+};
 
 const hasMessageType = (value: unknown): value is StreamMessageType =>
   typeof value === 'string' && Object.values(MESSAGE_TYPES).includes(value as StreamMessageType);
 
-const normalizeStreamScope = (domain: ResourceDomain, scope: unknown): string | null => {
+const hasSignalType = (value: unknown): value is StreamSignalType =>
+  typeof value === 'string' && Object.values(SIGNAL_TYPES).includes(value as StreamSignalType);
+
+const normalizeStreamScope = (domain: DoorbellDomain, scope: unknown): string | null => {
   if (typeof scope === 'string') {
     const trimmed = scope.trim();
     const normalized = stripClusterScope(trimmed);
@@ -131,14 +146,32 @@ const normalizeStreamScope = (domain: ResourceDomain, scope: unknown): string | 
 };
 
 const resolveUpdateMessage = (message: ServerMessage): UpdateMessage | null => {
-  if (!hasMessageType(message.type) || !isSupportedDomain(message.domain)) {
+  if (!isSupportedDomain(message.domain)) {
     return null;
   }
   const normalizedScope = normalizeStreamScope(message.domain, message.scope);
   if (normalizedScope === null) {
     return null;
   }
-  return { ...message, domain: message.domain, scope: normalizedScope };
+  const source = message.source;
+  const signal = message.signal;
+  const version = message.version?.trim();
+  const signalClusterId = message.clusterId?.trim();
+  // A message carrying a KNOWN source clock the domain does not declare is a
+  // contract violation (e.g. a metric doorbell aimed at a non-metric domain):
+  // drop it outright rather than letting the legacy `type` path apply it.
+  // Control frames without a source (heartbeat/ack) are unaffected.
+  if (isResourceStreamSourceClock(source) && !domainSupportsSourceClock(message.domain, source)) {
+    return null;
+  }
+  const signalEnvelope =
+    signalClusterId && version && isResourceStreamSourceClock(source) && hasSignalType(signal)
+      ? { clusterId: signalClusterId, source, signal, version }
+      : undefined;
+  if (!hasMessageType(message.type) && !signalEnvelope) {
+    return null;
+  }
+  return { ...message, domain: message.domain, scope: normalizedScope, signalEnvelope };
 };
 
 const normalizeUpdateClusterId = (update: UpdateMessage, clusterId: string): UpdateMessage => {
@@ -149,13 +182,7 @@ const normalizeUpdateClusterId = (update: UpdateMessage, clusterId: string): Upd
   if (messageClusterId && messageClusterId === clusterId) {
     return update;
   }
-  const next: UpdateMessage = { ...update, clusterId };
-  if (update.row && typeof update.row === 'object' && !Array.isArray(update.row)) {
-    if ('clusterId' in update.row) {
-      next.row = { ...(update.row as Record<string, unknown>), clusterId };
-    }
-  }
-  return next;
+  return { ...update, clusterId };
 };
 
 const parseResourceVersion = (value?: string | number): bigint | null => {
@@ -185,47 +212,6 @@ const parseResourceVersion = (value?: string | number): bigint | null => {
 
 // Stream sequence parsing mirrors resourceVersion semantics for resume tokens.
 const parseStreamSequence = (value?: string | number): bigint | null => parseResourceVersion(value);
-
-type KeyDiff = {
-  missingKeys: number;
-  extraKeys: number;
-  missingSample: string[];
-  extraSample: string[];
-};
-
-const diffKeySets = (expected: Set<string>, actual: Set<string>, sampleLimit: number): KeyDiff => {
-  const missingSample: string[] = [];
-  const extraSample: string[] = [];
-  let missingKeys = 0;
-  let extraKeys = 0;
-
-  expected.forEach((key) => {
-    if (!actual.has(key)) {
-      missingKeys += 1;
-      if (missingSample.length < sampleLimit) {
-        missingSample.push(key);
-      }
-    }
-  });
-
-  actual.forEach((key) => {
-    if (!expected.has(key)) {
-      extraKeys += 1;
-      if (extraSample.length < sampleLimit) {
-        extraSample.push(key);
-      }
-    }
-  });
-
-  return { missingKeys, extraKeys, missingSample, extraSample };
-};
-
-const updateStats = (stats: SnapshotStats | null, itemCount: number): SnapshotStats => {
-  if (!stats) {
-    return { itemCount, buildDurationMs: 0 };
-  }
-  return { ...stats, itemCount };
-};
 
 export type ResourceStreamTelemetrySummary = {
   resyncCount: number;
@@ -279,7 +265,7 @@ export class ResourceStreamManager {
   private lastConnectionError = '';
   private streamHealth = new ResourceStreamHealthStore();
   private errorNotifier = new StreamErrorNotifier();
-  private consecutiveErrors = new Map<string, number>();
+  private legacyResyncVersionCounter = 0;
   private visibility = new StreamVisibilityController<StreamSubscription>({
     captureActive: () => Array.from(this.subscriptions.values()),
     suspendActive: () => {
@@ -324,7 +310,7 @@ export class ResourceStreamManager {
   }
 
   // Expose per-scope health so refresh gating can keep snapshots running until delivery resumes.
-  getHealthStatus(domain: ResourceDomain, scope: string): ResourceStreamHealthStatus {
+  getHealthStatus(domain: DoorbellDomain, scope: string): ResourceStreamHealthStatus {
     return this.streamHealth.status(domain, scope);
   }
 
@@ -332,11 +318,11 @@ export class ResourceStreamManager {
     return this.streamHealth.snapshot(domain, scope);
   }
 
-  isHealthy(domain: ResourceDomain, scope: string): boolean {
+  isHealthy(domain: DoorbellDomain, scope: string): boolean {
     return this.getHealthStatus(domain, scope) === 'healthy';
   }
 
-  async start(domain: ResourceDomain, scope: string): Promise<void> {
+  async start(domain: DoorbellDomain, scope: string): Promise<void> {
     if (typeof window === 'undefined') {
       return;
     }
@@ -346,15 +332,15 @@ export class ResourceStreamManager {
     );
   }
 
-  stop(domain: ResourceDomain, scope: string, reset = false): void {
-    const subscriptions = this.getSubscriptions(domain, scope);
+  stop(domain: DoorbellDomain, scope: string, reset = false): void {
+    const subscriptions = this.releaseSubscriptions(domain, scope);
     if (subscriptions.length === 0) {
       return;
     }
     subscriptions.forEach((subscription) => this.scheduleUnsubscribe(subscription, reset));
   }
 
-  async refreshOnce(domain: ResourceDomain, scope: string): Promise<void> {
+  async refreshOnce(domain: DoorbellDomain, scope: string): Promise<void> {
     if (typeof window === 'undefined') {
       return;
     }
@@ -374,14 +360,15 @@ export class ResourceStreamManager {
       console.error('Invalid resource stream payload');
       return;
     }
-    if (!parsed || !hasMessageType(parsed.type)) {
+    if (!parsed) {
       return;
     }
     const update = resolveUpdateMessage(parsed);
     if (!update) {
       return;
     }
-    const messageClusterId = update.clusterId?.trim() || clusterId;
+    const messageClusterId =
+      update.signalEnvelope?.clusterId ?? update.clusterId?.trim() ?? clusterId;
     if (!messageClusterId) {
       return;
     }
@@ -393,6 +380,9 @@ export class ResourceStreamManager {
     let subscription = this.subscriptions.get(subscriptionKey);
     let resolvedUpdate = update;
     if (!subscription) {
+      if (update.signalEnvelope) {
+        return;
+      }
       // Fall back when cluster IDs drift but the scope/domain pair is unique.
       subscription = this.findSubscriptionByScope(update.domain, update.scope);
       if (!subscription) {
@@ -403,32 +393,100 @@ export class ResourceStreamManager {
     const errorMessage = resolvePermissionDeniedMessage(update.error, update.errorDetails);
     this.recordSubscriptionMessage(subscription);
 
+    // Server frames carry the cluster DISPLAY NAME (the subscribe ACK always
+    // does); capture it so subscription-labeled logging shows the same name
+    // as the backend's per-cluster log lines instead of falling back to the
+    // raw composite cluster ID.
+    const messageClusterName = parsed.clusterName?.trim();
+    if (messageClusterName && subscription.clusterName !== messageClusterName) {
+      subscription.clusterName = messageClusterName;
+    }
+
+    if (resolvedUpdate.signalEnvelope) {
+      switch (resolvedUpdate.signalEnvelope.signal) {
+        case SIGNAL_TYPES.changed:
+          this.handleUpdate(subscription, resolvedUpdate);
+          this.updateHealthForSubscription(subscription);
+          return;
+        case SIGNAL_TYPES.reset:
+          if (subscription.pendingReset) {
+            subscription.pendingReset = false;
+            this.updateHealthForSubscription(subscription);
+            return;
+          }
+          this.bumpSourceVersionOnly(
+            subscription,
+            Date.now(),
+            { [resolvedUpdate.signalEnvelope.source]: resolvedUpdate.signalEnvelope.version },
+            resolvedUpdate.signalEnvelope.version
+          );
+          void this.resyncSubscription(subscription, 'reset');
+          this.updateHealthForSubscription(subscription);
+          return;
+        case SIGNAL_TYPES.error:
+          this.recordSubscriptionError(subscription, errorMessage || 'stream error');
+          // A permission-denied frame is a SETTLED answer: resyncing cannot
+          // succeed until RBAC or the namespace scope changes. Hand the scope
+          // to the orchestrator's streaming block (cleared on scope change /
+          // auth recovery) instead of the endless resync loop. Health keeps
+          // reporting "unhealthy (permissions)" for diagnostics.
+          if (isPermissionDeniedStatus(update.errorDetails)) {
+            this.updateHealthForSubscription(subscription);
+            eventBus.emit('refresh:resource-stream-permission-denied', {
+              domain: subscription.domain,
+              scope: subscription.storeScope,
+              reason: errorMessage || 'permission denied',
+            });
+            return;
+          }
+          void this.resyncSubscription(subscription, errorMessage || 'stream error', true);
+          this.updateHealthForSubscription(subscription);
+          return;
+        default:
+          return;
+      }
+    }
+
     switch (resolvedUpdate.type) {
       case MESSAGE_TYPES.heartbeat:
+        return;
+      case MESSAGE_TYPES.ack:
+        // The server accepted the subscribe on this connection: the scope is
+        // trusted even with zero deliveries (quiet domain). Without a server
+        // confirmation the subscription must stay degraded so polling falls
+        // back — a send alone proves nothing (found live: a backend without
+        // the domain's selector left the client claiming healthy, frozen).
+        this.markSubscriptionSynchronized(subscription);
+        this.updateHealthForSubscription(subscription);
         return;
       case MESSAGE_TYPES.reset:
         if (subscription.pendingReset) {
           subscription.pendingReset = false;
-          this.updateHealthForScope(subscription.domain, subscription.reportScope);
+          // A post-subscribe RESET is also a server confirmation (backends
+          // that predate the ACK frame confirm fresh subscribes this way).
+          this.markSubscriptionSynchronized(subscription);
+          this.updateHealthForSubscription(subscription);
           return;
         }
+        this.bumpLegacyResyncSourceVersion(subscription, resolvedUpdate);
         void this.resyncSubscription(subscription, 'reset');
-        this.updateHealthForScope(subscription.domain, subscription.reportScope);
+        this.updateHealthForSubscription(subscription);
         return;
       case MESSAGE_TYPES.complete:
+        this.bumpLegacyResyncSourceVersion(subscription, resolvedUpdate);
         void this.resyncSubscription(subscription, errorMessage || 'complete');
-        this.updateHealthForScope(subscription.domain, subscription.reportScope);
+        this.updateHealthForSubscription(subscription);
         return;
       case MESSAGE_TYPES.error:
         this.recordSubscriptionError(subscription, errorMessage || 'stream error');
         void this.resyncSubscription(subscription, errorMessage || 'stream error', true);
-        this.updateHealthForScope(subscription.domain, subscription.reportScope);
+        this.updateHealthForSubscription(subscription);
         return;
       case MESSAGE_TYPES.added:
       case MESSAGE_TYPES.modified:
       case MESSAGE_TYPES.deleted:
         this.handleUpdate(subscription, resolvedUpdate);
-        this.updateHealthForScope(subscription.domain, subscription.reportScope);
+        this.updateHealthForSubscription(subscription);
         return;
       default:
         return;
@@ -436,7 +494,7 @@ export class ResourceStreamManager {
   }
 
   private findSubscriptionByScope(
-    domain: ResourceDomain,
+    domain: DoorbellDomain,
     scope: string
   ): StreamSubscription | undefined {
     return this.subscriptions.findByScope(domain, scope);
@@ -459,15 +517,23 @@ export class ResourceStreamManager {
       if (targetClusterId && subscription.clusterId !== targetClusterId) {
         return;
       }
-      this.subscribe(subscription);
-      if (
-        subscription.lastSequence &&
-        !subscription.resyncInFlight &&
-        !subscription.driftDetected
-      ) {
-        // Clear resync state when a resume-capable stream reconnects.
+      if (subscription.lastSequence && !subscription.resyncInFlight) {
+        this.subscribe(subscription);
+        // Clear resync state when a resume-capable stream reconnects; the
+        // server's ACK (or resumed deliveries) restores synchronized health.
         this.markResyncComplete(subscription);
+        this.updateHealthForSubscription(subscription);
+        return;
       }
+      if (!subscription.resyncInFlight) {
+        // No resume token: the subscription's data predates this connection
+        // (fetched while connecting), so changes in the gap could be missed.
+        // A forced resync on the live connection re-establishes trust — its
+        // tail re-subscribes and marks the subscription synchronized.
+        void this.resyncSubscription(subscription, 'reconnect', true);
+        return;
+      }
+      this.subscribe(subscription);
     });
   }
 
@@ -494,16 +560,14 @@ export class ResourceStreamManager {
     this.visibility.resume();
   }
 
-  private ensureSubscriptions(domain: ResourceDomain, scope: string): StreamSubscription[] {
+  private ensureSubscriptions(domain: DoorbellDomain, scope: string): StreamSubscription[] {
     const subscriptions = this.subscriptions.ensure(domain, scope);
-    subscriptions.forEach((subscription) =>
-      this.updateHealthForScope(subscription.domain, subscription.reportScope)
-    );
+    subscriptions.forEach((subscription) => this.updateHealthForSubscription(subscription));
     return subscriptions;
   }
 
-  private getSubscriptions(domain: ResourceDomain, scope: string): StreamSubscription[] {
-    return this.subscriptions.getForScope(domain, scope);
+  private releaseSubscriptions(domain: DoorbellDomain, scope: string): StreamSubscription[] {
+    return this.subscriptions.release(domain, scope);
   }
 
   private getConnection(): ResourceStreamConnection {
@@ -536,7 +600,7 @@ export class ResourceStreamManager {
       window.clearTimeout(subscription.updateTimer);
     }
     this.subscriptions.delete(subscription);
-    this.updateHealthForScope(subscription.domain, subscription.reportScope);
+    this.updateHealthForSubscription(subscription);
 
     if (reset) {
       this.clearStreamError(subscription.clusterId);
@@ -564,6 +628,17 @@ export class ResourceStreamManager {
     subscription.lastDeliveryEpoch = this.connectionEpoch;
   }
 
+  // markSubscriptionSynchronized records that this subscription's data is
+  // trusted on the CURRENT connection (a resync completed, or the stream
+  // resumed via its sequence token). It clears any prior error: the resync is
+  // the recovery protocol, so recovery must not wait for a delivery that a
+  // quiet domain will never produce.
+  private markSubscriptionSynchronized(subscription: StreamSubscription): void {
+    subscription.lastSyncedEpoch = this.connectionEpoch;
+    subscription.lastErrorAt = undefined;
+    subscription.lastErrorReason = undefined;
+  }
+
   private recordSubscriptionError(subscription: StreamSubscription, message: string): void {
     subscription.lastErrorAt = Date.now();
     subscription.lastErrorReason = message;
@@ -573,9 +648,6 @@ export class ResourceStreamManager {
     status: ResourceStreamHealthStatus;
     reason: string;
   } {
-    if (subscription.driftDetected) {
-      return { status: 'unhealthy', reason: 'drift detected' };
-    }
     if (this.connectionStatus !== 'connected') {
       const reason = this.lastConnectionError || 'stream disconnected';
       return { status: 'unhealthy', reason };
@@ -590,15 +662,22 @@ export class ResourceStreamManager {
     if (subscription.lastDeliveryEpoch === this.connectionEpoch) {
       return { status: 'healthy', reason: 'delivering' };
     }
+    // Connected + synchronized on this connection is healthy even with zero
+    // deliveries: quiet domains would otherwise poll forever ("awaiting
+    // updates" only means nothing has changed).
+    if (subscription.lastSyncedEpoch === this.connectionEpoch) {
+      return { status: 'healthy', reason: 'synchronized' };
+    }
     return { status: 'degraded', reason: 'awaiting updates' };
   }
 
   private aggregateHealth(
-    domain: ResourceDomain,
+    domain: DoorbellDomain,
     reportScope: string
   ): ResourceStreamHealthPayload {
     const subscriptions = Array.from(this.subscriptions.values()).filter(
-      (subscription) => subscription.domain === domain && subscription.reportScope === reportScope
+      (subscription) =>
+        subscription.domain === domain && this.reportScopes(subscription).includes(reportScope)
     );
     if (subscriptions.length === 0) {
       return {
@@ -641,18 +720,38 @@ export class ResourceStreamManager {
     return payload;
   }
 
-  private updateHealthForScope(domain: ResourceDomain, reportScope: string): void {
+  private updateHealthForScope(domain: DoorbellDomain, reportScope: string): void {
     const next = this.aggregateHealth(domain, reportScope);
     this.streamHealth.set(next);
   }
 
+  private reportScopes(subscription: StreamSubscription): string[] {
+    const scopes = Array.from(subscription.reportScopes ?? []);
+    return scopes.length > 0 ? scopes : [subscription.reportScope];
+  }
+
+  private forEachReportScope(
+    subscription: StreamSubscription,
+    callback: (reportScope: string) => void
+  ): void {
+    this.reportScopes(subscription).forEach(callback);
+  }
+
+  private updateHealthForSubscription(subscription: StreamSubscription): void {
+    this.forEachReportScope(subscription, (reportScope) =>
+      this.updateHealthForScope(subscription.domain, reportScope)
+    );
+  }
+
   private updateAllHealth(): void {
-    const targets = new Map<string, { domain: ResourceDomain; scope: string }>();
+    const targets = new Map<string, { domain: DoorbellDomain; scope: string }>();
     this.subscriptions.forEach((subscription) => {
-      const key = `${subscription.domain}::${subscription.reportScope}`;
-      if (!targets.has(key)) {
-        targets.set(key, { domain: subscription.domain, scope: subscription.reportScope });
-      }
+      this.forEachReportScope(subscription, (reportScope) => {
+        const key = `${subscription.domain}::${reportScope}`;
+        if (!targets.has(key)) {
+          targets.set(key, { domain: subscription.domain, scope: reportScope });
+        }
+      });
     });
     targets.forEach(({ domain, scope }) => this.updateHealthForScope(domain, scope));
   }
@@ -676,9 +775,6 @@ export class ResourceStreamManager {
 
   private handleUpdate(subscription: StreamSubscription, message: UpdateMessage): void {
     if (subscription.resyncInFlight) {
-      return;
-    }
-    if (subscription.driftDetected) {
       return;
     }
     if (isCompleteResyncStreamDomain(subscription.domain)) {
@@ -727,111 +823,103 @@ export class ResourceStreamManager {
     if (subscription.updateQueue.length === 0) {
       return;
     }
-    const updates = subscription.updateQueue.splice(
-      0,
-      subscription.updateQueue.length
-    ) as UpdateMessage[];
-    const now = Date.now();
+    const sourceUpdate = this.sourceVersionsFromUpdates(subscription.updateQueue);
+    subscription.updateQueue = [];
+    this.bumpSourceVersionOnly(
+      subscription,
+      Date.now(),
+      sourceUpdate.sourceVersions,
+      sourceUpdate.latest
+    );
+  }
 
-    // Always update shadow keys so drift checks can compare snapshots to streamed changes.
-    this.applyShadowUpdates(subscription, updates);
+  private sourceVersionsFromUpdates(
+    updates: Array<{
+      source?: string;
+      signal?: string;
+      version?: string;
+      signalEnvelope?: SignalEnvelope;
+    }>
+  ): { sourceVersions: Partial<Record<ResourceStreamSourceClock, string>>; latest?: string } {
+    const sourceVersions: Partial<Record<ResourceStreamSourceClock, string>> = {};
+    let latest: string | undefined;
+    for (const update of updates) {
+      const source = update.signalEnvelope?.source ?? update.source;
+      const version = update.signalEnvelope?.version ?? update.version?.trim();
+      if (!isResourceStreamSourceClock(source) || !version) {
+        continue;
+      }
+      sourceVersions[source] = version;
+      latest = version;
+    }
+    return { sourceVersions, latest };
+  }
 
-    // Notify-only domains carry no row payload — the query-backed table refetches
-    // on the bare signal. Bump streamRevision (the refetch trigger) and leave the
-    // stored rows untouched; never run the retain/merge/sort row path.
-    if (isNotifyOnlyStreamDomain(subscription.domain)) {
-      this.bumpStreamRevisionOnly(subscription, now);
+  private bumpLegacyResyncSourceVersion(
+    subscription: StreamSubscription,
+    update: UpdateMessage
+  ): void {
+    const source = this.legacyResyncSource(subscription.domain, update);
+    if (!source) {
       return;
     }
-
-    this.applyRowUpdates(subscription, updates, now);
+    const version = `${source}:resync:${++this.legacyResyncVersionCounter}`;
+    this.bumpSourceVersionOnly(subscription, Date.now(), { [source]: version }, version);
   }
 
-  // bumpStreamRevisionOnly advances the live-data identity for a notify-only
-  // domain without touching its rows. The third component of liveDomainVersion
-  // (streamRevision) changes, so the query-backed view refetches its page; the
-  // streamed deltas carried no rows to apply. Coalescing (UPDATE_COALESCE_MS)
-  // collapses a burst — e.g. an informer resync — into a single bump/refetch.
-  private bumpStreamRevisionOnly(subscription: StreamSubscription, now: number): void {
-    setScopedDomainState(subscription.domain, subscription.reportScope, (previous) => ({
-      ...previous,
-      status: 'ready',
-      streamRevision: (previous.streamRevision ?? 0) + 1,
-      lastUpdated: now,
-      lastAutoRefresh: now,
-      error: null,
-      isManual: false,
-      scope: subscription.reportScope,
-    }));
-    this.clearStreamError(subscription.clusterId);
+  private legacyResyncSource(
+    domain: DoorbellDomain,
+    update: UpdateMessage
+  ): ResourceStreamSourceClock | null {
+    const source = update.source;
+    if (isResourceStreamSourceClock(source) && domainSupportsSourceClock(domain, source)) {
+      return source;
+    }
+    if (domainSupportsSourceClock(domain, 'object')) {
+      return 'object';
+    }
+    return null;
   }
 
-  private applyRowUpdates(
+  private bumpSourceVersionOnly(
     subscription: StreamSubscription,
-    updates: UpdateMessage[],
-    now: number
+    now: number,
+    sourceVersions: Partial<Record<ResourceStreamSourceClock, string>>,
+    latest?: string
   ): void {
-    const descriptor = getResourceStreamDomainDescriptor(subscription.domain);
-    const collection = descriptor.collection;
-
-    setScopedDomainState(subscription.domain, subscription.reportScope, (previous) => {
-      const currentPayload = previous.data ?? collection.emptyPayload(subscription.clusterId);
-      const existingRows = collection.getRows(currentPayload);
-      const nextRows = applyResourceRowUpdates(
-        existingRows,
-        updates,
-        subscription.clusterId,
-        collection,
-        subscription.preserveMetrics
+    if (subscription.domain === 'namespaces' && sourceVersions.object) {
+      // Rare by design (namespace changes/presence flips); the matching backend
+      // line is "namespaces doorbell <version>: <reason> — signaling ...".
+      // Together they localize a dead doorbell to the backend, the wire, or the
+      // consumer — so both halves carry the per-cluster label.
+      logDebug(
+        `namespaces doorbell ${sourceVersions.object} received for scope ${subscription.reportScope}: advancing the object clock so NamespaceContext refetches the namespace list`,
+        { clusterId: subscription.clusterId, clusterName: subscription.clusterName }
       );
-
-      if (!previous.data && nextRows.length === 0) {
-        return previous;
-      }
-
-      if (previous.data && nextRows === existingRows) {
-        return previous;
-      }
-
-      return {
+    }
+    this.forEachReportScope(subscription, (reportScope) => {
+      setScopedDomainState(subscription.domain, reportScope, (previous) => ({
         ...previous,
         status: 'ready',
-        data:
-          nextRows === existingRows
-            ? currentPayload
-            : collection.withRows(currentPayload, nextRows),
-        stats: updateStats(previous.stats, nextRows.length),
-        // Streamed changes carry no new backend snapshot version/checksum, so
-        // bump the stream revision — the third component of the live-data
-        // identity — or query-backed views never refetch on streamed changes.
+        sourceVersion: latest ?? previous.sourceVersion,
+        // Doorbell clocks live in signalVersions, which payload applies never
+        // touch — the structural guarantee that signal-refetch keys move only
+        // when a doorbell delivers them. sourceVersions stays payload-owned
+        // (the backend back-fills an object clock into every snapshot, so it
+        // churns on every fetch and cannot carry signals).
+        signalVersions: {
+          ...(previous.signalVersions ?? {}),
+          ...sourceVersions,
+        },
         streamRevision: (previous.streamRevision ?? 0) + 1,
         lastUpdated: now,
         lastAutoRefresh: now,
         error: null,
         isManual: false,
-        scope: subscription.reportScope,
-      };
+        scope: reportScope,
+      }));
     });
     this.clearStreamError(subscription.clusterId);
-  }
-
-  private applyShadowUpdates(subscription: StreamSubscription, updates: UpdateMessage[]): void {
-    if (!subscription.hasBaseline) {
-      return;
-    }
-
-    const collection = getResourceStreamDomainDescriptor(subscription.domain).collection;
-    updates.forEach((update) => {
-      const key = collection.buildUpdateKey(update, subscription.clusterId);
-      if (!key) {
-        return;
-      }
-      if (update.type === MESSAGE_TYPES.deleted) {
-        subscription.shadowKeys.delete(key);
-      } else {
-        subscription.shadowKeys.add(key);
-      }
-    });
   }
 
   // Track resync activity so diagnostics can surface stream health.
@@ -843,14 +931,6 @@ export class ResourceStreamManager {
     stats.resyncCount += 1;
     stats.lastResyncAt = Date.now();
     stats.lastResyncReason = reason;
-  }
-
-  // Track snapshot fallbacks when drift forces streaming to stop.
-  private recordFallback(subscription: StreamSubscription, reason: string): void {
-    const stats = this.ensureStreamTelemetry(subscription);
-    stats.fallbackCount += 1;
-    stats.lastFallbackAt = Date.now();
-    stats.lastFallbackReason = reason;
   }
 
   private shouldTrackResync(reason: string): boolean {
@@ -885,9 +965,6 @@ export class ResourceStreamManager {
     if (subscription.resyncInFlight) {
       return;
     }
-    if (subscription.driftDetected) {
-      return;
-    }
     const now = Date.now();
     if (
       !force &&
@@ -900,6 +977,7 @@ export class ResourceStreamManager {
     subscription.lastResyncAt = now;
     if (this.shouldResetDeliveryOnResync(reason)) {
       subscription.lastDeliveryEpoch = undefined;
+      subscription.lastSyncedEpoch = undefined;
     }
     this.recordResync(subscription, reason);
     // Skip setting a user-visible "Stream resyncing" error for initial stream
@@ -908,7 +986,7 @@ export class ResourceStreamManager {
     if (reason !== 'initial') {
       this.markResyncing(subscription);
     }
-    this.updateHealthForScope(subscription.domain, subscription.reportScope);
+    this.updateHealthForSubscription(subscription);
     if (subscription.updateTimer !== null) {
       window.clearTimeout(subscription.updateTimer);
       subscription.updateTimer = null;
@@ -916,220 +994,51 @@ export class ResourceStreamManager {
     subscription.updateQueue = [];
     subscription.lastSequence = undefined;
 
-    // Notify-only domains carry no row baseline. A resync (initial start, reset,
-    // backpressure, complete/error) just re-arms the delta stream and bumps
-    // streamRevision so the query-backed view refetches its page — no full-row
-    // snapshot is pulled over the bridge, and status→'ready' clears the query
-    // gate so the table stops waiting on a baseline before showing page 1.
-    if (isNotifyOnlyStreamDomain(subscription.domain)) {
-      this.bumpStreamRevisionOnly(subscription, now);
-      this.markResyncComplete(subscription);
-      subscription.pendingReset = false;
-      this.subscribe(subscription);
-      return;
-    }
-
-    try {
-      const { snapshot, notModified } = await fetchSnapshotForSubscription(subscription);
-      if (notModified) {
-        this.markResyncComplete(subscription);
-        subscription.pendingReset = false;
-        if (subscription.driftDetected) {
-          this.unsubscribe(subscription, false);
-          return;
-        }
-        this.subscribe(subscription);
-        return;
-      }
-      if (!snapshot) {
-        throw new Error('resource stream snapshot missing');
-      }
-      this.applySnapshot(subscription, snapshot);
-      const snapshotVersion = parseResourceVersion(snapshot.version);
-      if (
-        snapshotVersion &&
-        (!subscription.resourceVersion || snapshotVersion > subscription.resourceVersion)
-      ) {
-        subscription.resourceVersion = snapshotVersion;
-      }
-      subscription.pendingReset = false;
-      if (subscription.driftDetected) {
-        this.unsubscribe(subscription, false);
-        return;
-      }
-      this.subscribe(subscription);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.setStreamError(subscription, message);
-    } finally {
-      subscription.resyncInFlight = false;
-      this.updateHealthForScope(subscription.domain, subscription.reportScope);
-    }
-  }
-
-  private applySnapshot(subscription: StreamSubscription, snapshot: Snapshot<any>): void {
-    // Drift detection compares streamed keys against the latest snapshot.
-    this.updateShadowBaseline(subscription, snapshot);
-
-    const generatedAt = snapshot.generatedAt || Date.now();
-    const descriptor = getResourceStreamDomainDescriptor(subscription.domain);
-    const collection = descriptor.collection;
-    const payload = snapshot.payload;
-
-    setScopedDomainState(subscription.domain, subscription.reportScope, (previous) => {
-      const previousRows = previous.data ? collection.getRows(previous.data) : [];
-      const incomingRows = collection.getRows(payload);
-      const mergedRows = mergeSnapshotRows(
-        previousRows,
-        incomingRows,
-        subscription.clusterId,
-        collection
-      );
-      const nextPayload = collection.withRows(payload, mergedRows);
-
-      return {
-        ...previous,
-        status: 'ready',
-        data: nextPayload,
-        stats: updateStats(snapshot.stats ?? previous.stats ?? null, mergedRows.length),
-        version: snapshot.version,
-        checksum: snapshot.checksum,
-        etag: snapshot.checksum ?? previous.etag,
-        lastUpdated: generatedAt,
-        lastAutoRefresh: generatedAt,
-        error: null,
-        isManual: false,
-        scope: subscription.reportScope,
-      };
-    });
-    this.clearStreamError(subscription.clusterId);
-  }
-
-  private updateShadowBaseline(subscription: StreamSubscription, snapshot: Snapshot<any>): void {
-    const snapshotKeys = getResourceStreamDomainDescriptor(subscription.domain).buildSnapshotKeys(
-      snapshot.payload,
-      subscription.clusterId
-    );
-
-    if (subscription.hasBaseline && !subscription.driftDetected) {
-      const streamCount = subscription.shadowKeys.size;
-      const snapshotCount = snapshotKeys.size;
-      const diff = diffKeySets(snapshotKeys, subscription.shadowKeys, DRIFT_SAMPLE_SIZE);
-      if (diff.missingKeys > 0 || diff.extraKeys > 0) {
-        this.flagDrift(subscription, {
-          reason: 'snapshot mismatch',
-          streamCount,
-          snapshotCount,
-          missingKeys: diff.missingKeys,
-          extraKeys: diff.extraKeys,
-          missingSample: diff.missingSample,
-          extraSample: diff.extraSample,
-        });
-      }
-    }
-
-    subscription.shadowKeys = snapshotKeys;
-    subscription.hasBaseline = true;
-  }
-
-  private flagDrift(
-    subscription: StreamSubscription,
-    details: {
-      reason: string;
-      streamCount: number;
-      snapshotCount: number;
-      missingKeys: number;
-      extraKeys: number;
-      missingSample: string[];
-      extraSample: string[];
-    }
-  ): void {
-    if (subscription.driftDetected) {
-      return;
-    }
-    this.recordFallback(subscription, details.reason);
-    subscription.driftDetected = true;
-    this.updateHealthForScope(subscription.domain, subscription.reportScope);
-
-    eventBus.emit('refresh:resource-stream-drift', {
-      domain: subscription.domain,
-      scope: subscription.reportScope,
-      reason: details.reason,
-      streamCount: details.streamCount,
-      snapshotCount: details.snapshotCount,
-      missingKeys: details.missingKeys,
-      extraKeys: details.extraKeys,
-    });
-
-    logWarning(
-      `[resource-stream] drift detected domain=${subscription.domain} scope=${subscription.reportScope} reason=${details.reason} streamCount=${details.streamCount} snapshotCount=${details.snapshotCount} missingKeys=${details.missingKeys} extraKeys=${details.extraKeys}`,
-      { clusterId: subscription.clusterId }
-    );
+    const sourceUpdate = this.sourceVersionsFromUpdates(subscription.updateQueue);
+    this.bumpSourceVersionOnly(subscription, now, sourceUpdate.sourceVersions, sourceUpdate.latest);
+    this.markResyncComplete(subscription);
+    subscription.pendingReset = false;
+    subscription.resyncInFlight = false;
+    // Trust is NOT granted here: the tail's subscribe must be confirmed by the
+    // server (ACK, or the pendingReset-absorbed RESET) before health reports
+    // synchronized.
+    this.subscribe(subscription);
+    this.updateHealthForSubscription(subscription);
   }
 
   private markResyncComplete(subscription: StreamSubscription): void {
     const now = Date.now();
-    setScopedDomainState(subscription.domain, subscription.reportScope, (previous) => ({
-      ...previous,
-      status: previous.data ? 'ready' : 'idle',
-      error: null,
-      lastUpdated: previous.lastUpdated ?? now,
-      lastAutoRefresh: now,
-      scope: subscription.reportScope,
-    }));
+    this.forEachReportScope(subscription, (reportScope) => {
+      setScopedDomainState(subscription.domain, reportScope, (previous) => ({
+        ...previous,
+        status: previous.data ? 'ready' : 'idle',
+        error: null,
+        lastUpdated: previous.lastUpdated ?? now,
+        lastAutoRefresh: now,
+        scope: reportScope,
+      }));
+    });
     this.clearStreamError(subscription.clusterId);
   }
 
   private markResyncing(subscription: StreamSubscription): void {
     const message = RESYNC_MESSAGE;
-    setScopedDomainState(subscription.domain, subscription.reportScope, (previous) => ({
-      ...previous,
-      status: previous.data ? 'updating' : 'initialising',
-      error: message,
-      scope: subscription.reportScope,
-    }));
-  }
-
-  private setStreamError(subscription: StreamSubscription, message: string): void {
-    this.recordSubscriptionError(subscription, message);
-    const key = `${subscription.clusterId}::${subscription.domain}::${subscription.storeScope}`;
-    const attempts = (this.consecutiveErrors.get(key) ?? 0) + 1;
-    this.consecutiveErrors.set(key, attempts);
-    const isTerminal = attempts >= STREAM_ERROR_NOTIFY_THRESHOLD;
-
-    setScopedDomainState(subscription.domain, subscription.reportScope, (previous) => ({
-      ...previous,
-      status: isTerminal ? 'error' : previous.status,
-      error: isTerminal ? message : previous.error,
-      scope: subscription.reportScope,
-    }));
-
-    if (isTerminal) {
-      this.notifyStreamError(subscription.clusterId, message);
-    }
-    this.updateHealthForScope(subscription.domain, subscription.reportScope);
+    this.forEachReportScope(subscription, (reportScope) => {
+      setScopedDomainState(subscription.domain, reportScope, (previous) => ({
+        ...previous,
+        status: previous.data ? 'updating' : 'initialising',
+        error: message,
+        scope: reportScope,
+      }));
+    });
   }
 
   private clearStreamError(clusterId: string): void {
     this.errorNotifier.clear('resource-stream', clusterId);
-    const errorKeys = Array.from(this.consecutiveErrors.keys()).filter((key) =>
-      key.startsWith(clusterId)
-    );
-    errorKeys.forEach((key) => this.consecutiveErrors.delete(key));
   }
 
   private clearAllStreamErrors(): void {
     this.errorNotifier.clearAll();
-    this.consecutiveErrors.clear();
-  }
-
-  private notifyStreamError(clusterId: string, message: string): void {
-    this.errorNotifier.notify({
-      source: 'resource-stream',
-      domain: 'resource-stream',
-      scope: clusterId || 'global',
-      message,
-    });
   }
 
   private stopAll(reset: boolean): void {
@@ -1143,18 +1052,8 @@ export class ResourceStreamManager {
     this.lastConnectionError = '';
     this.streamHealth.clear();
     this.errorNotifier.clearAll();
-    this.consecutiveErrors.clear();
     this.streamTelemetry.clear();
   }
 }
-
-const fetchSnapshotForSubscription = async (
-  subscription: StreamSubscription
-): Promise<{ snapshot?: Snapshot<any>; notModified: boolean }> => {
-  const { snapshot, notModified } = await fetchSnapshot(subscription.domain, {
-    scope: subscription.storeScope,
-  });
-  return { snapshot, notModified };
-};
 
 export const resourceStreamManager = new ResourceStreamManager();

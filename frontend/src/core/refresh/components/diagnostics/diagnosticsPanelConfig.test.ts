@@ -7,7 +7,6 @@
 
 import { describe, expect, test } from 'vitest';
 import {
-  METRICS_ONLY_DOMAINS,
   PAUSE_POLLING_WHEN_STREAMING_DOMAINS,
   STREAM_ONLY_DOMAINS,
 } from './diagnosticsPanelConfig';
@@ -15,15 +14,15 @@ import {
 const sortedDomains = (domains: Set<string>) => Array.from(domains).sort();
 
 describe('diagnosticsPanelConfig domain behavior sets', () => {
-  test('pins metrics-only domains derived from the contract', () => {
-    expect(sortedDomains(METRICS_ONLY_DOMAINS)).toEqual(['namespace-workloads', 'nodes', 'pods']);
-  });
-
   test('pins stream-only domains derived from the contract', () => {
     expect(sortedDomains(STREAM_ONLY_DOMAINS)).toEqual(['container-logs']);
   });
 
   test('pins domains that pause polling while streaming', () => {
+    // pods/nodes/namespace-workloads pause polling while streaming like every
+    // other stream-covered domain: their metric cadence is push-driven (the
+    // backend poller fans a metric doorbell over the stream), so no
+    // client-side metrics polling remains.
     expect(sortedDomains(PAUSE_POLLING_WHEN_STREAMING_DOMAINS)).toEqual([
       'catalog',
       'cluster-config',
@@ -41,6 +40,11 @@ describe('diagnosticsPanelConfig domain behavior sets', () => {
       'namespace-quotas',
       'namespace-rbac',
       'namespace-storage',
+      'namespace-workloads',
+      'namespaces',
+      'nodes',
+      'object-events',
+      'pods',
     ]);
   });
 });

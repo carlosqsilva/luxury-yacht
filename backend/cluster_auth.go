@@ -17,6 +17,7 @@ import (
 	"github.com/luxury-yacht/app/backend/internal/config"
 	"github.com/luxury-yacht/app/backend/internal/errorcapture"
 	"github.com/luxury-yacht/app/backend/internal/logsources"
+	"github.com/luxury-yacht/app/backend/refresh/system"
 )
 
 // handleClusterAuthStateChange handles auth state changes for a specific cluster.
@@ -25,7 +26,7 @@ import (
 //
 // NOTE: This is called from the auth manager with the mutex held, so heavy
 // operations must be run asynchronously to avoid blocking other auth operations.
-func (a *App) handleClusterAuthStateChange(clusterID string, state authstate.State, reason string) {
+func (a *App) handleClusterAuthStateChange(clusterID string, state authstate.State, diag authstate.FailureDiagnostic) {
 	if a == nil || clusterID == "" {
 		return
 	}
@@ -56,13 +57,9 @@ func (a *App) handleClusterAuthStateChange(clusterID string, state authstate.Sta
 		})
 
 	case authstate.StateRecovering:
-		a.logger.Warn(fmt.Sprintf("Cluster %s: auth recovering - %s", clusterName, reason), logsources.Auth, clusterID, clusterName)
+		a.logger.Warn(fmt.Sprintf("Cluster %s: auth recovering - %s", clusterName, diag.Reason), logsources.Auth, clusterID, clusterName)
 		// Emit per-cluster recovering event for the frontend
-		a.emitEvent("cluster:auth:recovering", map[string]any{
-			"clusterId":   clusterID,
-			"clusterName": clusterName,
-			"reason":      reason,
-		})
+		a.emitEvent("cluster:auth:recovering", authEventPayload(clusterID, clusterName, diag))
 		// Teardown only this cluster's subsystem through the coordinated mutation path.
 		a.runSelectionMutationAsync(fmt.Sprintf("cluster-auth-teardown:%s", clusterID), func(_ *selectionMutation) error {
 			return a.runClusterOperation(context.Background(), clusterID, func(opCtx context.Context) error {
@@ -75,40 +72,56 @@ func (a *App) handleClusterAuthStateChange(clusterID string, state authstate.Sta
 		})
 
 	case authstate.StateInvalid:
-		a.logger.Error(fmt.Sprintf("Cluster %s: auth failed - %s", clusterName, reason), logsources.Auth, clusterID, clusterName)
+		a.logger.Error(fmt.Sprintf("Cluster %s: auth failed - %s", clusterName, diag.Reason), logsources.Auth, clusterID, clusterName)
 		// Capture the auth failure with cluster context for error enhancement
-		errorcapture.CaptureWithCluster(clusterID, fmt.Sprintf("auth failed: %s", reason))
+		errorcapture.CaptureWithCluster(clusterID, fmt.Sprintf("auth failed: %s", diag.Reason))
 		// Emit per-cluster failure event for the frontend
-		a.emitEvent("cluster:auth:failed", map[string]any{
-			"clusterId":   clusterID,
-			"clusterName": clusterName,
-			"reason":      reason,
-		})
+		a.emitEvent("cluster:auth:failed", authEventPayload(clusterID, clusterName, diag))
 		if a.clusterLifecycle != nil {
 			a.clusterLifecycle.SetState(clusterID, ClusterStateAuthFailed)
 		}
 	}
 }
 
-// teardownClusterSubsystem stops the refresh subsystem for a specific cluster
-// without affecting other clusters.
-func (a *App) teardownClusterSubsystem(clusterID string) {
-	if a == nil || clusterID == "" {
+// authEventPayload builds an auth event payload carrying the per-cluster identity
+// plus the typed credential diagnostic. Every diagnostic field is always present
+// (empty string when unknown) so the frontend can rely on the payload shape.
+func authEventPayload(clusterID, clusterName string, diag authstate.FailureDiagnostic) map[string]any {
+	return map[string]any{
+		"clusterId":   clusterID,
+		"clusterName": clusterName,
+		"reason":      diag.Reason,
+		"class":       diag.Class,
+		"kind":        diag.Kind,
+		"summary":     diag.Summary,
+		"execCommand": diag.ExecCommand,
+	}
+}
+
+// stopClusterFeeds stops everything that FEEDS a cluster's subsystem — permission
+// revalidation, the resource stream, the refresh manager (which also stops the metrics
+// poller and informer hub), and the informer factory — WITHOUT removing the subsystem from
+// the registry and WITHOUT spilling. It is the shared stop logic for two callers:
+//   - teardownClusterSubsystem, which then takes the subsystem + spills (full teardown), and
+//   - coolClusterToMmapServing, which then swaps the maintained stores to mmap and keeps the
+//     subsystem registered so it serves cooled queries.
+//
+// The subsystem must be the one currently registered for clusterID; the caller passes it so
+// cool can act on the same subsystem it will keep serving.
+func (a *App) stopClusterFeeds(clusterID string, subsystem *system.Subsystem) {
+	if a == nil || clusterID == "" || subsystem == nil {
 		return
 	}
 
-	// Stop permission revalidation for this cluster
+	// Stop permission revalidation for this cluster.
 	a.stopRefreshPermissionRevalidation(clusterID)
 
-	// Get and remove the subsystem for this cluster.
-	subsystem := a.takeRefreshSubsystem(clusterID)
-	if subsystem == nil {
-		return
-	}
+	// Silence the doorbell notifiers (namespaces, object-events) BEFORE the
+	// stream manager stops: their debounce/rearm timers outlive the informers
+	// and would keep broadcasting into the dead manager.
+	subsystem.StopDoorbellNotifiers()
 
-	a.logger.Info(fmt.Sprintf("Tearing down subsystem for cluster %s", clusterID), logsources.Auth, clusterID, clusterID)
-
-	// Stop the resource stream if present
+	// Stop the resource stream if present.
 	if subsystem.ResourceStream != nil {
 		subsystem.ResourceStream.Stop()
 	}
@@ -130,10 +143,46 @@ func (a *App) teardownClusterSubsystem(clusterID string) {
 		}
 	}
 
-	// Shutdown the informer factory if present
+	// Shutdown the informer factory if present.
 	if subsystem.InformerFactory != nil {
 		_ = subsystem.InformerFactory.Shutdown()
 	}
+}
+
+// teardownClusterSubsystem stops the refresh subsystem for a specific cluster
+// without affecting other clusters.
+func (a *App) teardownClusterSubsystem(clusterID string) {
+	if a == nil || clusterID == "" {
+		return
+	}
+
+	// A cluster torn down while cooled (e.g. closed, or pressure-collapsed after cooling)
+	// must release its mmap mappings FIRST, before its stores are discarded — otherwise the
+	// closers would never run. takeCooledClosers returns each closer exactly once, so this
+	// never double-unmaps a subsequent re-warm.
+	a.closeCooledClosers(clusterID)
+
+	// Get and remove the subsystem for this cluster.
+	subsystem := a.takeRefreshSubsystem(clusterID)
+	if subsystem == nil {
+		// No live subsystem; still ensure permission revalidation is stopped (takeRefreshSubsystem
+		// short-circuits stopClusterFeeds below, which is where reval stop lives).
+		a.stopRefreshPermissionRevalidation(clusterID)
+		return
+	}
+
+	a.logger.Info(fmt.Sprintf("Tearing down subsystem for cluster %s", clusterID), logsources.Auth, clusterID, clusterID)
+
+	// Stop all feeds (permission reval, resource stream, manager, informer factory).
+	a.stopClusterFeeds(clusterID, subsystem)
+
+	// Spill this cluster's stores to disk now that the subsystem is quiescent, so a re-warm
+	// re-paints them fast before its informers re-sync (the heap they hold is reclaimed by the
+	// governor's Cold action right after this returns). The maintained query stores give the
+	// instant warm-paint; the ingest stores (+ their RV) let each reflector resume from a
+	// delta instead of a full re-LIST.
+	a.spillClusterStores(clusterID, subsystem.Registry)
+	a.spillClusterIngestStores(clusterID, subsystem.IngestManager)
 }
 
 // rebuildClusterSubsystem rebuilds the cluster clients and refresh subsystem
@@ -208,17 +257,31 @@ func (a *App) rebuildClusterSubsystem(clusterID string) {
 		return
 	}
 
+	// (The maintained stores were already warm-painted from disk inside
+	// buildRefreshSubsystemForSelection, before the manager starts — shared by every build path.)
+
 	// Start the subsystem
 	if a.refreshCtx != nil && subsystem.Manager != nil {
+		registry := subsystem.Registry
 		go func() {
 			if err := subsystem.Manager.Start(a.refreshCtx); err != nil {
 				a.logger.Warn(fmt.Sprintf("Refresh manager for cluster %s stopped: %v", clusterID, err), logsources.Auth, clusterID, clusterName)
+				return
+			}
+			// Manager.Start blocks until the informer hub has synced (factory + ingest), so
+			// the live caches are now populated: reconcile away any row warm-painted from a
+			// stale spill whose object was deleted while the cluster was Cold. Ingest-fed
+			// stores already reconciled via their reflector's initial Replace; this covers
+			// the shared-informer-fed kinds (HPA, Gateway-API, CRDs, events, …).
+			if registry != nil {
+				registry.ReconcileMaintainedStores()
 			}
 		}()
 	}
 
-	// Store the subsystem.
-	a.setRefreshSubsystem(clusterID, subsystem)
+	// Store the subsystem, stopping the previous one — overwriting the entry
+	// would leak its informers/reflectors/notifier on stale transports.
+	a.swapRefreshSubsystem(clusterID, subsystem)
 
 	// Build cluster order from current subsystems
 	subsystems := a.snapshotRefreshSubsystems()
@@ -230,13 +293,15 @@ func (a *App) rebuildClusterSubsystem(clusterID string) {
 	// If the HTTP server hasn't been started yet (e.g. all clusters had auth
 	// failures during initial startup), bootstrap the full HTTP infrastructure
 	// now that we have at least one working subsystem.
-	if a.refreshHTTPServer == nil || a.refreshAggregates == nil {
+	if a.refreshHTTPServer == nil || a.refreshAggregates.Load() == nil {
 		mux, aggregates, muxErr := a.buildRefreshMux(subsystems, clusterOrder)
 		if muxErr != nil {
 			a.logger.Error(fmt.Sprintf("Failed to build refresh mux after cluster %s recovery: %v", clusterID, muxErr), logsources.Auth, clusterID, clusterName)
 			return
 		}
-		a.refreshAggregates = aggregates
+		a.refreshAggregates.Store(aggregates)
+		// Heal any readiness settle-ring dropped while aggregates were nil.
+		a.sweepNamespacesReadiness(subsystems)
 		if srvErr := a.startRefreshHTTPServer(mux, subsystems); srvErr != nil {
 			a.logger.Error(fmt.Sprintf("Failed to start refresh HTTP server after cluster %s recovery: %v", clusterID, srvErr), logsources.Auth, clusterID, clusterName)
 			return
@@ -244,7 +309,7 @@ func (a *App) rebuildClusterSubsystem(clusterID string) {
 		a.logger.Info(fmt.Sprintf("Started refresh HTTP server after cluster %s recovery", clusterID), logsources.Auth, clusterID, clusterName)
 	} else {
 		// Update the aggregate handlers so they know about the new subsystem.
-		if err := a.refreshAggregates.Update(clusterOrder, subsystems); err != nil {
+		if err := a.refreshAggregates.Load().Update(clusterOrder, subsystems); err != nil {
 			a.logger.Error(fmt.Sprintf("Failed to update aggregates for cluster %s: %v", clusterID, err), logsources.Auth, clusterID, clusterName)
 		}
 	}
@@ -306,14 +371,19 @@ func (a *App) GetAllClusterAuthStates() map[string]map[string]any {
 			states[id] = map[string]any{"state": "unknown", "reason": ""}
 			continue
 		}
-		state, reason := clients.authManager.State()
+		state, _ := clients.authManager.State()
+		diag := clients.authManager.FailureDiagnostic()
 		info := clients.authManager.RecoveryInfo()
 		states[id] = map[string]any{
 			"state":             state.String(),
-			"reason":            reason,
+			"reason":            diag.Reason,
 			"clusterName":       clients.meta.Name,
 			"secondsUntilRetry": info.SecondsUntilRetry,
 			"errorClass":        string(info.ErrorClass),
+			"class":             diag.Class,
+			"kind":              diag.Kind,
+			"summary":           diag.Summary,
+			"execCommand":       diag.ExecCommand,
 		}
 	}
 	return states
@@ -326,19 +396,25 @@ func (a *App) handleClusterAuthRecoveryProgress(clusterID string, progress auths
 		return
 	}
 
-	// Get cluster name for better logging/events
+	// Get cluster name and the stored failure diagnostic. FailureDiagnostic is
+	// read outside the manager's lock (OnRecoveryProgress fires after emitProgress
+	// releases it), so this cannot deadlock.
 	clusterName := clusterID
+	var diag authstate.FailureDiagnostic
 	if clients := a.clusterClientsForID(clusterID); clients != nil {
 		clusterName = clients.meta.Name
+		if clients.authManager != nil {
+			diag = clients.authManager.FailureDiagnostic()
+		}
 	}
 
 	// Emit per-cluster progress event for the frontend. errorClass carries the
 	// latest probe verdict ("auth", "connectivity", or "" before any verdict)
 	// so the UI can distinguish an unreachable cluster from rejected credentials.
-	a.emitEvent("cluster:auth:progress", map[string]any{
-		"clusterId":         clusterID,
-		"clusterName":       clusterName,
-		"secondsUntilRetry": progress.SecondsUntilRetry,
-		"errorClass":        string(progress.ErrorClass),
-	})
+	// The typed diagnostic fields let a late-subscribing UI render exec-helper
+	// copy without having seen the failed/recovering event.
+	payload := authEventPayload(clusterID, clusterName, diag)
+	payload["secondsUntilRetry"] = progress.SecondsUntilRetry
+	payload["errorClass"] = string(progress.ErrorClass)
+	a.emitEvent("cluster:auth:progress", payload)
 }

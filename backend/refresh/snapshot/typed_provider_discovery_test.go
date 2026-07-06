@@ -74,7 +74,7 @@ func discoverTypedResourceDomains(t *testing.T) []typedDomainSource {
 			t.Fatalf("parse %s: %v", name, err)
 		}
 
-		capabilityFunc := ""
+		var capabilityFuncs []string
 		embeds := false
 		usesHelper := false
 
@@ -85,13 +85,13 @@ func discoverTypedResourceDomains(t *testing.T) []typedDomainSource {
 					strings.HasSuffix(node.Name.Name, "QueryCapabilities") &&
 					funcReturnsType(node, "ResourceQueryCapabilities") &&
 					bodyCallsFunc(node.Body, "newTypedResourceCapabilities") {
-					capabilityFunc = node.Name.Name
+					capabilityFuncs = append(capabilityFuncs, node.Name.Name)
 				}
-				// resolveTypedSnapshotPage wraps both canonical envelope
-				// constructors, so it satisfies the same guarantee.
+				// The engine-backed resolveTypedSnapshotPageViaStore wraps both
+				// canonical envelope constructors, so it satisfies the same guarantee.
 				if bodyCallsFunc(node.Body, "typedQueryEnvelope") ||
 					bodyCallsFunc(node.Body, "typedWindowEnvelope") ||
-					bodyCallsFunc(node.Body, "resolveTypedSnapshotPage") {
+					bodyCallsFunc(node.Body, "resolveTypedSnapshotPageViaStore") {
 					usesHelper = true
 				}
 			case *ast.TypeSpec:
@@ -104,7 +104,7 @@ func discoverTypedResourceDomains(t *testing.T) []typedDomainSource {
 			return true
 		})
 
-		if capabilityFunc != "" {
+		for _, capabilityFunc := range capabilityFuncs {
 			domains = append(domains, typedDomainSource{
 				file:               name,
 				capabilityFunc:     capabilityFunc,

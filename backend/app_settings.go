@@ -67,11 +67,22 @@ const (
 
 // settingsFile captures the persisted application settings stored in settings.json.
 type settingsFile struct {
-	SchemaVersion int                 `json:"schemaVersion"`
-	UpdatedAt     time.Time           `json:"updatedAt"`
-	Preferences   settingsPreferences `json:"preferences"`
-	Kubeconfig    settingsKubeconfig  `json:"kubeconfig"`
-	UI            settingsUI          `json:"ui"`
+	SchemaVersion int                               `json:"schemaVersion"`
+	UpdatedAt     time.Time                         `json:"updatedAt"`
+	Preferences   settingsPreferences               `json:"preferences"`
+	Kubeconfig    settingsKubeconfig                `json:"kubeconfig"`
+	UI            settingsUI                        `json:"ui"`
+	Clusters      map[string]settingsClusterSection `json:"clusters,omitempty"`
+}
+
+// settingsClusterSection captures per-cluster persisted settings, keyed by
+// clusterId (kubeconfigName:context — the same identity favorites and cluster
+// tabs use).
+type settingsClusterSection struct {
+	// AllowedNamespaces is the cluster's namespace scope
+	// (docs/plans/namespace-scope.md). Empty means no scope: every namespaced
+	// data path runs cluster-wide.
+	AllowedNamespaces []string `json:"allowedNamespaces,omitempty"`
 }
 
 // settingsPreferences captures user-configurable preferences.
@@ -505,6 +516,19 @@ func (a *App) getSettingsFilePath() (string, error) {
 	return filepath.Join(configDir, "settings.json"), nil
 }
 
+// cacheDirPath returns the app's cache directory (<UserCacheDir>/luxury-yacht):
+// the single home for transient on-disk caches (API discovery, maintained-store
+// spill, diagnostic dumps). It is the cache-tier sibling of the config dir and
+// the one place that defines the cache base, so Factory Reset can clear the
+// whole subtree in one call.
+func (a *App) cacheDirPath() (string, error) {
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		return "", fmt.Errorf("could not find cache directory: %w", err)
+	}
+	return filepath.Join(cacheDir, "luxury-yacht"), nil
+}
+
 // loadSettingsFile reads settings.json or returns defaults when missing.
 func (a *App) loadSettingsFile() (*settingsFile, error) {
 	configFile, err := a.getSettingsFilePath()
@@ -746,8 +770,11 @@ func (a *App) loadAppSettings() error {
 		SuppressNetworkErrorNotifications:        settings.Preferences.SuppressNetworkErrorNotifications,
 	}
 	containerlogs.SetPerScopeTargetLimit(objPanelLogsTargetPerScopeLimit)
-	if a.containerLogsTargetLimiter != nil {
-		a.containerLogsTargetLimiter.SetLimit(objPanelLogsTargetGlobalLimit)
+	// The accessor guards the lazy init (subsystem builds run concurrently); creating
+	// on demand here is correct — the limit then applies to the limiter every
+	// subsystem receives.
+	if limiter := a.sharedContainerLogsTargetLimiter(); limiter != nil {
+		limiter.SetLimit(objPanelLogsTargetGlobalLimit)
 	}
 	return nil
 }
@@ -839,6 +866,20 @@ func (a *App) ClearAppState() error {
 		persistenceFile, err := a.getPersistenceFilePath()
 		if err == nil {
 			if err := removeFileIfExists(persistenceFile); err != nil {
+				errs = append(errs, err)
+			}
+		} else {
+			errs = append(errs, err)
+		}
+
+		// Clear the transient cache subtree (discovery, spill, diagnostics) so a
+		// Factory Reset restores true fresh-install state, not just deleted config
+		// files. clearKubeconfigSelection above already tore down the refresh
+		// subsystem and disconnected every cluster, so no cache writer is active
+		// here; RemoveAll is a no-op when the tree is already absent.
+		cacheDir, err := a.cacheDirPath()
+		if err == nil {
+			if err := os.RemoveAll(cacheDir); err != nil {
 				errs = append(errs, err)
 			}
 		} else {
@@ -1004,6 +1045,7 @@ type settingsSideEffects struct {
 	kubernetesClientRateLimits bool
 	containerLogsPerScopeLimit bool
 	containerLogsGlobalLimit   bool
+	metricsInterval            bool
 }
 
 func applyAppPreferenceChange(settings *AppSettings, change AppPreferenceChange, effects *settingsSideEffects) error {
@@ -1059,6 +1101,7 @@ func applyAppPreferenceChange(settings *AppSettings, change AppPreferenceChange,
 			value = defaultMetricsIntervalMs()
 		}
 		settings.MetricsRefreshIntervalMs = value
+		effects.metricsInterval = true
 	case appPreferenceKubernetesClientQPS:
 		value, err := intPreferenceValue(change.Value)
 		if err != nil {
@@ -1381,6 +1424,7 @@ func (a *App) UpdateAppPreferences(request UpdateAppPreferencesRequest) (*Update
 	effectiveBurst := next.KubernetesClientBurst
 	perScopeLimit := next.ObjPanelLogsTargetPerScopeLimit
 	globalLimit := next.ObjPanelLogsTargetGlobalLimit
+	metricsIntervalMs := next.MetricsRefreshIntervalMs
 	responseSettings := copyAppSettings(next)
 	a.settingsMu.Unlock()
 
@@ -1390,8 +1434,21 @@ func (a *App) UpdateAppPreferences(request UpdateAppPreferencesRequest) (*Update
 	if effects.containerLogsPerScopeLimit {
 		containerlogs.SetPerScopeTargetLimit(perScopeLimit)
 	}
-	if effects.containerLogsGlobalLimit && a.containerLogsTargetLimiter != nil {
-		a.containerLogsTargetLimiter.SetLimit(globalLimit)
+	if effects.containerLogsGlobalLimit {
+		if limiter := a.sharedContainerLogsTargetLimiter(); limiter != nil {
+			limiter.SetLimit(globalLimit)
+		}
+	}
+	if effects.metricsInterval {
+		// The metric cadence is server-owned (the doorbell rides collections):
+		// retime every connected cluster's running poller live. Clusters that
+		// connect later read the same setting at subsystem build.
+		interval := time.Duration(metricsIntervalMs) * time.Millisecond
+		for _, subsystem := range a.snapshotRefreshSubsystems() {
+			if subsystem != nil && subsystem.Manager != nil {
+				subsystem.Manager.SetMetricsInterval(interval)
+			}
+		}
 	}
 
 	return &UpdateAppPreferencesResponse{

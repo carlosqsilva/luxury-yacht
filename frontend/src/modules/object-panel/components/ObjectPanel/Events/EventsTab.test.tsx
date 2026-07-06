@@ -72,6 +72,9 @@ const appPreferencesMocks = vi.hoisted(() => ({
 
 vi.mock('@/core/refresh/store', () => ({
   useRefreshScopedDomain: () => hoistedSnapshot,
+  // Consumed by useStreamSignalRefetch (the object-events doorbell refetch);
+  // no doorbell clocks in these tests, so an empty state map keeps it inert.
+  useRefreshScopedDomainStates: () => ({}),
 }));
 
 vi.mock('@/core/refresh/hooks/useAutoRefreshLoadingState', () => ({
@@ -151,10 +154,11 @@ describe('EventsTab', () => {
   let root: ReactDOM.Root;
   let EventsTab: React.FC<any>;
   let refreshOrchestrator: { setScopedDomainEnabled: any };
+  let refreshManagerMock: { register: any; unregister: any };
 
   beforeAll(async () => {
     ({ default: EventsTab } = await import('./EventsTab'));
-    ({ refreshOrchestrator } = await import('@/core/refresh'));
+    ({ refreshOrchestrator, refreshManager: refreshManagerMock } = await import('@/core/refresh'));
   });
 
   beforeEach(() => {
@@ -162,6 +166,8 @@ describe('EventsTab', () => {
     mockFindCatalogObjectByUID.mockReset();
     mockFetchScopedDomain.mockClear();
     refreshOrchestrator.setScopedDomainEnabled.mockClear();
+    refreshManagerMock.register.mockClear();
+    refreshManagerMock.unregister.mockClear();
     refreshWatcherState.onRefresh = null;
     autoRefreshLoadingState.isPaused = false;
     autoRefreshLoadingState.isManualRefreshActive = false;
@@ -176,6 +182,7 @@ describe('EventsTab', () => {
   afterEach(() => {
     act(() => root.unmount());
     container.remove();
+    vi.useRealTimers();
     hoistedSnapshot.data = null;
     hoistedSnapshot.stats = null;
     hoistedSnapshot.status = 'ready';
@@ -190,6 +197,30 @@ describe('EventsTab', () => {
     clusterName: PARENT_CLUSTER_NAME,
   };
 
+  const PANEL_ID = `obj:${PARENT_CLUSTER_ID}:apps/v1/deployment:default:my-deploy`;
+
+  it('registers the events refresher under the panel-scoped name', async () => {
+    // Same-kind panels must not share an events refresher: a kind-only name
+    // let one panel's unmount unregister the other's refresher + subscribers.
+    hoistedSnapshot.data = { events: [] };
+    hoistedSnapshot.status = 'ready';
+
+    act(() => {
+      root.render(
+        <EventsTab
+          objectData={parentObjectData}
+          panelId={PANEL_ID}
+          isActive={true}
+          eventsScope="parent-cluster|default:apps/v1:Deployment:my-deploy"
+        />
+      );
+    });
+
+    expect(refreshManagerMock.register).toHaveBeenCalledWith(
+      expect.objectContaining({ name: `object-deployment:${PANEL_ID}-events` })
+    );
+  });
+
   it('defaults the visible Age column to newest-event sorting', async () => {
     hoistedSnapshot.data = {
       events: [makeEvent()],
@@ -200,13 +231,53 @@ describe('EventsTab', () => {
       root.render(
         <EventsTab
           objectData={parentObjectData}
+          panelId={PANEL_ID}
           isActive={true}
-          eventsScope="parent-cluster|default:Deployment:my-deploy"
+          eventsScope="parent-cluster|default:apps/v1:Deployment:my-deploy"
         />
       );
     });
 
     expect(gridTableState.lastProps?.sortConfig).toEqual({ key: 'age', direction: 'desc' });
+  });
+
+  it('renders event Age from the live event timestamp', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:10Z'));
+    hoistedSnapshot.data = {
+      events: [makeEvent({ lastTimestamp: '2026-01-01T00:00:00Z' })],
+    };
+    hoistedSnapshot.status = 'ready';
+
+    act(() => {
+      root.render(
+        <EventsTab
+          objectData={parentObjectData}
+          panelId={PANEL_ID}
+          isActive={true}
+          eventsScope="parent-cluster|default:apps/v1:Deployment:my-deploy"
+        />
+      );
+    });
+
+    const ageColumn = gridTableState.lastProps.columns.find((column: any) => column.key === 'age');
+    const cellContainer = document.createElement('div');
+    document.body.appendChild(cellContainer);
+    const cellRoot = ReactDOM.createRoot(cellContainer);
+    try {
+      act(() => {
+        cellRoot.render(ageColumn.render(gridTableState.lastProps.data[0]));
+      });
+      expect(cellContainer.textContent).toBe('10s');
+
+      act(() => {
+        vi.advanceTimersByTime(1000);
+      });
+      expect(cellContainer.textContent).toBe('11s');
+    } finally {
+      act(() => cellRoot.unmount());
+      cellContainer.remove();
+    }
   });
 
   it('prefers per-event clusterId over parent panel cluster when opening related objects', async () => {
@@ -220,8 +291,9 @@ describe('EventsTab', () => {
       root.render(
         <EventsTab
           objectData={parentObjectData}
+          panelId={PANEL_ID}
           isActive={true}
-          eventsScope="parent-cluster|default:Deployment:my-deploy"
+          eventsScope="parent-cluster|default:apps/v1:Deployment:my-deploy"
         />
       );
     });
@@ -257,8 +329,9 @@ describe('EventsTab', () => {
       root.render(
         <EventsTab
           objectData={parentObjectData}
+          panelId={PANEL_ID}
           isActive={true}
-          eventsScope="parent-cluster|default:Deployment:my-deploy"
+          eventsScope="parent-cluster|default:apps/v1:Deployment:my-deploy"
         />
       );
     });
@@ -275,8 +348,9 @@ describe('EventsTab', () => {
       root.render(
         <EventsTab
           objectData={parentObjectData}
+          panelId={PANEL_ID}
           isActive={true}
-          eventsScope="parent-cluster|default:Deployment:my-deploy"
+          eventsScope="parent-cluster|default:apps/v1:Deployment:my-deploy"
         />
       );
     });
@@ -290,6 +364,7 @@ describe('EventsTab', () => {
     });
     expect(mockFetchScopedDomain).toHaveBeenCalledWith('object-events', expect.any(String), {
       isManual: true,
+      streamSignal: false,
     });
 
     // Scheduled refresh — orchestrator should see isManual: false.
@@ -299,6 +374,7 @@ describe('EventsTab', () => {
     });
     expect(mockFetchScopedDomain).toHaveBeenCalledWith('object-events', expect.any(String), {
       isManual: false,
+      streamSignal: false,
     });
   });
 
@@ -307,7 +383,12 @@ describe('EventsTab', () => {
 
     act(() => {
       root.render(
-        <EventsTab objectData={parentObjectData} isActive={true} eventsScope={eventsScope} />
+        <EventsTab
+          objectData={parentObjectData}
+          panelId={PANEL_ID}
+          isActive={true}
+          eventsScope={eventsScope}
+        />
       );
     });
 
@@ -318,10 +399,17 @@ describe('EventsTab', () => {
     );
 
     refreshOrchestrator.setScopedDomainEnabled.mockClear();
+    refreshManagerMock.register.mockClear();
+    refreshManagerMock.unregister.mockClear();
 
     act(() => {
       root.render(
-        <EventsTab objectData={parentObjectData} isActive={false} eventsScope={eventsScope} />
+        <EventsTab
+          objectData={parentObjectData}
+          panelId={PANEL_ID}
+          isActive={false}
+          eventsScope={eventsScope}
+        />
       );
     });
 
@@ -344,8 +432,9 @@ describe('EventsTab', () => {
       root.render(
         <EventsTab
           objectData={parentObjectData}
+          panelId={PANEL_ID}
           isActive={true}
-          eventsScope="parent-cluster|default:Deployment:my-deploy"
+          eventsScope="parent-cluster|default:apps/v1:Deployment:my-deploy"
         />
       );
     });
@@ -366,8 +455,9 @@ describe('EventsTab', () => {
       root.render(
         <EventsTab
           objectData={parentObjectData}
+          panelId={PANEL_ID}
           isActive={true}
-          eventsScope="parent-cluster|default:Deployment:my-deploy"
+          eventsScope="parent-cluster|default:apps/v1:Deployment:my-deploy"
         />
       );
     });
@@ -409,8 +499,9 @@ describe('EventsTab', () => {
       root.render(
         <EventsTab
           objectData={parentObjectData}
+          panelId={PANEL_ID}
           isActive={true}
-          eventsScope="parent-cluster|default:Deployment:my-deploy"
+          eventsScope="parent-cluster|default:apps/v1:Deployment:my-deploy"
         />
       );
     });
@@ -462,6 +553,7 @@ describe('EventsTab', () => {
       root.render(
         <EventsTab
           objectData={parentObjectData}
+          panelId={PANEL_ID}
           isActive={true}
           eventsScope="parent-cluster|default:apps/v1:Deployment:my-deploy"
         />
@@ -506,8 +598,9 @@ describe('EventsTab', () => {
       root.render(
         <EventsTab
           objectData={parentObjectData}
+          panelId={PANEL_ID}
           isActive={true}
-          eventsScope="parent-cluster|default:Deployment:my-deploy"
+          eventsScope="parent-cluster|default:apps/v1:Deployment:my-deploy"
         />
       );
     });
@@ -555,8 +648,9 @@ describe('EventsTab', () => {
       root.render(
         <EventsTab
           objectData={parentObjectData}
+          panelId={PANEL_ID}
           isActive={true}
-          eventsScope="parent-cluster|default:Deployment:my-deploy"
+          eventsScope="parent-cluster|default:apps/v1:Deployment:my-deploy"
         />
       );
     });
