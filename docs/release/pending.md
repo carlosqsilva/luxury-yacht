@@ -1,12 +1,23 @@
 ### Added
 
+- Command Palette is now in the OS **View** menu.
 - Pagination controls now allow you to manually enter and jump straight to a specific page number.
-- Command Palette is now in the **View** menu
 
 ### Changed
 
+- Kubeconfig dropdown menu has been removed, and replaced with a more integrated open-cluster flow using the Command Palette.
+  - Added `File -> Open Cluster` to the OS menus.
+  - Added `ctrl/cmd+O` shortcut key to open a cluster.
+  - Added a permanent `Open Cluster +` button on the cluster tab bar.
+  - Command Palette gains an "open in Kubeconfig mode" to only show kubeconfigs.
+- Cluster tab bar is now always visible, even if only one cluster is open.
+- App header cleanup
+  - Removed the cluster/namespace/view breadcrumbs, as they were visual clutter that didn't add much info.
+  - Removed the Settings button. Settings is still reachable in the OS menus and with `ctrl/cmd+,`
+  - Added a search button (magnifying glass icon) that opens the Command Palette
+- The app now flags syntactically-invalid kubeconfigs and won't attempt to open them.
 - Improved performance when paging through large tables.
-- When you copy or export "all matching rows" and the cluster changes while the rows are being gathered, the app now warns you that the results mix before-and-after data, instead of quietly returning an inconsistent set.
+- The app now warns if data has changed while a data export (copy to clipboard or save to file) is in progress.
 - Error/Warning/Info Notifications (toast popups) are now color-coded by severity.
 
 ### Fixed
