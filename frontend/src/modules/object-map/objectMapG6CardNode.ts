@@ -5,16 +5,10 @@
  * object names, namespaces, and collapse/expand badges.
  */
 
+import type { CircleStyleProps, Group, RectStyleProps, TextStyleProps } from '@antv/g';
 import { Circle as GCircle, Rect as GRect, Text as GText } from '@antv/g';
-import type {
-  CircleStyleProps,
-  DisplayObjectConfig,
-  Group,
-  RectStyleProps,
-  TextStyleProps,
-} from '@antv/g';
-import { BaseNode, ExtensionCategory, register } from '@antv/g6';
 import type { BaseNodeStyleProps } from '@antv/g6';
+import { BaseNode, ExtensionCategory, register } from '@antv/g6';
 import { OBJECT_MAP_CARD_STYLE } from './objectMapCardStyle';
 import { OBJECT_MAP_G6_CARD_NODE, type ObjectMapG6CardDetailLevel } from './objectMapG6Constants';
 
@@ -73,10 +67,6 @@ interface ObjectMapG6CardNodeStyleProps extends BaseNodeStyleProps {
 }
 
 class ObjectMapG6CardNode extends BaseNode<ObjectMapG6CardNodeStyleProps> {
-  constructor(options: DisplayObjectConfig<ObjectMapG6CardNodeStyleProps>) {
-    super(options);
-  }
-
   private getBackgroundOpacity(attributes: Required<ObjectMapG6CardNodeStyleProps>): number {
     return attributes.cardBackgroundOpacity ?? 1;
   }
@@ -162,7 +152,9 @@ class ObjectMapG6CardNode extends BaseNode<ObjectMapG6CardNodeStyleProps> {
   private getNamespaceTextWidth(attributes: Required<ObjectMapG6CardNodeStyleProps>): number {
     const [width] = this.getSize(attributes);
     const fullWidth = width - OBJECT_MAP_CARD_STYLE.paddingX * 2;
-    if (!attributes.cardAgeText) return fullWidth;
+    if (!attributes.cardAgeText) {
+      return fullWidth;
+    }
     const ageWidth = measureTextWidth(
       attributes.cardAgeText,
       attributes.cardFontFamily,
@@ -284,7 +276,9 @@ class ObjectMapG6CardNode extends BaseNode<ObjectMapG6CardNodeStyleProps> {
   private getStatusDotStyle(
     attributes: Required<ObjectMapG6CardNodeStyleProps>
   ): CircleStyleProps | false {
-    if (!attributes.cardStatusFill) return false;
+    if (!attributes.cardStatusFill) {
+      return false;
+    }
     const [cardWidth, cardHeight] = this.getSize(attributes);
     const radius = OBJECT_MAP_CARD_STYLE.statusDotSize / 2;
     const x = cardWidth / 2 - OBJECT_MAP_CARD_STYLE.statusDotRightInset - radius;
@@ -456,7 +450,9 @@ class ObjectMapG6CardNode extends BaseNode<ObjectMapG6CardNodeStyleProps> {
 let isRegistered = false;
 
 export const ensureObjectMapG6CardNodeRegistered = (): void => {
-  if (isRegistered) return;
+  if (isRegistered) {
+    return;
+  }
   register(ExtensionCategory.NODE, OBJECT_MAP_G6_CARD_NODE, ObjectMapG6CardNode);
   isRegistered = true;
 };

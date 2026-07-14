@@ -7,17 +7,15 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { eventBus } from '@/core/events';
 import { useOptionalClusterLifecycle } from '@/core/contexts/ClusterLifecycleContext';
-
-import type { CapabilityDescriptor, CapabilityState } from './types';
-import { normalizeDescriptor } from './utils';
+import { eventBus } from '@/core/events';
+import { type QueryPayloadItem, queryPermissions } from './permissionRead';
 import {
   getPermissionKey,
+  getPermissionQueryDiagnosticsSnapshot,
   getUserPermissionMap,
   subscribeDiagnostics,
   subscribeUserPermissions,
-  getPermissionQueryDiagnosticsSnapshot,
 } from './permissionStore';
 import type {
   PermissionMap,
@@ -29,7 +27,8 @@ import {
   isTransientClusterInactivePermissionError,
   isTransientPermissionResultError,
 } from './transientPermissionErrors';
-import { queryPermissions, type QueryPayloadItem } from './permissionRead';
+import type { CapabilityDescriptor, CapabilityState } from './types';
+import { normalizeDescriptor } from './utils';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -37,18 +36,12 @@ import { queryPermissions, type QueryPayloadItem } from './permissionRead';
 
 export interface UseCapabilitiesOptions {
   enabled?: boolean;
-  ttlMs?: number;
   refreshKey?: unknown;
-  force?: boolean;
 }
 
 export interface UseCapabilitiesResult {
-  entries: CapabilityDescriptor[];
-  byId: Map<string, CapabilityDescriptor>;
   loading: boolean;
   ready: boolean;
-  refetch: () => void;
-  getEntry: (id: string) => CapabilityDescriptor | undefined;
   getState: (id: string) => CapabilityState;
   isAllowed: (id: string) => boolean;
 }
@@ -101,7 +94,7 @@ export const useCapabilities = (
   options: UseCapabilitiesOptions = {}
 ): UseCapabilitiesResult => {
   const enabled = options.enabled ?? true;
-  const { ttlMs, force, refreshKey } = options;
+  const { refreshKey } = options;
   const permissionMap = useUserPermissions();
   const clusterLifecycle = useOptionalClusterLifecycle();
 
@@ -192,6 +185,8 @@ export const useCapabilities = (
 
   // Query named-resource descriptors directly via QueryPermissions RPC.
   useEffect(() => {
+    void refreshKey;
+    void retryVersion;
     if (!enabled || queryableNamedDescriptors.length === 0) {
       return;
     }
@@ -240,7 +235,9 @@ export const useCapabilities = (
       .then((response) => {
         const nextMap = new Map(namedResultsRef.current);
         for (const r of response.results) {
-          if (!r.name) continue;
+          if (!r.name) {
+            continue;
+          }
           const isError = r.source === 'error' || !!r.error;
           if (isTransientPermissionResultError(r)) {
             nextMap.set(r.id, {
@@ -293,10 +290,11 @@ export const useCapabilities = (
         namedResultsRef.current = nextMap;
         setNamedResultsVersion((v) => v + 1);
       });
-  }, [enabled, force, queryableNamedDescriptors, ttlMs, refreshKey, retryVersion]);
+  }, [enabled, queryableNamedDescriptors, refreshKey, retryVersion]);
 
   // Build the unified state map from both sources.
   const stateById = useMemo(() => {
+    void namedResultsVersion;
     const map = new Map<string, CapabilityState>();
     if (!enabled) {
       return map;
@@ -357,7 +355,6 @@ export const useCapabilities = (
 
     return map;
     // namedResultsVersion triggers recomputation when named results update.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled, normalizedDescriptors, permissionMap, namedResultsVersion]);
 
   const loading =
@@ -392,16 +389,9 @@ export const useCapabilities = (
 
   const isAllowed = useCallback((id: string) => getState(id).allowed, [getState]);
 
-  const resultEntries: CapabilityDescriptor[] = [];
-  const resultMap = useMemo(() => new Map<string, CapabilityDescriptor>(), []);
-
   return {
-    entries: resultEntries,
-    byId: resultMap,
     loading,
     ready,
-    refetch: () => undefined,
-    getEntry: () => undefined,
     getState,
     isAllowed,
   };

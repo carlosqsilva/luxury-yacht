@@ -1,11 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import type { GridTableFilterState } from '@shared/components/tables/GridTable.types';
 
 import {
   applyGridTableFilters,
   buildGridTableFilterOptions,
   resolveGridTableFilterAccessors,
 } from '@shared/components/tables/gridTableFilterEngine';
-import type { GridTableFilterState } from '@shared/components/tables/GridTable.types';
+import { describe, expect, it } from 'vitest';
 
 interface Row {
   id: string;
@@ -104,7 +104,8 @@ describe('gridTableFilterEngine', () => {
   it('treats null and em-dash namespaces as cluster-scoped for filtering', () => {
     const clusterScopedAccessors = resolveGridTableFilterAccessors({
       accessors: {
-        getNamespace: (row) => (row.namespace == null ? '—' : row.namespace),
+        getNamespace: (row) =>
+          row.namespace === null || row.namespace === undefined ? '—' : row.namespace,
       },
       defaultGetKind,
       defaultGetNamespace,

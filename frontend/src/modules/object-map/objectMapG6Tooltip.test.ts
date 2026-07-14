@@ -4,11 +4,11 @@
  * Tests object-map connection tooltip layout, truncation, and badge rows.
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { KindBadgeVisualStyle } from '@shared/utils/kindBadgeColors';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ObjectMapG6Palette } from './objectMapG6Data';
+import { computeObjectMapTooltipLayout, MAX_FILTERED_TOOLTIP_OBJECTS } from './objectMapG6Tooltip';
 import type { ObjectMapHoverEdge } from './objectMapRendererTypes';
-import { MAX_FILTERED_TOOLTIP_OBJECTS, computeObjectMapTooltipLayout } from './objectMapG6Tooltip';
 
 const palette: ObjectMapG6Palette = {
   accent: '#60a5fa',
@@ -238,7 +238,9 @@ describe('computeObjectMapTooltipLayout', () => {
     const first = layout.rows[0];
 
     expect(first.type).toBe('object');
-    if (first.type !== 'object') return;
+    if (first.type !== 'object') {
+      return;
+    }
     expect(first.endpoint.badgeText).toContain('…');
     expect(first.endpoint.text).toContain('…');
     expect(layout.width).toBeLessThanOrEqual(narrowPalette.tooltipMaxWidth);
@@ -262,7 +264,9 @@ describe('computeObjectMapTooltipLayout', () => {
     const first = layout.rows[0];
 
     expect(first.type).toBe('object');
-    if (first.type !== 'object') return;
+    if (first.type !== 'object') {
+      return;
+    }
     expect(first.endpoint.badgeText).toBe('CLUSTERROLEBINDING');
     expect(first.endpoint.badgeWidth).toBeLessThanOrEqual(widePalette.tooltipBadgeMaxWidth);
   });

@@ -5,9 +5,10 @@
  * Encapsulates state and side effects for the shared components.
  */
 
-import type React from 'react';
+import { AriaGridColumnHeader, AriaGridRow } from '@shared/components/tables/AriaGridPrimitives';
 import type { GridColumnDefinition } from '@shared/components/tables/GridTable.types';
 import { isSortableColumn } from '@shared/components/tables/GridTable.utils';
+import type React from 'react';
 
 export interface UseGridTableHeaderRowParams<T> {
   renderedColumns: GridColumnDefinition<T>[];
@@ -18,6 +19,9 @@ export interface UseGridTableHeaderRowParams<T> {
   handleHeaderClick: (column: GridColumnDefinition<T>) => void;
   renderSortIndicator: (columnKey: string) => React.ReactNode;
   handleResizeStart: (event: React.MouseEvent, leftKey: string, rightKey: string) => void;
+  handleResizeKeyDown: (event: React.KeyboardEvent, columnKey: string) => void;
+  getColumnMinWidth: (column: GridColumnDefinition<T>) => number;
+  getColumnMaxWidth: (column: GridColumnDefinition<T>) => number;
   autoSizeColumn: (columnKey: string) => void;
   sortConfig?: { key: string; direction: 'asc' | 'desc' | null } | null;
 }
@@ -31,11 +35,14 @@ export function useGridTableHeaderRow<T>({
   handleHeaderClick,
   renderSortIndicator,
   handleResizeStart,
+  handleResizeKeyDown,
+  getColumnMinWidth,
+  getColumnMaxWidth,
   autoSizeColumn,
   sortConfig,
 }: UseGridTableHeaderRowParams<T>): React.ReactNode {
   return (
-    <div className="gridtable-header" role="row">
+    <AriaGridRow className="gridtable-header">
       {renderedColumns.map((column, index) => {
         const isSortable = isSortableColumn(column);
         const nextColumn = renderedColumns[index + 1];
@@ -48,16 +55,19 @@ export function useGridTableHeaderRow<T>({
 
         // Compute aria-sort for this header cell.
         const ariaSortValue = (() => {
-          if (!isSortable) return undefined;
-          if (!sortConfig || sortConfig.key !== column.key || !sortConfig.direction) return 'none';
+          if (!isSortable) {
+            return undefined;
+          }
+          if (!sortConfig || sortConfig.key !== column.key || !sortConfig.direction) {
+            return 'none';
+          }
           return sortConfig.direction === 'asc' ? 'ascending' : 'descending';
         })();
 
         return (
-          <div
+          <AriaGridColumnHeader
             key={column.key}
             className={`grid-cell grid-cell-header ${column.className || ''}`}
-            role="columnheader"
             aria-sort={ariaSortValue}
             data-column={column.key}
             data-sortable={isSortable}
@@ -72,42 +82,43 @@ export function useGridTableHeaderRow<T>({
             }}
           >
             <span className="header-content">
-              <span
-                onClick={() => isSortable && handleHeaderClick(column)}
-                {...(isSortable
-                  ? {
-                      role: 'button',
-                      tabIndex: 0,
-                      'aria-label': `Sort by ${typeof column.header === 'string' ? column.header : column.key}`,
-                      onKeyDown: (e: React.KeyboardEvent) => {
-                        if (e.key === 'Enter' || e.key === ' ') {
-                          e.preventDefault();
-                          handleHeaderClick(column);
-                        }
-                      },
-                    }
-                  : undefined)}
-              >
-                {column.header}
-                {isSortable && renderSortIndicator(column.key)}
-              </span>
+              {isSortable ? (
+                <button
+                  type="button"
+                  className="gridtable-sort-button"
+                  onClick={() => handleHeaderClick(column)}
+                  aria-label={`Sort by ${typeof column.header === 'string' ? column.header : column.key}`}
+                >
+                  {column.header}
+                  {renderSortIndicator(column.key)}
+                </button>
+              ) : (
+                <span>{column.header}</span>
+              )}
             </span>
-            {showResizeHandle && (
-              <div
+            {!!showResizeHandle && (
+              <hr
                 className="resize-handle"
                 onMouseDown={(e) => handleResizeStart(e, column.key, nextColumn.key)}
+                onKeyDown={(event) => handleResizeKeyDown(event, column.key)}
                 onClick={(e) => e.stopPropagation()}
                 onDoubleClick={(e) => {
                   e.preventDefault();
                   e.stopPropagation();
                   autoSizeColumn(column.key);
                 }}
+                aria-label={`Resize ${typeof column.header === 'string' ? column.header : column.key} column`}
+                aria-orientation="vertical"
+                aria-valuemin={getColumnMinWidth(column)}
+                aria-valuemax={getColumnMaxWidth(column)}
+                aria-valuenow={columnWidths[column.key]}
+                tabIndex={0}
               />
             )}
-            {showKindSeparator && <div className="column-separator" aria-hidden="true" />}
-          </div>
+            {!!showKindSeparator && <div className="column-separator" aria-hidden="true" />}
+          </AriaGridColumnHeader>
         );
       })}
-    </div>
+    </AriaGridRow>
   );
 }

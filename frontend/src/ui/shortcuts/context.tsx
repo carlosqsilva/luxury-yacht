@@ -5,17 +5,19 @@
  * Implements context logic for the UI layer.
  */
 
-import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
-import {
-  ShortcutDefinition,
+import { EventsOff, EventsOn } from '@wailsjs/runtime/runtime';
+import type React from 'react';
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import type {
   RegisteredShortcut,
-  ShortcutMap,
+  ShortcutDefinition,
   ShortcutGroup,
+  ShortcutMap,
   ShortcutModifiers,
 } from '@/types/shortcuts';
-import { getShortcutKey, modifiersMatch, isInputElement, resolveEventElement } from './utils';
-import { EventsOn, EventsOff } from '@wailsjs/runtime/runtime';
-import SearchShortcutHandler from './components/SearchShortcutHandler';
+import { isMacPlatform } from '@/utils/platform';
+import { focusRegisteredSearchShortcutTarget } from './searchShortcutRegistry';
+import { getShortcutKey, isInputElement, modifiersMatch, resolveEventElement } from './utils';
 
 interface KeyboardProviderValue {
   // Registration
@@ -49,7 +51,7 @@ export interface KeyboardSurfaceNativeActionContext {
   text?: string;
 }
 
-export type KeyboardSurfaceKeyResult = boolean | 'handled-no-prevent' | void;
+export type KeyboardSurfaceKeyResult = boolean | 'handled-no-prevent' | undefined;
 
 export interface KeyboardSurfaceOptions {
   kind: 'modal' | 'palette' | 'menu' | 'dropdown' | 'panel' | 'region' | 'editor';
@@ -61,7 +63,7 @@ export interface KeyboardSurfaceOptions {
   suppressShortcuts?: boolean;
   onKeyDown?: (event: KeyboardEvent) => KeyboardSurfaceKeyResult;
   onEscape?: (event: KeyboardEvent) => KeyboardSurfaceKeyResult;
-  onNativeAction?: (context: KeyboardSurfaceNativeActionContext) => boolean | void;
+  onNativeAction?: (context: KeyboardSurfaceNativeActionContext) => boolean | undefined;
 }
 
 interface RegisteredKeyboardSurface extends KeyboardSurfaceOptions {
@@ -192,8 +194,8 @@ const KeyboardProviderInner: React.FC<KeyboardProviderProps> = ({ children, disa
   const unregisterShortcut = useCallback((id: string) => {
     setShortcuts((prev) => {
       const next = new Map(prev);
-      for (const [key, shortcuts] of next.entries()) {
-        const filtered = shortcuts.filter((s) => s.id !== id);
+      for (const [key, registeredShortcuts] of next.entries()) {
+        const filtered = registeredShortcuts.filter((s) => s.id !== id);
         if (filtered.length === 0) {
           next.delete(key);
         } else {
@@ -203,6 +205,18 @@ const KeyboardProviderInner: React.FC<KeyboardProviderProps> = ({ children, disa
       return next;
     });
   }, []);
+
+  useEffect(() => {
+    const id = registerShortcut({
+      key: 'f',
+      modifiers: isMacPlatform() ? { meta: true } : { ctrl: true },
+      handler: () => Boolean(focusRegisteredSearchShortcutTarget()),
+      description: 'Focus active search',
+      category: 'Global',
+      priority: 1000,
+    });
+    return () => unregisterShortcut(id);
+  }, [registerShortcut, unregisterShortcut]);
 
   const getOrderedSurfaces = useCallback((): RegisteredKeyboardSurface[] => {
     return Array.from(surfacesRef.current.values())
@@ -400,7 +414,9 @@ const KeyboardProviderInner: React.FC<KeyboardProviderProps> = ({ children, disa
 
   // Handle keyboard events
   useEffect(() => {
-    if (!isEnabled || disabled) return;
+    if (!isEnabled || disabled) {
+      return;
+    }
 
     const handleCapturedTabKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Tab') {
@@ -643,9 +659,9 @@ const KeyboardProviderInner: React.FC<KeyboardProviderProps> = ({ children, disa
       }
     }
 
-    return Array.from(groups.entries()).map(([category, shortcuts]) => ({
+    return Array.from(groups.entries()).map(([category, categoryShortcuts]) => ({
       category,
-      shortcuts: shortcuts.sort((a, b) => a.key.localeCompare(b.key)),
+      shortcuts: categoryShortcuts.sort((a, b) => a.key.localeCompare(b.key)),
     }));
   }, [shortcuts]);
 
@@ -675,10 +691,5 @@ const KeyboardProviderInner: React.FC<KeyboardProviderProps> = ({ children, disa
     dispatchNativeAction,
   };
 
-  return (
-    <KeyboardContext.Provider value={value}>
-      <SearchShortcutHandler />
-      {children}
-    </KeyboardContext.Provider>
-  );
+  return <KeyboardContext.Provider value={value}>{children}</KeyboardContext.Provider>;
 };

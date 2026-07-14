@@ -9,10 +9,10 @@
  * persists across cluster switches and is captured in favorites.
  */
 
-import { useCallback, useMemo } from 'react';
-import { MetadataIcon } from '@shared/components/icons/SharedIcons';
 import type { IconBarItem } from '@shared/components/IconBar/IconBar';
+import { MetadataIcon } from '@shared/components/icons/SharedIcons';
 import type { GridTableFilterState } from '@shared/components/tables/GridTable.types';
+import { useCallback, useMemo } from 'react';
 
 export interface UseMetadataSearchOptions<T> {
   /** Whether to create the metadata toggle item. */
@@ -86,7 +86,9 @@ export function useMetadataSearch<T>(
       const values: string[] = getDefaultValues(row).filter(Boolean);
       if (includeMetadata) {
         for (const map of getMetadataMaps(row)) {
-          if (!map) continue;
+          if (!map) {
+            continue;
+          }
           for (const [k, v] of Object.entries(map)) {
             values.push(k, v, `${k}: ${v}`);
           }

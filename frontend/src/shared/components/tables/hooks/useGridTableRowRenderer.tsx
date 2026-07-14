@@ -5,11 +5,12 @@
  * Encapsulates state and side effects for the shared components.
  */
 
-import { useCallback } from 'react';
-import type React from 'react';
+import { AriaGridCell, AriaGridRow } from '@shared/components/tables/AriaGridPrimitives';
 import type { GridColumnDefinition } from '@shared/components/tables/GridTable.types';
 import { getStableRowId } from '@shared/components/tables/GridTable.utils';
 import type { MeasureRowRefFn } from '@shared/components/tables/hooks/useGridTableVirtualization';
+import type React from 'react';
+import { useCallback } from 'react';
 
 // Returns row/cell render callbacks for GridTable, wiring hover handlers,
 // context menus, and slotting for virtualization measurements.
@@ -19,7 +20,8 @@ export type RenderRowContentFn<T> = (
   absoluteIndex: number,
   shouldMeasure: boolean,
   elementKey: string,
-  slotId?: string
+  slotId?: string,
+  virtualTop?: number
 ) => React.ReactNode;
 
 export interface UseGridTableRowRendererParams<T> {
@@ -81,12 +83,21 @@ export function useGridTableRowRenderer<T>({
       absoluteIndex: number,
       shouldMeasure: boolean,
       elementKey: string,
-      slotId?: string
+      slotId?: string,
+      virtualTop?: number
     ): React.ReactNode => {
       const rowKey = keyExtractor(item, absoluteIndex);
       const rowExtraClass = getRowClassName?.(item, absoluteIndex);
       const rowClassName = ['gridtable-row', rowExtraClass || ''].filter(Boolean).join(' ');
-      const rowInlineStyle = getRowStyle ? getRowStyle(item, absoluteIndex) : undefined;
+      const configuredRowStyle = getRowStyle ? getRowStyle(item, absoluteIndex) : undefined;
+      const rowInlineStyle =
+        virtualTop === undefined
+          ? configuredRowStyle
+          : {
+              ...configuredRowStyle,
+              position: 'absolute' as const,
+              transform: `translateY(${virtualTop}px)`,
+            };
       const isSelected = rowClassName.includes('gridtable-row--selected');
       const isFocused = rowClassName.includes('gridtable-row--focused');
 
@@ -100,12 +111,11 @@ export function useGridTableRowRenderer<T>({
       const rowId = getStableRowId(rowKey);
 
       return (
-        <div
+        <AriaGridRow
           key={elementKey}
           id={rowId}
           className={rowClassName}
           style={rowInlineStyle}
-          role="row"
           aria-selected={isFocused || isSelected || undefined}
           data-row-key={rowKey}
           data-grid-slot={slotId}
@@ -138,10 +148,9 @@ export function useGridTableRowRenderer<T>({
                 : model.column.disableShortcuts === true;
 
             return (
-              <div
+              <AriaGridCell
                 key={model.key}
                 className={`grid-cell ${model.className}`}
-                role="gridcell"
                 data-column={model.key}
                 data-has-context-menu="true"
                 onContextMenu={(e) => handleContextMenu(e, model.key, item, absoluteIndex)}
@@ -149,10 +158,10 @@ export function useGridTableRowRenderer<T>({
                 data-gridtable-shortcut-optout={disableShortcuts ? 'true' : undefined}
               >
                 <span className="grid-cell-content">{cell.content}</span>
-              </div>
+              </AriaGridCell>
             );
           })}
-        </div>
+        </AriaGridRow>
       );
     },
     [

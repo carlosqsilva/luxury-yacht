@@ -11,8 +11,9 @@
  * spec/shell view.
  */
 
-import React from 'react';
 import { StatusChip, type StatusChipVariant } from '@shared/components/StatusChip';
+import { withStableListKeys } from '@shared/utils/stableListKeys';
+import type React from 'react';
 import '../shared.css';
 import './DetailsTabContainers.css';
 
@@ -69,17 +70,25 @@ const formatRef = (parsed: ParsedImage): string =>
 const TRANSIENT_WAITING_REASONS = new Set(['ContainerCreating', 'PodInitializing']);
 
 const stateVariant = (state?: string, reason?: string): StatusChipVariant => {
-  if (state === 'Running') return 'healthy';
-  if (state === 'Terminated' && reason === 'Completed') return 'healthy';
+  if (state === 'Running') {
+    return 'healthy';
+  }
+  if (state === 'Terminated' && reason === 'Completed') {
+    return 'healthy';
+  }
   if (state === 'Waiting') {
     return reason && TRANSIENT_WAITING_REASONS.has(reason) ? 'info' : 'unhealthy';
   }
-  if (state === 'Terminated') return 'unhealthy';
+  if (state === 'Terminated') {
+    return 'unhealthy';
+  }
   return 'info';
 };
 
 const stateLabel = (state?: string, reason?: string): string => {
-  if (!state) return 'Unknown';
+  if (!state) {
+    return 'Unknown';
+  }
   return reason ? `${state}: ${reason}` : state;
 };
 
@@ -95,7 +104,7 @@ const ContainerCard: React.FC<{ container: Container }> = ({ container }) => {
     <div className="containers-card">
       <div className="containers-card-header">
         <span className="containers-card-title">{container.name}</span>
-        {container.state && (
+        {!!container.state && (
           <StatusChip variant={variant} tooltip={container.stateMessage || undefined}>
             {stateLabel(container.state, container.stateReason)}
           </StatusChip>
@@ -135,9 +144,11 @@ const ContainerCard: React.FC<{ container: Container }> = ({ container }) => {
 
 const ContainerList: React.FC<{ containers: Container[] }> = ({ containers }) => (
   <div className="containers-card-list">
-    {containers.map((c, i) => (
-      <ContainerCard key={`${c.name}-${i}`} container={c} />
-    ))}
+    {withStableListKeys(containers, (container) => container.name).map(
+      ({ key, value: container }) => (
+        <ContainerCard key={key} container={container} />
+      )
+    )}
   </div>
 );
 
@@ -157,13 +168,13 @@ function Containers({ containers = [], initContainers = [] }: ContainersProps) {
       <div className="containers-groups">
         {initContainers.length > 0 && (
           <div className="containers-group">
-            {hasBoth && <div className="containers-group-heading">Init Containers</div>}
+            {!!hasBoth && <div className="containers-group-heading">Init Containers</div>}
             <ContainerList containers={initContainers} />
           </div>
         )}
         {containers.length > 0 && (
           <div className="containers-group">
-            {hasBoth && <div className="containers-group-heading">Containers</div>}
+            {!!hasBoth && <div className="containers-group-heading">Containers</div>}
             <ContainerList containers={containers} />
           </div>
         )}

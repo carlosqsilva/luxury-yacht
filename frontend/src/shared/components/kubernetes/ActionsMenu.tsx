@@ -9,18 +9,20 @@
  * and the Node cordon/drain openers.
  */
 
-import React, { useState, useRef, useEffect, useMemo } from 'react';
-import { type ObjectActionData } from '@shared/hooks/useObjectActions';
-import { useObjectActionController } from '@shared/hooks/useObjectActionController';
 import { useObjectPanel } from '@modules/object-panel/hooks/useObjectPanel';
-import '../ContextMenu.css';
+import ContextMenu from '@shared/components/ContextMenu';
+import { useObjectActionController } from '@shared/hooks/useObjectActionController';
+import type { ObjectActionData } from '@shared/hooks/useObjectActions';
+import React, { useMemo, useState } from 'react';
 import './ActionsMenu.css';
 
 const clampReplicas = (value: number): number => Math.max(0, Math.min(9999, value));
 
 const parseDesiredReplicas = (value?: string | null): number | null => {
   const trimmed = value?.trim();
-  if (!trimmed) return null;
+  if (!trimmed) {
+    return null;
+  }
   const segments = trimmed.split('/');
   const candidate = Number.parseInt(segments[segments.length - 1]?.trim() ?? '', 10);
   return Number.isFinite(candidate) ? clampReplicas(candidate) : null;
@@ -54,8 +56,7 @@ export const ActionsMenu = React.memo<ActionsMenuProps>(
   }) => {
     const { openWithObject } = useObjectPanel();
     const [isOpen, setIsOpen] = useState(false);
-    const menuRef = useRef<HTMLDivElement>(null);
-    const dropdownRef = useRef<HTMLDivElement>(null);
+    const [menuPosition, setMenuPosition] = useState({ x: 0, y: 0 });
 
     const resolvedCurrentReplicas = useMemo(() => {
       if (typeof currentReplicas === 'number' && Number.isFinite(currentReplicas)) {
@@ -101,44 +102,6 @@ export const ActionsMenu = React.memo<ActionsMenuProps>(
       [actionObject, objectActions]
     );
 
-    // Close menu when clicking outside
-    useEffect(() => {
-      const handleClickOutside = (event: MouseEvent) => {
-        if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
-          setIsOpen(false);
-        }
-      };
-
-      if (isOpen) {
-        document.addEventListener('mousedown', handleClickOutside);
-        return () => document.removeEventListener('mousedown', handleClickOutside);
-      }
-    }, [isOpen]);
-
-    // Position dropdown to stay within viewport
-    useEffect(() => {
-      if (isOpen && dropdownRef.current && menuRef.current) {
-        const dropdown = dropdownRef.current;
-        const button = menuRef.current.querySelector('.actions-menu-button');
-        if (!button) return;
-
-        const buttonRect = button.getBoundingClientRect();
-        const dropdownRect = dropdown.getBoundingClientRect();
-
-        // Check if dropdown would go off-screen to the right
-        if (buttonRect.right - dropdownRect.width < 10) {
-          dropdown.style.right = 'auto';
-          dropdown.style.left = '0';
-        }
-
-        // Check if dropdown would go off-screen at the bottom
-        if (buttonRect.bottom + dropdownRect.height > window.innerHeight - 10) {
-          dropdown.style.top = 'auto';
-          dropdown.style.bottom = 'calc(100% + 4px)';
-        }
-      }
-    }, [isOpen]);
-
     // Don't render if no actions available
     if (menuItems.length === 0) {
       return null;
@@ -146,63 +109,31 @@ export const ActionsMenu = React.memo<ActionsMenuProps>(
 
     return (
       <>
-        <div className="actions-menu" ref={menuRef}>
+        <div className="actions-menu">
           <button
+            type="button"
             className="actions-menu-button"
-            onClick={() => setIsOpen(!isOpen)}
+            onClick={(event) => {
+              if (isOpen) {
+                setIsOpen(false);
+                return;
+              }
+
+              const buttonRect = event.currentTarget.getBoundingClientRect();
+              setMenuPosition({ x: buttonRect.left, y: buttonRect.bottom + 4 });
+              setIsOpen(true);
+            }}
             disabled={actionLoading}
             title="Actions"
             aria-label="Actions menu"
           >
             <span className="actions-menu-icon">⋯</span>
           </button>
-
-          {isOpen && (
-            <div className="context-menu actions-menu-dropdown" ref={dropdownRef}>
-              {menuItems.map((item, index) => {
-                if ('header' in item && item.header) {
-                  return (
-                    <div key={index} className="context-menu-header">
-                      {item.label}
-                    </div>
-                  );
-                }
-
-                if ('divider' in item && item.divider) {
-                  return <div key={index} className="context-menu-divider" />;
-                }
-
-                const menuItem = item as {
-                  actionId?: string;
-                  label: string;
-                  icon?: React.ReactNode;
-                  onClick?: () => void;
-                  disabled?: boolean;
-                  danger?: boolean;
-                };
-
-                return (
-                  <div
-                    key={index}
-                    className={`context-menu-item${menuItem.disabled ? ' disabled' : ''}${menuItem.danger ? ' danger' : ''}`}
-                    role="menuitem"
-                    aria-disabled={menuItem.disabled ? 'true' : 'false'}
-                    data-context-action-id={menuItem.actionId}
-                    onClick={() => {
-                      if (!menuItem.disabled && menuItem.onClick) {
-                        setIsOpen(false);
-                        menuItem.onClick();
-                      }
-                    }}
-                  >
-                    {menuItem.icon && <span className="context-menu-icon">{menuItem.icon}</span>}
-                    <span className="context-menu-label">{menuItem.label}</span>
-                  </div>
-                );
-              })}
-            </div>
-          )}
         </div>
+
+        {!!isOpen && (
+          <ContextMenu items={menuItems} position={menuPosition} onClose={() => setIsOpen(false)} />
+        )}
 
         {/* All action modals (confirm/scale/scale-to-zero/port-forward/rollback)
             are owned by the shared controller. */}

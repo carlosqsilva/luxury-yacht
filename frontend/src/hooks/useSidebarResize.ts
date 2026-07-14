@@ -4,7 +4,33 @@
  * Hook for useSidebarResize.
  * Handles sidebar resize drag behavior with document-level mouse tracking.
  */
-import { useEffect, useState, useCallback } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+
+export const SIDEBAR_MIN_WIDTH = 200;
+export const SIDEBAR_MAX_WIDTH = 500;
+const SIDEBAR_KEYBOARD_STEP = 16;
+
+export function getSidebarWidthFromKey(
+  currentWidth: number,
+  key: string,
+  minWidth = SIDEBAR_MIN_WIDTH,
+  maxWidth = SIDEBAR_MAX_WIDTH
+): number | null {
+  const clamp = (width: number) => Math.max(minWidth, Math.min(maxWidth, width));
+  if (key === 'ArrowLeft') {
+    return clamp(currentWidth - SIDEBAR_KEYBOARD_STEP);
+  }
+  if (key === 'ArrowRight') {
+    return clamp(currentWidth + SIDEBAR_KEYBOARD_STEP);
+  }
+  if (key === 'Home') {
+    return minWidth;
+  }
+  if (key === 'End') {
+    return maxWidth;
+  }
+  return null;
+}
 
 interface SidebarResizeOptions {
   isResizing: boolean;
@@ -21,8 +47,8 @@ export function useSidebarResize({
   isResizing: externalIsResizing,
   onWidthChange,
   onResizeEnd,
-  minWidth = 200,
-  maxWidth = 500,
+  minWidth = SIDEBAR_MIN_WIDTH,
+  maxWidth = SIDEBAR_MAX_WIDTH,
 }: SidebarResizeOptions): void {
   const [isResizing, setIsResizing] = useState(false);
 
@@ -48,7 +74,9 @@ export function useSidebarResize({
 
   // Handle document-level mouse events during resize
   useEffect(() => {
-    if (!isResizing) return;
+    if (!isResizing) {
+      return;
+    }
 
     document.addEventListener('mousemove', handleMouseMove);
     document.addEventListener('mouseup', handleMouseUp);

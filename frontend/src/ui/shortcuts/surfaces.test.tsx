@@ -1,18 +1,13 @@
-import { useRef, useEffect, useState } from 'react';
-import ReactDOM from 'react-dom/client';
-import { act } from 'react';
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { act, useEffect, useRef, useState } from 'react';
+import * as ReactDOM from 'react-dom/client';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { KeyboardProvider, useKeyboardContext } from './context';
-import { useKeyboardSurface } from './surfaces';
 import { useShortcut } from './hooks';
+import { useKeyboardSurface } from './surfaces';
 
 describe('keyboard surfaces', () => {
   let container: HTMLDivElement;
   let root: ReactDOM.Root;
-
-  beforeAll(() => {
-    (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
-  });
 
   beforeEach(() => {
     container = document.createElement('div');
@@ -57,9 +52,13 @@ describe('keyboard surfaces', () => {
       return (
         <>
           <div ref={surfaceRef}>
-            <button id="inside-surface">Inside</button>
+            <button type="button" data-testid="inside-surface">
+              Inside
+            </button>
           </div>
-          <button id="outside-surface">Outside</button>
+          <button type="button" data-testid="outside-surface">
+            Outside
+          </button>
         </>
       );
     };
@@ -73,7 +72,9 @@ describe('keyboard surfaces', () => {
       await Promise.resolve();
     });
 
-    const insideButton = document.querySelector('#inside-surface') as HTMLButtonElement | null;
+    const insideButton = document.querySelector(
+      '[data-testid="inside-surface"]'
+    ) as HTMLButtonElement | null;
     expect(insideButton).not.toBeNull();
     insideButton?.focus();
 
@@ -107,9 +108,11 @@ describe('keyboard surfaces', () => {
       return (
         <>
           <div ref={surfaceRef}>
-            <button>Inside</button>
+            <button type="button">Inside</button>
           </div>
-          <button id="outside-surface">Outside</button>
+          <button type="button" data-testid="outside-surface">
+            Outside
+          </button>
         </>
       );
     };
@@ -123,7 +126,9 @@ describe('keyboard surfaces', () => {
       await Promise.resolve();
     });
 
-    const outsideButton = document.querySelector('#outside-surface') as HTMLButtonElement | null;
+    const outsideButton = document.querySelector(
+      '[data-testid="outside-surface"]'
+    ) as HTMLButtonElement | null;
     expect(outsideButton).not.toBeNull();
     outsideButton?.focus();
 
@@ -156,9 +161,11 @@ describe('keyboard surfaces', () => {
       return (
         <>
           <div ref={surfaceRef}>
-            <button>Inside</button>
+            <button type="button">Inside</button>
           </div>
-          <button id="outside-surface">Outside</button>
+          <button type="button" data-testid="outside-surface">
+            Outside
+          </button>
         </>
       );
     };
@@ -172,7 +179,9 @@ describe('keyboard surfaces', () => {
       await Promise.resolve();
     });
 
-    const outsideButton = document.querySelector('#outside-surface') as HTMLButtonElement | null;
+    const outsideButton = document.querySelector(
+      '[data-testid="outside-surface"]'
+    ) as HTMLButtonElement | null;
     expect(outsideButton).not.toBeNull();
     outsideButton?.focus();
 
@@ -220,12 +229,14 @@ describe('keyboard surfaces', () => {
       return (
         <>
           <div ref={regionRef}>
-            <button>Region</button>
+            <button type="button">Region</button>
           </div>
           <div ref={panelRef}>
-            <button>Panel</button>
+            <button type="button">Panel</button>
           </div>
-          <button id="outside-surface">Outside</button>
+          <button type="button" data-testid="outside-surface">
+            Outside
+          </button>
         </>
       );
     };
@@ -239,7 +250,9 @@ describe('keyboard surfaces', () => {
       await Promise.resolve();
     });
 
-    const outsideButton = document.querySelector('#outside-surface') as HTMLButtonElement | null;
+    const outsideButton = document.querySelector(
+      '[data-testid="outside-surface"]'
+    ) as HTMLButtonElement | null;
     expect(outsideButton).not.toBeNull();
     outsideButton?.focus();
 
@@ -290,12 +303,14 @@ describe('keyboard surfaces', () => {
       return (
         <>
           <div ref={panelRef}>
-            <button>Panel</button>
+            <button type="button">Panel</button>
           </div>
           <div ref={modalRef}>
-            <button>Modal</button>
+            <button type="button">Modal</button>
           </div>
-          <button id="outside-surface">Outside</button>
+          <button type="button" data-testid="outside-surface">
+            Outside
+          </button>
         </>
       );
     };
@@ -309,7 +324,9 @@ describe('keyboard surfaces', () => {
       await Promise.resolve();
     });
 
-    const outsideButton = document.querySelector('#outside-surface') as HTMLButtonElement | null;
+    const outsideButton = document.querySelector(
+      '[data-testid="outside-surface"]'
+    ) as HTMLButtonElement | null;
     expect(outsideButton).not.toBeNull();
     outsideButton?.focus();
 
@@ -362,7 +379,9 @@ describe('keyboard surfaces', () => {
       return (
         <div ref={modalRef}>
           <div ref={dropdownRef}>
-            <button id="inside-dropdown">Inside dropdown</button>
+            <button type="button" data-testid="inside-dropdown">
+              Inside dropdown
+            </button>
           </div>
         </div>
       );
@@ -377,7 +396,9 @@ describe('keyboard surfaces', () => {
       await Promise.resolve();
     });
 
-    const insideDropdown = document.querySelector('#inside-dropdown') as HTMLButtonElement | null;
+    const insideDropdown = document.querySelector(
+      '[data-testid="inside-dropdown"]'
+    ) as HTMLButtonElement | null;
     expect(insideDropdown).not.toBeNull();
     insideDropdown?.focus();
 
@@ -408,8 +429,8 @@ describe('keyboard surfaces', () => {
         rootRef: regionRef,
         active: true,
         captureWhenActive: true,
-        onKeyDown: (event) => {
-          if (event.key !== 'Tab') {
+        onKeyDown: (keyboardEvent) => {
+          if (keyboardEvent.key !== 'Tab') {
             return false;
           }
           regionHandler();
@@ -421,8 +442,8 @@ describe('keyboard surfaces', () => {
         kind: 'dropdown',
         rootRef: dropdownRef,
         active: true,
-        onKeyDown: (event) => {
-          if (event.key !== 'Tab') {
+        onKeyDown: (keyboardEvent) => {
+          if (keyboardEvent.key !== 'Tab') {
             return false;
           }
           dropdownHandler();
@@ -433,7 +454,9 @@ describe('keyboard surfaces', () => {
       return (
         <div ref={regionRef}>
           <div ref={dropdownRef}>
-            <button id="inside-dropdown">Inside dropdown</button>
+            <button type="button" data-testid="inside-dropdown">
+              Inside dropdown
+            </button>
           </div>
         </div>
       );
@@ -448,7 +471,9 @@ describe('keyboard surfaces', () => {
       await Promise.resolve();
     });
 
-    const insideDropdown = document.querySelector('#inside-dropdown') as HTMLButtonElement | null;
+    const insideDropdown = document.querySelector(
+      '[data-testid="inside-dropdown"]'
+    ) as HTMLButtonElement | null;
     expect(insideDropdown).not.toBeNull();
     insideDropdown?.focus();
 
@@ -497,7 +522,9 @@ describe('keyboard surfaces', () => {
       return (
         <div ref={panelRef}>
           <div ref={editorRef}>
-            <button id="inside-editor">Inside editor</button>
+            <button type="button" data-testid="inside-editor">
+              Inside editor
+            </button>
           </div>
         </div>
       );
@@ -512,7 +539,9 @@ describe('keyboard surfaces', () => {
       await Promise.resolve();
     });
 
-    const insideEditor = document.querySelector('#inside-editor') as HTMLButtonElement | null;
+    const insideEditor = document.querySelector(
+      '[data-testid="inside-editor"]'
+    ) as HTMLButtonElement | null;
     expect(insideEditor).not.toBeNull();
     insideEditor?.focus();
 
@@ -564,15 +593,25 @@ describe('keyboard surfaces', () => {
       return (
         <>
           <div ref={firstRef}>
-            <button id="first-surface">First</button>
+            <button type="button" data-testid="first-surface">
+              First
+            </button>
           </div>
           <div ref={secondRef}>
-            <button id="second-surface">Second</button>
+            <button type="button" data-testid="second-surface">
+              Second
+            </button>
           </div>
-          <button id="rerender" onClick={() => setVersion((current) => current + 1)}>
+          <button
+            type="button"
+            data-testid="rerender"
+            onClick={() => setVersion((current) => current + 1)}
+          >
             Rerender
           </button>
-          <button id="outside-surface">Outside</button>
+          <button type="button" data-testid="outside-surface">
+            Outside
+          </button>
         </>
       );
     };
@@ -586,8 +625,12 @@ describe('keyboard surfaces', () => {
       await Promise.resolve();
     });
 
-    const outsideButton = document.querySelector('#outside-surface') as HTMLButtonElement | null;
-    const rerenderButton = document.querySelector('#rerender') as HTMLButtonElement | null;
+    const outsideButton = document.querySelector(
+      '[data-testid="outside-surface"]'
+    ) as HTMLButtonElement | null;
+    const rerenderButton = document.querySelector(
+      '[data-testid="rerender"]'
+    ) as HTMLButtonElement | null;
     expect(outsideButton).not.toBeNull();
     expect(rerenderButton).not.toBeNull();
 
@@ -646,7 +689,9 @@ describe('keyboard surfaces', () => {
 
       return (
         <div ref={surfaceRef}>
-          <button id="inside-surface">Inside</button>
+          <button type="button" data-testid="inside-surface">
+            Inside
+          </button>
         </div>
       );
     };
@@ -660,7 +705,9 @@ describe('keyboard surfaces', () => {
       await Promise.resolve();
     });
 
-    const insideButton = document.querySelector('#inside-surface') as HTMLButtonElement | null;
+    const insideButton = document.querySelector(
+      '[data-testid="inside-surface"]'
+    ) as HTMLButtonElement | null;
     expect(insideButton).not.toBeNull();
     insideButton?.focus();
 
@@ -714,7 +761,9 @@ describe('keyboard surfaces', () => {
       return (
         <div ref={panelRef}>
           <div ref={editorRef}>
-            <button id="inside-editor">Inside editor</button>
+            <button type="button" data-testid="inside-editor">
+              Inside editor
+            </button>
           </div>
         </div>
       );
@@ -729,7 +778,9 @@ describe('keyboard surfaces', () => {
       await Promise.resolve();
     });
 
-    const insideEditor = document.querySelector('#inside-editor') as HTMLButtonElement | null;
+    const insideEditor = document.querySelector(
+      '[data-testid="inside-editor"]'
+    ) as HTMLButtonElement | null;
     expect(insideEditor).not.toBeNull();
     insideEditor?.focus();
 
@@ -764,7 +815,9 @@ describe('keyboard surfaces', () => {
 
       return (
         <div ref={surfaceRef}>
-          <button id="inside-surface">Inside</button>
+          <button type="button" data-testid="inside-surface">
+            Inside
+          </button>
         </div>
       );
     };
@@ -778,7 +831,9 @@ describe('keyboard surfaces', () => {
       await Promise.resolve();
     });
 
-    const insideButton = document.querySelector('#inside-surface') as HTMLButtonElement | null;
+    const insideButton = document.querySelector(
+      '[data-testid="inside-surface"]'
+    ) as HTMLButtonElement | null;
     expect(insideButton).not.toBeNull();
     insideButton?.focus();
 
@@ -808,8 +863,8 @@ describe('keyboard surfaces', () => {
         rootRef: surfaceRef,
         active: true,
         suppressShortcuts: true,
-        onKeyDown: (event) => {
-          if (event.key !== 'Tab') {
+        onKeyDown: (keyboardEvent) => {
+          if (keyboardEvent.key !== 'Tab') {
             return false;
           }
           surfaceHandler();
@@ -828,7 +883,9 @@ describe('keyboard surfaces', () => {
 
       return (
         <div ref={surfaceRef}>
-          <button id="inside-surface">Inside</button>
+          <button type="button" data-testid="inside-surface">
+            Inside
+          </button>
         </div>
       );
     };
@@ -842,7 +899,9 @@ describe('keyboard surfaces', () => {
       await Promise.resolve();
     });
 
-    const insideButton = document.querySelector('#inside-surface') as HTMLButtonElement | null;
+    const insideButton = document.querySelector(
+      '[data-testid="inside-surface"]'
+    ) as HTMLButtonElement | null;
     expect(insideButton).not.toBeNull();
     insideButton?.focus();
 

@@ -7,27 +7,40 @@
  * rather than delivering rows over the bridge.
  */
 
-import { setScopedDomainState } from '../store';
-import type { PermissionDeniedStatus } from '../types';
-import { stripClusterScope } from '../clusterScope';
 import { eventBus } from '@/core/events';
 import {
   APP_LOG_SOURCES,
+  type AppLogsClusterMeta,
   logAppLogsDebug,
   logAppLogsInfo,
-  type AppLogsClusterMeta,
 } from '@/core/logging/appLogsClient';
+import { stripClusterScope } from '../clusterScope';
 import { isPermissionDeniedStatus, resolvePermissionDeniedMessage } from '../permissionErrors';
+import { setScopedDomainState } from '../store';
 import {
-  domainSupportsSourceClock,
-  isResourceStreamSourceClock,
-  isCompleteResyncStreamDomain,
-  isClusterScopedDomain,
-  isSupportedDomain,
+  RESOURCE_STREAM_MESSAGE_TYPES,
+  RESOURCE_STREAM_SIGNALS,
+  type ResourceStreamMessageType,
+  type ResourceStreamServerMessage,
+  type ResourceStreamSignal,
+} from '../types';
+import { ResourceStreamConnection } from './resourceStreamConnection';
+import {
   type DoorbellDomain,
+  domainSupportsSourceClock,
+  isClusterScopedDomain,
+  isCompleteResyncStreamDomain,
+  isResourceStreamSourceClock,
+  isSupportedDomain,
   type ResourceStreamSourceClock,
 } from './resourceStreamDomains';
-import { ResourceStreamConnection } from './resourceStreamConnection';
+import {
+  type ResourceStreamConnectionStatus,
+  type ResourceStreamHealthPayload,
+  type ResourceStreamHealthStatus,
+  ResourceStreamHealthStore,
+  STREAM_HEALTH_STATUS_ORDER,
+} from './resourceStreamHealth';
 import {
   ResourceStreamSubscriptionStore,
   resourceStreamSubscriptionKey,
@@ -35,13 +48,6 @@ import {
 } from './resourceStreamSubscriptions';
 import { StreamErrorNotifier } from './streamErrorNotifier';
 import { StreamVisibilityController } from './streamVisibilityController';
-import {
-  ResourceStreamHealthStore,
-  STREAM_HEALTH_STATUS_ORDER,
-  type ResourceStreamConnectionStatus,
-  type ResourceStreamHealthPayload,
-  type ResourceStreamHealthStatus,
-} from './resourceStreamHealth';
 
 export { normalizeResourceScope } from './resourceStreamDomains';
 
@@ -61,61 +67,14 @@ const logDebug = (message: string, cluster?: AppLogsClusterMeta): void => {
   logAppLogsDebug(message, APP_LOG_SOURCES.ResourceStream, cluster);
 };
 
-const MESSAGE_TYPES = {
-  request: 'REQUEST',
-  cancel: 'CANCEL',
-  heartbeat: 'HEARTBEAT',
-  // Server confirmation of an accepted subscribe; anchors 'synchronized' health.
-  ack: 'ACK',
-  reset: 'RESET',
-  complete: 'COMPLETE',
-  error: 'ERROR',
-  added: 'ADDED',
-  modified: 'MODIFIED',
-  deleted: 'DELETED',
-} as const;
-
-type StreamMessageType = (typeof MESSAGE_TYPES)[keyof typeof MESSAGE_TYPES];
-
-const SIGNAL_TYPES = {
-  changed: 'changed',
-  reset: 'reset',
-  error: 'error',
-} as const;
-
-type StreamSignalType = (typeof SIGNAL_TYPES)[keyof typeof SIGNAL_TYPES];
-
 type SignalEnvelope = {
   clusterId: string;
   source: ResourceStreamSourceClock;
-  signal: StreamSignalType;
+  signal: ResourceStreamSignal;
   version: string;
 };
 
-type ServerMessage = {
-  type?: StreamMessageType;
-  clusterId?: string;
-  clusterName?: string;
-  domain?: string;
-  scope?: string;
-  source?: string;
-  signal?: string;
-  version?: string;
-  resourceVersion?: string;
-  sequence?: string;
-  ref?: {
-    clusterId: string;
-    group: string;
-    version: string;
-    kind: string;
-    resource?: string;
-    namespace?: string;
-    name?: string;
-    uid?: string;
-  };
-  error?: string;
-  errorDetails?: PermissionDeniedStatus;
-};
+type ServerMessage = Partial<ResourceStreamServerMessage>;
 
 type UpdateMessage = ServerMessage & {
   domain: DoorbellDomain;
@@ -123,11 +82,12 @@ type UpdateMessage = ServerMessage & {
   signalEnvelope?: SignalEnvelope;
 };
 
-const hasMessageType = (value: unknown): value is StreamMessageType =>
-  typeof value === 'string' && Object.values(MESSAGE_TYPES).includes(value as StreamMessageType);
+const hasMessageType = (value: unknown): value is ResourceStreamMessageType =>
+  typeof value === 'string' &&
+  RESOURCE_STREAM_MESSAGE_TYPES.includes(value as ResourceStreamMessageType);
 
-const hasSignalType = (value: unknown): value is StreamSignalType =>
-  typeof value === 'string' && Object.values(SIGNAL_TYPES).includes(value as StreamSignalType);
+const hasSignalType = (value: unknown): value is ResourceStreamSignal =>
+  typeof value === 'string' && RESOURCE_STREAM_SIGNALS.includes(value as ResourceStreamSignal);
 
 const normalizeStreamScope = (domain: DoorbellDomain, scope: unknown): string | null => {
   if (typeof scope === 'string') {
@@ -139,7 +99,7 @@ const normalizeStreamScope = (domain: DoorbellDomain, scope: unknown): string | 
     return null;
   }
   // Cluster-scoped updates omit scope in JSON, so treat missing scope as empty.
-  if (scope == null && isClusterScopedDomain(domain)) {
+  if ((scope === null || scope === undefined) && isClusterScopedDomain(domain)) {
     return '';
   }
   return null;
@@ -293,7 +253,9 @@ export class ResourceStreamManager {
       resyncCount: 0,
       fallbackCount: 0,
     };
-    this.streamTelemetry.forEach((stats) => accumulateStreamTelemetry(summary, stats));
+    this.streamTelemetry.forEach((stats) => {
+      accumulateStreamTelemetry(summary, stats);
+    });
     return summary;
   }
 
@@ -303,7 +265,8 @@ export class ResourceStreamManager {
     const byClusterDomain: Record<string, ResourceStreamTelemetrySummary> = {};
     this.streamTelemetry.forEach((stats) => {
       const key = `${stats.clusterId}::${stats.domain}`;
-      const summary = (byClusterDomain[key] ??= { resyncCount: 0, fallbackCount: 0 });
+      byClusterDomain[key] ??= { resyncCount: 0, fallbackCount: 0 };
+      const summary = byClusterDomain[key];
       accumulateStreamTelemetry(summary, stats);
     });
     return byClusterDomain;
@@ -337,7 +300,9 @@ export class ResourceStreamManager {
     if (subscriptions.length === 0) {
       return;
     }
-    subscriptions.forEach((subscription) => this.scheduleUnsubscribe(subscription, reset));
+    subscriptions.forEach((subscription) => {
+      this.scheduleUnsubscribe(subscription, reset);
+    });
   }
 
   async refreshOnce(domain: DoorbellDomain, scope: string): Promise<void> {
@@ -404,11 +369,11 @@ export class ResourceStreamManager {
 
     if (resolvedUpdate.signalEnvelope) {
       switch (resolvedUpdate.signalEnvelope.signal) {
-        case SIGNAL_TYPES.changed:
+        case 'changed':
           this.handleUpdate(subscription, resolvedUpdate);
           this.updateHealthForSubscription(subscription);
           return;
-        case SIGNAL_TYPES.reset:
+        case 'reset':
           if (subscription.pendingReset) {
             subscription.pendingReset = false;
             this.updateHealthForSubscription(subscription);
@@ -423,7 +388,7 @@ export class ResourceStreamManager {
           void this.resyncSubscription(subscription, 'reset');
           this.updateHealthForSubscription(subscription);
           return;
-        case SIGNAL_TYPES.error:
+        case 'error':
           this.recordSubscriptionError(subscription, errorMessage || 'stream error');
           // A permission-denied frame is a SETTLED answer: resyncing cannot
           // succeed until RBAC or the namespace scope changes. Hand the scope
@@ -448,9 +413,9 @@ export class ResourceStreamManager {
     }
 
     switch (resolvedUpdate.type) {
-      case MESSAGE_TYPES.heartbeat:
+      case 'HEARTBEAT':
         return;
-      case MESSAGE_TYPES.ack:
+      case 'ACK':
         // The server accepted the subscribe on this connection: the scope is
         // trusted even with zero deliveries (quiet domain). Without a server
         // confirmation the subscription must stay degraded so polling falls
@@ -459,7 +424,7 @@ export class ResourceStreamManager {
         this.markSubscriptionSynchronized(subscription);
         this.updateHealthForSubscription(subscription);
         return;
-      case MESSAGE_TYPES.reset:
+      case 'RESET':
         if (subscription.pendingReset) {
           subscription.pendingReset = false;
           // A post-subscribe RESET is also a server confirmation (backends
@@ -472,19 +437,19 @@ export class ResourceStreamManager {
         void this.resyncSubscription(subscription, 'reset');
         this.updateHealthForSubscription(subscription);
         return;
-      case MESSAGE_TYPES.complete:
+      case 'COMPLETE':
         this.bumpLegacyResyncSourceVersion(subscription, resolvedUpdate);
         void this.resyncSubscription(subscription, errorMessage || 'complete');
         this.updateHealthForSubscription(subscription);
         return;
-      case MESSAGE_TYPES.error:
+      case 'ERROR':
         this.recordSubscriptionError(subscription, errorMessage || 'stream error');
         void this.resyncSubscription(subscription, errorMessage || 'stream error', true);
         this.updateHealthForSubscription(subscription);
         return;
-      case MESSAGE_TYPES.added:
-      case MESSAGE_TYPES.modified:
-      case MESSAGE_TYPES.deleted:
+      case 'ADDED':
+      case 'MODIFIED':
+      case 'DELETED':
         this.handleUpdate(subscription, resolvedUpdate);
         this.updateHealthForSubscription(subscription);
         return;
@@ -562,7 +527,9 @@ export class ResourceStreamManager {
 
   private ensureSubscriptions(domain: DoorbellDomain, scope: string): StreamSubscription[] {
     const subscriptions = this.subscriptions.ensure(domain, scope);
-    subscriptions.forEach((subscription) => this.updateHealthForSubscription(subscription));
+    subscriptions.forEach((subscription) => {
+      this.updateHealthForSubscription(subscription);
+    });
     return subscriptions;
   }
 
@@ -753,7 +720,9 @@ export class ResourceStreamManager {
         }
       });
     });
-    targets.forEach(({ domain, scope }) => this.updateHealthForScope(domain, scope));
+    targets.forEach(({ domain, scope }) => {
+      this.updateHealthForScope(domain, scope);
+    });
   }
 
   private markConnectionOpen(): void {
@@ -1043,7 +1012,9 @@ export class ResourceStreamManager {
 
   private stopAll(reset: boolean): void {
     const subscriptions = Array.from(this.subscriptions.values());
-    subscriptions.forEach((subscription) => this.unsubscribe(subscription, reset));
+    subscriptions.forEach((subscription) => {
+      this.unsubscribe(subscription, reset);
+    });
     this.subscriptions.clear();
     this.connection?.close();
     this.connection = null;

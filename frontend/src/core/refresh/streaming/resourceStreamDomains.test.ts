@@ -8,17 +8,17 @@ import { describe, expect, it } from 'vitest';
 
 import { refreshDomainContract } from '../domainRegistry';
 import {
-  DOORBELL_STREAM_DOMAINS,
   COMPLETE_RESYNC_STREAM_DOMAINS,
-  RESOURCE_STREAM_DOMAINS,
+  DOORBELL_STREAM_DOMAINS,
+  type DoorbellDomain,
   domainSupportsSourceClock,
-  isCompleteResyncStreamDomain,
   isClusterScopedDomain,
+  isCompleteResyncStreamDomain,
   isSupportedDomain,
   normalizeResourceScope,
-  resourceStreamDomainDescriptors,
-  type DoorbellDomain,
+  RESOURCE_STREAM_DOMAINS,
   type ResourceDomain,
+  resourceStreamDomainDescriptors,
 } from './resourceStreamDomains';
 
 const EXPECTED_DOMAINS: ResourceDomain[] = [
@@ -146,10 +146,12 @@ describe('resource stream domain descriptors', () => {
   // domains declare the metric source clock (live usage is joined onto the
   // base rows at serve by the backend).
   it('matches the backend-authored projection contract', async () => {
-    const { refreshDomainContract } = await import('@/core/refresh/domainRegistry');
-    const contractDomains = refreshDomainContract.resourceStream.domains;
+    const { refreshDomainContract: loadedRefreshDomainContract } = await import(
+      '@/core/refresh/domainRegistry'
+    );
+    const contractDomains = loadedRefreshDomainContract.resourceStream.domains;
     const sourceClocksByDomain = new Map(
-      refreshDomainContract.domains.map((entry) => [entry.domain, entry.sourceClocks ?? []])
+      loadedRefreshDomainContract.domains.map((entry) => [entry.domain, entry.sourceClocks ?? []])
     );
     expect(Object.keys(contractDomains).sort()).toEqual([...EXPECTED_DOMAINS].sort());
 

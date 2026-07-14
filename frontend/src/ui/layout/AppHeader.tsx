@@ -5,16 +5,16 @@
  * Implements AppHeader logic for the UI layer.
  */
 
-import React from 'react';
+import { SearchIcon } from '@shared/components/icons/SharedIcons';
+import FavMenuDropdown from '@ui/favorites/FavMenuDropdown';
 import ConnectivityStatus from '@ui/status/ConnectivityStatus';
 import MetricsStatus from '@ui/status/MetricsStatus';
 import SessionsStatus from '@ui/status/SessionsStatus';
 import UpdateStatus from '@ui/status/UpdateStatus';
-import FavMenuDropdown from '@ui/favorites/FavMenuDropdown';
 import { WindowToggleMaximise } from '@wailsjs/runtime/runtime';
-import { isMacPlatform } from '@/utils/platform';
+import React from 'react';
 import { eventBus } from '@/core/events';
-import { SearchIcon } from '@shared/components/icons/SharedIcons';
+import { isMacPlatform } from '@/utils/platform';
 import './AppHeader.css';
 
 const AppHeader: React.FC = () => {
@@ -22,19 +22,27 @@ const AppHeader: React.FC = () => {
   const isModalOpen = () =>
     typeof document !== 'undefined' && document.body.classList.contains('modal-surface-open');
 
-  const handleHeaderDoubleClick = () => {
+  const toggleWindowMaximize = () => {
     if (!isModalOpen()) {
       WindowToggleMaximise();
     }
   };
 
   return (
-    <div
-      className={`app-header${isMac ? ' app-header--mac' : ''}`}
-      onDoubleClick={handleHeaderDoubleClick}
-      data-app-region="header"
-    >
-      <div className="app-header-controls" onDoubleClick={(e) => e.stopPropagation()}>
+    <header className={`app-header${isMac ? ' app-header--mac' : ''}`} data-app-region="header">
+      <button
+        type="button"
+        className="app-header-drag-control"
+        aria-label="Toggle window maximize"
+        title="Double-click to maximize or restore the window"
+        onClick={(event) => {
+          if (event.detail === 0) {
+            toggleWindowMaximize();
+          }
+        }}
+        onDoubleClick={toggleWindowMaximize}
+      />
+      <div className="app-header-controls">
         <UpdateStatus />
         <div className="status-indicators">
           <ConnectivityStatus />
@@ -53,7 +61,7 @@ const AppHeader: React.FC = () => {
           <SearchIcon width={14} height={14} />
         </button>
       </div>
-    </div>
+    </header>
   );
 };
 

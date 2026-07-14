@@ -8,9 +8,10 @@
  * registered, GC will silently delete the persisted state for that view.
  */
 
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import * as fs from 'fs';
-import * as path from 'path';
+import { compareUtf16Strings } from '@/shared/utils/sort';
 import { listRegisteredGridTableViews } from './gridTableViewRegistry';
 
 const TABLE_MODES = [
@@ -75,7 +76,9 @@ function walkSourceFiles(dir: string): string[] {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) {
       // Skip node_modules, dist, and test fixtures.
-      if (entry.name === 'node_modules' || entry.name === 'dist') continue;
+      if (entry.name === 'node_modules' || entry.name === 'dist') {
+        continue;
+      }
       results.push(...walkSourceFiles(full));
     } else if (/\.tsx?$/.test(entry.name) && !entry.name.includes('.test.')) {
       results.push(full);
@@ -114,7 +117,9 @@ function extractViewIds(sourceRoot: string): { viewId: string; file: string }[] 
       continue;
     }
     const content = fs.readFileSync(filePath, 'utf-8');
-    if (!hookPattern.test(content)) continue;
+    if (!hookPattern.test(content)) {
+      continue;
+    }
 
     // Collect static viewId literals.
     for (const match of content.matchAll(staticViewIdPattern)) {
@@ -212,9 +217,10 @@ function findProductionDirectGridTableUsages(sourceRoot: string): string[] {
     })
     .filter(
       (relativePath) =>
-        !Object.prototype.hasOwnProperty.call(DIRECT_GRIDTABLE_USAGE_EXCEPTIONS, relativePath)
+        Object.getOwnPropertyDescriptor(DIRECT_GRIDTABLE_USAGE_EXCEPTIONS, relativePath) ===
+        undefined
     )
-    .sort();
+    .sort(compareUtf16Strings);
 }
 
 function findProductionDirectUseTableSortUsages(sourceRoot: string): string[] {
@@ -227,7 +233,8 @@ function findProductionDirectUseTableSortUsages(sourceRoot: string): string[] {
     })
     .filter(
       (relativePath) =>
-        !Object.prototype.hasOwnProperty.call(DIRECT_USE_TABLE_SORT_EXCEPTIONS, relativePath)
+        Object.getOwnPropertyDescriptor(DIRECT_USE_TABLE_SORT_EXCEPTIONS, relativePath) ===
+        undefined
     )
     .sort();
 }
@@ -240,7 +247,7 @@ function findUnclassifiedDirectUsageExceptions(): string[] {
   return entries
     .filter(([, exception]) => !exception.mode.trim() || !exception.reason.trim())
     .map(([file]) => file)
-    .sort();
+    .sort(compareUtf16Strings);
 }
 
 // A stale exception — an allowlisted file that no longer uses what it was
@@ -267,7 +274,7 @@ function findStaleDirectUsageExceptions(sourceRoot: string): string[] {
     /\buseTableSort\(/,
     'DIRECT_USE_TABLE_SORT_EXCEPTIONS'
   );
-  return stale.sort();
+  return stale.sort(compareUtf16Strings);
 }
 
 // A "source producer" returns a ResourceInventorySourceState — either an arrow
@@ -313,7 +320,7 @@ describe('gridTableViewRegistry contract', () => {
     const stale = [...registered].filter((id) => !usedIds.has(id));
     if (stale.length > 0) {
       throw new Error(
-        `Registry contains viewIds with no matching usage in source files:\n` +
+        'Registry contains viewIds with no matching usage in source files:\n' +
           stale.map((id) => `  "${id}"`).join('\n') +
           '\n\nRemove them from gridTableViewRegistry.ts or add their usage.'
       );
@@ -324,7 +331,7 @@ describe('gridTableViewRegistry contract', () => {
     const missing = findResourceGridCallsMissingTableMode(srcRoot);
     if (missing.length > 0) {
       throw new Error(
-        `Found resource-grid adapter calls without tableMode:\n` +
+        'Found resource-grid adapter calls without tableMode:\n' +
           missing.map((file) => `  ${file}`).join('\n') +
           '\n\nAdd an explicit Local Complete, Local Partial, Query Backed Static, or Query Backed Dynamic mode.'
       );
@@ -335,7 +342,7 @@ describe('gridTableViewRegistry contract', () => {
     const invalid = findResourceGridCallsWithoutRecognizedTableMode(srcRoot);
     if (invalid.length > 0) {
       throw new Error(
-        `Found resource-grid adapter calls with unrecognized tableMode:\n` +
+        'Found resource-grid adapter calls with unrecognized tableMode:\n' +
           invalid.map((file) => `  ${file}`).join('\n') +
           '\n\nUse Local Complete, Local Partial, Query Backed Static, or Query Backed Dynamic.'
       );
@@ -346,7 +353,7 @@ describe('gridTableViewRegistry contract', () => {
     const unexpected = findProductionDirectGridTableUsages(srcRoot);
     if (unexpected.length > 0) {
       throw new Error(
-        `Found direct production GridTable usages without an explicit exception:\n` +
+        'Found direct production GridTable usages without an explicit exception:\n' +
           unexpected.map((file) => `  ${file}`).join('\n') +
           '\n\nRoute resource tables through the resource-grid adapter with tableMode, or add a reviewed bounded/partial exception here.'
       );
@@ -357,7 +364,7 @@ describe('gridTableViewRegistry contract', () => {
     const unexpected = findProductionDirectUseTableSortUsages(srcRoot);
     if (unexpected.length > 0) {
       throw new Error(
-        `Found direct production useTableSort usages without an explicit exception:\n` +
+        'Found direct production useTableSort usages without an explicit exception:\n' +
           unexpected.map((file) => `  ${file}`).join('\n') +
           '\n\nRoute resource tables through the resource-grid adapter tableMode path, or add a reviewed bounded/partial exception here.'
       );
@@ -368,7 +375,7 @@ describe('gridTableViewRegistry contract', () => {
     const unclassified = findUnclassifiedDirectUsageExceptions();
     if (unclassified.length > 0) {
       throw new Error(
-        `Found direct GridTable/useTableSort exceptions without mode and reason:\n` +
+        'Found direct GridTable/useTableSort exceptions without mode and reason:\n' +
           unclassified.map((file) => `  ${file}`).join('\n') +
           '\n\nEvery direct bypass must document whether it is an adapter shell, Local Complete, Local Partial, Query Backed Static, or Query Backed Dynamic.'
       );
@@ -379,7 +386,7 @@ describe('gridTableViewRegistry contract', () => {
     const stale = findStaleDirectUsageExceptions(srcRoot);
     if (stale.length > 0) {
       throw new Error(
-        `Found allowlisted direct-usage exceptions whose file no longer uses GridTable/useTableSort:\n` +
+        'Found allowlisted direct-usage exceptions whose file no longer uses GridTable/useTableSort:\n' +
           stale.map((file) => `  ${file}`).join('\n') +
           '\n\nRemove the stale exception so the allowlist stays exact — a stale entry silently ' +
           'pre-authorizes a future direct bypass in that file without review.'
@@ -393,7 +400,7 @@ describe('gridTableViewRegistry contract', () => {
     const unexpected = producers.filter((file) => !sanctioned.has(file));
     if (unexpected.length > 0) {
       throw new Error(
-        `Found resource-inventory source producers outside the sanctioned adapters:\n` +
+        'Found resource-inventory source producers outside the sanctioned adapters:\n' +
           unexpected.map((file) => `  ${file}`).join('\n') +
           '\n\nResource inventory tables must source from boundedRowsSource or backendQuerySource. ' +
           'A new source shape must be reviewed and added to RESOURCE_INVENTORY_SOURCE_ADAPTERS deliberately.'

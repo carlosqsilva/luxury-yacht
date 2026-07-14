@@ -1,24 +1,10 @@
 import { buildClusterScope, parseClusterScopeList } from '../clusterScope';
-import { normalizeResourceScope, type DoorbellDomain } from './resourceStreamDomains';
+import type { ResourceStreamServerMessage } from '../types';
 import type { ResourceStreamClientMessage } from './resourceStreamConnection';
-export type ResourceStreamUpdateMessage = {
-  type?: string;
-  clusterId?: string;
-  clusterName?: string;
+import { type DoorbellDomain, normalizeResourceScope } from './resourceStreamDomains';
+export type ResourceStreamUpdateMessage = Partial<ResourceStreamServerMessage> & {
   domain: DoorbellDomain;
   scope: string;
-  source?: string;
-  signal?: string;
-  version?: string;
-  resourceVersion?: string;
-  sequence?: string;
-  uid?: string;
-  name?: string;
-  namespace?: string;
-  kind?: string;
-  row?: unknown;
-  error?: string;
-  errorDetails?: unknown;
 };
 
 export type StreamSubscription = {
@@ -101,13 +87,15 @@ export const resolveResourceStreamSubscriptionScope = (
 };
 
 export class ResourceStreamSubscriptionStore {
+  private readonly unsubscribeDebounceMs: number;
+  private readonly logInfo: (message: string) => void;
   private subscriptions = new Map<string, StreamSubscription>();
   private pendingUnsubscribes = new Map<string, PendingUnsubscribe>();
 
-  constructor(
-    private readonly unsubscribeDebounceMs: number,
-    private readonly logInfo: (message: string) => void
-  ) {}
+  constructor(unsubscribeDebounceMs: number, logInfo: (message: string) => void) {
+    this.unsubscribeDebounceMs = unsubscribeDebounceMs;
+    this.logInfo = logInfo;
+  }
 
   get size(): number {
     return this.subscriptions.size;
@@ -151,7 +139,7 @@ export class ResourceStreamSubscriptionStore {
       )
       .filter(
         (subscription): subscription is StreamSubscription =>
-          subscription !== undefined && subscription.reportScopes.has(resolved.reportScope)
+          subscription?.reportScopes.has(resolved.reportScope) === true
       );
   }
 
@@ -170,7 +158,7 @@ export class ResourceStreamSubscriptionStore {
         )
       )
       .filter((subscription): subscription is StreamSubscription => {
-        if (!subscription || !subscription.reportScopes.has(resolved.reportScope)) {
+        if (!subscription?.reportScopes.has(resolved.reportScope)) {
           return false;
         }
         subscription.reportScopes.delete(resolved.reportScope);
@@ -235,7 +223,9 @@ export class ResourceStreamSubscriptionStore {
   }
 
   clearPendingUnsubscribes(): void {
-    this.pendingUnsubscribes.forEach((pending) => window.clearTimeout(pending.timerId));
+    this.pendingUnsubscribes.forEach((pending) => {
+      window.clearTimeout(pending.timerId);
+    });
     this.pendingUnsubscribes.clear();
   }
 

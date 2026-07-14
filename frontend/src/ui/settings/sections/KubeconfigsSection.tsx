@@ -4,13 +4,13 @@
  * Kubeconfigs tab content: directories scanned for kubeconfig files.
  */
 
-import { useState, useEffect } from 'react';
-import { OpenKubeconfigSearchPathDialog, SetKubeconfigSearchPaths } from '@wailsjs/go/backend/App';
-import { errorHandler } from '@utils/errorHandler';
-import { readKubeconfigSearchPaths, requestAppState } from '@/core/app-state-access';
 import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
-import { CloseIcon, PlusIcon } from '@shared/components/icons/SharedIcons';
 import { KubeconfigFolderIcon } from '@shared/components/icons/SettingsIcons';
+import { CloseIcon, PlusIcon } from '@shared/components/icons/SharedIcons';
+import { errorHandler } from '@utils/errorHandler';
+import { useEffect, useEffectEvent, useState } from 'react';
+import { readKubeconfigSearchPaths, requestAppState } from '@/core/app-state-access';
+import { OpenKubeconfigSearchPathDialog, SetKubeconfigSearchPaths } from '@/core/backend-api';
 
 function KubeconfigsSection() {
   const { loadKubeconfigs } = useKubeconfig();
@@ -19,9 +19,10 @@ function KubeconfigsSection() {
   const [kubeconfigPathsSaving, setKubeconfigPathsSaving] = useState(false);
   const [kubeconfigPathsSelecting, setKubeconfigPathsSelecting] = useState(false);
 
-  useEffect(() => {
+  const loadInitialKubeconfigPaths = useEffectEvent(() => {
     loadKubeconfigPaths();
-  }, []);
+  });
+  useEffect(() => loadInitialKubeconfigPaths(), []);
 
   const loadKubeconfigPaths = async () => {
     setKubeconfigPathsLoading(true);
@@ -58,8 +59,12 @@ function KubeconfigsSection() {
     try {
       const selected = await OpenKubeconfigSearchPathDialog();
       const trimmed = selected?.trim();
-      if (!trimmed) return;
-      if (kubeconfigPaths.some((path) => path.trim() === trimmed)) return;
+      if (!trimmed) {
+        return;
+      }
+      if (kubeconfigPaths.some((path) => path.trim() === trimmed)) {
+        return;
+      }
       await persistKubeconfigPaths([...kubeconfigPaths, trimmed], 'addKubeconfigPath');
     } catch (error) {
       errorHandler.handle(error, { action: 'addKubeconfigPath' });
@@ -69,7 +74,9 @@ function KubeconfigsSection() {
   };
 
   const handleRemoveKubeconfigPath = async (index: number) => {
-    if (kubeconfigPaths.length <= 1) return;
+    if (kubeconfigPaths.length <= 1) {
+      return;
+    }
     const nextPaths = kubeconfigPaths.filter((_, currentIndex) => currentIndex !== index);
     await persistKubeconfigPaths(nextPaths, 'removeKubeconfigPath');
   };
@@ -103,7 +110,7 @@ function KubeconfigsSection() {
                   return (
                     <div
                       className="setting-item setting-item-surface kubeconfig-path-row"
-                      key={`kubeconfig-path-${index}`}
+                      key={path}
                     >
                       <span className="kubeconfig-path-icon" aria-hidden="true">
                         <KubeconfigFolderIcon width={16} height={16} />
@@ -132,7 +139,7 @@ function KubeconfigsSection() {
               onClick={handleAddKubeconfigPath}
               disabled={kubeconfigPathsSaving || kubeconfigPathsLoading || kubeconfigPathsSelecting}
             >
-              <PlusIcon width={12} height={12} ariaHidden />
+              <PlusIcon width={12} height={12} />
               Add path
             </button>
           </div>

@@ -6,8 +6,8 @@
  */
 
 import { useEffect, useMemo, useRef } from 'react';
+import type { ShortcutModifiers } from '@/types/shortcuts';
 import { useKeyboardContext } from './context';
-import { ShortcutModifiers } from '@/types/shortcuts';
 
 const normalizeModifiers = (modifiers?: ShortcutModifiers): ShortcutModifiers | undefined => {
   if (!modifiers) {
@@ -28,7 +28,7 @@ const normalizeModifiers = (modifiers?: ShortcutModifiers): ShortcutModifiers | 
 
 interface UseShortcutOptions {
   key: string;
-  handler: (event?: KeyboardEvent) => void | boolean;
+  handler: (event?: KeyboardEvent) => undefined | boolean;
   modifiers?: ShortcutModifiers;
   description?: string;
   category?: string;
@@ -164,6 +164,8 @@ export function useShortcuts(
   const commonSignature = useMemo(() => JSON.stringify(commonOptions ?? {}), [commonOptions]);
 
   useEffect(() => {
+    void structuralSignature;
+    void commonSignature;
     const currentShortcuts = latestShortcutsRef.current;
     const registeredIds = currentShortcuts.map((shortcut, index) => {
       const merged = {
@@ -189,8 +191,10 @@ export function useShortcuts(
     shortcutIdsRef.current = registeredIds;
 
     return () => {
-      registeredIds.forEach((id) => unregisterShortcut(id));
+      registeredIds.forEach((id) => {
+        unregisterShortcut(id);
+      });
       shortcutIdsRef.current = [];
     };
-  }, [structuralSignature, commonSignature, registerShortcut, unregisterShortcut]);
+  }, [registerShortcut, unregisterShortcut, structuralSignature, commonSignature]);
 }

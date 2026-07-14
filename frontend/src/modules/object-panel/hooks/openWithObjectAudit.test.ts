@@ -32,10 +32,11 @@
  * synthetic kinds that never resolve to a real Kubernetes GVK (e.g.
  * Helm releases).
  */
+
 import fs from 'node:fs';
 import path from 'node:path';
-
 import { describe, expect, it } from 'vitest';
+import { requireValue } from '@/test-utils/requireValue';
 
 interface CallSite {
   file: string;
@@ -49,7 +50,7 @@ interface CallSite {
 function* walkSourceFiles(root: string): Generator<string> {
   const stack: string[] = [root];
   while (stack.length > 0) {
-    const current = stack.pop()!;
+    const current = requireValue(stack.pop(), 'expected test value in openWithObjectAudit.test.ts');
     const entries = fs.readdirSync(current, { withFileTypes: true });
     for (const entry of entries) {
       const full = path.join(current, entry.name);
@@ -65,11 +66,17 @@ function* walkSourceFiles(root: string): Generator<string> {
         stack.push(full);
         continue;
       }
-      if (!entry.isFile()) continue;
-      if (!/\.(ts|tsx)$/.test(entry.name)) continue;
+      if (!entry.isFile()) {
+        continue;
+      }
+      if (!/\.(ts|tsx)$/.test(entry.name)) {
+        continue;
+      }
       // Skip test files: tests assert against mocks; production code is
       // what actually constructs the references that hit the backend.
-      if (/\.test\.(ts|tsx)$/.test(entry.name)) continue;
+      if (/\.test\.(ts|tsx)$/.test(entry.name)) {
+        continue;
+      }
       yield full;
     }
   }
@@ -94,17 +101,17 @@ function findObjectLiteralsAfter(
     let depth = 0;
     let i = openBrace;
     let inString: '"' | "'" | '`' | null = null;
-    let escape = false;
+    let isEscaped = false;
     let closeBrace = -1;
     for (; i < source.length; i++) {
       const ch = source[i];
-      if (escape) {
-        escape = false;
+      if (isEscaped) {
+        isEscaped = false;
         continue;
       }
       if (inString) {
         if (ch === '\\') {
-          escape = true;
+          isEscaped = true;
           continue;
         }
         if (ch === inString) {
@@ -197,7 +204,9 @@ function findObjectPanelLinkHelperBackedLiterals(
 function lineNumberAtOffset(source: string, offset: number): number {
   let line = 1;
   for (let i = 0; i < offset && i < source.length; i++) {
-    if (source[i] === '\n') line++;
+    if (source[i] === '\n') {
+      line++;
+    }
   }
   return line;
 }
@@ -236,13 +245,19 @@ function gatherViolations(config: AuditConfig): CallSite[] {
   const violations: CallSite[] = [];
   for (const file of walkSourceFiles(frontendSrc)) {
     const source = fs.readFileSync(file, 'utf8');
-    if (!source.includes(config.sourceMarker)) continue;
+    if (!source.includes(config.sourceMarker)) {
+      continue;
+    }
     const literals = config.finder(source);
-    if (literals.length === 0) continue;
+    if (literals.length === 0) {
+      continue;
+    }
 
     const relative = path.relative(path.resolve(frontendSrc, '..'), file);
     for (const literal of literals) {
-      if (literalSatisfiesInvariant(literal.body)) continue;
+      if (literalSatisfiesInvariant(literal.body)) {
+        continue;
+      }
       violations.push({
         file: relative,
         line: lineNumberAtOffset(source, literal.start),
@@ -291,7 +306,9 @@ describe('openWithObject audit (kind-only-objects guardrail)', () => {
     let totalLiterals = 0;
     for (const file of walkSourceFiles(frontendSrc)) {
       const source = fs.readFileSync(file, 'utf8');
-      if (!source.includes('openWithObject')) continue;
+      if (!source.includes('openWithObject')) {
+        continue;
+      }
       totalLiterals +=
         findOpenWithObjectLiterals(source).length +
         findOpenWithObjectHelperBackedLiterals(source).length;
@@ -314,7 +331,9 @@ describe('ObjectPanelLink audit (kind-only-objects guardrail)', () => {
     let totalLiterals = 0;
     for (const file of walkSourceFiles(frontendSrc)) {
       const source = fs.readFileSync(file, 'utf8');
-      if (!source.includes('ObjectPanelLink')) continue;
+      if (!source.includes('ObjectPanelLink')) {
+        continue;
+      }
       totalLiterals +=
         findObjectPanelLinkLiterals(source).length +
         findObjectPanelLinkHelperBackedLiterals(source).length;

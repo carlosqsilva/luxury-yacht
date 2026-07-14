@@ -7,18 +7,35 @@
  * Manages the host DOM node for rendering floating panels.
  */
 
-import React, {
+import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
+import type React from 'react';
+import {
   createContext,
-  useContext,
-  useState,
   useCallback,
+  useContext,
   useEffect,
   useLayoutEffect,
-  useRef,
   useMemo,
+  useRef,
+  useState,
   useSyncExternalStore,
 } from 'react';
-import type { TabGroupState, GroupKey, PanelRegistration } from './tabGroupTypes';
+import { getContentBounds } from './dockablePanelLayout';
+import type { PanelLayoutStore } from './panelLayoutStore';
+import { createPanelLayoutStore, setActivePanelLayoutStore } from './panelLayoutStore';
+import { PanelLayoutStoreContext } from './panelLayoutStoreContext';
+import type { AdjacentTabActivationPreference } from './tabGroupState';
+import {
+  addPanelToFloatingGroup,
+  addPanelToGroup,
+  getGroupForPanel,
+  getGroupTabs,
+  movePanelToGroup,
+  removePanelFromGroup,
+  reorderTab,
+  setActiveTab,
+} from './tabGroupState';
+import type { GroupKey, PanelRegistration, TabGroupState } from './tabGroupTypes';
 import type { DockPosition } from './useDockablePanelState';
 import {
   focusPanelById,
@@ -26,22 +43,6 @@ import {
   setPanelOpenById,
   setPanelPositionById,
 } from './useDockablePanelState';
-import { createPanelLayoutStore, setActivePanelLayoutStore } from './panelLayoutStore';
-import type { PanelLayoutStore } from './panelLayoutStore';
-import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
-import { getContentBounds } from './dockablePanelLayout';
-import { PanelLayoutStoreContext } from './panelLayoutStoreContext';
-import {
-  addPanelToGroup,
-  removePanelFromGroup,
-  setActiveTab,
-  reorderTab,
-  movePanelToGroup,
-  addPanelToFloatingGroup,
-  getGroupForPanel,
-  getGroupTabs,
-} from './tabGroupState';
-import type { AdjacentTabActivationPreference } from './tabGroupState';
 
 interface DockablePanelContextValue {
   // Tab group state
@@ -322,11 +323,17 @@ export const DockablePanelProvider: React.FC<DockablePanelProviderProps> = ({ ch
   useEffect(() => {
     const handleFocusIn = (event: FocusEvent) => {
       const target = event.target;
-      if (!(target instanceof Element)) return;
+      if (!(target instanceof Element)) {
+        return;
+      }
       const owner = target.closest<HTMLElement>('[data-dockable-group-key]');
-      if (!owner) return;
+      if (!owner) {
+        return;
+      }
       const key = owner.dataset.dockableGroupKey;
-      if (!key) return;
+      if (!key) {
+        return;
+      }
       setLastFocusedGroupKey(key as GroupKey);
     };
     document.addEventListener('focusin', handleFocusIn);
@@ -356,8 +363,12 @@ export const DockablePanelProvider: React.FC<DockablePanelProviderProps> = ({ ch
   const getLastFocusedPosition = useCallback((): DockPosition => {
     // Helper: map a group key to a DockPosition.
     const keyToPosition = (key: GroupKey | 'floating'): DockPosition => {
-      if (key === 'right') return 'right';
-      if (key === 'bottom') return 'bottom';
+      if (key === 'right') {
+        return 'right';
+      }
+      if (key === 'bottom') {
+        return 'bottom';
+      }
       return 'floating';
     };
 
@@ -382,7 +393,9 @@ export const DockablePanelProvider: React.FC<DockablePanelProviderProps> = ({ ch
       }
       activeStore.setTabGroups((prev) => {
         const groupKey = getGroupForPanel(prev, panelId);
-        if (!groupKey) return prev;
+        if (!groupKey) {
+          return prev;
+        }
         return setActiveTab(prev, panelId, groupKey);
       });
       focusPanelById(panelId);
@@ -675,15 +688,18 @@ export const DockablePanelProvider: React.FC<DockablePanelProviderProps> = ({ ch
     if (!listeners) {
       return;
     }
-    listeners.forEach((fn) => fn());
+    listeners.forEach((fn) => {
+      fn();
+    });
   }, []);
 
   const subscribeContentChange = useCallback((groupKey: GroupKey, fn: () => void) => {
     const listenersByGroup = contentChangeListeners.current;
-    if (!listenersByGroup.has(groupKey)) {
-      listenersByGroup.set(groupKey, new Set());
+    let listeners = listenersByGroup.get(groupKey);
+    if (!listeners) {
+      listeners = new Set();
+      listenersByGroup.set(groupKey, listeners);
     }
-    const listeners = listenersByGroup.get(groupKey)!;
     listeners.add(fn);
     return () => {
       listeners.delete(fn);

@@ -5,9 +5,9 @@
  * Covers key behaviors and edge cases for ResourceLoadingBoundary.
  */
 
-import ReactDOM from 'react-dom/client';
 import { act } from 'react';
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as ReactDOM from 'react-dom/client';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import ResourceLoadingBoundary from './ResourceLoadingBoundary';
 
@@ -24,10 +24,6 @@ vi.mock('@/core/refresh/hooks/useAutoRefreshLoadingState', () => ({
 describe('ResourceLoadingBoundary', () => {
   let container: HTMLDivElement;
   let root: ReactDOM.Root;
-
-  beforeAll(() => {
-    (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
-  });
 
   beforeEach(() => {
     autoRefreshLoadingState.isPaused = false;
@@ -79,7 +75,7 @@ describe('ResourceLoadingBoundary', () => {
   });
 
   it('warns when allowPartial is set but no data arrives', async () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 
     await act(async () => {
       root.render(
@@ -98,7 +94,7 @@ describe('ResourceLoadingBoundary', () => {
   });
 
   it('suppresses the empty warning when suppressEmptyWarning is true', async () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 
     await act(async () => {
       root.render(

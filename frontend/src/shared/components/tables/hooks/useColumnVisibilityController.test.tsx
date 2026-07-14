@@ -5,14 +5,11 @@
  * Covers key behaviors and edge cases for useColumnVisibilityController.
  */
 
-import React, { act, useImperativeHandle } from 'react';
-import ReactDOM from 'react-dom/client';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-
 import type { GridColumnDefinition } from '@shared/components/tables/GridTable.types';
 import { useColumnVisibilityController } from '@shared/components/tables/hooks/useColumnVisibilityController';
-
-(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+import React, { act, useImperativeHandle } from 'react';
+import * as ReactDOM from 'react-dom/client';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 type SampleRow = { name: string };
 
@@ -42,7 +39,12 @@ const createHarness = async (props: HarnessProps = {}) => {
   const root = ReactDOM.createRoot(container);
   const ref = React.createRef<HarnessHandle>();
 
-  const Harness = React.forwardRef<HarnessHandle, HarnessProps>((incomingProps, forwardRef) => {
+  const Harness = ({
+    ref: harnessRef,
+    ...incomingProps
+  }: HarnessProps & {
+    ref?: React.Ref<HarnessHandle>;
+  }) => {
     const controller = useColumnVisibilityController<SampleRow>({
       columns,
       columnVisibility: incomingProps.columnVisibility,
@@ -58,14 +60,14 @@ const createHarness = async (props: HarnessProps = {}) => {
       visibilityFnRef.current = controller.isColumnVisible;
     }, [controller.renderedColumns, controller.isColumnVisible]);
 
-    useImperativeHandle(forwardRef, () => ({
+    useImperativeHandle(harnessRef, () => ({
       toggle: controller.toggleColumnVisibility,
       isVisible: (key: string) => visibilityFnRef.current(key),
       getRenderedKeys: () => renderedKeysRef.current,
     }));
 
     return null;
-  });
+  };
 
   await act(async () => {
     root.render(<Harness ref={ref} {...props} />);

@@ -4,8 +4,10 @@
  * Tests visible object-map state derivation for filters, focus, search, and legend.
  */
 
-import { describe, expect, it } from 'vitest';
 import type { ObjectMapEdge, ObjectMapNode, ObjectMapReference } from '@core/refresh/types';
+import { describe, expect, it } from 'vitest';
+import { compareUtf16Strings } from '@/shared/utils/sort';
+import { requireValue } from '@/test-utils/requireValue';
 import { computeObjectMapLayout } from './objectMapLayout';
 import {
   deriveObjectMapVisibleState,
@@ -106,7 +108,10 @@ describe('deriveObjectMapVisibleState', () => {
       selectedKinds: ['Service', 'Pod'],
     });
 
-    expect(result.visibleLayout.nodes.map((n) => n.id).sort()).toEqual(['pod', 'service']);
+    expect(result.visibleLayout.nodes.map((n) => n.id).sort(compareUtf16Strings)).toEqual([
+      'pod',
+      'service',
+    ]);
     expect(result.visibleLayout.edges).toHaveLength(1);
     expect(result.visibleLayout.edges[0]).toMatchObject({
       sourceId: 'service',
@@ -146,8 +151,18 @@ describe('deriveObjectMapVisibleState', () => {
       selectedKinds: ['Service', 'Pod'],
     });
 
-    expect(selected.visibleLayout.nodes.map((node) => [node.id, node.x, node.y])).toEqual(
-      unselected.visibleLayout.nodes.map((node) => [node.id, node.x, node.y])
+    expect(
+      selected.visibleLayout.nodes.map((selectedNode) => [
+        selectedNode.id,
+        selectedNode.x,
+        selectedNode.y,
+      ])
+    ).toEqual(
+      unselected.visibleLayout.nodes.map((unselectedNode) => [
+        unselectedNode.id,
+        unselectedNode.x,
+        unselectedNode.y,
+      ])
     );
     expect(selected.visibleSelectionState.activeId).toBe('pod-b');
   });
@@ -171,13 +186,13 @@ describe('deriveObjectMapVisibleState', () => {
       focusMode: true,
     });
 
-    expect(result.visibleLayout.nodes.map((n) => n.id).sort()).toEqual([
+    expect(result.visibleLayout.nodes.map((n) => n.id).sort(compareUtf16Strings)).toEqual([
       'config',
       'deploy',
       'pod-a',
       'secret',
     ]);
-    expect(result.visibleLayout.edges.map((e) => e.id).sort()).toEqual([
+    expect(result.visibleLayout.edges.map((e) => e.id).sort(compareUtf16Strings)).toEqual([
       'config-secret',
       'deploy-pod-a',
       'pod-config',
@@ -235,7 +250,12 @@ describe('deriveObjectMapVisibleState', () => {
 describe('object map visible state pruning', () => {
   it('prunes edge and kind selections against available options', () => {
     expect(
-      Array.from(pruneObjectMapEnabledEdgeTypes(new Set(['owner', 'stale']), new Set(['owner']))!)
+      Array.from(
+        requireValue(
+          pruneObjectMapEnabledEdgeTypes(new Set(['owner', 'stale']), new Set(['owner'])),
+          'expected test value in objectMapVisibleState.test.ts'
+        )
+      )
     ).toEqual(['owner']);
     expect(
       pruneObjectMapSelectedKinds(

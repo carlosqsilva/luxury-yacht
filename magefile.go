@@ -208,10 +208,7 @@ func (QC) GoModUpdateCheck() error {
 // Updates Go modules
 func (QC) GoModUpdate() error {
 	fmt.Println("\n🔄 Updating outdated Go modules...")
-	if err := sh.RunV("go", "get", "-u"); err != nil {
-		return err
-	}
-	return sh.RunV("go", "mod", "tidy")
+	return mage.UpdateDirectGoModules(sh.Output, sh.RunV)
 }
 
 // Checks that all Go files are gofmt-formatted. Fails (listing the offending
@@ -250,7 +247,7 @@ func (QC) Lint() error {
 		return err
 	}
 	fmt.Println("\n🔎 Running npm linter...")
-	return sh.RunV("npm", "run", "lint", "--prefix", cfg.FrontendDir)
+	return sh.RunV("npm", "run", "check", "--prefix", cfg.FrontendDir)
 }
 
 // Runs the npm linter with fix
@@ -262,7 +259,7 @@ func (QC) LintFix() error {
 		return err
 	}
 	fmt.Println("\n🔧 Running npm linter with fix...")
-	return sh.RunV("npm", "run", "lint:fix", "--prefix", cfg.FrontendDir)
+	return sh.RunV("npm", "run", "check:fix", "--prefix", cfg.FrontendDir)
 }
 
 // Runs the npm typechecker

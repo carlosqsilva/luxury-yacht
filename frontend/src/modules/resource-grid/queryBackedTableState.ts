@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import type { SortConfig } from '@hooks/useTableSort';
 
 import { ALL_NAMESPACES_SCOPE } from '@modules/namespace/constants';
 import type {
@@ -6,7 +6,7 @@ import type {
   GridTableFilterState,
 } from '@shared/components/tables/GridTable';
 import { DEFAULT_GRID_TABLE_FILTER_STATE } from '@shared/components/tables/gridTableFilterState';
-import type { SortConfig } from '@hooks/useTableSort';
+import { useCallback, useState } from 'react';
 
 export interface QueryBackedTableState {
   filters: GridTableFilterState;
@@ -74,45 +74,32 @@ export function queryBackedFacetFilterOptions(
   return explicitHasMetadataBeyondFallback ? explicitValues : queryFacetValues;
 }
 
-export function normalizeQueryBackedNamespaceFilters(
-  filters: GridTableFilterState,
-  availableNamespaces: string[] | undefined
+export function removeQueryBackedNamespaceFilterSentinels(
+  filters: GridTableFilterState
 ): GridTableFilterState {
   const namespaceFilters = filters.namespaces.filter(
     (namespace) => !isAllNamespacesFilterSentinel(namespace)
   );
-  const withoutSentinels =
-    namespaceFilters.length === filters.namespaces.length
-      ? filters
-      : { ...filters, namespaces: namespaceFilters };
+  return namespaceFilters.length === filters.namespaces.length
+    ? filters
+    : { ...filters, namespaces: namespaceFilters };
+}
 
+export function normalizeQueryBackedNamespaceQueryFilters(
+  filters: GridTableFilterState,
+  availableNamespaces: string[] | undefined
+): GridTableFilterState {
   const available = normalizeOptionSet(availableNamespaces);
-  if (withoutSentinels.namespaces.length === 0) {
-    return withoutSentinels;
+  const selected = normalizeOptionSet(filters.namespaces);
+  if (available.size === 0 || selected.size !== available.size) {
+    return filters;
   }
-  // An empty option list means availability is UNKNOWN (options still loading,
-  // or a cluster blip emptied them while the view stayed mounted) — never
-  // "the selection is invalid". The caller persists normalization results, so
-  // clearing here would permanently destroy the user's saved filters.
-  if (available.size === 0) {
-    return withoutSentinels;
-  }
-
-  const selected = normalizeOptionSet(withoutSentinels.namespaces);
-  if (selected.size !== available.size) {
-    return withoutSentinels;
-  }
-
   for (const namespace of available) {
     if (!selected.has(namespace)) {
-      return withoutSentinels;
+      return filters;
     }
   }
-
-  return {
-    ...withoutSentinels,
-    namespaces: [],
-  };
+  return { ...filters, namespaces: [] };
 }
 
 function queryBackedTableStateEquals(left: QueryBackedTableState, right: QueryBackedTableState) {

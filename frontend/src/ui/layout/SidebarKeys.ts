@@ -5,11 +5,16 @@
  * Implements SidebarKeys logic for the UI layer.
  */
 
-import { useCallback, useEffect, useState, type RefObject } from 'react';
 import { KeyboardScopePriority } from '@ui/shortcuts/priorities';
 import { useKeyboardSurface } from '@ui/shortcuts/surfaces';
 import { hasNativeTabHandling, isInputElement, resolveEventElement } from '@ui/shortcuts/utils';
-import type { NamespaceViewType, ClusterViewType } from '@/types/navigation/views';
+import { type RefObject, useCallback, useEffect, useState } from 'react';
+import {
+  type ClusterViewType,
+  type NamespaceViewType,
+  parseClusterViewType,
+  parseNamespaceViewType,
+} from '@/types/navigation/views';
 import { focusPreviousRegionBeforeSidebar } from './appFocusRegions';
 
 export type SidebarCursorTarget =
@@ -47,22 +52,21 @@ export const describeElementTarget = (element: HTMLElement | null): SidebarCurso
   if (kind === 'overview') {
     return { kind: 'overview' };
   }
-  if (kind === 'cluster-view' && element.dataset.sidebarTargetView) {
-    return {
-      kind: 'cluster-view',
-      view: element.dataset.sidebarTargetView as ClusterViewType,
-    };
+  if (kind === 'cluster-view') {
+    // The dataset round-trips through the DOM as strings; validate membership
+    // instead of blind-casting so a bogus value yields no target.
+    const view = parseClusterViewType(element.dataset.sidebarTargetView);
+    return view ? { kind: 'cluster-view', view } : null;
   }
-  if (
-    kind === 'namespace-view' &&
-    element.dataset.sidebarTargetNamespace &&
-    element.dataset.sidebarTargetView
-  ) {
-    return {
-      kind: 'namespace-view',
-      namespace: element.dataset.sidebarTargetNamespace,
-      view: element.dataset.sidebarTargetView as NamespaceViewType,
-    };
+  if (kind === 'namespace-view' && element.dataset.sidebarTargetNamespace) {
+    const view = parseNamespaceViewType(element.dataset.sidebarTargetView);
+    return view
+      ? {
+          kind: 'namespace-view',
+          namespace: element.dataset.sidebarTargetNamespace,
+          view,
+        }
+      : null;
   }
   if (kind === 'namespace-toggle' && element.dataset.sidebarTargetNamespace) {
     return {
@@ -92,6 +96,7 @@ interface SidebarKeyboardParams {
 
 interface SidebarKeyboardApi {
   buildSidebarItemClassName: (baseClasses: string[], target?: SidebarCursorTarget | null) => string;
+  isTargetSelected: (target: SidebarCursorTarget) => boolean;
   focusSelectedSidebarItem: () => void;
   getDisplaySelectionTarget: () => SidebarCursorTarget | null;
   describeTarget: (element: HTMLElement | null) => SidebarCursorTarget | null;
@@ -263,7 +268,7 @@ export const useSidebarKeyboardControls = ({
       }
 
       const container = sidebarRef.current;
-      if (!container || !container.contains(document.activeElement)) {
+      if (!container?.contains(document.activeElement)) {
         return false;
       }
       if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) {
@@ -422,6 +427,7 @@ export const useSidebarKeyboardControls = ({
 
   return {
     buildSidebarItemClassName,
+    isTargetSelected,
     focusSelectedSidebarItem,
     getDisplaySelectionTarget,
     describeTarget: describeElementTarget,

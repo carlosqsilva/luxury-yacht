@@ -1,17 +1,19 @@
 import { ensureRefreshBaseURL, invalidateRefreshBaseURL } from '../client';
+import type { ResourceStreamClientMessage as ResourceStreamWireClientMessage } from '../types';
 import type { DoorbellDomain } from './resourceStreamDomains';
 import { streamReconnectDelay } from './streamTiming';
 
 const RESOURCE_STREAM_PATH = '/api/v2/stream/resources';
 const RECONNECT_JITTER_FACTOR = 0.2;
 
-export type ResourceStreamClientMessage = {
-  type: string;
+export type ResourceStreamClientMessage = Omit<
+  ResourceStreamWireClientMessage,
+  'type' | 'domain' | 'scope'
+> & {
+  type: Extract<ResourceStreamWireClientMessage['type'], 'REQUEST' | 'CANCEL'>;
   clusterId?: string;
   domain: DoorbellDomain;
   scope: string;
-  resourceVersion?: string;
-  resumeToken?: string;
 };
 
 export type ResourceStreamConnectionDelegate = {
@@ -21,6 +23,7 @@ export type ResourceStreamConnectionDelegate = {
 };
 
 export class ResourceStreamConnection {
+  private readonly delegate: ResourceStreamConnectionDelegate;
   private socket: WebSocket | null = null;
   private attempt = 0;
   private closed = false;
@@ -28,7 +31,9 @@ export class ResourceStreamConnection {
   private reconnectTimer: number | null = null;
   private pendingMessages: ResourceStreamClientMessage[] = [];
 
-  constructor(private readonly delegate: ResourceStreamConnectionDelegate) {}
+  constructor(delegate: ResourceStreamConnectionDelegate) {
+    this.delegate = delegate;
+  }
 
   async connect(): Promise<void> {
     if (this.closed || this.paused || typeof window === 'undefined') {
@@ -95,7 +100,9 @@ export class ResourceStreamConnection {
     this.delegate.handleConnectionOpen('');
     const pending = [...this.pendingMessages];
     this.pendingMessages = [];
-    pending.forEach((message) => this.send(message));
+    pending.forEach((message) => {
+      this.send(message);
+    });
   }
 
   private handleMessage(event: MessageEvent): void {

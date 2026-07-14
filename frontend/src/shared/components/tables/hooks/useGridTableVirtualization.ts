@@ -10,16 +10,17 @@
  * Unmeasured rows fall back to estimateRowHeight.
  */
 
+import type { GridTableVirtualizationOptions } from '@shared/components/tables/GridTable.types';
 import {
+  type RefObject,
   useCallback,
   useEffect,
+  useEffectEvent,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
-  type RefObject,
 } from 'react';
-import type { GridTableVirtualizationOptions } from '@shared/components/tables/GridTable.types';
 
 // Drives row virtualization: determines visible window, manages scroll offsets,
 // and coordinates hover/header sync during virtual scroll.
@@ -151,9 +152,13 @@ export function useGridTableVirtualization<T>({
   // getBoundingClientRect and updates the cache if it changed.
   const measureRowRef: MeasureRowRefFn = useCallback(
     (rowKey: string, node: HTMLDivElement | null) => {
-      if (!node) return;
+      if (!node) {
+        return;
+      }
       const rect = node.getBoundingClientRect();
-      if (rect.height <= 0) return;
+      if (rect.height <= 0) {
+        return;
+      }
       const cached = rowHeightCacheRef.current.get(rowKey);
       if (cached === undefined || Math.abs(cached - rect.height) > 0.5) {
         rowHeightCacheRef.current.set(rowKey, rect.height);
@@ -174,6 +179,8 @@ export function useGridTableVirtualization<T>({
   }, [wrapperRef]);
 
   useLayoutEffect(() => {
+    void data.length;
+    void hideHeader;
     updateScrollbarWidth();
   }, [updateScrollbarWidth, data.length, hideHeader]);
 
@@ -203,6 +210,7 @@ export function useGridTableVirtualization<T>({
   // positions[i] = top offset of row i. positions[data.length] = total height.
   // Unmeasured rows use estimateRowHeight as their height.
   const rowPositions = useMemo(() => {
+    void heightCacheVersion;
     const n = data.length;
     const pos = new Float64Array(n + 1);
     const cache = rowHeightCacheRef.current;
@@ -214,12 +222,12 @@ export function useGridTableVirtualization<T>({
     }
     return pos;
     // heightCacheVersion is included so positions recompute after measurements.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data, keyExtractor, virtualizationConfig.estimateRowHeight, heightCacheVersion]);
 
   // --- Viewport and scroll tracking ---
 
   useEffect(() => {
+    void data.length;
     if (!shouldVirtualize) {
       setVirtualViewportHeight(0);
       setVirtualScrollTop(0);
@@ -251,14 +259,15 @@ export function useGridTableVirtualization<T>({
     };
   }, [
     shouldVirtualize,
-    data.length,
     wrapperRef,
     updateScrollbarWidth,
     hoverRowRef,
     updateHoverForElement,
+    data.length,
   ]);
 
   useEffect(() => {
+    void data.length;
     if (!shouldVirtualize) {
       return;
     }
@@ -312,7 +321,6 @@ export function useGridTableVirtualization<T>({
     };
   }, [
     shouldVirtualize,
-    data.length,
     wrapperRef,
     scheduleHeaderSync,
     updateHoverForElement,
@@ -320,6 +328,7 @@ export function useGridTableVirtualization<T>({
     updateColumnWindowRange,
     startFrameSampler,
     stopFrameSampler,
+    data.length,
   ]);
 
   // Reset scroll position when filters change
@@ -346,21 +355,21 @@ export function useGridTableVirtualization<T>({
       }
     }
     return () => {
-      if (rafHandle != null) {
+      if (rafHandle !== null && rafHandle !== undefined) {
         cancelAnimationFrame(rafHandle);
       }
     };
   }, [filteringEnabled, filterSignature, shouldVirtualize, wrapperRef, updateColumnWindowRange]);
 
-  useEffect(() => {
+  const cleanUpVirtualization = useEffectEvent(() => {
     return () => {
       // Clear any hover state unconditionally on unmount.
       updateHoverForElement(null);
       stopFrameSampler('unmount');
     };
     // We only need to run this on unmount
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  });
+  useEffect(() => cleanUpVirtualization(), []);
 
   // --- Virtual range: binary-search the positions array ---
   const virtualRange = useMemo(() => {
@@ -378,7 +387,9 @@ export function useGridTableVirtualization<T>({
     let visibleCount = 0;
     const viewportBottom = virtualScrollTop + virtualViewportHeight;
     for (let i = firstVisible; i < totalCount; i++) {
-      if (rowPositions[i] >= viewportBottom) break;
+      if (rowPositions[i] >= viewportBottom) {
+        break;
+      }
       visibleCount++;
     }
 
@@ -402,6 +413,9 @@ export function useGridTableVirtualization<T>({
 
   // Sync hover overlay when the virtual range shifts
   useEffect(() => {
+    void virtualRange.start;
+    void virtualRange.end;
+    void data.length;
     const current = hoverRowRef.current;
     if (!current) {
       return;
@@ -463,7 +477,9 @@ export function useGridTableVirtualization<T>({
   // Helper to get the top offset of a row by absolute index
   const getRowTop = useCallback(
     (index: number): number => {
-      if (index < 0 || index >= rowPositions.length) return 0;
+      if (index < 0 || index >= rowPositions.length) {
+        return 0;
+      }
       return rowPositions[index];
     },
     [rowPositions]

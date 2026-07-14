@@ -1,19 +1,39 @@
 /**
  * frontend/src/shared/components/tabs/Tabs.test.tsx
  */
-import ReactDOM from 'react-dom/client';
+
 import { act } from 'react';
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as ReactDOM from 'react-dom/client';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createTestId } from '@/test-utils/createTestId';
+import { requireValue } from '@/test-utils/requireValue';
+import { installWindowProperty } from '@/test-utils/windowProperty';
 
 import { Tabs } from './Tabs';
+
+const installResizeObserver = (observers: Array<() => void>) =>
+  installWindowProperty(
+    'ResizeObserver',
+    class implements ResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        observers.push(() => callback([], this));
+      }
+
+      observe() {
+        return undefined;
+      }
+      unobserve() {
+        return undefined;
+      }
+      disconnect() {
+        return undefined;
+      }
+    }
+  );
 
 describe('Tabs', () => {
   let container: HTMLDivElement;
   let root: ReactDOM.Root;
-
-  beforeAll(() => {
-    (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
-  });
 
   beforeEach(() => {
     container = document.createElement('div');
@@ -30,7 +50,9 @@ describe('Tabs', () => {
 
   it('renders an empty tablist with the required aria-label', () => {
     act(() => {
-      root.render(<Tabs tabs={[]} activeId={null} onActivate={() => {}} aria-label="Test Tabs" />);
+      root.render(
+        <Tabs tabs={[]} activeId={null} onActivate={() => undefined} aria-label="Test Tabs" />
+      );
     });
 
     const tablist = container.querySelector('[role="tablist"]');
@@ -49,7 +71,7 @@ describe('Tabs', () => {
             { id: 'c', label: 'Gamma' },
           ]}
           activeId="a"
-          onActivate={() => {}}
+          onActivate={() => undefined}
           aria-label="Test Tabs"
         />
       );
@@ -71,7 +93,7 @@ describe('Tabs', () => {
             { id: 'b', label: 'Beta' },
           ]}
           activeId="b"
-          onActivate={() => {}}
+          onActivate={() => undefined}
           aria-label="Test Tabs"
         />
       );
@@ -144,7 +166,7 @@ describe('Tabs', () => {
             { id: 'c', label: 'Gamma' },
           ]}
           activeId="b"
-          onActivate={() => {}}
+          onActivate={() => undefined}
           aria-label="Test Tabs"
         />
       );
@@ -218,7 +240,7 @@ describe('Tabs', () => {
             { id: 'c', label: 'Gamma' },
           ]}
           activeId="b"
-          onActivate={() => {}}
+          onActivate={() => undefined}
           aria-label="Test Tabs"
         />
       );
@@ -250,7 +272,7 @@ describe('Tabs', () => {
             { id: 'c', label: 'Gamma' },
           ]}
           activeId="a"
-          onActivate={() => {}}
+          onActivate={() => undefined}
           aria-label="Test Tabs"
         />
       );
@@ -326,7 +348,7 @@ describe('Tabs', () => {
             { id: 'b', label: <svg />, ariaLabel: 'Icon-only tab' },
           ]}
           activeId="a"
-          onActivate={() => {}}
+          onActivate={() => undefined}
           aria-label="Test Tabs"
         />
       );
@@ -343,7 +365,7 @@ describe('Tabs', () => {
         <Tabs
           tabs={[{ id: 'a', label: 'Alpha' }]}
           activeId="a"
-          onActivate={() => {}}
+          onActivate={() => undefined}
           aria-label="Test Tabs"
           textTransform="uppercase"
         />
@@ -360,7 +382,7 @@ describe('Tabs', () => {
         <Tabs
           tabs={[{ id: 'a', label: 'Alpha' }]}
           activeId="a"
-          onActivate={() => {}}
+          onActivate={() => undefined}
           aria-label="Test Tabs"
         />
       );
@@ -371,15 +393,16 @@ describe('Tabs', () => {
   });
 
   it('merges a consumer className onto the root and applies an id', () => {
+    const tabListId = createTestId('custom-id');
     act(() => {
       root.render(
         <Tabs
           tabs={[{ id: 'a', label: 'Alpha' }]}
           activeId="a"
-          onActivate={() => {}}
+          onActivate={() => undefined}
           aria-label="Test Tabs"
           className="custom-class"
-          id="custom-id"
+          id={tabListId}
         />
       );
     });
@@ -387,7 +410,7 @@ describe('Tabs', () => {
     const tablist = container.querySelector('[role="tablist"]');
     expect(tablist?.classList.contains('tab-strip')).toBe(true);
     expect(tablist?.classList.contains('custom-class')).toBe(true);
-    expect(tablist?.id).toBe('custom-id');
+    expect(tablist?.id).toBe(tabListId);
   });
 
   it('adds the fit sizing modifier class by default', () => {
@@ -396,7 +419,7 @@ describe('Tabs', () => {
         <Tabs
           tabs={[{ id: 'a', label: 'Alpha' }]}
           activeId="a"
-          onActivate={() => {}}
+          onActivate={() => undefined}
           aria-label="Test Tabs"
         />
       );
@@ -413,7 +436,7 @@ describe('Tabs', () => {
         <Tabs
           tabs={[{ id: 'a', label: 'Alpha' }]}
           activeId="a"
-          onActivate={() => {}}
+          onActivate={() => undefined}
           aria-label="Test Tabs"
           tabSizing="equal"
         />
@@ -431,7 +454,7 @@ describe('Tabs', () => {
         <Tabs
           tabs={[{ id: 'a', label: 'Alpha' }]}
           activeId="a"
-          onActivate={() => {}}
+          onActivate={() => undefined}
           aria-label="Test Tabs"
           minTabWidth={100}
           maxTabWidth={300}
@@ -450,7 +473,7 @@ describe('Tabs', () => {
         <Tabs
           tabs={[{ id: 'a', label: 'Alpha' }]}
           activeId="a"
-          onActivate={() => {}}
+          onActivate={() => undefined}
           aria-label="Test Tabs"
         />
       );
@@ -471,7 +494,7 @@ describe('Tabs', () => {
         <Tabs
           tabs={[{ id: 'a', label: 'Alpha' }]}
           activeId="a"
-          onActivate={() => {}}
+          onActivate={() => undefined}
           aria-label="Test Tabs"
           tabSizing="equal"
         />
@@ -495,7 +518,7 @@ describe('Tabs', () => {
             { id: 'b', label: 'Beta' },
           ]}
           activeId="a"
-          onActivate={() => {}}
+          onActivate={() => undefined}
           aria-label="Test Tabs"
         />
       );
@@ -525,7 +548,9 @@ describe('Tabs', () => {
     const closeButton = container.querySelector<HTMLElement>('.tab-item__close');
     expect(closeButton).toBeTruthy();
     act(() => {
-      closeButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      requireValue(closeButton, 'expected test value in Tabs.test.tsx').dispatchEvent(
+        new MouseEvent('click', { bubbles: true })
+      );
     });
 
     expect(onClose).toHaveBeenCalledTimes(1);
@@ -539,7 +564,7 @@ describe('Tabs', () => {
         <Tabs
           tabs={[{ id: 'a', label: 'Alpha', onClose }]}
           activeId="a"
-          onActivate={() => {}}
+          onActivate={() => undefined}
           aria-label="Test Tabs"
         />
       );
@@ -549,7 +574,9 @@ describe('Tabs', () => {
     tab?.focus();
 
     act(() => {
-      tab!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }));
+      requireValue(tab, 'expected test value in Tabs.test.tsx').dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Delete', bubbles: true })
+      );
     });
 
     expect(onClose).toHaveBeenCalledTimes(1);
@@ -562,7 +589,7 @@ describe('Tabs', () => {
         <Tabs
           tabs={[{ id: 'a', label: 'Alpha', onClose }]}
           activeId="a"
-          onActivate={() => {}}
+          onActivate={() => undefined}
           aria-label="Test Tabs"
         />
       );
@@ -572,7 +599,9 @@ describe('Tabs', () => {
     tab?.focus();
 
     act(() => {
-      tab!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true }));
+      requireValue(tab, 'expected test value in Tabs.test.tsx').dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true })
+      );
     });
 
     expect(onClose).toHaveBeenCalledTimes(1);
@@ -584,7 +613,7 @@ describe('Tabs', () => {
         <Tabs
           tabs={[{ id: 'a', label: 'Alpha' }]}
           activeId="a"
-          onActivate={() => {}}
+          onActivate={() => undefined}
           aria-label="Test Tabs"
         />
       );
@@ -595,7 +624,9 @@ describe('Tabs', () => {
 
     // Should not throw or do anything.
     act(() => {
-      tab!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }));
+      requireValue(tab, 'expected test value in Tabs.test.tsx').dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Delete', bubbles: true })
+      );
     });
 
     // No assertion needed beyond "doesn't throw" — no onClose to call.
@@ -612,11 +643,11 @@ describe('Tabs', () => {
               extraProps: {
                 'data-testid': 'cluster-id-1',
                 draggable: true,
-              } as any,
+              },
             },
           ]}
           activeId="a"
-          onActivate={() => {}}
+          onActivate={() => undefined}
           aria-label="Test Tabs"
         />
       );
@@ -628,7 +659,7 @@ describe('Tabs', () => {
   });
 
   it('warns in dev mode when extraProps overrides a reserved key', () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 
     act(() => {
       root.render(
@@ -637,11 +668,11 @@ describe('Tabs', () => {
             {
               id: 'a',
               label: 'Alpha',
-              extraProps: { tabIndex: 99 } as any,
+              extraProps: { tabIndex: 99 },
             },
           ]}
           activeId="a"
-          onActivate={() => {}}
+          onActivate={() => undefined}
           aria-label="Test Tabs"
         />
       );
@@ -669,7 +700,7 @@ describe('Tabs', () => {
             },
           ]}
           activeId="a"
-          onActivate={() => {}}
+          onActivate={() => undefined}
           aria-label="Test Tabs"
         />
       );
@@ -681,18 +712,113 @@ describe('Tabs', () => {
     expect(leading).toBeTruthy();
     // leading should appear before label in the DOM
     expect(
-      leading!.compareDocumentPosition(label!) & Node.DOCUMENT_POSITION_FOLLOWING
+      requireValue(leading, 'expected test value in Tabs.test.tsx').compareDocumentPosition(
+        requireValue(label, 'expected test value in Tabs.test.tsx')
+      ) & Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy();
   });
 
   it('renders an empty tablist without crashing when tabs array is empty', () => {
     act(() => {
-      root.render(<Tabs tabs={[]} activeId={null} onActivate={() => {}} aria-label="Test Tabs" />);
+      root.render(
+        <Tabs tabs={[]} activeId={null} onActivate={() => undefined} aria-label="Test Tabs" />
+      );
     });
 
     const tablist = container.querySelector('[role="tablist"]');
     expect(tablist).toBeTruthy();
     expect(tablist?.querySelectorAll('[role="tab"]').length).toBe(0);
+  });
+
+  it('does not recreate the scroll observer when only the tabs array identity changes', async () => {
+    let observeCount = 0;
+    let disconnectCount = 0;
+    const restoreResizeObserver = installWindowProperty(
+      'ResizeObserver',
+      class implements ResizeObserver {
+        observe() {
+          observeCount += 1;
+        }
+        unobserve() {
+          return undefined;
+        }
+        disconnect() {
+          disconnectCount += 1;
+        }
+      }
+    );
+    const render = (tabs: Array<{ id: string; label: string }>) => {
+      root.render(
+        <Tabs
+          tabs={tabs}
+          activeId="a"
+          onActivate={() => undefined}
+          aria-label="Test Tabs"
+          overflow="scroll"
+        />
+      );
+    };
+
+    try {
+      await act(async () => render([{ id: 'a', label: 'Alpha' }]));
+      const initialObserveCount = observeCount;
+
+      await act(async () => render([{ id: 'a', label: 'Alpha' }]));
+
+      expect(observeCount).toBe(initialObserveCount);
+      expect(disconnectCount).toBe(0);
+    } finally {
+      restoreResizeObserver();
+    }
+  });
+
+  it('remeasures overflow when the tab list changes without recreating the observer', async () => {
+    const restoreResizeObserver = installWindowProperty(
+      'ResizeObserver',
+      class implements ResizeObserver {
+        observe() {
+          return undefined;
+        }
+        unobserve() {
+          return undefined;
+        }
+        disconnect() {
+          return undefined;
+        }
+      }
+    );
+    const render = (tabs: Array<{ id: string; label: string }>) => {
+      root.render(
+        <Tabs
+          tabs={tabs}
+          activeId="a"
+          onActivate={() => undefined}
+          aria-label="Test Tabs"
+          overflow="scroll"
+        />
+      );
+    };
+
+    try {
+      await act(async () => render([{ id: 'a', label: 'Alpha' }]));
+      const tablist = requireValue(
+        container.querySelector<HTMLElement>('[role="tablist"]'),
+        'expected scrollable tab list'
+      );
+      Object.defineProperty(tablist, 'clientWidth', { configurable: true, value: 100 });
+      Object.defineProperty(tablist, 'scrollWidth', { configurable: true, value: 240 });
+
+      await act(async () =>
+        render([
+          { id: 'a', label: 'Alpha' },
+          { id: 'b', label: 'Beta' },
+        ])
+      );
+
+      expect(container.querySelector('[aria-label="Scroll tabs right"]')).not.toBeNull();
+    } finally {
+      restoreResizeObserver();
+    }
   });
 
   it('keeps the strip keyboard-reachable when activeId does not match any tab', () => {
@@ -704,7 +830,7 @@ describe('Tabs', () => {
             { id: 'b', label: 'Beta' },
           ]}
           activeId="nonexistent"
-          onActivate={() => {}}
+          onActivate={() => undefined}
           aria-label="Test Tabs"
         />
       );
@@ -731,7 +857,7 @@ describe('Tabs', () => {
             { id: 'c', label: 'Gamma' },
           ]}
           activeId={null}
-          onActivate={() => {}}
+          onActivate={() => undefined}
           aria-label="Test Tabs"
         />
       );
@@ -758,7 +884,7 @@ describe('Tabs', () => {
             { id: 'c', label: 'Gamma' },
           ]}
           activeId="b"
-          onActivate={() => {}}
+          onActivate={() => undefined}
           aria-label="Test Tabs"
           disableRovingTabIndex
         />
@@ -784,7 +910,7 @@ describe('Tabs', () => {
             { id: 'b', label: 'Beta' },
           ]}
           activeId="a"
-          onActivate={() => {}}
+          onActivate={() => undefined}
           aria-label="Test Tabs"
         />
       );
@@ -796,21 +922,14 @@ describe('Tabs', () => {
   it('renders scroll buttons when overflow="scroll" and content overflows', () => {
     // Force overflow by mocking the scroll measurements.
     const observers: Array<() => void> = [];
-    const OriginalResizeObserver = (globalThis as any).ResizeObserver;
-    (globalThis as any).ResizeObserver = class {
-      constructor(public cb: () => void) {
-        observers.push(cb);
-      }
-      observe() {}
-      disconnect() {}
-    };
+    const restoreResizeObserver = installResizeObserver(observers);
 
     act(() => {
       root.render(
         <Tabs
           tabs={Array.from({ length: 10 }, (_, i) => ({ id: `t${i}`, label: `Tab ${i}` }))}
           activeId="t0"
-          onActivate={() => {}}
+          onActivate={() => undefined}
           aria-label="Test Tabs"
           overflow="scroll"
         />
@@ -825,12 +944,14 @@ describe('Tabs', () => {
 
     // Trigger the observer callback.
     act(() => {
-      observers.forEach((cb) => cb());
+      observers.forEach((cb) => {
+        cb();
+      });
     });
 
     expect(container.querySelector('.tab-strip__overflow-indicator')).toBeTruthy();
 
-    (globalThis as any).ResizeObserver = OriginalResizeObserver;
+    restoreResizeObserver();
   });
 
   it('does not render scroll buttons when overflow="none"', () => {
@@ -839,7 +960,7 @@ describe('Tabs', () => {
         <Tabs
           tabs={Array.from({ length: 10 }, (_, i) => ({ id: `t${i}`, label: `Tab ${i}` }))}
           activeId="t0"
-          onActivate={() => {}}
+          onActivate={() => undefined}
           aria-label="Test Tabs"
           overflow="none"
         />
@@ -851,14 +972,7 @@ describe('Tabs', () => {
 
   it('scrolls the strip when an overflow indicator is clicked', () => {
     const observers: Array<() => void> = [];
-    const OriginalResizeObserver = (globalThis as any).ResizeObserver;
-    (globalThis as any).ResizeObserver = class {
-      constructor(public cb: () => void) {
-        observers.push(cb);
-      }
-      observe() {}
-      disconnect() {}
-    };
+    const restoreResizeObserver = installResizeObserver(observers);
 
     // Spy on requestAnimationFrame so we can drive the manual scroll
     // animation synchronously from the test.
@@ -873,13 +987,16 @@ describe('Tabs', () => {
         <Tabs
           tabs={Array.from({ length: 10 }, (_, i) => ({ id: `t${i}`, label: `Tab ${i}` }))}
           activeId="t0"
-          onActivate={() => {}}
+          onActivate={() => undefined}
           aria-label="Test Tabs"
         />
       );
     });
 
-    const scrollContainer = container.querySelector<HTMLDivElement>('[role="tablist"]')!;
+    const scrollContainer = requireValue(
+      container.querySelector<HTMLDivElement>('[role="tablist"]'),
+      'expected test value in Tabs.test.tsx'
+    );
     Object.defineProperty(scrollContainer, 'scrollWidth', { value: 1000, configurable: true });
     Object.defineProperty(scrollContainer, 'clientWidth', { value: 200, configurable: true });
     // Make scrollLeft writable so the manual animation can set it.
@@ -899,7 +1016,11 @@ describe('Tabs', () => {
       Object.defineProperty(btn, 'offsetWidth', { value: 100, configurable: true });
     });
 
-    act(() => observers.forEach((cb) => cb()));
+    act(() =>
+      observers.forEach((cb) => {
+        cb();
+      })
+    );
 
     const rightButton = container.querySelector<HTMLButtonElement>(
       '.tab-strip__overflow-indicator--right'
@@ -907,7 +1028,9 @@ describe('Tabs', () => {
     expect(rightButton).toBeTruthy();
 
     act(() => {
-      rightButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      requireValue(rightButton, 'expected test value in Tabs.test.tsx').dispatchEvent(
+        new MouseEvent('click', { bubbles: true })
+      );
     });
 
     // Click should have scheduled a rAF to start the manual scroll animation.
@@ -929,14 +1052,14 @@ describe('Tabs', () => {
     expect(scrollContainer.scrollLeft).toBe(32);
 
     rafSpy.mockRestore();
-    (globalThis as any).ResizeObserver = OriginalResizeObserver;
+    restoreResizeObserver();
   });
 
   it('scrolls the active tab into view when activeId changes', () => {
     const scrollIntoViewSpy = vi.fn();
     // Patch HTMLElement.prototype so all buttons share the spy.
     const original = HTMLElement.prototype.scrollIntoView;
-    HTMLElement.prototype.scrollIntoView = scrollIntoViewSpy as any;
+    HTMLElement.prototype.scrollIntoView = (options) => scrollIntoViewSpy(options);
 
     act(() => {
       root.render(
@@ -946,7 +1069,7 @@ describe('Tabs', () => {
             { id: 'b', label: 'Beta' },
           ]}
           activeId="a"
-          onActivate={() => {}}
+          onActivate={() => undefined}
           aria-label="Test Tabs"
           overflow="scroll"
         />
@@ -963,7 +1086,7 @@ describe('Tabs', () => {
             { id: 'b', label: 'Beta' },
           ]}
           activeId="b"
-          onActivate={() => {}}
+          onActivate={() => undefined}
           aria-label="Test Tabs"
           overflow="scroll"
         />
@@ -983,9 +1106,9 @@ describe('Tabs', () => {
     act(() => {
       root.render(
         <Tabs
-          tabs={[{ id: 'a', label: 'Alpha', onClose: () => {}, closeIcon: customIcon }]}
+          tabs={[{ id: 'a', label: 'Alpha', onClose: () => undefined, closeIcon: customIcon }]}
           activeId="a"
-          onActivate={() => {}}
+          onActivate={() => undefined}
           aria-label="Test Tabs"
         />
       );
@@ -1001,11 +1124,16 @@ describe('Tabs', () => {
       root.render(
         <Tabs
           tabs={[
-            { id: 'a', label: 'Alpha', onClose: () => {}, closeAriaLabel: 'Close Alpha tab' },
-            { id: 'b', label: 'Beta', onClose: () => {} },
+            {
+              id: 'a',
+              label: 'Alpha',
+              onClose: () => undefined,
+              closeAriaLabel: 'Close Alpha tab',
+            },
+            { id: 'b', label: 'Beta', onClose: () => undefined },
           ]}
           activeId="a"
-          onActivate={() => {}}
+          onActivate={() => undefined}
           aria-label="Test Tabs"
         />
       );
@@ -1017,31 +1145,31 @@ describe('Tabs', () => {
 
   it('renders both overflow indicators together once the strip overflows', () => {
     const observers: Array<() => void> = [];
-    const OriginalResizeObserver = (globalThis as any).ResizeObserver;
-    (globalThis as any).ResizeObserver = class {
-      constructor(public cb: () => void) {
-        observers.push(cb);
-      }
-      observe() {}
-      disconnect() {}
-    };
+    const restoreResizeObserver = installResizeObserver(observers);
 
     act(() => {
       root.render(
         <Tabs
           tabs={Array.from({ length: 5 }, (_, i) => ({ id: `t${i}`, label: `Tab ${i}` }))}
           activeId="t0"
-          onActivate={() => {}}
+          onActivate={() => undefined}
           aria-label="Test Tabs"
         />
       );
     });
 
-    const scrollContainer = container.querySelector<HTMLDivElement>('[role="tablist"]')!;
+    const scrollContainer = requireValue(
+      container.querySelector<HTMLDivElement>('[role="tablist"]'),
+      'expected test value in Tabs.test.tsx'
+    );
     Object.defineProperty(scrollContainer, 'scrollWidth', { value: 500, configurable: true });
     Object.defineProperty(scrollContainer, 'clientWidth', { value: 300, configurable: true });
 
-    act(() => observers.forEach((cb) => cb()));
+    act(() =>
+      observers.forEach((cb) => {
+        cb();
+      })
+    );
 
     // Both indicators render together whenever the strip overflows, even
     // at scrollLeft = 0. No per-side conditional rendering, no count badge.
@@ -1051,6 +1179,6 @@ describe('Tabs', () => {
     expect(rightInd).toBeTruthy();
     expect(container.querySelector('.tab-strip__overflow-count')).toBeNull();
 
-    (globalThis as any).ResizeObserver = OriginalResizeObserver;
+    restoreResizeObserver();
   });
 });

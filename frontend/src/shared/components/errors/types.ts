@@ -5,7 +5,7 @@
  * Defines shared interfaces and payload shapes for the shared components.
  */
 
-import { ErrorInfo, ReactNode } from 'react';
+import type { ErrorInfo, ReactNode } from 'react';
 
 export interface ErrorBoundaryProps {
   children: ReactNode;
@@ -30,11 +30,13 @@ export interface ErrorFallbackProps {
   scope?: string;
 }
 
-export enum RecoveryStrategy {
-  RETRY = 'retry',
-  REFRESH = 'refresh',
-  RELOAD = 'reload',
-  RESET = 'reset',
-  DEGRADE = 'degrade',
-  FATAL = 'fatal',
-}
+export const RecoveryStrategy = {
+  RETRY: 'retry',
+  REFRESH: 'refresh',
+  RELOAD: 'reload',
+  RESET: 'reset',
+  DEGRADE: 'degrade',
+  FATAL: 'fatal',
+} as const;
+
+export type RecoveryStrategy = (typeof RecoveryStrategy)[keyof typeof RecoveryStrategy];

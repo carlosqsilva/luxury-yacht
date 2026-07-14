@@ -18,9 +18,9 @@
  *   })
  */
 
-import { useCallback } from 'react';
 import { useObjectPanel } from '@modules/object-panel/hooks/useObjectPanel';
 import { useNavigateToView } from '@shared/hooks/useNavigateToView';
+import { useCallback } from 'react';
 import type { KubernetesObjectReference } from '@/types/view-state';
 
 export function useObjectLink() {
@@ -31,11 +31,15 @@ export function useObjectLink() {
     <T>(getRef: (item: T) => KubernetesObjectReference | undefined) => ({
       onClick: (item: T) => {
         const ref = getRef(item);
-        if (ref) openWithObject(ref);
+        if (ref) {
+          openWithObject(ref);
+        }
       },
       onAltClick: (item: T) => {
         const ref = getRef(item);
-        if (ref) navigateToView(ref);
+        if (ref) {
+          navigateToView(ref);
+        }
       },
     }),
     [openWithObject, navigateToView]

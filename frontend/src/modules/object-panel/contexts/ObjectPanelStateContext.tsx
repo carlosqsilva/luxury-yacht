@@ -4,28 +4,30 @@
  * Owns object-panel tab state across the app: open object refs, active tabs,
  * canonical panel IDs, and full cache eviction when a panel is closed.
  */
-import React, {
-  createContext,
-  useContext,
-  useState,
-  useCallback,
-  useMemo,
-  useEffect,
-  useRef,
-} from 'react';
-import type { KubernetesObjectReference } from '@/types/view-state';
-import type { ViewType } from '@modules/object-panel/components/ObjectPanel/types';
+
 import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
-import { resetRefreshDomain } from '@/core/data-access';
-import { clearPanelState } from '@ui/dockable/useDockablePanelState';
-import { handoffLayoutBeforeClose } from '@ui/dockable/useDockablePanelState';
-import { clearLogViewerPrefs } from '@modules/object-panel/components/ObjectPanel/Logs/logViewerPrefsCache';
 import { clearContainerLogsStreamScopeParams } from '@modules/object-panel/components/ObjectPanel/Logs/containerLogsStreamScopeParamsCache';
+import { clearLogViewerPrefs } from '@modules/object-panel/components/ObjectPanel/Logs/logViewerPrefsCache';
+import type { ViewType } from '@modules/object-panel/components/ObjectPanel/types';
 import {
   buildObjectPanelRef,
   getObjectPanelScopeEvictions,
+  type ObjectPanelRef,
   objectPanelId,
 } from '@modules/object-panel/objectPanelRef';
+import { clearPanelState, handoffLayoutBeforeClose } from '@ui/dockable/useDockablePanelState';
+import type React from 'react';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
+import { resetRefreshDomain } from '@/core/data-access';
+import type { KubernetesObjectReference } from '@/types/view-state';
 
 export { objectPanelId } from '@modules/object-panel/objectPanelRef';
 
@@ -40,7 +42,7 @@ export { objectPanelId } from '@modules/object-panel/objectPanelRef';
  * back. The cache should only be freed when the user actually closes
  * the panel for good, which is what this helper enforces.
  */
-const evictPanelScopes = (ref: KubernetesObjectReference): void => {
+const evictPanelScopes = (ref: ObjectPanelRef): void => {
   getObjectPanelScopeEvictions(ref).forEach(({ domain, scope }) => {
     resetRefreshDomain(domain, scope);
     if (domain === 'container-logs') {
@@ -51,7 +53,7 @@ const evictPanelScopes = (ref: KubernetesObjectReference): void => {
 
 interface ObjectPanelState {
   // Map of panelId → objectRef for all open object panels
-  openPanels: Map<string, KubernetesObjectReference>;
+  openPanels: Map<string, ObjectPanelRef>;
   // Map of panelId → which sub-tab (Details/YAML/Events/etc.) is active
   // for that panel. Lifted out of ObjectPanel's useReducer so the active
   // sub-tab survives cluster switches: ObjectPanel components unmount
@@ -71,7 +73,7 @@ interface ObjectPanelStateContextType {
   // Derived: true if any object panel is open
   showObjectPanel: boolean;
   // The full map of open panels
-  openPanels: Map<string, KubernetesObjectReference>;
+  openPanels: Map<string, ObjectPanelRef>;
 
   // Open/activate a panel for the given object reference.
   // If the object is already open, activates the existing tab.
@@ -180,13 +182,13 @@ export const ObjectPanelStateProvider: React.FC<ObjectPanelStateProviderProps> =
       // cache for any panels in clusters that are about to be dropped —
       // those panels will never remount, so their cached scopes and
       // prefs would otherwise leak forever.
-      Object.entries(prev).forEach(([key, value]) => {
+      Object.entries(prev).forEach(([key, storedValue]) => {
         const keepingThisCluster =
           key === '__default__' || (activeClusterIds.length > 0 && allowed.has(key));
         if (keepingThisCluster) {
           return;
         }
-        value.openPanels.forEach((ref, panelId) => {
+        storedValue.openPanels.forEach((ref, panelId) => {
           evictPanelScopes(ref);
           clearLogViewerPrefs(panelId);
         });
@@ -195,9 +197,9 @@ export const ObjectPanelStateProvider: React.FC<ObjectPanelStateProviderProps> =
         return prev.__default__ ? { __default__: prev.__default__ } : {};
       }
       const next: Record<string, ObjectPanelState> = {};
-      Object.entries(prev).forEach(([key, value]) => {
+      Object.entries(prev).forEach(([key, storedValue]) => {
         if (key === '__default__' || allowed.has(key)) {
-          next[key] = value;
+          next[key] = storedValue;
         }
       });
       return next;

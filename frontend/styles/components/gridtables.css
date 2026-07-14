@@ -40,7 +40,7 @@
 
 /* Visibility */
 .hidden {
-  display: none !important;
+  display: none;
 }
 
 /* ============================================
@@ -104,7 +104,19 @@
   position: relative;
 }
 
-.gridtable-wrapper:focus {
+.gridtable--body > caption {
+  display: block;
+}
+
+.gridtable--body > tbody {
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  width: fit-content;
+  min-width: 100%;
+}
+
+.gridtable--body:focus {
   outline: none;
 }
 
@@ -115,6 +127,8 @@
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
+  border-collapse: collapse;
+  border-spacing: 0;
 }
 
 /* ============================================
@@ -140,26 +154,19 @@
   margin-bottom: 0;
 }
 
-.content-body .gridtable-header-container,
-.content-body .gridtable-pagination {
+.content-body .gridtable-header-container {
   margin-right: var(--dock-right-offset, 0px);
-}
-
-.content-body .gridtable-pagination {
-  margin-bottom: var(--dock-bottom-offset, 0px);
 }
 
 /* Smooth transition only while a docked panel is open.
    When the panel closes the class is removed first so the margin snaps
    back instantly instead of leaving a visible gap. */
 body.dock-right-open .content-body .gridtable-wrapper,
-body.dock-right-open .content-body .gridtable-header-container,
-body.dock-right-open .content-body .gridtable-pagination {
+body.dock-right-open .content-body .gridtable-header-container {
   transition: margin-right 0.3s ease-out;
 }
 
-body.dock-bottom-open .content-body .gridtable-wrapper,
-body.dock-bottom-open .content-body .gridtable-pagination {
+body.dock-bottom-open .content-body .gridtable-wrapper {
   transition: margin-bottom 0.3s ease-out;
 }
 
@@ -170,15 +177,8 @@ body.dock-right-open.dock-bottom-open .content-body .gridtable-wrapper {
     margin-bottom 0.3s ease-out;
 }
 
-body.dock-right-open.dock-bottom-open .content-body .gridtable-pagination {
-  transition:
-    margin-right 0.3s ease-out,
-    margin-bottom 0.3s ease-out;
-}
-
 body.dockable-panel-resizing .content-body .gridtable-wrapper,
-body.dockable-panel-resizing .content-body .gridtable-header-container,
-body.dockable-panel-resizing .content-body .gridtable-pagination {
+body.dockable-panel-resizing .content-body .gridtable-header-container {
   transition: none;
 }
 
@@ -187,6 +187,11 @@ body.dockable-panel-resizing .content-body .gridtable-pagination {
   width: fit-content;
   min-width: 100%;
   will-change: transform;
+}
+
+.gridtable--header > thead {
+  display: block;
+  width: 100%;
 }
 
 .gridtable--body {
@@ -245,7 +250,8 @@ body.dockable-panel-resizing .content-body .gridtable-pagination {
   overflow: hidden;
 }
 
-.header-content > span {
+.header-content > span,
+.gridtable-sort-button {
   display: inline-block;
   line-height: inherit;
   white-space: nowrap;
@@ -253,11 +259,21 @@ body.dockable-panel-resizing .content-body .gridtable-pagination {
   text-overflow: ellipsis;
 }
 
+.gridtable-sort-button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-transform: inherit;
+  text-align: left;
+}
+
 .grid-cell-header[data-sortable="true"] {
   transition: background-color var(--transition-fast);
 }
 
-.grid-cell-header[data-sortable="true"] .header-content > span {
+.grid-cell-header[data-sortable="true"] .gridtable-sort-button {
   cursor: pointer;
 }
 
@@ -282,6 +298,9 @@ body.dockable-panel-resizing .content-body .gridtable-pagination {
   z-index: var(--z-index-grid-resize-handle);
   transition: background-color 0.2s;
   touch-action: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
 }
 
 .resize-handle::before {
@@ -364,14 +383,6 @@ body.dockable-panel-resizing .content-body .gridtable-pagination {
   width: 100%;
 }
 
-.gridtable-virtual-inner {
-  position: absolute;
-  top: 0;
-  left: 0;
-  will-change: transform;
-  min-width: 100%;
-}
-
 .gridtable-row {
   display: flex;
   width: 100%;
@@ -415,7 +426,7 @@ body.dockable-panel-resizing .content-body .gridtable-pagination {
 /* .gridtable-hover-overlay.is-focused inherits border-left from base styles */
 
 body.gridtable-disable-hover .gridtable-hover-overlay {
-  opacity: 0 !important;
+  opacity: 0;
 }
 
 .gridtable-row:last-child {
@@ -489,6 +500,10 @@ body.gridtable-disable-hover .gridtable-hover-overlay {
   margin: 1rem;
 }
 
+.gridtable-empty-body {
+  align-items: center;
+}
+
 .gridtable-empty-filter-hint {
   margin-top: 0.5rem;
   font-size: calc(var(--grid-font-size-data) - 1px);
@@ -496,6 +511,10 @@ body.gridtable-disable-hover .gridtable-hover-overlay {
 }
 
 .gridtable-empty-filter-hint__link {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  font: inherit;
   color: var(--color-accent);
   text-decoration: none;
   cursor: pointer;
@@ -511,16 +530,6 @@ body.gridtable-disable-hover .gridtable-hover-overlay {
   position: relative;
 }
 
-/* Position the LoadingSpinner exactly 200px from top for initial load */
-.gridtable-container.gridtable-initial-loading .loading-spinner-container {
-  position: absolute;
-  top: 100px; /* Fixed distance from top */
-  left: 50%;
-  transform: translateX(-50%);
-  padding: 0;
-  min-height: auto;
-}
-
 /* Loading overlay for refreshing with existing data */
 .gridtable-loading-overlay {
   position: absolute;
@@ -533,6 +542,16 @@ body.gridtable-disable-hover .gridtable-hover-overlay {
 
 /* Ensure LoadingSpinner in overlay doesn't have extra padding */
 .gridtable-loading-overlay .loading-spinner-container {
+  padding: 0;
+  min-height: auto;
+}
+
+/* Position the LoadingSpinner exactly 200px from top for initial load */
+.gridtable-container.gridtable-initial-loading .loading-spinner-container {
+  position: absolute;
+  top: 100px; /* Fixed distance from top */
+  left: 50%;
+  transform: translateX(-50%);
   padding: 0;
   min-height: auto;
 }
@@ -571,6 +590,29 @@ body.gridtable-disable-hover .gridtable-hover-overlay {
   box-sizing: border-box;
 }
 
+.content-body .gridtable-pagination {
+  margin-right: var(--dock-right-offset, 0px);
+  margin-bottom: var(--dock-bottom-offset, 0px);
+}
+
+body.dock-right-open .content-body .gridtable-pagination {
+  transition: margin-right 0.3s ease-out;
+}
+
+body.dock-bottom-open .content-body .gridtable-pagination {
+  transition: margin-bottom 0.3s ease-out;
+}
+
+body.dock-right-open.dock-bottom-open .content-body .gridtable-pagination {
+  transition:
+    margin-right 0.3s ease-out,
+    margin-bottom 0.3s ease-out;
+}
+
+body.dockable-panel-resizing .content-body .gridtable-pagination {
+  transition: none;
+}
+
 .gridtable-pagination:empty {
   display: none;
 }
@@ -604,6 +646,16 @@ body.gridtable-disable-hover .gridtable-hover-overlay {
 .gridtable-link {
   color: var(--color-text);
   transition: color 0.2s;
+}
+
+.gridtable-cell-button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 
 .gridtable-link:hover {

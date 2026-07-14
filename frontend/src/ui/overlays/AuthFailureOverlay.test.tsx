@@ -6,11 +6,11 @@
  * provider stderr in the default copy.
  */
 
-import ReactDOM from 'react-dom/client';
 import { act } from 'react';
+import * as ReactDOM from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { AuthFailureOverlayContent } from './AuthFailureOverlay';
 import type { ClusterAuthState } from '@/core/contexts/AuthErrorContext';
+import { AuthFailureOverlayContent } from './AuthFailureOverlay';
 
 const baseState: ClusterAuthState = {
   hasError: true,
@@ -44,7 +44,7 @@ describe('AuthFailureOverlayContent', () => {
   const renderContent = async (authState: ClusterAuthState) => {
     await act(async () => {
       root.render(
-        <AuthFailureOverlayContent authState={authState} clusterId="c1" onRetry={() => {}} />
+        <AuthFailureOverlayContent authState={authState} clusterId="c1" onRetry={() => undefined} />
       );
     });
   };

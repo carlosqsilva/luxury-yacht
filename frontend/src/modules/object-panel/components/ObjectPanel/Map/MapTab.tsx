@@ -10,15 +10,20 @@
  * The object-map scoped domain stays enabled while the tab is active,
  * so the shared refresh manager polls it on the configured cadence.
  */
-import React, { useCallback } from 'react';
+import type React from 'react';
+import { useCallback } from 'react';
 import './MapTab.css';
-import { errorHandler } from '@/utils/errorHandler';
-import { useRefreshDomainHandle } from '@/core/data-access';
-import type { ObjectMapReference, ObjectMapSnapshotPayload } from '@/core/refresh/types';
+import {
+  isMapSnapshotLoading,
+  isMapSnapshotRefreshing,
+} from '@modules/object-map/mapSnapshotStatus';
 import ObjectMap from '@modules/object-map/ObjectMap';
 import { buildResolvedFromMapRef } from '@modules/object-map/objectMapNavigation';
 import { useObjectPanel } from '@modules/object-panel/hooks/useObjectPanel';
 import { useNavigateToView } from '@shared/hooks/useNavigateToView';
+import { useRefreshDomainHandle } from '@/core/data-access';
+import type { ObjectMapReference, ObjectMapSnapshotPayload } from '@/core/refresh/types';
+import { errorHandler } from '@/utils/errorHandler';
 import type { PanelObjectData } from '../types';
 
 interface MapTabProps {
@@ -29,11 +34,6 @@ interface MapTabProps {
   // cannot drift apart.
   mapScope: string | null;
 }
-
-const isLoadingState = (status: string): boolean =>
-  status === 'idle' || status === 'loading' || status === 'initialising' || status === 'updating';
-const isRefreshingState = (status: string): boolean =>
-  status === 'loading' || status === 'initialising' || status === 'updating';
 
 const MapTab: React.FC<MapTabProps> = ({ objectData, isActive, mapScope }) => {
   const { openWithObject } = useObjectPanel();
@@ -54,7 +54,9 @@ const MapTab: React.FC<MapTabProps> = ({ objectData, isActive, mapScope }) => {
 
   const fetchMap = useCallback(
     (reason: 'startup' | 'user' = 'startup') => {
-      if (!mapScope) return;
+      if (!mapScope) {
+        return;
+      }
       void refreshMap(reason, mapScope).catch(handleFetchError);
     },
     [handleFetchError, mapScope, refreshMap]
@@ -62,8 +64,9 @@ const MapTab: React.FC<MapTabProps> = ({ objectData, isActive, mapScope }) => {
 
   const payload = snapshot.data as ObjectMapSnapshotPayload | null;
   const loading =
-    Boolean(isActive && objectData && mapScope && isLoadingState(snapshot.status)) && !payload;
-  const refreshing = isRefreshingState(snapshot.status) && snapshot.isManual === true;
+    Boolean(isActive && objectData && mapScope && isMapSnapshotLoading(snapshot.status)) &&
+    !payload;
+  const refreshing = isMapSnapshotRefreshing(snapshot.status) && snapshot.isManual === true;
   const handleRefresh = useCallback(() => fetchMap('user'), [fetchMap]);
   // ObjectMap renders the Refresh button; only expose it when we
   // have a scope to fetch against.
@@ -72,7 +75,9 @@ const MapTab: React.FC<MapTabProps> = ({ objectData, isActive, mapScope }) => {
   const handleOpenPanel = useCallback(
     (ref: ObjectMapReference) => {
       const resolved = buildResolvedFromMapRef(ref);
-      if (resolved) openWithObject(resolved);
+      if (resolved) {
+        openWithObject(resolved);
+      }
     },
     [openWithObject]
   );
@@ -80,7 +85,9 @@ const MapTab: React.FC<MapTabProps> = ({ objectData, isActive, mapScope }) => {
   const handleNavigateView = useCallback(
     (ref: ObjectMapReference) => {
       const resolved = buildResolvedFromMapRef(ref);
-      if (resolved) navigateToView(resolved);
+      if (resolved) {
+        navigateToView(resolved);
+      }
     },
     [navigateToView]
   );
@@ -88,7 +95,9 @@ const MapTab: React.FC<MapTabProps> = ({ objectData, isActive, mapScope }) => {
   const handleOpenObjectMap = useCallback(
     (ref: ObjectMapReference) => {
       const resolved = buildResolvedFromMapRef(ref);
-      if (resolved) openWithObject(resolved, { initialTab: 'map' });
+      if (resolved) {
+        openWithObject(resolved, { initialTab: 'map' });
+      }
     },
     [openWithObject]
   );
@@ -99,8 +108,8 @@ const MapTab: React.FC<MapTabProps> = ({ objectData, isActive, mapScope }) => {
         {snapshot.error && !payload && (
           <div className="map-tab__message map-tab__message--error">{snapshot.error}</div>
         )}
-        {loading && <div className="map-tab__message">Loading object map…</div>}
-        {payload && (
+        {!!loading && <div className="map-tab__message">Loading object map…</div>}
+        {!!payload && (
           <ObjectMap
             payload={payload}
             onRefresh={onRefresh}

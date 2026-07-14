@@ -5,12 +5,13 @@
  * Handles rendering and interactions for the shared components.
  */
 
-import React, { useState, useRef, useEffect } from 'react';
-import Tooltip from './Tooltip';
+import type React from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   USAGE_CRITICAL_THRESHOLD_PERCENT,
   USAGE_HIGH_THRESHOLD_PERCENT,
 } from './resourceBarThresholds';
+import Tooltip from './Tooltip';
 import './ResourceBar.css';
 
 interface ResourceBarProps {
@@ -83,23 +84,32 @@ const ResourceBar: React.FC<ResourceBarProps> = ({
 
   // Parse resource values to numbers
   const parseResource = (value: string | undefined): number => {
-    if (!value || value === '-' || value === 'undefined' || value === 'null' || value === 'not set')
+    if (
+      !value ||
+      value === '-' ||
+      value === 'undefined' ||
+      value === 'null' ||
+      value === 'not set'
+    ) {
       return 0;
+    }
 
     try {
       if (type === 'cpu') {
         // Handle CPU (millicores or cores)
         if (value.endsWith('m')) {
           const parsed = parseFloat(value.slice(0, -1));
-          return isNaN(parsed) ? 0 : parsed;
+          return Number.isNaN(parsed) ? 0 : parsed;
         } else {
           const parsed = parseFloat(value) * 1000; // Convert cores to millicores
-          return isNaN(parsed) ? 0 : parsed;
+          return Number.isNaN(parsed) ? 0 : parsed;
         }
       } else {
         // Handle Memory - match DetailsTabUtilization's parseMemToMB exactly
         const num = parseFloat(value);
-        if (isNaN(num)) return 0;
+        if (Number.isNaN(num)) {
+          return 0;
+        }
 
         if (value.endsWith('Ki')) {
           return num / 1024; // Convert Ki to Mi
@@ -240,16 +250,22 @@ const ResourceBar: React.FC<ResourceBarProps> = ({
 
   // Format values for display
   const formatValue = (value: string | undefined, parsedValue: number): string => {
-    if (!value || value === '-' || value === 'undefined' || value === 'null') return '-';
+    if (!value || value === '-' || value === 'undefined' || value === 'null') {
+      return '-';
+    }
 
     if (type === 'cpu') {
       // For CPU, 0 is a valid value (0 millicores)
       // Only return '-' if the original value was invalid
-      if (isNaN(parsedValue)) return '-';
+      if (Number.isNaN(parsedValue)) {
+        return '-';
+      }
       return `${Math.round(parsedValue)}m`;
     } else {
       // For memory, 0 likely means parsing failed
-      if (parsedValue === 0) return '-';
+      if (parsedValue === 0) {
+        return '-';
+      }
       if (parsedValue >= 1024 * 1024) {
         return `${(parsedValue / (1024 * 1024)).toFixed(1)}Ti`;
       } else if (parsedValue >= 1024) {
@@ -318,7 +334,7 @@ const ResourceBar: React.FC<ResourceBarProps> = ({
         </span>
       </div>
 
-      {hasConfigIssue && (
+      {!!hasConfigIssue && (
         <div className="rb-tooltip-row warning">
           <span>⚠️ Requests exceeds Limits</span>
         </div>

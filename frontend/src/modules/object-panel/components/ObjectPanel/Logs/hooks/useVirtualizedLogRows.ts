@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
+import { type RefObject, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 interface VirtualizedLogRowsOptions<T> {
   rows: T[];
@@ -111,6 +111,7 @@ export function useVirtualizedLogRows<T>({
   }, [disconnectRowObserver, keyExtractor, rows]);
 
   useEffect(() => {
+    void rows.length;
     if (!shouldVirtualize) {
       setViewportHeight(0);
       setScrollTop(0);

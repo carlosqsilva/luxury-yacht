@@ -5,16 +5,16 @@
  * Covers key behaviors and edge cases for SidebarKeys.
  */
 
-import React from 'react';
-import { act } from 'react';
-import ReactDOM from 'react-dom/client';
-import { afterEach, describe, expect, it, vi } from 'vitest';
 import { KeyboardProvider } from '@ui/shortcuts/context';
+import React, { act } from 'react';
+import * as ReactDOM from 'react-dom/client';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { requireValue } from '@/test-utils/requireValue';
 import {
-  useSidebarKeyboardControls,
-  targetsAreEqual,
   describeElementTarget,
   type SidebarCursorTarget,
+  targetsAreEqual,
+  useSidebarKeyboardControls,
 } from './SidebarKeys';
 
 const buildTargetElement = (attrs: Record<string, string>) => {
@@ -86,6 +86,28 @@ describe('Sidebar keyboard helpers', () => {
       )
     ).toEqual({ kind: 'cluster-toggle', id: 'resources' });
   });
+
+  it('yields no target for dataset view values outside the view unions', () => {
+    // The dataset round-trips through the DOM as strings; a value that is not
+    // a member of the view unions must not become a cursor target.
+    expect(
+      describeElementTarget(
+        buildTargetElement({
+          'data-sidebar-target-kind': 'cluster-view',
+          'data-sidebar-target-view': 'not-a-view',
+        })
+      )
+    ).toBeNull();
+    expect(
+      describeElementTarget(
+        buildTargetElement({
+          'data-sidebar-target-kind': 'namespace-view',
+          'data-sidebar-target-namespace': 'dev',
+          'data-sidebar-target-view': 'not-a-view',
+        })
+      )
+    ).toBeNull();
+  });
 });
 
 type HarnessHandle = ReturnType<typeof useSidebarKeyboardControls> & {
@@ -95,117 +117,114 @@ type HarnessHandle = ReturnType<typeof useSidebarKeyboardControls> & {
   setSelectionTarget: (target: SidebarCursorTarget | null) => void;
 };
 
-const TestHarness = React.forwardRef<
-  HarnessHandle,
-  {
-    collapsed?: boolean;
-    selectionTarget?: SidebarCursorTarget | null;
-    pendingSelection?: SidebarCursorTarget | null;
-    onClearPreview?: () => void;
-    onNamespaceViewClick?: () => void;
-  }
->(
-  (
-    {
-      collapsed = false,
-      selectionTarget = null,
-      pendingSelection = null,
-      onClearPreview,
-      onNamespaceViewClick,
+interface TestHarnessProps {
+  collapsed?: boolean;
+  selectionTarget?: SidebarCursorTarget | null;
+  pendingSelection?: SidebarCursorTarget | null;
+  onClearPreview?: () => void;
+  onNamespaceViewClick?: () => void;
+  ref?: React.Ref<HarnessHandle>;
+}
+
+const TestHarness = ({
+  collapsed = false,
+  selectionTarget = null,
+  pendingSelection = null,
+  onClearPreview,
+  onNamespaceViewClick,
+  ref,
+}: TestHarnessProps) => {
+  const sidebarRef = React.useRef<HTMLDivElement | null>(null);
+  const keyboardCursorIndexRef = React.useRef<number | null>(null);
+  const pendingCommitRef = React.useRef<SidebarCursorTarget | null>(null);
+  const keyboardActivationRef = React.useRef(false);
+  const [cursorPreview, setCursorPreview] = React.useState<SidebarCursorTarget | null>(null);
+  const [pendingSelectionState, setPendingSelection] = React.useState<SidebarCursorTarget | null>(
+    pendingSelection
+  );
+  const selectionTargetRef = React.useRef<SidebarCursorTarget | null>(selectionTarget);
+  React.useEffect(() => {
+    selectionTargetRef.current = selectionTarget;
+  }, [selectionTarget]);
+
+  const clearKeyboardPreview = React.useCallback(() => {
+    setCursorPreview(null);
+    onClearPreview?.();
+  }, [onClearPreview]);
+
+  const api = useSidebarKeyboardControls({
+    sidebarRef,
+    isCollapsed: collapsed,
+    cursorPreview,
+    setCursorPreview,
+    pendingSelection: pendingSelectionState,
+    setPendingSelection,
+    keyboardCursorIndexRef,
+    pendingCommitRef,
+    keyboardActivationRef,
+    clearKeyboardPreview,
+    getCurrentSelectionTarget: () => selectionTargetRef.current,
+  });
+
+  React.useImperativeHandle(ref, () => ({
+    ...api,
+    sidebarRef,
+    setCursorPreview,
+    setPendingSelection,
+    setSelectionTarget: (target: SidebarCursorTarget | null) => {
+      selectionTargetRef.current = target;
     },
-    ref
-  ) => {
-    const sidebarRef = React.useRef<HTMLDivElement | null>(null);
-    const keyboardCursorIndexRef = React.useRef<number | null>(null);
-    const pendingCommitRef = React.useRef<SidebarCursorTarget | null>(null);
-    const keyboardActivationRef = React.useRef(false);
-    const [cursorPreview, setCursorPreview] = React.useState<SidebarCursorTarget | null>(null);
-    const [pendingSelectionState, setPendingSelection] = React.useState<SidebarCursorTarget | null>(
-      pendingSelection
-    );
-    const selectionTargetRef = React.useRef<SidebarCursorTarget | null>(selectionTarget);
-    React.useEffect(() => {
-      selectionTargetRef.current = selectionTarget;
-    }, [selectionTarget]);
+  }));
 
-    const clearKeyboardPreview = React.useCallback(() => {
-      setCursorPreview(null);
-      onClearPreview?.();
-    }, [onClearPreview]);
+  const buildItem = (
+    base: string[],
+    target: SidebarCursorTarget,
+    extra: Record<string, string>,
+    onClick?: () => void
+  ) => (
+    <button
+      key={JSON.stringify(target)}
+      type="button"
+      tabIndex={-1}
+      data-sidebar-focusable="true"
+      {...extra}
+      className={api.buildSidebarItemClassName(base, target)}
+      onClick={onClick}
+    >
+      {JSON.stringify(target)}
+    </button>
+  );
 
-    const api = useSidebarKeyboardControls({
-      sidebarRef,
-      isCollapsed: collapsed,
-      cursorPreview,
-      setCursorPreview,
-      pendingSelection: pendingSelectionState,
-      setPendingSelection,
-      keyboardCursorIndexRef,
-      pendingCommitRef,
-      keyboardActivationRef,
-      clearKeyboardPreview,
-      getCurrentSelectionTarget: () => selectionTargetRef.current,
-    });
-
-    React.useImperativeHandle(ref, () => ({
-      ...api,
-      sidebarRef,
-      setCursorPreview,
-      setPendingSelection,
-      setSelectionTarget: (target: SidebarCursorTarget | null) => {
-        selectionTargetRef.current = target;
-      },
-    }));
-
-    const buildItem = (
-      base: string[],
-      target: SidebarCursorTarget,
-      extra: Record<string, string>,
-      onClick?: () => void
-    ) => (
-      <div
-        key={JSON.stringify(target)}
-        tabIndex={-1}
-        data-sidebar-focusable="true"
-        {...extra}
-        className={api.buildSidebarItemClassName(base, target)}
-        onClick={onClick}
-      >
-        {JSON.stringify(target)}
-      </div>
-    );
-
-    return (
-      <div ref={sidebarRef} data-testid="sidebar">
-        {buildItem(
-          ['sidebar-item'],
-          { kind: 'overview' },
-          { 'data-sidebar-target-kind': 'overview' }
-        )}
-        {buildItem(
-          ['sidebar-item'],
-          { kind: 'cluster-view', view: 'nodes' },
-          { 'data-sidebar-target-kind': 'cluster-view', 'data-sidebar-target-view': 'nodes' }
-        )}
-        {buildItem(
-          ['sidebar-item'],
-          { kind: 'namespace-toggle', namespace: 'dev' },
-          { 'data-sidebar-target-kind': 'namespace-toggle', 'data-sidebar-target-namespace': 'dev' }
-        )}
-        {buildItem(
-          ['sidebar-item'],
-          { kind: 'namespace-view', namespace: 'dev', view: 'pods' },
-          {
-            'data-sidebar-target-kind': 'namespace-view',
-            'data-sidebar-target-namespace': 'dev',
-            'data-sidebar-target-view': 'pods',
-          },
-          onNamespaceViewClick
-        )}
-      </div>
-    );
-  }
-);
+  return (
+    <div ref={sidebarRef} data-testid="sidebar">
+      {buildItem(
+        ['sidebar-item'],
+        { kind: 'overview' },
+        { 'data-sidebar-target-kind': 'overview' }
+      )}
+      {buildItem(
+        ['sidebar-item'],
+        { kind: 'cluster-view', view: 'nodes' },
+        { 'data-sidebar-target-kind': 'cluster-view', 'data-sidebar-target-view': 'nodes' }
+      )}
+      {buildItem(
+        ['sidebar-item'],
+        { kind: 'namespace-toggle', namespace: 'dev' },
+        { 'data-sidebar-target-kind': 'namespace-toggle', 'data-sidebar-target-namespace': 'dev' }
+      )}
+      {buildItem(
+        ['sidebar-item'],
+        { kind: 'namespace-view', namespace: 'dev', view: 'pods' },
+        {
+          'data-sidebar-target-kind': 'namespace-view',
+          'data-sidebar-target-namespace': 'dev',
+          'data-sidebar-target-view': 'pods',
+        },
+        onNamespaceViewClick
+      )}
+    </div>
+  );
+};
 
 const renderHarness = (props?: React.ComponentProps<typeof TestHarness>) => {
   const container = document.createElement('div');
@@ -256,9 +275,13 @@ describe('useSidebarKeyboardControls', () => {
     const { container, cleanup } = renderHarness({
       selectionTarget: { kind: 'overview' },
     });
-    const sidebarRoot = container.querySelector<HTMLElement>(
-      '[data-sidebar-target-kind="overview"]'
-    )!.parentElement!;
+    const sidebarRoot = requireValue(
+      requireValue(
+        container.querySelector<HTMLElement>('[data-sidebar-target-kind="overview"]'),
+        'expected test value in SidebarKeys.test.tsx'
+      ).parentElement,
+      'expected test value in SidebarKeys.test.tsx'
+    );
     const input = document.createElement('input');
     sidebarRoot.appendChild(input);
     input.focus();
@@ -294,12 +317,18 @@ describe('useSidebarKeyboardControls', () => {
     const { ref, container, cleanup } = renderHarness({
       selectionTarget: { kind: 'overview' },
     });
-    const overview = container.querySelector('[data-sidebar-target-kind="overview"]')!;
+    const overview = requireValue(
+      container.querySelector('[data-sidebar-target-kind="overview"]'),
+      'expected test value in SidebarKeys.test.tsx'
+    );
     expect(overview.className).toContain('active');
     act(() => {
       ref.current?.setCursorPreview({ kind: 'cluster-view', view: 'nodes' });
     });
-    const nodes = container.querySelector('[data-sidebar-target-view="nodes"]')!;
+    const nodes = requireValue(
+      container.querySelector('[data-sidebar-target-view="nodes"]'),
+      'expected test value in SidebarKeys.test.tsx'
+    );
     expect(nodes.className).toContain('keyboard-preview');
     cleanup();
   });
@@ -428,7 +457,10 @@ describe('useSidebarKeyboardControls', () => {
     });
     expect(document.activeElement).toBe(overview);
 
-    const sidebar = container.querySelector('[data-testid="sidebar"]')!;
+    const sidebar = requireValue(
+      container.querySelector('[data-testid="sidebar"]'),
+      'expected test value in SidebarKeys.test.tsx'
+    );
     await act(async () => {
       overview.focus();
       await Promise.resolve();
@@ -442,7 +474,10 @@ describe('useSidebarKeyboardControls', () => {
       });
     };
     await fireKey('ArrowDown');
-    const nodes = container.querySelector('[data-sidebar-target-view="nodes"]')!;
+    const nodes = requireValue(
+      container.querySelector('[data-sidebar-target-view="nodes"]'),
+      'expected test value in SidebarKeys.test.tsx'
+    );
     expect(nodes.className).toContain('keyboard-preview');
     expect(ref.current?.isKeyboardNavActive).toBe(true);
 
@@ -468,7 +503,10 @@ describe('useSidebarKeyboardControls', () => {
       selectionTarget: { kind: 'overview' },
       onClearPreview,
     });
-    const sidebar = container.querySelector('[data-testid="sidebar"]')!;
+    const sidebar = requireValue(
+      container.querySelector('[data-testid="sidebar"]'),
+      'expected test value in SidebarKeys.test.tsx'
+    );
     const overview = container.querySelector(
       '[data-sidebar-target-kind="overview"]'
     ) as HTMLElement;

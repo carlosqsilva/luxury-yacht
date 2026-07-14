@@ -1,6 +1,6 @@
-import ReactDOM from 'react-dom/client';
 import { act } from 'react';
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as ReactDOM from 'react-dom/client';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useAppDebugShortcuts } from './useAppDebugShortcuts';
 
 const platformMocks = vi.hoisted(() => ({
@@ -57,10 +57,6 @@ const renderHookHost = (handlers?: Partial<Parameters<typeof useAppDebugShortcut
 };
 
 describe('useAppDebugShortcuts', () => {
-  beforeAll(() => {
-    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-  });
-
   beforeEach(() => {
     runtimeHandlers.clear();
     runtimeEventsOn.mockClear();
@@ -75,8 +71,8 @@ describe('useAppDebugShortcuts', () => {
 
   afterEach(() => {
     document.body.innerHTML = '';
-    delete window.runtime;
-    delete (window as Window & { WailsInvoke?: (message: string) => void }).WailsInvoke;
+    window.runtime = undefined;
+    (window as Window & { WailsInvoke?: (message: string) => void }).WailsInvoke = undefined;
   });
 
   it('toggles each debug overlay on its Ctrl+Alt shortcut', () => {

@@ -5,11 +5,11 @@
  * Covers key behaviors and edge cases for ErrorBoundary.
  */
 
-import React from 'react';
-import ReactDOM from 'react-dom/client';
+import type React from 'react';
 import { act } from 'react';
-import { afterEach, afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as ReactDOM from 'react-dom/client';
 import type { MockInstance } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { handleMock } = vi.hoisted(() => ({
   handleMock: vi.fn(),
@@ -30,10 +30,6 @@ describe('ErrorBoundary', () => {
   let consoleGroupSpy: MockInstance | undefined;
   let consoleGroupEndSpy: MockInstance | undefined;
 
-  beforeAll(() => {
-    (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
-  });
-
   beforeEach(() => {
     container = document.createElement('div');
     document.body.appendChild(container);
@@ -44,9 +40,9 @@ describe('ErrorBoundary', () => {
     consoleGroupSpy = vi.spyOn(console, 'group');
     consoleGroupEndSpy = vi.spyOn(console, 'groupEnd');
 
-    consoleErrorSpy.mockImplementation(() => {});
-    consoleGroupSpy.mockImplementation(() => {});
-    consoleGroupEndSpy.mockImplementation(() => {});
+    consoleErrorSpy.mockImplementation(() => undefined);
+    consoleGroupSpy.mockImplementation(() => undefined);
+    consoleGroupEndSpy.mockImplementation(() => undefined);
   });
 
   afterEach(() => {

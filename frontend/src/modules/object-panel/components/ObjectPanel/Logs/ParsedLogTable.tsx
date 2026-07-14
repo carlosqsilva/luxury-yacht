@@ -1,8 +1,8 @@
-import { useCallback, type MouseEvent } from 'react';
 import GridTable, {
   GRIDTABLE_VIRTUALIZATION_DEFAULT,
   type GridColumnDefinition,
 } from '@shared/components/tables/GridTable';
+import { useCallback } from 'react';
 import type { ParsedLogEntry } from './logViewerReducer';
 import { getParsedLogRowKey } from './parsedLogUtils';
 
@@ -14,18 +14,7 @@ interface ParsedLogTableProps {
 }
 
 const ParsedLogTable = ({ rows, columns, expandedRows, onToggleRow }: ParsedLogTableProps) => {
-  const handleTableClick = useCallback(
-    (event: MouseEvent<HTMLDivElement>) => {
-      const row = (event.target as HTMLElement | null)?.closest<HTMLElement>('.gridtable-row');
-      const rowKey = row?.dataset.rowKey;
-      if (rowKey) {
-        onToggleRow(rowKey);
-      }
-    },
-    [onToggleRow]
-  );
-
-  const handleRowKeyboard = useCallback(
+  const handleRowActivation = useCallback(
     (item: ParsedLogEntry) => {
       onToggleRow(getParsedLogRowKey(item));
     },
@@ -39,19 +28,18 @@ const ParsedLogTable = ({ rows, columns, expandedRows, onToggleRow }: ParsedLogT
   );
 
   return (
-    <div onClick={handleTableClick} style={{ height: '100%' }}>
-      <GridTable
-        data={rows}
-        columns={columns}
-        keyExtractor={(item: ParsedLogEntry) => getParsedLogRowKey(item)}
-        onRowClick={handleRowKeyboard}
-        getRowClassName={getRowClassName}
-        className="parsed-logs-table"
-        tableClassName="gridtable-parsed-logs"
-        virtualization={GRIDTABLE_VIRTUALIZATION_DEFAULT}
-        isKindColumnKey={() => false}
-      />
-    </div>
+    <GridTable
+      data={rows}
+      columns={columns}
+      keyExtractor={(item: ParsedLogEntry) => getParsedLogRowKey(item)}
+      onRowClick={handleRowActivation}
+      onRowPointerClick={handleRowActivation}
+      getRowClassName={getRowClassName}
+      className="parsed-logs-table"
+      tableClassName="gridtable-parsed-logs"
+      virtualization={GRIDTABLE_VIRTUALIZATION_DEFAULT}
+      isKindColumnKey={() => false}
+    />
   );
 };
 

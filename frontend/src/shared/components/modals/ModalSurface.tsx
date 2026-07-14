@@ -1,4 +1,5 @@
-import React, { useEffect } from 'react';
+import type React from 'react';
+import { useEffect } from 'react';
 import { createPortal } from 'react-dom';
 
 interface ModalSurfaceProps {
@@ -49,19 +50,19 @@ const ModalSurface: React.FC<ModalSurfaceProps> = ({
   const containerClasses = ['modal-container', containerClassName, isClosing ? 'closing' : '']
     .filter(Boolean)
     .join(' ');
-
   return createPortal(
-    <div
-      className={overlayClasses}
-      onClick={closeOnBackdrop ? onClose : undefined}
-      data-modal-surface="true"
-    >
-      <div
-        className="modal-window-drag-region"
-        aria-hidden="true"
-        onClick={(event) => event.stopPropagation()}
-      />
+    <div className={overlayClasses} data-modal-surface="true">
+      <div className="modal-window-drag-region" aria-hidden="true" />
       <div className="modal-backdrop">
+        {!!closeOnBackdrop && (
+          <button
+            type="button"
+            className="modal-backdrop-dismiss"
+            aria-label="Close dialog"
+            tabIndex={-1}
+            onClick={onClose}
+          />
+        )}
         <div
           ref={modalRef}
           className={containerClasses}
@@ -69,7 +70,6 @@ const ModalSurface: React.FC<ModalSurfaceProps> = ({
           aria-modal="true"
           aria-labelledby={labelledBy}
           tabIndex={-1}
-          onClick={(event) => event.stopPropagation()}
         >
           {children}
         </div>

@@ -192,15 +192,15 @@
 }
 
 .shell-tab__terminal .xterm .xterm-scrollable-element > .scrollbar {
-  display: none !important;
+  display: none;
 }
 
 .shell-tab__terminal .xterm .xterm-scrollable-element > .shadow {
-  display: none !important;
+  display: none;
 }
 
 .shell-tab__terminal .xterm .xterm-decoration-overview-ruler {
-  display: none !important;
+  display: none;
 }
 
 @media (max-width: 640px) {

@@ -6,29 +6,31 @@
  * favorite is activated, this context waits for the cluster to be ready
  * then applies the view/namespace/sidebar state.
  */
-import React, {
+
+import { useClusterLifecycle } from '@core/contexts/ClusterLifecycleContext';
+import { useViewState } from '@core/contexts/ViewStateContext';
+import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
+import { useNamespace } from '@modules/namespace/contexts/NamespaceContext';
+import type React from 'react';
+import {
   createContext,
-  useContext,
-  useState,
-  useEffect,
   useCallback,
+  useContext,
+  useEffect,
   useMemo,
   useRef,
+  useState,
 } from 'react';
 import type { Favorite } from '@/core/persistence/favorites';
 import {
   hydrateFavorites,
   addFavorite as persistAddFavorite,
-  updateFavorite as persistUpdateFavorite,
   deleteFavorite as persistDeleteFavorite,
+  updateFavorite as persistUpdateFavorite,
   setFavoriteOrder,
   subscribeFavorites,
 } from '@/core/persistence/favorites';
-import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
-import { useClusterLifecycle } from '@core/contexts/ClusterLifecycleContext';
-import { useViewState } from '@core/contexts/ViewStateContext';
-import { useNamespace } from '@modules/namespace/contexts/NamespaceContext';
-import type { ClusterViewType, NamespaceViewType } from '@/types/navigation/views';
+import { parseClusterViewType, parseNamespaceViewType } from '@/types/navigation/views';
 
 // ---------- Types ----------
 
@@ -105,7 +107,9 @@ export const FavoritesProvider: React.FC<FavoritesProviderProps> = ({ children }
       navigationAppliedRef.current = false;
       return;
     }
-    if (navigationAppliedRef.current) return;
+    if (navigationAppliedRef.current) {
+      return;
+    }
 
     // For cluster-specific favorites, wait for the correct cluster to be active AND ready.
     // New favorites carry clusterId; older persisted favorites only have the kubeconfig
@@ -114,16 +118,24 @@ export const FavoritesProvider: React.FC<FavoritesProviderProps> = ({ children }
     const isClusterSpecific = pendingFavorite.clusterSelection !== '' || favoriteClusterId !== '';
     if (isClusterSpecific) {
       if (favoriteClusterId) {
-        if (selectedClusterId !== favoriteClusterId) return;
+        if (selectedClusterId !== favoriteClusterId) {
+          return;
+        }
       } else if (selectedKubeconfig !== pendingFavorite.clusterSelection) {
         return;
       }
-      if (!isClusterReady(favoriteClusterId || selectedClusterId)) return;
+      if (!isClusterReady(favoriteClusterId || selectedClusterId)) {
+        return;
+      }
     } else {
       // Generic favorite: wait for the active cluster to be ready.
-      if (selectedClusterId && !isClusterReady(selectedClusterId)) return;
+      if (selectedClusterId && !isClusterReady(selectedClusterId)) {
+        return;
+      }
     }
-    if (pendingFavorite.viewType === 'namespace' && !namespaceReady) return;
+    if (pendingFavorite.viewType === 'namespace' && !namespaceReady) {
+      return;
+    }
 
     navigationAppliedRef.current = true;
 
@@ -134,15 +146,20 @@ export const FavoritesProvider: React.FC<FavoritesProviderProps> = ({ children }
         viewState.onNamespaceSelect(pendingFavorite.namespace);
       }
       // Set the tab AFTER onNamespaceSelect, which defaults to 'browse'
-      // when coming from a non-namespace view. The favorite's view overrides that.
-      viewState.setActiveNamespaceTab(pendingFavorite.view as NamespaceViewType);
+      // when coming from a non-namespace view. The favorite's view overrides
+      // that — unless the persisted string is no longer a valid tab (saved
+      // before a rename, or corrupted), in which case the default stands.
+      const favoriteTab = parseNamespaceViewType(pendingFavorite.view);
+      if (favoriteTab) {
+        viewState.setActiveNamespaceTab(favoriteTab);
+      }
       viewState.setSidebarSelection({
         type: 'namespace',
         value: pendingFavorite.namespace || '',
       });
     } else if (pendingFavorite.viewType === 'cluster') {
       viewState.setViewType('cluster');
-      viewState.setActiveClusterView((pendingFavorite.view as ClusterViewType) || null);
+      viewState.setActiveClusterView(parseClusterViewType(pendingFavorite.view) ?? null);
       viewState.setSidebarSelection({ type: 'cluster', value: 'cluster' });
     }
   }, [

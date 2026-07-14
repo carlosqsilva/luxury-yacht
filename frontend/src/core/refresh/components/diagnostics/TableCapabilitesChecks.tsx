@@ -5,9 +5,10 @@
  * Handles rendering and interactions for the shared components.
  */
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import type { CapabilityBatchRow } from './diagnosticsPanelTypes';
+import type React from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { permissionFeatureLabel } from '@/core/capabilities';
+import type { CapabilityBatchRow } from './diagnosticsPanelTypes';
 
 interface CapabilityChecksTableProps {
   currentRows: CapabilityBatchRow[];
@@ -34,13 +35,17 @@ const matchesSearch = (row: CapabilityBatchRow, query: string): boolean => {
     row.lastResult,
     row.lastError,
     row.method,
-    row.ssrrIncomplete == null ? null : row.ssrrIncomplete ? 'incomplete' : 'complete',
+    row.ssrrIncomplete === null || row.ssrrIncomplete === undefined
+      ? null
+      : row.ssrrIncomplete
+        ? 'incomplete'
+        : 'complete',
     row.ssrrRuleCount,
     row.ssarFallbackCount,
     row.totalChecks,
     descriptorText,
   ]
-    .filter((value) => value != null)
+    .filter((value) => value !== null && value !== undefined)
     .some((value) => String(value).toLowerCase().includes(query));
 };
 
@@ -66,14 +71,21 @@ const CapabilityRow: React.FC<{
     <td>{row.totalChecks}</td>
     <td className="diagnostics-permission-reason">{row.lastError ?? '—'}</td>
     <td>{row.method ?? '—'}</td>
-    <td>{row.ssrrIncomplete != null ? (row.ssrrIncomplete ? 'Yes' : 'No') : '—'}</td>
+    <td>
+      {row.ssrrIncomplete !== null && row.ssrrIncomplete !== undefined
+        ? row.ssrrIncomplete
+          ? 'Yes'
+          : 'No'
+        : '—'}
+    </td>
     <td>{row.ssrrRuleCount ?? '—'}</td>
     <td>{row.ssarFallbackCount ?? '—'}</td>
     <td>
       {row.descriptorsByFeature && row.descriptorsByFeature.length > 0 ? (
-        <span
+        <button
+          type="button"
           className={
-            `diagnostics-table-descriptor` +
+            'diagnostics-table-descriptor' +
             (!isCollapsed ? ' diagnostics-table-cell-expanded' : '')
           }
           onClick={() => onToggle(row.key)}
@@ -92,7 +104,7 @@ const CapabilityRow: React.FC<{
                 </div>
               ))
             : 'Click to expand'}
-        </span>
+        </button>
       ) : (
         <span className="diagnostics-table-descriptor">—</span>
       )}
@@ -151,6 +163,7 @@ export const CapabilityChecksTable: React.FC<CapabilityChecksTableProps> = ({
   }, [filteredTotalRows]);
 
   useEffect(() => {
+    void normalizedSearch;
     setVisibleLimit(INITIAL_VISIBLE_ROWS);
     setExpandedRows(new Set());
   }, [normalizedSearch]);

@@ -5,12 +5,11 @@
  * Covers key behaviors and edge cases for context.
  */
 
-import { useEffect } from 'react';
-import ReactDOM from 'react-dom/client';
-import { act } from 'react';
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { act, useEffect, useEffectEvent } from 'react';
+import * as ReactDOM from 'react-dom/client';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { KeyboardProvider, useKeyboardContext, deriveCopyText, applySelectAll } from './context';
+import { applySelectAll, deriveCopyText, KeyboardProvider, useKeyboardContext } from './context';
 
 const runtimeMocks = vi.hoisted(() => ({
   eventsOn: vi.fn(),
@@ -27,10 +26,6 @@ type KeyboardContextApi = ReturnType<typeof useKeyboardContext>;
 describe('KeyboardProvider', () => {
   let container: HTMLDivElement;
   let root: ReactDOM.Root;
-
-  beforeAll(() => {
-    (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
-  });
 
   beforeEach(() => {
     container = document.createElement('div');
@@ -59,7 +54,7 @@ describe('KeyboardProvider', () => {
         apiRef.current = ctx;
       }, [ctx]);
 
-      useEffect(() => {
+      const registerListShortcut = useEffectEvent(() => {
         const listId = ctx.registerShortcut({
           key: 'l',
           priority: 1,
@@ -69,8 +64,8 @@ describe('KeyboardProvider', () => {
         return () => {
           ctx.unregisterShortcut(listId);
         };
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-      }, []);
+      });
+      useEffect(() => registerListShortcut(), []);
 
       return null;
     };
@@ -100,7 +95,7 @@ describe('KeyboardProvider', () => {
         apiRef.current = ctx;
       }, [ctx]);
 
-      useEffect(() => {
+      const registerPriorityShortcuts = useEffectEvent(() => {
         const lowId = ctx.registerShortcut({
           key: 'k',
           priority: 1,
@@ -117,8 +112,8 @@ describe('KeyboardProvider', () => {
           ctx.unregisterShortcut(lowId);
           ctx.unregisterShortcut(highId);
         };
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-      }, []);
+      });
+      useEffect(() => registerPriorityShortcuts(), []);
 
       return null;
     };
@@ -185,7 +180,7 @@ describe('KeyboardProvider', () => {
       if (originalExecDescriptor) {
         Object.defineProperty(document, 'execCommand', originalExecDescriptor);
       } else {
-        delete (document as any).execCommand;
+        Reflect.deleteProperty(document, 'execCommand');
       }
     });
   });
@@ -194,10 +189,6 @@ describe('KeyboardProvider', () => {
 describe('keyboard handling edge cases', () => {
   let container: HTMLDivElement;
   let root: ReactDOM.Root;
-
-  beforeAll(() => {
-    (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
-  });
 
   beforeEach(() => {
     container = document.createElement('div');
@@ -225,7 +216,7 @@ describe('keyboard handling edge cases', () => {
         apiRef.current = ctx;
       }, [ctx]);
 
-      useEffect(() => {
+      const registerCopyShortcuts = useEffectEvent(() => {
         const plainId = ctx.registerShortcut({
           key: 'c',
           modifiers: { meta: true },
@@ -242,8 +233,8 @@ describe('keyboard handling edge cases', () => {
           ctx.unregisterShortcut(plainId);
           ctx.unregisterShortcut(extendedId);
         };
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-      }, []);
+      });
+      useEffect(() => registerCopyShortcuts(), []);
 
       return null;
     };
@@ -328,11 +319,11 @@ describe('keyboard handling edge cases', () => {
 
     const Harness = () => {
       const ctx = useKeyboardContext();
-      useEffect(() => {
+      const registerEditorSurface = useEffectEvent(() => {
         const id = ctx.registerSurface({ kind: 'editor', rootRef, onNativeAction });
         return () => ctx.unregisterSurface(id);
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-      }, []);
+      });
+      useEffect(() => registerEditorSurface(), []);
       return null;
     };
 
@@ -353,7 +344,8 @@ describe('keyboard handling edge cases', () => {
       ([event]) => event === 'menu:cut'
     );
     const cutHandler = cutRegistrations[cutRegistrations.length - 1]?.[1] as
-      (() => void) | undefined;
+      | (() => void)
+      | undefined;
     expect(typeof cutHandler).toBe('function');
 
     act(() => {
@@ -393,7 +385,8 @@ describe('keyboard handling edge cases', () => {
       ([event]) => event === 'menu:cut'
     );
     const cutHandler = cutRegistrations[cutRegistrations.length - 1]?.[1] as
-      (() => void) | undefined;
+      | (() => void)
+      | undefined;
     expect(typeof cutHandler).toBe('function');
 
     act(() => {

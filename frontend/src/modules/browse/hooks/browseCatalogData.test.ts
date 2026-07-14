@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-
+import { makeCatalogSnapshotPayload } from '@/core/refresh/refreshContractTestBuilders';
 import type { CatalogItem, CatalogSnapshotPayload } from '@/core/refresh/types';
 import {
   acceptsCatalogSnapshotScope,
@@ -27,21 +27,14 @@ const makeItem = (overrides: Partial<CatalogItem>): CatalogItem => ({
   ...overrides,
 });
 
-const makePayload = (overrides: Partial<CatalogSnapshotPayload>): CatalogSnapshotPayload => ({
-  clusterId: 'cluster-1',
-  clusterName: 'Cluster 1',
-  items: [],
-  continue: '',
-  total: 0,
-  resourceCount: 0,
-  kinds: [],
-  namespaces: [],
-  batchIndex: 0,
-  batchSize: 0,
-  totalBatches: 1,
-  isFinal: true,
-  ...overrides,
-});
+const makePayload = (overrides: Partial<CatalogSnapshotPayload>): CatalogSnapshotPayload =>
+  makeCatalogSnapshotPayload({
+    clusterId: 'cluster-1',
+    clusterName: 'Cluster 1',
+    kinds: [],
+    namespaces: [],
+    ...overrides,
+  });
 
 describe('browseCatalogData', () => {
   it('plans base, metadata, and page scopes for pinned namespace Browse', () => {
@@ -54,8 +47,12 @@ describe('browseCatalogData', () => {
       pageLimit: 200,
     });
 
-    expect(plan.catalogScope).toBe('cluster-1|limit=200&search=api&kind=Pod&namespace=default');
-    expect(plan.metadataScope).toBe('cluster-1|limit=1&namespace=default');
+    expect(plan.catalogScope).toBe(
+      'cluster-1|limit=200&resourceScope=namespace&search=api&kind=Pod&namespace=default&scopeNamespace=default'
+    );
+    expect(plan.metadataScope).toBe(
+      'cluster-1|limit=1&resourceScope=namespace&namespace=default&scopeNamespace=default'
+    );
     expect(plan.metadataUsesActiveScope).toBe(false);
     expect(plan.hasUserNamespaceScope).toBe(true);
     expect(plan.namespacesToQuery).toEqual(['default']);
@@ -70,7 +67,9 @@ describe('browseCatalogData', () => {
         },
         '200'
       )
-    ).toBe('cluster-1|limit=200&search=api&kind=Pod&namespace=default&continue=200');
+    ).toBe(
+      'cluster-1|limit=200&resourceScope=namespace&search=api&kind=Pod&namespace=default&scopeNamespace=default&continue=200'
+    );
   });
 
   it('separates user namespace scope from backend namespace expansion', () => {
@@ -87,6 +86,22 @@ describe('browseCatalogData', () => {
     expect(plan.hasUserNamespaceScope).toBe(false);
   });
 
+  it('carries the cluster Browse boundary separately from active filters', () => {
+    const plan = buildBrowseCatalogPlan({
+      clusterId: 'cluster-1',
+      clusterScopedOnly: true,
+      pinnedNamespaces: [],
+      filters: { search: '', kinds: ['Node'], namespaces: [] },
+      availableNamespaces: ['default', 'kube-system'],
+      pageLimit: 50,
+    });
+
+    expect(plan.catalogScope).toBe(
+      'cluster-1|limit=50&resourceScope=cluster&kind=Node&namespace=cluster'
+    );
+    expect(plan.metadataScope).toBe('cluster-1|limit=1&resourceScope=cluster&namespace=cluster');
+  });
+
   it('includes backend sort in catalog scopes when the sort is not the default', () => {
     const plan = buildBrowseCatalogPlan({
       clusterId: 'cluster-1',
@@ -99,7 +114,7 @@ describe('browseCatalogData', () => {
     });
 
     expect(plan.catalogScope).toBe(
-      'cluster-1|limit=200&sort=name&sortDirection=desc&namespace=default'
+      'cluster-1|limit=200&resourceScope=namespace&sort=name&sortDirection=desc&namespace=default&scopeNamespace=default'
     );
     expect(
       buildBrowseCatalogPageScope(
@@ -113,7 +128,9 @@ describe('browseCatalogData', () => {
         },
         'cursor'
       )
-    ).toBe('cluster-1|limit=200&sort=name&sortDirection=desc&namespace=default&continue=cursor');
+    ).toBe(
+      'cluster-1|limit=200&resourceScope=namespace&sort=name&sortDirection=desc&namespace=default&scopeNamespace=default&continue=cursor'
+    );
   });
 
   it('rejects stale pinned-namespace snapshots', () => {

@@ -6,13 +6,13 @@
  * container/local port mapping.
  */
 
-import { useState, useEffect, useCallback, useRef } from 'react';
 import { buildObjectActionTarget, runStartPortForward } from '@shared/actions/objectActionClient';
-import { readTargetPortsForRef, requestData } from '@/core/data-access';
-import ModalSurface from '@shared/components/modals/ModalSurface';
-import ModalHeader from '@shared/components/modals/ModalHeader';
-import { useModalFocusTrap } from '@shared/components/modals/useModalFocusTrap';
 import { PortForwardIcon } from '@shared/components/icons/SharedIcons';
+import ModalHeader from '@shared/components/modals/ModalHeader';
+import ModalSurface from '@shared/components/modals/ModalSurface';
+import { useModalFocusTrap } from '@shared/components/modals/useModalFocusTrap';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { readTargetPortsForRef, requestData } from '@/core/data-access';
 import './PortForwardModal.css';
 
 /**
@@ -68,6 +68,7 @@ function getDefaultLocalPort(containerPort: number): number {
  * custom port input when no ports are available.
  */
 const PortForwardModal = ({ target, onClose, onStarted }: PortForwardModalProps) => {
+  const elementIdPrefix = useId();
   // Selected container port (either from predefined list or manual input)
   const [containerPort, setContainerPort] = useState<number>(0);
   // Local port to forward to
@@ -109,6 +110,7 @@ const PortForwardModal = ({ target, onClose, onStarted }: PortForwardModalProps)
 
   // Reset form state when target changes, fetch ports if not provided
   useEffect(() => {
+    void targetKey;
     const currentTarget = targetRef.current;
     if (!currentTarget) {
       return;
@@ -209,7 +211,9 @@ const PortForwardModal = ({ target, onClose, onStarted }: PortForwardModalProps)
 
   // Handle form submission
   const handleSubmit = useCallback(async () => {
-    if (!target) return;
+    if (!target) {
+      return;
+    }
 
     // Validate ports
     if (!isValidPort(containerPort)) {
@@ -296,7 +300,7 @@ const PortForwardModal = ({ target, onClose, onStarted }: PortForwardModalProps)
 
         {/* Container Port Selection */}
         <div className="port-forward-field">
-          <label>Container Port</label>
+          <span className="port-forward-field-label">Container Port</span>
           {isLoadingPorts ? (
             // Loading indicator while fetching ports
             <div className="port-forward-loading">Loading available ports...</div>
@@ -320,10 +324,10 @@ const PortForwardModal = ({ target, onClose, onStarted }: PortForwardModalProps)
                   />
                   <span className="port-forward-port-option-label">
                     <span className="port-forward-port-number">{portInfo.port}</span>
-                    {portInfo.name && (
+                    {!!portInfo.name && (
                       <span className="port-forward-port-name">({portInfo.name})</span>
                     )}
-                    {portInfo.protocol && (
+                    {!!portInfo.protocol && (
                       <span className="port-forward-port-protocol">{portInfo.protocol}</span>
                     )}
                   </span>
@@ -334,6 +338,7 @@ const PortForwardModal = ({ target, onClose, onStarted }: PortForwardModalProps)
             // Manual input for container port
             <div className="port-forward-input-group">
               <input
+                aria-label="Container port"
                 type="number"
                 className="port-forward-input"
                 min={1}
@@ -342,7 +347,7 @@ const PortForwardModal = ({ target, onClose, onStarted }: PortForwardModalProps)
                 onChange={handleContainerPortInput}
                 placeholder="Enter port (1-65535)"
                 disabled={isLoading}
-                autoFocus
+                data-modal-initial-focus
               />
             </div>
           )}
@@ -350,10 +355,10 @@ const PortForwardModal = ({ target, onClose, onStarted }: PortForwardModalProps)
 
         {/* Local Port Input */}
         <div className="port-forward-field">
-          <label htmlFor="port-forward-local-port">Local Port</label>
+          <label htmlFor={`${elementIdPrefix}-port-forward-local-port`}>Local Port</label>
           <div className="port-forward-input-group">
             <input
-              id="port-forward-local-port"
+              id={`${elementIdPrefix}-port-forward-local-port`}
               type="number"
               className="port-forward-input"
               min={1}
@@ -372,14 +377,15 @@ const PortForwardModal = ({ target, onClose, onStarted }: PortForwardModalProps)
       </div>
 
       {/* Error Message */}
-      {error && <div className="port-forward-error">{error}</div>}
+      {!!error && <div className="port-forward-error">{error}</div>}
 
       {/* Footer */}
       <div className="port-forward-footer">
-        <button className="button cancel" onClick={onClose} disabled={isLoading}>
+        <button type="button" className="button cancel" onClick={onClose} disabled={isLoading}>
           Cancel
         </button>
         <button
+          type="button"
           className="button save"
           onClick={handleSubmit}
           disabled={

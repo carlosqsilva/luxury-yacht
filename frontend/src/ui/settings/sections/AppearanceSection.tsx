@@ -6,55 +6,75 @@
  */
 
 import {
-  useState,
-  useEffect,
-  useRef,
-  useCallback,
-  useMemo,
-  type CSSProperties,
-  type ReactElement,
-  type RefObject,
-} from 'react';
-import { types } from '@wailsjs/go/models';
-import { errorHandler } from '@utils/errorHandler';
-import { changeAppearanceMode } from '@/utils/appearanceMode';
-import {
-  getIntegerPreferenceMetadata,
-  getPreferenceMetadata,
-  hydrateAppPreferences,
-  normalizeIntegerPreferenceValue,
-  createPaletteTintPreferenceWorkflow,
-  getPaletteTint,
-  getAccentColor,
-  createAccentColorPreferenceWorkflow,
-  getLinkColor,
-  createLinkColorPreferenceWorkflow,
-} from '@/core/settings/appPreferences';
-import { useAppearanceMode } from '@/core/contexts/AppearanceModeContext';
-import {
-  applyTintedPalette,
-  isPaletteActive,
-  MAX_SATURATION,
-  MAX_BRIGHTNESS_OFFSET,
-} from '@utils/paletteTint';
-import { applyAccentColor, applyAccentBg } from '@utils/accentColor';
-import { applyLinkColor } from '@utils/linkColor';
-import ConfirmationModal from '@shared/components/modals/ConfirmationModal';
-import {
-  EditIcon,
-  DeleteIcon,
-  CheckIcon,
-  CloseIcon,
-  PlusIcon,
-} from '@shared/components/icons/SharedIcons';
-import {
   AppearanceModeIcon,
   DarkModeIcon,
   LightModeIcon,
 } from '@shared/components/icons/SettingsIcons';
+import {
+  CheckIcon,
+  CloseIcon,
+  DeleteIcon,
+  EditIcon,
+  PlusIcon,
+} from '@shared/components/icons/SharedIcons';
+import ConfirmationModal from '@shared/components/modals/ConfirmationModal';
+import { applyAccentBg, applyAccentColor } from '@utils/accentColor';
+import { errorHandler } from '@utils/errorHandler';
+import { applyLinkColor } from '@utils/linkColor';
+import {
+  applyTintedPalette,
+  isPaletteActive,
+  MAX_BRIGHTNESS_OFFSET,
+  MAX_SATURATION,
+} from '@utils/paletteTint';
+import { types } from '@wailsjs/go/models';
+import {
+  type CSSProperties,
+  type ReactElement,
+  type RefObject,
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
+import { useAppearanceMode } from '@/core/contexts/AppearanceModeContext';
+import {
+  type AppearanceMode,
+  createAccentColorPreferenceWorkflow,
+  createLinkColorPreferenceWorkflow,
+  createPaletteTintPreferenceWorkflow,
+  getAccentColor,
+  getIntegerPreferenceMetadata,
+  getLinkColor,
+  getPaletteTint,
+  getPreferenceMetadata,
+  hydrateAppPreferences,
+  normalizeIntegerPreferenceValue,
+} from '@/core/settings/appPreferences';
+import { changeAppearanceMode } from '@/utils/appearanceMode';
 import { useThemes } from './useThemes';
 
 const DEFAULT_THEME_ID = 'default';
+
+export function reorderThemeByOffset(
+  ids: string[],
+  themeId: string,
+  offset: -1 | 1
+): string[] | null {
+  const fromIndex = ids.indexOf(themeId);
+  const defaultIndex = ids.indexOf(DEFAULT_THEME_ID);
+  const lastCustomIndex = defaultIndex === -1 ? ids.length - 1 : defaultIndex - 1;
+  const toIndex = fromIndex + offset;
+  if (themeId === DEFAULT_THEME_ID || fromIndex < 0 || toIndex < 0 || toIndex > lastCustomIndex) {
+    return null;
+  }
+  const reordered = [...ids];
+  reordered.splice(fromIndex, 1);
+  reordered.splice(toIndex, 0, themeId);
+  return reordered;
+}
 
 const isDefaultTheme = (theme: types.Theme) => theme.id === DEFAULT_THEME_ID;
 
@@ -78,9 +98,9 @@ function AppearanceModeSelector({
   options,
   onChange,
 }: {
-  mode: string;
+  mode: AppearanceMode;
   options: ReadonlyArray<(typeof appearanceModeOptions)[number]>;
-  onChange: (mode: string) => void;
+  onChange: (mode: AppearanceMode) => void;
 }) {
   return (
     <div className="settings-row">
@@ -91,7 +111,7 @@ function AppearanceModeSelector({
         </div>
       </div>
       <div className="settings-row-control">
-        <div className="settings-choice-buttons" role="group" aria-label="Appearance mode">
+        <fieldset className="settings-choice-buttons" aria-label="Appearance mode">
           {options.map((option) => {
             const Icon = option.icon;
             const isSelected = mode === option.value;
@@ -108,7 +128,7 @@ function AppearanceModeSelector({
               </button>
             );
           })}
-        </div>
+        </fieldset>
       </div>
     </div>
   );
@@ -153,6 +173,8 @@ function PaletteControls({
   onSaturationReset: () => void;
   onBrightnessReset: () => void;
 }) {
+  const elementIdPrefix = useId();
+
   return (
     <div className="settings-row">
       <div className="settings-row-label">
@@ -164,10 +186,10 @@ function PaletteControls({
       </div>
       <div className="settings-row-control">
         <div className="palette-tint-controls">
-          <label htmlFor="palette-hue">Hue</label>
+          <label htmlFor={`${elementIdPrefix}-palette-hue`}>Hue</label>
           <input
             type="range"
-            id="palette-hue"
+            id={`${elementIdPrefix}-palette-hue`}
             className="palette-slider palette-slider-hue"
             min={paletteBounds.hue.min}
             max={paletteBounds.hue.max}
@@ -186,10 +208,10 @@ function PaletteControls({
             ↺
           </button>
 
-          <label htmlFor="palette-saturation">Saturation</label>
+          <label htmlFor={`${elementIdPrefix}-palette-saturation`}>Saturation</label>
           <input
             type="range"
-            id="palette-saturation"
+            id={`${elementIdPrefix}-palette-saturation`}
             className="palette-slider palette-slider-saturation"
             min={paletteBounds.saturation.min}
             max={paletteBounds.saturation.max}
@@ -208,10 +230,10 @@ function PaletteControls({
             ↺
           </button>
 
-          <label htmlFor="palette-brightness">Brightness</label>
+          <label htmlFor={`${elementIdPrefix}-palette-brightness`}>Brightness</label>
           <input
             type="range"
-            id="palette-brightness"
+            id={`${elementIdPrefix}-palette-brightness`}
             className="palette-slider palette-slider-brightness"
             min={paletteBounds.brightness.min}
             max={paletteBounds.brightness.max}
@@ -291,19 +313,22 @@ function ColorControl({
                 } else if (e.key === 'Escape') {
                   e.preventDefault();
                   onHexCancel();
-                } else e.stopPropagation();
+                } else {
+                  e.stopPropagation();
+                }
               }}
               onBlur={onHexCancel}
               maxLength={7}
             />
           ) : (
-            <span
+            <button
+              type="button"
               className="color-swatch-value palette-hex-clickable"
               onClick={onHexClick}
               title="Click to edit hex value"
             >
               {value || defaultColor}
-            </span>
+            </button>
           )}
           <button
             type="button"
@@ -321,6 +346,7 @@ function ColorControl({
 }
 
 function AppearanceSection() {
+  const elementIdPrefix = useId();
   const { mode, resolvedMode } = useAppearanceMode();
 
   // Palette tint state for hue/saturation/brightness sliders.
@@ -367,6 +393,7 @@ function AppearanceSection() {
   const [deleteConfirmThemeId, setDeleteConfirmThemeId] = useState<string | null>(null);
   const [hasUnsavedDefaultThemeChanges, setHasUnsavedDefaultThemeChanges] = useState(false);
   const [themePatternError, setThemePatternError] = useState<string | null>(null);
+  const newThemeNameInputRef = useRef<HTMLInputElement>(null);
   const appearanceModeMetadata = getPreferenceMetadata('appearanceMode');
   const enabledAppearanceModeOptions = appearanceModeOptions.filter(
     (option) =>
@@ -409,6 +436,12 @@ function AppearanceSection() {
     }
   }, [editingPaletteField]);
 
+  useEffect(() => {
+    if (editingThemeId === 'new') {
+      newThemeNameInputRef.current?.focus();
+    }
+  }, [editingThemeId]);
+
   // Clean up pending preference commits on unmount.
   useEffect(() => {
     return () => {
@@ -418,11 +451,8 @@ function AppearanceSection() {
     };
   }, [accentColorPreferenceWorkflow, linkColorPreferenceWorkflow, palettePreferenceWorkflow]);
 
-  const handleAppearanceModeChange = async (nextMode: string) => {
+  const handleAppearanceModeChange = async (nextMode: AppearanceMode) => {
     try {
-      if (nextMode !== 'light' && nextMode !== 'dark' && nextMode !== 'system') {
-        return;
-      }
       await changeAppearanceMode(nextMode);
     } catch (error) {
       errorHandler.handle(error, { action: 'setAppearanceMode', mode: nextMode });
@@ -540,9 +570,11 @@ function AppearanceSection() {
 
   const handleAccentHexCommit = () => {
     let trimmed = accentHexDraft.trim().toLowerCase();
-    if (!trimmed.startsWith('#')) trimmed = '#' + trimmed;
+    if (!trimmed.startsWith('#')) {
+      trimmed = `#${trimmed}`;
+    }
     if (/^#[0-9a-f]{3}$/.test(trimmed)) {
-      trimmed = '#' + trimmed[1] + trimmed[1] + trimmed[2] + trimmed[2] + trimmed[3] + trimmed[3];
+      trimmed = `#${trimmed[1]}${trimmed[1]}${trimmed[2]}${trimmed[2]}${trimmed[3]}${trimmed[3]}`;
     }
     if (validHexRe.test(trimmed)) {
       handleAccentColorChange(trimmed);
@@ -583,9 +615,11 @@ function AppearanceSection() {
 
   const handleLinkHexCommit = () => {
     let trimmed = linkHexDraft.trim().toLowerCase();
-    if (!trimmed.startsWith('#')) trimmed = '#' + trimmed;
+    if (!trimmed.startsWith('#')) {
+      trimmed = `#${trimmed}`;
+    }
     if (/^#[0-9a-f]{3}$/.test(trimmed)) {
-      trimmed = '#' + trimmed[1] + trimmed[1] + trimmed[2] + trimmed[2] + trimmed[3] + trimmed[3];
+      trimmed = `#${trimmed[1]}${trimmed[1]}${trimmed[2]}${trimmed[2]}${trimmed[3]}${trimmed[3]}`;
     }
     if (validHexRe.test(trimmed)) {
       handleLinkColorChange(trimmed);
@@ -603,9 +637,11 @@ function AppearanceSection() {
   };
 
   const handlePaletteValueCommit = () => {
-    if (!editingPaletteField) return;
+    if (!editingPaletteField) {
+      return;
+    }
     const parsed = parseInt(paletteDraft, 10);
-    if (isNaN(parsed)) {
+    if (Number.isNaN(parsed)) {
       setEditingPaletteField(null);
       return;
     }
@@ -652,11 +688,17 @@ function AppearanceSection() {
 
   // Commit the active theme's edits (palette + name/pattern from themeDraft).
   const handleSaveActiveTheme = async () => {
-    if (!activeThemeId) return;
+    if (!activeThemeId) {
+      return;
+    }
     const existing = themes.find((t) => t.id === activeThemeId);
-    if (!existing) return;
+    if (!existing) {
+      return;
+    }
     const trimmedName = themeDraft.name.trim();
-    if (!trimmedName) return; // Name is required.
+    if (!trimmedName) {
+      return; // Name is required.
+    }
     const isDefault = existing.id === DEFAULT_THEME_ID;
     const clusterPattern = isDefault ? '' : themeDraft.clusterPattern.trim();
 
@@ -682,7 +724,9 @@ function AppearanceSection() {
 
   // Cancel: re-apply the saved theme values and exit edit mode.
   const handleCancelActiveTheme = async () => {
-    if (!activeThemeId) return;
+    if (!activeThemeId) {
+      return;
+    }
     await handleApplyTheme(activeThemeId);
     setThemePatternError(null);
     setActiveThemeId(null);
@@ -692,7 +736,9 @@ function AppearanceSection() {
   };
 
   const handleThemeSave = async () => {
-    if (!themeDraft.name.trim()) return;
+    if (!themeDraft.name.trim()) {
+      return;
+    }
     const clusterPattern = themeDraft.clusterPattern.trim();
 
     if (!(await validateThemePatternDraft(clusterPattern))) {
@@ -720,7 +766,9 @@ function AppearanceSection() {
   };
 
   const handleDeleteThemeConfirm = async () => {
-    if (!deleteConfirmThemeId) return;
+    if (!deleteConfirmThemeId) {
+      return;
+    }
     try {
       await deleteThemeEntry(deleteConfirmThemeId);
     } catch (error) {
@@ -854,7 +902,9 @@ function AppearanceSection() {
   }
 
   const handleSaveDefaultThemeFromPrompt = async () => {
-    if (!defaultTheme) return;
+    if (!defaultTheme) {
+      return;
+    }
     try {
       await saveThemeEntry(
         buildThemeFromCurrentAppearance({
@@ -883,7 +933,9 @@ function AppearanceSection() {
     const ids = themes.map((t) => t.id);
     const fromIdx = ids.indexOf(draggingThemeId);
     const toIdx = ids.indexOf(targetId);
-    if (fromIdx === -1 || toIdx === -1) return;
+    if (fromIdx === -1 || toIdx === -1) {
+      return;
+    }
 
     const reordered = [...ids];
     reordered.splice(fromIdx, 1);
@@ -896,6 +948,22 @@ function AppearanceSection() {
     } finally {
       setDraggingThemeId(null);
       setDropTargetThemeId(null);
+    }
+  };
+
+  const handleThemeKeyboardReorder = async (themeId: string, offset: -1 | 1) => {
+    const reordered = reorderThemeByOffset(
+      themes.map((theme) => theme.id),
+      themeId,
+      offset
+    );
+    if (!reordered) {
+      return;
+    }
+    try {
+      await reorderThemeEntries(reordered);
+    } catch (error) {
+      errorHandler.handle(error, { action: 'reorderThemes' });
     }
   };
 
@@ -942,7 +1010,8 @@ function AppearanceSection() {
       );
     }
     return (
-      <span
+      <button
+        type="button"
         className="palette-slider-value palette-hex-clickable"
         onClick={() => handlePaletteValueClick(field)}
         title="Click to edit value"
@@ -950,7 +1019,7 @@ function AppearanceSection() {
         {value > 0 && field === 'brightness' ? '+' : ''}
         {value}
         {suffix}
-      </span>
+      </button>
     );
   };
 
@@ -1072,23 +1141,12 @@ function AppearanceSection() {
                     <div
                       key={theme.id}
                       className={`setting-item setting-item-surface themes-table-row${isDragging ? ' themes-table-row--dragging' : ''}${isDropTarget ? ' themes-table-row--drop-target' : ''}${activeThemeId && activeThemeId !== theme.id ? ' themes-table-row--dimmed' : ''}`}
-                      onDragOver={(e) => {
-                        if (!draggingThemeId || isDefault) return;
-                        e.preventDefault();
-                        setDropTargetThemeId(theme.id);
-                      }}
-                      onDragLeave={() => {
-                        setDropTargetThemeId((c) => (c === theme.id ? null : c));
-                      }}
-                      onDrop={(e) => {
-                        e.preventDefault();
-                        handleThemeDrop(theme.id);
-                      }}
                     >
                       {isDefault ? (
                         <span className="themes-drag-handle themes-drag-handle--placeholder"></span>
                       ) : (
-                        <span
+                        <button
+                          type="button"
                           className="themes-drag-handle"
                           draggable
                           onDragStart={(e) => {
@@ -1099,10 +1157,37 @@ function AppearanceSection() {
                             setDraggingThemeId(null);
                             setDropTargetThemeId(null);
                           }}
-                          title="Drag to reorder"
+                          onDragOver={(event) => {
+                            if (!draggingThemeId) {
+                              return;
+                            }
+                            event.preventDefault();
+                            setDropTargetThemeId(theme.id);
+                          }}
+                          onDragLeave={() => {
+                            setDropTargetThemeId((current) =>
+                              current === theme.id ? null : current
+                            );
+                          }}
+                          onDrop={(event) => {
+                            event.preventDefault();
+                            void handleThemeDrop(theme.id);
+                          }}
+                          onKeyDown={(event) => {
+                            if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') {
+                              return;
+                            }
+                            event.preventDefault();
+                            void handleThemeKeyboardReorder(
+                              theme.id,
+                              event.key === 'ArrowUp' ? -1 : 1
+                            );
+                          }}
+                          aria-label={`Reorder ${theme.name}. Use Up and Down Arrow keys.`}
+                          title="Drag or use Up and Down Arrow keys to reorder"
                         >
                           &#x283F;
-                        </span>
+                        </button>
                       )}
                       {activeThemeId === theme.id && !isDefault ? (
                         <div className="theme-fields">
@@ -1112,9 +1197,13 @@ function AppearanceSection() {
                             onChange={(e) => setThemeDraft((d) => ({ ...d, name: e.target.value }))}
                             placeholder="Name"
                             onKeyDown={(e) => {
-                              if (e.key === 'Enter') handleSaveActiveTheme();
-                              else if (e.key === 'Escape') handleCancelActiveTheme();
-                              else e.stopPropagation();
+                              if (e.key === 'Enter') {
+                                handleSaveActiveTheme();
+                              } else if (e.key === 'Escape') {
+                                handleCancelActiveTheme();
+                              } else {
+                                e.stopPropagation();
+                              }
                             }}
                           />
                           <input
@@ -1133,13 +1222,20 @@ function AppearanceSection() {
                               themePatternError ? 'theme-pattern-error-active' : undefined
                             }
                             onKeyDown={(e) => {
-                              if (e.key === 'Enter') handleSaveActiveTheme();
-                              else if (e.key === 'Escape') handleCancelActiveTheme();
-                              else e.stopPropagation();
+                              if (e.key === 'Enter') {
+                                handleSaveActiveTheme();
+                              } else if (e.key === 'Escape') {
+                                handleCancelActiveTheme();
+                              } else {
+                                e.stopPropagation();
+                              }
                             }}
                           />
-                          {themePatternError && (
-                            <div id="theme-pattern-error-active" className="theme-pattern-error">
+                          {!!themePatternError && (
+                            <div
+                              id={`${elementIdPrefix}-theme-pattern-error-active`}
+                              className="theme-pattern-error"
+                            >
                               {themePatternError}
                             </div>
                           )}
@@ -1211,15 +1307,19 @@ function AppearanceSection() {
                     <span className="themes-drag-handle themes-drag-handle--placeholder"></span>
                     <div className="theme-fields">
                       <input
+                        ref={newThemeNameInputRef}
                         className="theme-name-input"
                         value={themeDraft.name}
                         onChange={(e) => setThemeDraft((d) => ({ ...d, name: e.target.value }))}
                         placeholder="Name"
-                        autoFocus
                         onKeyDown={(e) => {
-                          if (e.key === 'Enter') handleThemeSave();
-                          else if (e.key === 'Escape') handleThemeEditCancel();
-                          else e.stopPropagation();
+                          if (e.key === 'Enter') {
+                            handleThemeSave();
+                          } else if (e.key === 'Escape') {
+                            handleThemeEditCancel();
+                          } else {
+                            e.stopPropagation();
+                          }
                         }}
                       />
                       <input
@@ -1236,13 +1336,20 @@ function AppearanceSection() {
                         aria-invalid={themePatternError ? 'true' : undefined}
                         aria-describedby={themePatternError ? 'theme-pattern-error-new' : undefined}
                         onKeyDown={(e) => {
-                          if (e.key === 'Enter') handleThemeSave();
-                          else if (e.key === 'Escape') handleThemeEditCancel();
-                          else e.stopPropagation();
+                          if (e.key === 'Enter') {
+                            handleThemeSave();
+                          } else if (e.key === 'Escape') {
+                            handleThemeEditCancel();
+                          } else {
+                            e.stopPropagation();
+                          }
                         }}
                       />
-                      {themePatternError && (
-                        <div id="theme-pattern-error-new" className="theme-pattern-error">
+                      {!!themePatternError && (
+                        <div
+                          id={`${elementIdPrefix}-theme-pattern-error-new`}
+                          className="theme-pattern-error"
+                        >
                           {themePatternError}
                         </div>
                       )}
@@ -1272,7 +1379,7 @@ function AppearanceSection() {
                     className="button generic settings-add-button themes-save-new-row"
                     onClick={handleSaveCurrentAsTheme}
                   >
-                    <PlusIcon width={12} height={12} ariaHidden />
+                    <PlusIcon width={12} height={12} />
                     Save new theme
                   </button>
                 )}

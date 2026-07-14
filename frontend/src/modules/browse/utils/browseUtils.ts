@@ -5,8 +5,8 @@
  * Handles catalog scope building, normalization, and item management.
  */
 
-import type { CatalogItem } from '@/core/refresh/types';
 import { buildClusterScope } from '@/core/refresh/clusterScope';
+import type { CatalogItem } from '@/core/refresh/types';
 
 /**
  * Parses a continue token from an unknown value.
@@ -75,7 +75,7 @@ const dedupeByUID = (incoming: CatalogItem[]): DedupeResult => {
     }
 
     const existingIndex = indexByUid.get(uid);
-    if (existingIndex == null) {
+    if (existingIndex === null || existingIndex === undefined) {
       indexByUid.set(uid, items.length);
       items.push(item);
       continue;
@@ -149,6 +149,8 @@ export const filterNamespaceScopedItems = (items: CatalogItem[]): CatalogItem[] 
  */
 export interface BuildCatalogScopeParams {
   limit: number;
+  resourceScope?: 'cluster' | 'namespace';
+  scopeNamespaces?: string[];
   search: string;
   kinds: string[];
   namespaces: string[];
@@ -170,6 +172,9 @@ export const buildCatalogScope = (params: BuildCatalogScopeParams): string => {
   if (params.customOnly) {
     query.set('customOnly', 'true');
   }
+  if (params.resourceScope) {
+    query.set('resourceScope', params.resourceScope);
+  }
   const sort = params.sort?.trim();
   if (sort) {
     query.set('sort', sort);
@@ -190,7 +195,9 @@ export const buildCatalogScope = (params: BuildCatalogScopeParams): string => {
     .map((kind) => kind.trim())
     .filter(Boolean)
     .sort()
-    .forEach((kind) => query.append('kind', kind));
+    .forEach((kind) => {
+      query.append('kind', kind);
+    });
 
   params.namespaces
     .map((namespace) => namespace.trim())
@@ -200,6 +207,14 @@ export const buildCatalogScope = (params: BuildCatalogScopeParams): string => {
       // GridTable uses '' as the synthetic "cluster-scoped" namespace option.
       // The backend catalog already understands cluster scope when namespace is omitted.
       query.append('namespace', namespace);
+    });
+
+  (params.scopeNamespaces ?? [])
+    .map((namespace) => namespace.trim())
+    .filter(Boolean)
+    .sort()
+    .forEach((namespace) => {
+      query.append('scopeNamespace', namespace);
     });
 
   const continueToken = params.continueToken?.trim();
@@ -259,12 +274,18 @@ export const normalizeCatalogScope = (
         ? Number(startRankRaw)
         : undefined;
     const customOnly = params.get('customOnly') === 'true';
+    const resourceScope = params.get('resourceScope');
     const kinds = params.getAll('kind');
     // Use pinned namespaces if provided, otherwise use namespaces from the scope.
     const namespaces = pinnedNamespaces.length > 0 ? pinnedNamespaces : params.getAll('namespace');
+    const scopeNamespaces =
+      pinnedNamespaces.length > 0 ? pinnedNamespaces : params.getAll('scopeNamespace');
 
     const normalized = buildCatalogScope({
       limit,
+      resourceScope:
+        resourceScope === 'cluster' || resourceScope === 'namespace' ? resourceScope : undefined,
+      scopeNamespaces,
       search,
       kinds,
       namespaces,

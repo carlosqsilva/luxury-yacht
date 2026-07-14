@@ -8,8 +8,8 @@
  * tables own their rows, and the active tab lives in ViewStateContext.
  */
 import { act } from 'react';
-import ReactDOM from 'react-dom/client';
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as ReactDOM from 'react-dom/client';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { NamespaceResourcesProvider } from './NsResourcesContext';
 
@@ -54,10 +54,6 @@ vi.mock('@modules/namespace/contexts/NamespaceContext', () => ({
 describe('NamespaceResourcesProvider', () => {
   let container: HTMLDivElement;
   let root: ReactDOM.Root;
-
-  beforeAll(() => {
-    (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
-  });
 
   beforeEach(() => {
     container = document.createElement('div');

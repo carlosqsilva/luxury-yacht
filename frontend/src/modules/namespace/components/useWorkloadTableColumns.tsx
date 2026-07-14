@@ -4,17 +4,16 @@
  * Hook for useWorkloadTableColumns.
  * Provides column definitions for the Workloads GridTable.
  */
-import { useMemo } from 'react';
-
-import type { GridColumnDefinition } from '@shared/components/tables/GridTable';
-import * as cf from '@shared/components/tables/columnFactories';
-import { getDisplayKind } from '@/utils/kindAliasMap';
-import { parseCpuToMillicores, parseMemToMB } from '@/utils/resourceCalculations';
-import { backendStatusTextClass } from '@shared/utils/backendStatusPresentation';
-import { workloadRowCpuValue, workloadRowMemoryValue } from '@/core/resource-metrics';
 
 import type { WorkloadData } from '@modules/namespace/components/NsViewWorkloads.helpers';
 import { useNamespaceColumnLink } from '@modules/namespace/components/useNamespaceColumnLink';
+import * as cf from '@shared/components/tables/columnFactories';
+import type { GridColumnDefinition } from '@shared/components/tables/GridTable';
+import { backendStatusTextClass } from '@shared/utils/backendStatusPresentation';
+import { useMemo } from 'react';
+import { workloadRowCpuValue, workloadRowMemoryValue } from '@/core/resource-metrics';
+import { getDisplayKind } from '@/utils/kindAliasMap';
+import { parseCpuToMillicores, parseMemToMB } from '@/utils/resourceCalculations';
 
 interface UseWorkloadTableColumnsParams {
   handleWorkloadClick: (workload: WorkloadData) => void;
@@ -159,7 +158,9 @@ const useWorkloadTableColumns = ({
         getShowEmptyState: () => true,
         sortable: true,
         sortValue: (row) =>
-          parseCpuToMillicores(row.cpuUsage != null ? String(row.cpuUsage) : undefined),
+          parseCpuToMillicores(
+            row.cpuUsage !== null && row.cpuUsage !== undefined ? String(row.cpuUsage) : undefined
+          ),
       })
     );
 
@@ -178,7 +179,10 @@ const useWorkloadTableColumns = ({
         getAnimationKey: (row) => `workload:${row.namespace}/${row.name}:memory`,
         getShowEmptyState: () => true,
         sortable: true,
-        sortValue: (row) => parseMemToMB(row.memUsage != null ? String(row.memUsage) : undefined),
+        sortValue: (row) =>
+          parseMemToMB(
+            row.memUsage !== null && row.memUsage !== undefined ? String(row.memUsage) : undefined
+          ),
       })
     );
 

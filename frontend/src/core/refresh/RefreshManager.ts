@@ -52,7 +52,8 @@ export interface RefresherState {
 export type RefreshCallback = (isManual: boolean, signal: AbortSignal) => void | Promise<void>;
 
 type RefreshCallbackOutcome =
-  { status: 'fulfilled' } | { status: 'rejected'; error: Error; timedOut: boolean };
+  | { status: 'fulfilled' }
+  | { status: 'rejected'; error: Error; timedOut: boolean };
 
 type RefreshExecutionSummary = {
   successCount: number;
@@ -70,18 +71,14 @@ interface RefresherInstance {
   isEnabled: boolean;
 }
 
-// Import types from navigation
-import type {
-  ViewType,
-  NamespaceViewType as NamespaceViewType,
-  ClusterViewType as ClusterViewType,
-} from '@/types/navigation/views';
 import { eventBus } from '@/core/events';
+// Import types from navigation
+import type { ClusterViewType, NamespaceViewType, ViewType } from '@/types/navigation/views';
 import {
-  SYSTEM_REFRESHERS,
-  namespaceViewToRefresher,
   clusterViewToRefresher,
+  namespaceViewToRefresher,
   type RefresherName,
+  SYSTEM_REFRESHERS,
 } from './refresherTypes';
 
 class RefreshManager {
@@ -176,7 +173,9 @@ class RefreshManager {
    */
   public unregister(name: RefresherName): void {
     const instance = this.refreshers.get(name);
-    if (!instance) return;
+    if (!instance) {
+      return;
+    }
 
     // Clear all timers
     this.clearTimers(instance);
@@ -191,7 +190,9 @@ class RefreshManager {
    */
   public enable(name: RefresherName): void {
     const instance = this.refreshers.get(name);
-    if (!instance) return;
+    if (!instance) {
+      return;
+    }
     if (instance.isEnabled) {
       if (this.isGloballyPaused) {
         instance.state.status = 'paused';
@@ -219,7 +220,9 @@ class RefreshManager {
    */
   public disable(name: RefresherName): void {
     const instance = this.refreshers.get(name);
-    if (!instance) return;
+    if (!instance) {
+      return;
+    }
 
     if (!instance.isEnabled && instance.state.status === 'disabled') {
       return;
@@ -236,11 +239,11 @@ class RefreshManager {
    * Subscribe to refresh events for a specific refresher
    */
   public subscribe(name: RefresherName, callback: RefreshCallback): () => void {
-    if (!this.subscribers.has(name)) {
-      this.subscribers.set(name, new Set());
+    let callbacks = this.subscribers.get(name);
+    if (!callbacks) {
+      callbacks = new Set();
+      this.subscribers.set(name, callbacks);
     }
-
-    const callbacks = this.subscribers.get(name)!;
     callbacks.add(callback);
 
     // Return unsubscribe function
@@ -267,11 +270,15 @@ class RefreshManager {
 
     if (manualTargets.length > 0) {
       if (namespaceChanged) {
-        manualTargets.forEach((name) => this.abortRefresher(name));
+        manualTargets.forEach((name) => {
+          this.abortRefresher(name);
+        });
       } else if (previousContext.currentView !== this.context.currentView) {
         manualTargets
           .filter((name) => name.startsWith('namespace-'))
-          .forEach((name) => this.abortRefresher(name));
+          .forEach((name) => {
+            this.abortRefresher(name);
+          });
       }
 
       void this.triggerManualRefreshMany(manualTargets);
@@ -376,9 +383,9 @@ class RefreshManager {
       }
     } else {
       this.isGloballyPaused = true;
-      this.refreshers.forEach((instance, refresherName) =>
-        this.pauseRefresher(refresherName, instance)
-      );
+      this.refreshers.forEach((instance, refresherName) => {
+        this.pauseRefresher(refresherName, instance);
+      });
     }
   }
 
@@ -388,7 +395,7 @@ class RefreshManager {
   public resume(name?: RefresherName): void {
     if (name) {
       const instance = this.refreshers.get(name);
-      if (instance && instance.isEnabled && instance.state.status === 'paused') {
+      if (instance?.isEnabled && instance.state.status === 'paused') {
         this.resumeRefresher(name, instance);
       }
     } else {
@@ -422,7 +429,9 @@ class RefreshManager {
    */
   private startRefresher(name: RefresherName): void {
     const instance = this.refreshers.get(name);
-    if (!instance) return;
+    if (!instance) {
+      return;
+    }
 
     if (!instance.isEnabled) {
       instance.state.status = 'disabled';
@@ -589,17 +598,23 @@ class RefreshManager {
    */
   private async refreshSingle(name: RefresherName, isManual: boolean): Promise<void> {
     const instance = this.refreshers.get(name);
-    if (!instance) return;
+    if (!instance) {
+      return;
+    }
 
     if (!instance.isEnabled && !isManual) {
       return;
     }
 
     // Don't refresh if globally paused (unless manual refresh)
-    if (this.isGloballyPaused && !isManual) return;
+    if (this.isGloballyPaused && !isManual) {
+      return;
+    }
 
     // Don't refresh if individually paused (unless manual refresh)
-    if (instance.state.status === 'paused' && !isManual) return;
+    if (instance.state.status === 'paused' && !isManual) {
+      return;
+    }
 
     // Handle concurrent refresh based on type
     if (instance.state.status === 'refreshing') {
@@ -832,7 +847,7 @@ class RefreshManager {
     // First error uses base cooldown, subsequent errors double each time, capped at 60s
     const MAX_BACKOFF_MS = 60_000;
     const errorCount = instance.state.consecutiveErrors;
-    const backoffMultiplier = errorCount > 1 ? Math.pow(2, errorCount - 1) : 1;
+    const backoffMultiplier = errorCount > 1 ? 2 ** (errorCount - 1) : 1;
     const cooldownMs = Math.min(MAX_BACKOFF_MS, instance.config.cooldown * backoffMultiplier);
 
     // Set cooldown timer

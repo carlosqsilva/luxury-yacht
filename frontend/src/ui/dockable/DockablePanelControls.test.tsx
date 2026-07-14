@@ -5,10 +5,10 @@
  * Covers key behaviors and edge cases for DockablePanelControls.
  */
 
-import React from 'react';
-import ReactDOM from 'react-dom/client';
+import type React from 'react';
 import { act } from 'react';
-import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import * as ReactDOM from 'react-dom/client';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { DockablePanelControls } from './DockablePanelControls';
 
@@ -35,10 +35,6 @@ const renderControls = async (ui: React.ReactElement) => {
 };
 
 describe('DockablePanelControls', () => {
-  beforeAll(() => {
-    (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
-  });
-
   afterEach(() => {
     document.body.innerHTML = '';
   });
@@ -80,14 +76,13 @@ describe('DockablePanelControls', () => {
     await unmount();
   });
 
-  it('renders right-docked controls and stops mouse down propagation', async () => {
+  it('renders native right-docked controls and invokes their actions', async () => {
     const onDock = vi.fn();
     const onToggleMaximize = vi.fn();
     const onClose = vi.fn();
-    const parentMouseDown = vi.fn();
 
     const { host, unmount } = await renderControls(
-      <div onMouseDown={parentMouseDown}>
+      <form aria-label="Panel controls harness">
         <DockablePanelControls
           position="right"
           isMaximized={false}
@@ -96,18 +91,11 @@ describe('DockablePanelControls', () => {
           onToggleMaximize={onToggleMaximize}
           onClose={onClose}
         />
-      </div>
+      </form>
     );
 
-    // Ensure the controls container intercepts mouse down events.
     const controls = host.querySelector('.dockable-panel__controls') as HTMLDivElement;
     expect(controls).toBeTruthy();
-
-    await act(async () => {
-      controls.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-    });
-
-    expect(parentMouseDown).not.toHaveBeenCalled();
 
     const dockBottom = host.querySelector(
       '[aria-label="Dock panel to bottom"]'
@@ -117,6 +105,8 @@ describe('DockablePanelControls', () => {
     ) as HTMLButtonElement;
     expect(dockBottom).toBeTruthy();
     expect(dockFloat).toBeTruthy();
+    expect(dockBottom.type).toBe('button');
+    expect(dockFloat.type).toBe('button');
 
     await act(async () => {
       dockBottom.click();

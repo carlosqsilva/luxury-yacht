@@ -1,7 +1,3 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import type React from 'react';
-import type { RefObject } from 'react';
-
 import type {
   ColumnWidthInput,
   ColumnWidthState,
@@ -15,19 +11,23 @@ import {
   normalizeKindClass,
   parseWidthInputToNumber,
 } from '@shared/components/tables/GridTable.utils';
-import {
-  useGridTableColumnVirtualization,
-  type ColumnRenderModel,
-} from '@shared/components/tables/hooks/useGridTableColumnVirtualization';
-import { useGridTableColumnMeasurer } from '@shared/components/tables/hooks/useGridTableColumnMeasurer';
-import { useGridTableColumnWidths } from '@shared/components/tables/hooks/useGridTableColumnWidths';
-import { useGridTableAutoGrow } from '@shared/components/tables/hooks/useGridTableAutoGrow';
 import { useColumnResizeController } from '@shared/components/tables/hooks/useColumnResizeController';
 import { useContainerWidthObserver } from '@shared/components/tables/hooks/useContainerWidthObserver';
+import { useGridTableAutoGrow } from '@shared/components/tables/hooks/useGridTableAutoGrow';
+import { useGridTableColumnMeasurer } from '@shared/components/tables/hooks/useGridTableColumnMeasurer';
+import {
+  type ColumnRenderModel,
+  useGridTableColumnVirtualization,
+} from '@shared/components/tables/hooks/useGridTableColumnVirtualization';
+import { useGridTableColumnWidths } from '@shared/components/tables/hooks/useGridTableColumnWidths';
+
+import type React from 'react';
+import type { RefObject } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
 const getColumnMinWidth = <T>(column: GridColumnDefinition<T>) => {
   const parsed = parseWidthInputToNumber(column.minWidth);
-  if (parsed != null) {
+  if (parsed !== null && parsed !== undefined) {
     return parsed;
   }
   return DEFAULT_COLUMN_MIN_WIDTH;
@@ -35,7 +35,7 @@ const getColumnMinWidth = <T>(column: GridColumnDefinition<T>) => {
 
 const getColumnMaxWidth = <T>(column: GridColumnDefinition<T>) => {
   const parsed = parseWidthInputToNumber(column.maxWidth);
-  if (parsed != null) {
+  if (parsed !== null && parsed !== undefined) {
     return parsed;
   }
   return Number.POSITIVE_INFINITY;
@@ -134,6 +134,9 @@ interface GridTableColumnLayout<T> {
   tableContentWidth: number;
   tableViewportWidth: number;
   handleResizeStart: (event: React.MouseEvent, leftKey: string, rightKey: string) => void;
+  handleResizeKeyDown: (event: React.KeyboardEvent, columnKey: string) => void;
+  getColumnMinWidth: (column: GridColumnDefinition<T>) => number;
+  getColumnMaxWidth: (column: GridColumnDefinition<T>) => number;
   autoSizeColumn: (columnKey: string) => void;
   markVisibleAutoColumnsDirty: () => void;
 }
@@ -216,6 +219,8 @@ export function useGridTableColumnLayout<T>({
   }, [columnRenderModelsWithOffsets]);
 
   useEffect(() => {
+    void columnVirtualizationConfig.enabled;
+    void allowHorizontalOverflow;
     markAllAutoColumnsDirty();
   }, [markAllAutoColumnsDirty, columnVirtualizationConfig.enabled, allowHorizontalOverflow]);
 
@@ -274,19 +279,20 @@ export function useGridTableColumnLayout<T>({
     tableDataLength: tableData.length,
   });
 
-  const { handleResizeStart, autoSizeColumn, resetManualResizes } = useColumnResizeController<T>({
-    columns,
-    renderedColumns,
-    columnWidths,
-    setColumnWidths,
-    manuallyResizedColumnsRef,
-    getColumnMinWidth,
-    getColumnMaxWidth,
-    measureColumnWidth,
-    enableColumnResizing,
-    isFixedColumnKey,
-    onManualResize: handleManualResizeEvent,
-  });
+  const { handleResizeStart, handleResizeKeyDown, autoSizeColumn, resetManualResizes } =
+    useColumnResizeController<T>({
+      columns,
+      renderedColumns,
+      columnWidths,
+      setColumnWidths,
+      manuallyResizedColumnsRef,
+      getColumnMinWidth,
+      getColumnMaxWidth,
+      measureColumnWidth,
+      enableColumnResizing,
+      isFixedColumnKey,
+      onManualResize: handleManualResizeEvent,
+    });
 
   useEffect(() => {
     if (!enableColumnResizing) {
@@ -303,6 +309,9 @@ export function useGridTableColumnLayout<T>({
     tableContentWidth,
     tableViewportWidth,
     handleResizeStart,
+    handleResizeKeyDown,
+    getColumnMinWidth,
+    getColumnMaxWidth,
     autoSizeColumn,
     markVisibleAutoColumnsDirty,
   };

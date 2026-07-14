@@ -7,15 +7,16 @@
  * update, or delete the favorite.
  */
 
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { FavoriteOutlineIcon, FavoriteFilledIcon } from '@shared/components/icons/FavoriteIcons';
-import type { IconBarItem } from '@shared/components/IconBar/IconBar';
 import { useFavorites } from '@core/contexts/FavoritesContext';
-import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
 import { useViewState } from '@core/contexts/ViewStateContext';
+import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
 import { useNamespace } from '@modules/namespace/contexts/NamespaceContext';
-import type { Favorite, FavoriteFilters, FavoriteTableState } from '@/core/persistence/favorites';
+import type { IconBarItem } from '@shared/components/IconBar/IconBar';
+import { FavoriteFilledIcon, FavoriteOutlineIcon } from '@shared/components/icons/FavoriteIcons';
 import type { GridTableFilterState } from '@shared/components/tables/GridTable.types';
+import type React from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import type { Favorite, FavoriteFilters, FavoriteTableState } from '@/core/persistence/favorites';
 import FavSaveModal from './FavSaveModal';
 
 /** Current view state that the FavToggle needs to snapshot when saving a favorite.
@@ -112,28 +113,45 @@ export function useFavToggle(state: FavToggleState): {
         (fav.clusterId
           ? selectedClusterId === fav.clusterId
           : selectedKubeconfig === fav.clusterSelection);
-      if (!clusterMatches) continue;
-      if (viewType !== fav.viewType) continue;
-      if (activeViewTab !== fav.view) continue;
-      if (viewType === 'namespace' && selectedNamespace !== fav.namespace) continue;
+      if (!clusterMatches) {
+        continue;
+      }
+      if (viewType !== fav.viewType) {
+        continue;
+      }
+      if (activeViewTab !== fav.view) {
+        continue;
+      }
+      if (viewType === 'namespace' && selectedNamespace !== fav.namespace) {
+        continue;
+      }
 
       // Compare filters: search text, kinds, namespaces, caseSensitive, includeMetadata.
       if (fav.filters) {
         const search = state.filters.search.trim();
         const favSearch = (fav.filters.search ?? '').trim();
-        if (search !== favSearch) continue;
+        if (search !== favSearch) {
+          continue;
+        }
 
         const kinds = [...state.filters.kinds].sort().join(',');
         const favKinds = [...(fav.filters.kinds ?? [])].sort().join(',');
-        if (kinds !== favKinds) continue;
+        if (kinds !== favKinds) {
+          continue;
+        }
 
         const ns = [...state.filters.namespaces].sort().join(',');
         const favNs = [...(fav.filters.namespaces ?? [])].sort().join(',');
-        if (ns !== favNs) continue;
-
-        if ((state.filters.caseSensitive ?? false) !== (fav.filters.caseSensitive ?? false))
+        if (ns !== favNs) {
           continue;
-        if ((state.includeMetadata ?? false) !== (fav.filters.includeMetadata ?? false)) continue;
+        }
+
+        if ((state.filters.caseSensitive ?? false) !== (fav.filters.caseSensitive ?? false)) {
+          continue;
+        }
+        if ((state.includeMetadata ?? false) !== (fav.filters.includeMetadata ?? false)) {
+          continue;
+        }
       }
 
       return fav;
@@ -157,14 +175,24 @@ export function useFavToggle(state: FavToggleState): {
   // The FavoritesContext effect handles cluster switching and view navigation.
   // This effect waits for those to settle before applying filter/table state.
   useEffect(() => {
-    if (!pendingFavorite) return;
-    if (!state.hydrated) return;
+    if (!pendingFavorite) {
+      return;
+    }
+    if (!state.hydrated) {
+      return;
+    }
 
     // Only apply in the view that matches the favorite's target.
-    if (pendingFavorite.viewType !== viewType) return;
+    if (pendingFavorite.viewType !== viewType) {
+      return;
+    }
     const expectedTab = viewType === 'namespace' ? activeNamespaceTab : activeClusterTab;
-    if (pendingFavorite.view !== expectedTab) return;
-    if (viewType === 'namespace' && pendingFavorite.namespace !== selectedNamespace) return;
+    if (pendingFavorite.view !== expectedTab) {
+      return;
+    }
+    if (viewType === 'namespace' && pendingFavorite.namespace !== selectedNamespace) {
+      return;
+    }
 
     if (pendingFavorite.filters && state.setFilters) {
       state.setFilters({
@@ -197,7 +225,7 @@ export function useFavToggle(state: FavToggleState): {
 
   const [modalOpen, setModalOpen] = useState(false);
 
-  const isFavorited = currentFavoriteMatch != null;
+  const isFavorited = currentFavoriteMatch !== null && currentFavoriteMatch !== undefined;
 
   // Build a human-readable display label for the view tab.
   const viewLabel = useMemo(() => {

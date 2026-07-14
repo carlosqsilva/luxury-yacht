@@ -12,18 +12,19 @@
  * from the renderer context (`context.hpaManaged`).
  */
 
-import React from 'react';
-import { daemonset, deployment, replicaset, statefulset } from '@wailsjs/go/models';
 import { ObjectPanelLink } from '@shared/components/ObjectPanelLink';
 import { StatusChip, type StatusChipVariant } from '@shared/components/StatusChip';
 import { buildRequiredObjectReference } from '@shared/utils/objectIdentity';
+import { withStableListKeys } from '@shared/utils/stableListKeys';
+import { daemonset, deployment, replicaset, statefulset } from '@wailsjs/go/models';
+import type React from 'react';
+import type { OverviewContext, OverviewDescriptor, OverviewItemSpec } from '../schema';
 import { OverviewItem } from '../shared/OverviewItem';
 import {
   DEFAULT_TOLERATION_RE,
-  parseToleration,
   type ParsedToleration,
+  parseToleration,
 } from '../shared/tolerations';
-import type { OverviewContext, OverviewDescriptor, OverviewItemSpec } from '../schema';
 import '../shared/OverviewBlocks.css';
 import '../WorkloadOverview.css';
 
@@ -47,8 +48,12 @@ const clusterMeta = (context: OverviewContext) => ({
  *  Real wire payload formats `Status.Replicas/desired` as a string here; the
  *  DaemonSet DTO reports `ready` as a plain number. */
 const parseLeadingCount = (value: string | number | undefined): number | null => {
-  if (value === undefined) return null;
-  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (value === undefined) {
+    return null;
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null;
+  }
   const match = value.trim().match(/^(\d+)/);
   return match ? Number(match[1]) : null;
 };
@@ -64,7 +69,9 @@ const composePodStateCaption = (
   statusLabel: 'available' | 'ready' = 'available'
 ): { headline: string; drift?: string } => {
   const headline = `${available} of ${desired} ${statusLabel}`;
-  if (available >= desired) return { headline };
+  if (available >= desired) {
+    return { headline };
+  }
   if (created < desired) {
     const n = desired - created;
     return { headline, drift: `${n} unscheduled` };
@@ -103,7 +110,7 @@ const PodStateBar: React.FC<PodStateBarProps> = ({
       <div className="podstate-summary">
         <div className="podstate-caption">
           <span className="podstate-caption-zero">None</span>
-          {hpaManaged && <span className="podstate-caption-hpa">(HPA managed)</span>}
+          {!!hpaManaged && <span className="podstate-caption-hpa">(HPA managed)</span>}
         </div>
       </div>
     );
@@ -153,8 +160,8 @@ const PodStateBar: React.FC<PodStateBarProps> = ({
       </div>
       <div className="podstate-caption">
         {headline}
-        {drift && <span className="podstate-caption-drift">· {drift}</span>}
-        {hpaManaged && <span className="podstate-caption-hpa">(HPA managed)</span>}
+        {!!drift && <span className="podstate-caption-drift">· {drift}</span>}
+        {!!hpaManaged && <span className="podstate-caption-hpa">(HPA managed)</span>}
       </div>
     </div>
   );
@@ -190,17 +197,22 @@ const resolvePodStateCounts = (
     Number.isFinite(podCount) &&
     typeof readyPodCount === 'number' &&
     Number.isFinite(readyPodCount);
-  const usePodSummary = hasPodSummary && (podCount > 0 || desiredCount === 0);
+  const normalizedPodCount = hasPodSummary ? podCount : null;
+  const normalizedReadyPodCount = hasPodSummary ? readyPodCount : null;
+  const usePodSummary =
+    normalizedPodCount !== null &&
+    normalizedReadyPodCount !== null &&
+    (normalizedPodCount > 0 || desiredCount === 0);
 
-  const readyCount = usePodSummary ? readyPodCount! : parseLeadingCount(ready);
+  const readyCount = usePodSummary ? normalizedReadyPodCount : parseLeadingCount(ready);
   if (usePodSummary) {
-    createdCount = podCount!;
+    createdCount = normalizedPodCount;
     if (desiredCount !== null) {
-      desiredCount = Math.max(desiredCount, podCount!);
+      desiredCount = Math.max(desiredCount, normalizedPodCount);
     }
   }
   const availableCount = usePodSummary
-    ? readyPodCount!
+    ? normalizedReadyPodCount
     : typeof available === 'number'
       ? available
       : null;
@@ -227,7 +239,9 @@ const renderPodStateWidget = (
   counts: PodStateCounts | null,
   context: OverviewContext
 ): React.ReactNode => {
-  if (!counts) return null;
+  if (!counts) {
+    return null;
+  }
   return (
     <>
       <OverviewItem
@@ -267,7 +281,9 @@ interface ParsedCondition {
 const parseCondition = (raw: string): ParsedCondition | null => {
   // Type: Status [(Reason)] [- Message]
   const m = raw.match(/^([A-Za-z]+):\s*([A-Za-z]+)\s*(?:\(([^)]+)\))?(?:\s*-\s*(.+))?$/);
-  if (!m) return null;
+  if (!m) {
+    return null;
+  }
   return {
     type: m[1],
     status: m[2],
@@ -277,10 +293,14 @@ const parseCondition = (raw: string): ParsedCondition | null => {
 };
 
 const findCondition = (conditions: string[] | undefined, type: string): ParsedCondition | null => {
-  if (!conditions) return null;
+  if (!conditions) {
+    return null;
+  }
   for (const raw of conditions) {
     const parsed = parseCondition(raw);
-    if (parsed && parsed.type === type) return parsed;
+    if (parsed && parsed.type === type) {
+      return parsed;
+    }
   }
   return null;
 };
@@ -289,8 +309,12 @@ const findCondition = (conditions: string[] | undefined, type: string): ParsedCo
 // chip variant. Complete states are filtered out at the call site.
 const rolloutStatusVariant = (status: string): StatusChipVariant => {
   const s = status.toLowerCase();
-  if (s.includes('fail') || s === 'replicafailure') return 'unhealthy';
-  if (s.includes('progress')) return 'info';
+  if (s.includes('fail') || s === 'replicafailure') {
+    return 'unhealthy';
+  }
+  if (s.includes('progress')) {
+    return 'info';
+  }
   return 'info';
 };
 
@@ -338,11 +362,13 @@ const podManagementTooltip = (policy: string): string | undefined => {
 const strategyTooltip = (strategy: string, kind: StrategyKind): React.ReactNode | undefined => {
   switch (strategy) {
     case 'RollingUpdate':
-      if (kind === 'deployment')
+      if (kind === 'deployment') {
         return 'Pods are replaced incrementally, controlled by maxSurge and maxUnavailable.';
-      if (kind === 'daemonset')
+      }
+      if (kind === 'daemonset') {
         return 'Pods are replaced one node at a time, respecting maxUnavailable.';
-      if (kind === 'statefulset')
+      }
+      if (kind === 'statefulset') {
         return (
           <>
             Pods are replaced in reverse ordinal order, one at a time.
@@ -352,6 +378,7 @@ const strategyTooltip = (strategy: string, kind: StrategyKind): React.ReactNode 
             allowing staged rollouts.
           </>
         );
+      }
       return undefined;
     case 'Recreate':
       return (
@@ -390,23 +417,26 @@ const nonDefaultTolerations = (tolerations: string[] | undefined): ParsedTolerat
 
 const renderPodTemplateGroup = (d: PodTemplate, context: OverviewContext): React.ReactNode => {
   const tolerations = nonDefaultTolerations(d.tolerations);
-  const showSvcAccount = Boolean(d.serviceAccount && d.serviceAccount !== 'default');
-  const showNodeSelector = Boolean(d.nodeSelector && Object.keys(d.nodeSelector).length > 0);
-  if (!showSvcAccount && !showNodeSelector && tolerations.length === 0) return null;
+  const serviceAccount = d.serviceAccount !== 'default' ? d.serviceAccount : undefined;
+  const nodeSelector =
+    d.nodeSelector && Object.keys(d.nodeSelector).length > 0 ? d.nodeSelector : undefined;
+  if (!serviceAccount && !nodeSelector && tolerations.length === 0) {
+    return null;
+  }
 
   return (
     <>
       <div className="metadata-section-separator" />
       {/* ServiceAccount — only when explicitly set to a non-default SA. The
           implicit `default` SA is noise. */}
-      {showSvcAccount && (
+      {!!serviceAccount && (
         <OverviewItem
           label="Svc Account"
           value={
             <ObjectPanelLink
               objectRef={buildRequiredObjectReference({
                 kind: 'ServiceAccount',
-                name: d.serviceAccount!,
+                name: serviceAccount,
                 namespace: d.namespace,
                 ...clusterMeta(context),
               })}
@@ -418,13 +448,13 @@ const renderPodTemplateGroup = (d: PodTemplate, context: OverviewContext): React
       )}
       {/* Pod placement constraints — surfaced here (not in metadata) because
           they directly determine which nodes pods can land on. */}
-      {showNodeSelector && (
+      {!!nodeSelector && (
         <OverviewItem
           label="Node Selector"
           fullWidth
           value={
             <div className="overview-condition-list">
-              {Object.entries(d.nodeSelector!).map(([k, v]) => (
+              {Object.entries(nodeSelector).map(([k, v]) => (
                 <StatusChip key={k} variant="info">
                   {`${k}=${v}`}
                 </StatusChip>
@@ -439,11 +469,13 @@ const renderPodTemplateGroup = (d: PodTemplate, context: OverviewContext): React
           fullWidth
           value={
             <div className="overview-condition-list">
-              {tolerations.map((p, i) => (
-                <StatusChip key={`${p.label}-${i}`} variant="info" tooltip={p.tooltip}>
-                  {p.label}
-                </StatusChip>
-              ))}
+              {withStableListKeys(tolerations, (toleration) => JSON.stringify(toleration)).map(
+                ({ key, value: toleration }) => (
+                  <StatusChip key={key} variant="info" tooltip={toleration.tooltip}>
+                    {toleration.label}
+                  </StatusChip>
+                )
+              )}
             </div>
           }
         />
@@ -526,7 +558,9 @@ const deploymentItems: OverviewItemSpec<DeploymentDetails>[] = [
     label: 'Availability',
     render: (d) => {
       const c = findCondition(d.conditions, 'Available');
-      if (!c || c.status !== 'False') return null;
+      if (c?.status !== 'False') {
+        return null;
+      }
       const tip = [c.reason, c.message].filter(Boolean).join(' — ') || undefined;
       return (
         <StatusChip variant="unhealthy" tooltip={tip}>
@@ -540,7 +574,9 @@ const deploymentItems: OverviewItemSpec<DeploymentDetails>[] = [
     label: 'Replica Failure',
     render: (d) => {
       const c = findCondition(d.conditions, 'ReplicaFailure');
-      if (!c || c.status !== 'True') return null;
+      if (c?.status !== 'True') {
+        return null;
+      }
       const tip = [c.reason, c.message].filter(Boolean).join(' — ') || undefined;
       return (
         <StatusChip variant="unhealthy" tooltip={tip}>
@@ -560,7 +596,9 @@ const deploymentItems: OverviewItemSpec<DeploymentDetails>[] = [
         d.rolloutStatus === 'complete' ||
         (d.rolloutStatus === 'progressing' &&
           d.rolloutMessage?.includes('successfully progressed'));
-      if (!d.rolloutStatus || isActuallyComplete) return null;
+      if (!d.rolloutStatus || isActuallyComplete) {
+        return null;
+      }
       return (
         <StatusChip variant={rolloutStatusVariant(d.rolloutStatus)}>{d.rolloutStatus}</StatusChip>
       );
@@ -575,7 +613,9 @@ const deploymentItems: OverviewItemSpec<DeploymentDetails>[] = [
         d.rolloutStatus === 'complete' ||
         (d.rolloutStatus === 'progressing' &&
           d.rolloutMessage?.includes('successfully progressed'));
-      if (!d.rolloutStatus || isActuallyComplete || !d.rolloutMessage) return null;
+      if (!d.rolloutStatus || isActuallyComplete || !d.rolloutMessage) {
+        return null;
+      }
       return d.rolloutMessage;
     },
   },
@@ -619,7 +659,7 @@ const deploymentItems: OverviewItemSpec<DeploymentDetails>[] = [
           >
             {d.currentReplicaSet}
           </ObjectPanelLink>
-          {d.currentRevision && (
+          {!!d.currentRevision && (
             <span className="workload-replicaset-meta">
               <span>Revision {d.currentRevision}</span>
               {typeof d.revisionHistory === 'number' &&
@@ -867,7 +907,9 @@ const statefulSetItems: OverviewItemSpec<StatefulSetDetails>[] = [
       const retention = d.pvcRetentionPolicy ?? {};
       const hasTemplates = templates.length > 0;
       const hasRetention = Object.keys(retention).length > 0;
-      if (!hasTemplates && !hasRetention) return null;
+      if (!hasTemplates && !hasRetention) {
+        return null;
+      }
       return (
         <>
           {/* Visual separator before the volumes group. */}
@@ -883,8 +925,8 @@ const statefulSetItems: OverviewItemSpec<StatefulSetDetails>[] = [
                     <div key={tmpl.name} className="workload-volume-template">
                       <span className="workload-volume-template-name">{tmpl.name}</span>
                       <span className="workload-volume-template-meta">
-                        {tmpl.storageRequest && <span>{tmpl.storageRequest}</span>}
-                        {tmpl.storageClass && <span>{tmpl.storageClass}</span>}
+                        {!!tmpl.storageRequest && <span>{tmpl.storageRequest}</span>}
+                        {!!tmpl.storageClass && <span>{tmpl.storageClass}</span>}
                         {tmpl.accessModes && tmpl.accessModes.length > 0 && (
                           <span className="workload-volume-template-modes">
                             {tmpl.accessModes.map((mode) => (

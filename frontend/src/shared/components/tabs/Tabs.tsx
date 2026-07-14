@@ -8,17 +8,17 @@
  *
  * See docs/frontend/tabs.md for the shared tab contract.
  */
-import {
-  Fragment,
-  useEffect,
-  useRef,
-  useState,
+
+import { TabOverflowIcon } from '@shared/components/icons/SharedIcons';
+import React, {
   type CSSProperties,
   type HTMLAttributes,
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
+  useEffect,
+  useRef,
+  useState,
 } from 'react';
-import { TabOverflowIcon } from '@shared/components/icons/SharedIcons';
 
 export interface TabDescriptor {
   id: string;
@@ -47,7 +47,9 @@ export interface TabDescriptor {
    * attribute. Used primarily by drag sources (draggable, onDragStart,
    * onDragEnd).
    */
-  extraProps?: HTMLAttributes<HTMLElement>;
+  extraProps?:
+    | HTMLAttributes<HTMLElement>
+    | (HTMLAttributes<HTMLElement> & Partial<Record<`data-${string}`, string | number | boolean>>);
 }
 
 // Keys owned by the base Tabs component. Wrappers must not override these via
@@ -67,7 +69,9 @@ const RESERVED_TAB_KEYS = new Set([
 ]);
 
 function warnReservedKeys(tabId: string, extraProps: HTMLAttributes<HTMLElement> | undefined) {
-  if (process.env.NODE_ENV === 'production' || !extraProps) return;
+  if (process.env.NODE_ENV === 'production' || !extraProps) {
+    return;
+  }
   for (const key of Object.keys(extraProps)) {
     if (RESERVED_TAB_KEYS.has(key)) {
       console.warn(
@@ -161,7 +165,9 @@ export function Tabs({
   // and scroll so it just clears the indicator.
   const scrollToNextTab = (direction: -1 | 1) => {
     const bar = scrollRef.current;
-    if (!bar) return;
+    if (!bar) {
+      return;
+    }
     const indicatorSize =
       parseFloat(getComputedStyle(bar).getPropertyValue('--tab-strip-overflow-indicator-size')) ||
       32;
@@ -181,7 +187,9 @@ export function Tabs({
       // First tab whose right edge is hidden past the right indicator.
       for (const tab of tabs) {
         const btn = tabRefs.current.get(tab.id);
-        if (!btn) continue;
+        if (!btn) {
+          continue;
+        }
         if (btn.offsetLeft + btn.offsetWidth > barRight - indicatorSize + 1) {
           target = btn;
           break;
@@ -191,14 +199,18 @@ export function Tabs({
       // Last tab whose left edge is hidden before the left indicator.
       for (let i = tabs.length - 1; i >= 0; i--) {
         const btn = tabRefs.current.get(tabs[i].id);
-        if (!btn) continue;
+        if (!btn) {
+          continue;
+        }
         if (btn.offsetLeft < barLeft + indicatorSize - 1) {
           target = btn;
           break;
         }
       }
     }
-    if (!target) return;
+    if (!target) {
+      return;
+    }
 
     const rawTarget =
       direction === 1
@@ -217,7 +229,9 @@ export function Tabs({
   // scrollLeft.
   const animateScrollTo = (target: number) => {
     const bar = scrollRef.current;
-    if (!bar) return;
+    if (!bar) {
+      return;
+    }
 
     if (animationFrameRef.current !== null) {
       cancelAnimationFrame(animationFrameRef.current);
@@ -236,7 +250,7 @@ export function Tabs({
     const step = (now: number) => {
       const progress = Math.min(1, (now - startTime) / DURATION_MS);
       // easeOutCubic
-      const eased = 1 - Math.pow(1 - progress, 3);
+      const eased = 1 - (1 - progress) ** 3;
       bar.scrollLeft = startScroll + delta * eased;
       if (progress < 1) {
         animationFrameRef.current = requestAnimationFrame(step);
@@ -250,7 +264,9 @@ export function Tabs({
 
   const focusFirstEnabled = () => {
     const idx = tabs.findIndex((t) => !t.disabled);
-    if (idx >= 0) tabRefs.current.get(tabs[idx].id)?.focus();
+    if (idx >= 0) {
+      tabRefs.current.get(tabs[idx].id)?.focus();
+    }
   };
 
   const focusLastEnabled = () => {
@@ -263,7 +279,9 @@ export function Tabs({
   };
 
   const focusNextEnabled = (currentIndex: number, direction: 1 | -1) => {
-    if (tabs.length === 0) return;
+    if (tabs.length === 0) {
+      return;
+    }
     let next = currentIndex;
     for (let i = 0; i < tabs.length; i++) {
       next = (((next + direction) % tabs.length) + tabs.length) % tabs.length;
@@ -340,7 +358,7 @@ export function Tabs({
     measure();
     // ResizeObserver is a global in browsers; in environments without it
     // (e.g. jsdom without a mock) fall back to a one-shot measurement.
-    const RO: typeof ResizeObserver | undefined = (globalThis as any).ResizeObserver;
+    const RO: typeof ResizeObserver | undefined = globalThis.ResizeObserver;
     const observer = RO ? new RO(measure) : null;
     observer?.observe(el);
     el.addEventListener('scroll', measure);
@@ -360,14 +378,19 @@ export function Tabs({
   // React bails out of no-op state updates (e.g. setHasOverflow(true) when
   // already true), so repeat invocations are free.
   useEffect(() => {
-    if (overflow !== 'scroll') return;
+    void tabs;
+    if (overflow !== 'scroll') {
+      return;
+    }
     const el = scrollRef.current;
-    if (!el) return;
+    if (!el) {
+      return;
+    }
     const max = el.scrollWidth - el.clientWidth;
     setHasOverflow(max > 1);
     setAtStart(el.scrollLeft <= 0);
     setAtEnd(el.scrollLeft >= max - 1);
-  }, [tabs, overflow]);
+  }, [overflow, tabs]);
 
   // Cancel any in-flight rAF scroll animation on unmount. Kept as a
   // separate unmount-only effect so it doesn't run on every overflow or
@@ -385,7 +408,9 @@ export function Tabs({
   // consumer programmatically activates a tab that's currently scrolled
   // off-screen).
   useEffect(() => {
-    if (overflow !== 'scroll' || !activeId) return;
+    if (overflow !== 'scroll' || !activeId) {
+      return;
+    }
     const el = tabRefs.current.get(activeId);
     if (typeof el?.scrollIntoView === 'function') {
       el.scrollIntoView({ inline: 'nearest', block: 'nearest', behavior: 'smooth' });
@@ -425,7 +450,7 @@ export function Tabs({
       style={style}
       id={id}
     >
-      {showIndicators && (
+      {!!showIndicators && (
         <button
           type="button"
           className="tab-strip__overflow-indicator tab-strip__overflow-indicator--left"
@@ -443,7 +468,7 @@ export function Tabs({
         const isFocusStop = hasActiveTab ? isActive : index === fallbackFocusIndex;
         warnReservedKeys(tab.id, tab.extraProps);
         return (
-          <Fragment key={tab.id}>
+          <React.Fragment key={tab.id}>
             {dropInsertIndex === index && (
               <div className="tab-strip__drop-indicator" data-testid="tab-strip-drop-indicator" />
             )}
@@ -475,7 +500,7 @@ export function Tabs({
             >
               {tab.leading}
               <span className="tab-item__label">{tab.label}</span>
-              {tab.onClose && (
+              {!!tab.onClose && (
                 <button
                   type="button"
                   className="tab-item__close"
@@ -490,13 +515,13 @@ export function Tabs({
                 </button>
               )}
             </div>
-          </Fragment>
+          </React.Fragment>
         );
       })}
       {dropInsertIndex === tabs.length && (
         <div className="tab-strip__drop-indicator" data-testid="tab-strip-drop-indicator" />
       )}
-      {showIndicators && (
+      {!!showIndicators && (
         <button
           type="button"
           className="tab-strip__overflow-indicator tab-strip__overflow-indicator--right"

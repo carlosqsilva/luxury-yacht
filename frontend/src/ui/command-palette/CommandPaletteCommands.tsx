@@ -5,26 +5,13 @@
  * Implements CommandPaletteCommands logic for the UI layer.
  */
 
-import { useCallback, useMemo, type ReactNode } from 'react';
-import { useViewState } from '@core/contexts/ViewStateContext';
-import { useNamespace } from '@modules/namespace/contexts/NamespaceContext';
-import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
+import { useAppearanceMode } from '@core/contexts/AppearanceModeContext';
 import { useFavorites } from '@core/contexts/FavoritesContext';
-import { navigateToFavorite } from '@ui/favorites/navigateToFavorite';
-import {
-  SettingsIcon,
-  CollapseSidebarIcon,
-  ExpandSidebarIcon,
-  InfoIcon,
-  CloseIcon,
-  ResetFiltersIcon,
-  RefreshIcon,
-  DiagnosticsIcon,
-  DiffIcon,
-  LogsIcon,
-  CategoryIcon,
-  NamespaceIcon,
-} from '@shared/components/icons/SharedIcons';
+import { useViewState } from '@core/contexts/ViewStateContext';
+import { useZoom } from '@core/contexts/ZoomContext';
+import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
+import { isAllNamespaces } from '@modules/namespace/constants';
+import { useNamespace } from '@modules/namespace/contexts/NamespaceContext';
 import { FavoriteGenericIcon, FavoritePinIcon } from '@shared/components/icons/FavoriteIcons';
 import { ZoomInIcon, ZoomOutIcon } from '@shared/components/icons/ObjectMapIcons';
 import {
@@ -33,16 +20,26 @@ import {
   KubeconfigsIcon,
   LightModeIcon,
 } from '@shared/components/icons/SettingsIcons';
-import { useAppearanceMode } from '@core/contexts/AppearanceModeContext';
-import { useZoom } from '@core/contexts/ZoomContext';
-import { requestContextRefresh } from '@/core/data-access';
-import { useAutoRefresh } from '@/core/refresh';
-import { changeAppearanceMode } from '@/utils/appearanceMode';
-import { isAllNamespaces } from '@modules/namespace/constants';
-import type { ClusterViewType, NamespaceViewType } from '@/types/navigation/views';
+import {
+  CategoryIcon,
+  CloseIcon,
+  CollapseSidebarIcon,
+  DiagnosticsIcon,
+  DiffIcon,
+  ExpandSidebarIcon,
+  InfoIcon,
+  LogsIcon,
+  NamespaceIcon,
+  RefreshIcon,
+  ResetFiltersIcon,
+  SettingsIcon,
+} from '@shared/components/icons/SharedIcons';
 import { clearAllGridTableState } from '@shared/components/tables/persistence/gridTablePersistenceReset';
+import { navigateToFavorite } from '@ui/favorites/navigateToFavorite';
+import { type ReactNode, useCallback, useMemo } from 'react';
+import { requestContextRefresh } from '@/core/data-access';
 import { eventBus } from '@/core/events';
-import { isMacPlatform } from '@/utils/platform';
+import { useAutoRefresh } from '@/core/refresh';
 import {
   setDimInactiveNamespaces,
   setExclusiveNamespaces,
@@ -51,6 +48,9 @@ import {
 import { useDimInactiveNamespaces } from '@/hooks/useDimInactiveNamespaces';
 import { useExclusiveNamespaces } from '@/hooks/useExclusiveNamespaces';
 import { useShortNames } from '@/hooks/useShortNames';
+import type { ClusterViewType, NamespaceViewType } from '@/types/navigation/views';
+import { changeAppearanceMode } from '@/utils/appearanceMode';
+import { isMacPlatform } from '@/utils/platform';
 
 export interface Command {
   id: string;
@@ -128,6 +128,16 @@ export function useCommandPaletteCommands() {
 
   const closeTabShortcut = useMemo(() => (isMacPlatform() ? ['⌘', 'W'] : ['Ctrl', 'W']), []);
   const diffObjectsShortcut = useMemo(() => (isMacPlatform() ? ['⌘', 'D'] : ['Ctrl', 'D']), []);
+  const selectNamespaceShortcut = useMemo(
+    () => (isMacPlatform() ? ['⇧', '⌘', 'N'] : ['Ctrl', 'Shift', 'N']),
+    []
+  );
+  // The same accelerator as File → Open Cluster (backend/menu.go), which opens
+  // the palette in kubeconfig selection.
+  const selectKubeconfigShortcut = useMemo(
+    () => (isMacPlatform() ? ['⌘', 'O'] : ['Ctrl', 'O']),
+    []
+  );
 
   const commands = useMemo(
     () => [
@@ -401,6 +411,7 @@ export function useCommandPaletteCommands() {
           // Will be handled specially in CommandPalette component
         },
         keywords: ['kubeconfig', 'context', 'cluster', 'switch'],
+        shortcut: selectKubeconfigShortcut,
       },
       {
         id: 'select-namespace',
@@ -412,6 +423,7 @@ export function useCommandPaletteCommands() {
           // Handled specially in CommandPalette component
         },
         keywords: ['namespace', 'change', 'select'],
+        shortcut: selectNamespaceShortcut,
       },
       {
         id: 'cluster-browse',
@@ -492,6 +504,8 @@ export function useCommandPaletteCommands() {
       openClusterTab,
       closeCurrentClusterTab,
       closeTabShortcut,
+      selectNamespaceShortcut,
+      selectKubeconfigShortcut,
       toggleAutoRefresh,
       diffObjectsShortcut,
       autoRefreshEnabled,
@@ -672,7 +686,7 @@ export function useCommandPaletteCommands() {
         renderLabel: (
           <span className="command-palette-kubeconfig-label">
             <span className="command-palette-kubeconfig-context">{config.context}</span>
-            {isInvalid && (
+            {!!isInvalid && (
               <span className="command-palette-kubeconfig-invalid" title={config.invalidReason}>
                 ⚠ invalid
               </span>

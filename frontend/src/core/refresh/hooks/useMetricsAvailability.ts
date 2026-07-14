@@ -5,21 +5,21 @@
  * Encapsulates state and side effects for the core layer.
  */
 
+import { useClusterLifecycle } from '@core/contexts/ClusterLifecycleContext';
+import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
 import { useEffect, useMemo } from 'react';
+import { useViewState } from '@/core/contexts/ViewStateContext';
 import { requestRefreshDomain } from '@/core/data-access';
 import { refreshOrchestrator, useRefreshScopedDomain } from '@/core/refresh';
-import { buildClusterScope } from '@/core/refresh/clusterScope';
 import { canActivateClusterOverviewRefresh } from '@/core/refresh/clusterOverviewLifecycle';
-import { useViewState } from '@/core/contexts/ViewStateContext';
+import { buildClusterScope } from '@/core/refresh/clusterScope';
 import type { ClusterOverviewMetrics } from '@/core/refresh/types';
-import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
-import { useClusterLifecycle } from '@core/contexts/ClusterLifecycleContext';
 
 export const useClusterMetricsAvailability = (): ClusterOverviewMetrics | null => {
   const { selectedClusterId } = useKubeconfig();
   const { viewType } = useViewState();
   const { getClusterState } = useClusterLifecycle();
-  const lifecycleState = selectedClusterId ? getClusterState(selectedClusterId) : '';
+  const lifecycleState = selectedClusterId ? getClusterState(selectedClusterId) : undefined;
   const canActivateOverviewRefresh = canActivateClusterOverviewRefresh(lifecycleState);
 
   // Metrics for foreground UI should follow the active cluster only.

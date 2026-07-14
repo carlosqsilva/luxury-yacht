@@ -7,49 +7,50 @@
  */
 
 import React, {
+  type HTMLAttributes,
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
-  type HTMLAttributes,
 } from 'react';
 import './DiagnosticsPanel.css';
+import {
+  resetGridTablePerformanceDiagnostics,
+  useGridTablePerformanceDiagnostics,
+} from '@shared/components/tables/performance/gridTablePerformanceStore';
+import { type TabDescriptor, Tabs } from '@shared/components/tabs';
 import { DockablePanel } from '@ui/dockable';
-import { useRefreshState, useRefreshScopedDomainEntries, type DomainSnapshotState } from '../store';
-import type {
-  RefreshDomain,
-  NodeMetricsInfo,
-  PodSnapshotPayload,
-  ContainerLogsSnapshotPayload,
-  TelemetrySummary,
-  TelemetryStreamStatus,
-} from '../types';
-import { refreshManager } from '../RefreshManager';
-import { resourceStreamManager } from '../streaming/resourceStreamManager';
-import { refreshOrchestrator } from '../orchestrator';
-import { resolveModeDetails } from './diagnostics/modeDetails';
-import { useShortcut, useKeyboardSurface } from '@ui/shortcuts';
+import { useKeyboardSurface, useShortcut } from '@ui/shortcuts';
 import { KeyboardScopePriority } from '@ui/shortcuts/priorities';
+import { useCapabilityDiagnostics, useUserPermissions } from '@/core/capabilities';
+import { useViewState } from '@/core/contexts/ViewStateContext';
+import { useBrokerReadDiagnostics } from '@/core/read-diagnostics';
+import { parseClusterScopeList, stripClusterScope } from '@/core/refresh/clusterScope';
+import { useKubeconfig } from '@/modules/kubernetes/config/KubeconfigContext';
+import { useNamespace } from '@/modules/namespace/contexts/NamespaceContext';
 import {
   fetchKubernetesAPIClientDiagnostics,
   fetchSelectionDiagnostics,
   fetchTelemetrySummary,
   type KubernetesAPIClientDiagnostics,
+  type NormalizedTelemetrySummary,
   type SelectionDiagnostics,
 } from '../client';
-import { stripClusterScope, parseClusterScopeList } from '@/core/refresh/clusterScope';
-import { useKubeconfig } from '@/modules/kubernetes/config/KubeconfigContext';
-import { useCapabilityDiagnostics, useUserPermissions } from '@/core/capabilities';
-import { useBrokerReadDiagnostics } from '@/core/read-diagnostics';
-import { Tabs, type TabDescriptor } from '@shared/components/tabs';
-import { useViewState } from '@/core/contexts/ViewStateContext';
-import { useNamespace } from '@/modules/namespace/contexts/NamespaceContext';
+import { refreshOrchestrator } from '../orchestrator';
+import { refreshManager } from '../RefreshManager';
+import { type DomainSnapshotState, useRefreshScopedDomainEntries, useRefreshState } from '../store';
+import { resourceStreamManager } from '../streaming/resourceStreamManager';
+import type {
+  ContainerLogsSnapshotPayload,
+  NodeMetricsInfo,
+  PodSnapshotPayload,
+  RefreshDomain,
+  TelemetryStreamStatus,
+} from '../types';
 
 // Import from extracted modules
 import {
-  type DiagnosticsRow,
-  type DiagnosticsPanelProps,
   buildBrokerReadRows,
   buildBrokerReadsSummary,
   buildCapabilityBatchRows,
@@ -63,31 +64,30 @@ import {
   buildMetricsSummary,
   buildOrchestratorSummary,
   buildPermissionRows,
+  CLUSTER_SCOPE,
+  type DiagnosticsPanelProps,
+  type DiagnosticsRow,
+  DOMAIN_REFRESHER_MAP,
+  DOMAIN_STREAM_MAP,
   dedupeDiagnosticsRows,
   formatInterval,
   formatLastUpdated,
-  STALE_THRESHOLD_MS,
-  CLUSTER_SCOPE,
-  DOMAIN_REFRESHER_MAP,
-  DOMAIN_STREAM_MAP,
+  getScopedFeaturesForView,
   PAUSE_POLLING_WHEN_STREAMING_DOMAINS,
   PRIORITY_DOMAINS,
+  resolveDomainNamespace,
+  STALE_THRESHOLD_MS,
   STREAM_MODE_BY_NAME,
   STREAM_ONLY_DOMAINS,
-  getScopedFeaturesForView,
-  resolveDomainNamespace,
 } from './diagnostics';
-import { DiagnosticsTable, DiagnosticsSummaryCards } from './diagnostics/TableRefreshDomains';
-import { DiagnosticsStreamsTable } from './diagnostics/TableStreams';
-import { KubernetesAPIClientsTable } from './diagnostics/TableKubernetesAPIClients';
+import { GridTablePerformance } from './diagnostics/GridTablePerformance';
+import { resolveModeDetails } from './diagnostics/modeDetails';
 import { BrokerReadsTable } from './diagnostics/TableBrokerReads';
 import { CapabilityChecksTable } from './diagnostics/TableCapabilitesChecks';
 import { EffectivePermissionsTable } from './diagnostics/TableEffectivePermissions';
-import { GridTablePerformance } from './diagnostics/GridTablePerformance';
-import {
-  resetGridTablePerformanceDiagnostics,
-  useGridTablePerformanceDiagnostics,
-} from '@shared/components/tables/performance/gridTablePerformanceStore';
+import { KubernetesAPIClientsTable } from './diagnostics/TableKubernetesAPIClients';
+import { DiagnosticsSummaryCards, DiagnosticsTable } from './diagnostics/TableRefreshDomains';
+import { DiagnosticsStreamsTable } from './diagnostics/TableStreams';
 
 // Re-export for backwards compatibility
 export { resolveDomainNamespace } from './diagnostics';
@@ -103,6 +103,9 @@ type StreamHealthSummary = {
 };
 
 const PERMISSION_ERROR_HINTS = ['forbidden', 'permission', 'unauthorized', 'access denied', 'rbac'];
+
+const asRecord = (value: unknown): Record<string, unknown> | null =>
+  value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : null;
 
 type DiagnosticsTabId =
   | 'refresh-domains'
@@ -220,8 +223,12 @@ const resolveScopeDetails = (
       };
     })
     .sort((a, b) => {
-      if (a.label === 'Active' && b.label !== 'Active') return -1;
-      if (b.label === 'Active' && a.label !== 'Active') return 1;
+      if (a.label === 'Active' && b.label !== 'Active') {
+        return -1;
+      }
+      if (b.label === 'Active' && a.label !== 'Active') {
+        return 1;
+      }
       return a.clusterName.localeCompare(b.clusterName);
     });
   // Format as "cluster-A (active), cluster-B, cluster-C".
@@ -437,9 +444,9 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
   // active cluster before falling back to generic "first populated" selection.
   const pickPreferredScopeState = useCallback(
     (
-      entries: Array<[string, DomainSnapshotState<any>]>,
+      entries: Array<[string, DomainSnapshotState<unknown>]>,
       preferredClusterId: string | undefined
-    ): DomainSnapshotState<any> => {
+    ): DomainSnapshotState<unknown> => {
       if (entries.length === 0) {
         return { status: 'idle', data: null, stats: null, error: null, droppedAutoRefreshes: 0 };
       }
@@ -447,15 +454,15 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
       let candidates = entries;
       const clusterId = (preferredClusterId ?? '').trim();
       if (clusterId) {
-        const clusterMatches = entries.filter(([scopeKey, state]) => {
-          const parsed = parseClusterScopeList(state.scope ?? scopeKey);
+        const clusterMatches = entries.filter(([entryScopeKey, state]) => {
+          const parsed = parseClusterScopeList(state.scope ?? entryScopeKey);
           return parsed.clusterIds.includes(clusterId);
         });
         if (clusterMatches.length > 0) {
           candidates = clusterMatches;
         } else {
-          const hasClusterScopedEntries = entries.some(([scopeKey, state]) => {
-            const parsed = parseClusterScopeList(state.scope ?? scopeKey);
+          const hasClusterScopedEntries = entries.some(([entryScopeKey, state]) => {
+            const parsed = parseClusterScopeList(state.scope ?? entryScopeKey);
             return parsed.clusterIds.length > 0;
           });
           if (hasClusterScopedEntries) {
@@ -479,14 +486,14 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
         candidates[0];
 
       const [scopeKey, scopedState] = selected;
-      if (scopedState.scope && scopedState.scope.trim()) {
+      if (scopedState.scope?.trim()) {
         return scopedState;
       }
       return { ...scopedState, scope: scopeKey };
     },
     []
   );
-  const [telemetrySummary, setTelemetrySummary] = useState<TelemetrySummary | null>(null);
+  const [telemetrySummary, setTelemetrySummary] = useState<NormalizedTelemetrySummary | null>(null);
   const [telemetryError, setTelemetryError] = useState<string | null>(null);
   const [selectionDiagnostics, setSelectionDiagnostics] = useState<SelectionDiagnostics | null>(
     null
@@ -887,7 +894,8 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
           if (!hasMetricsFlag) {
             return undefined;
           }
-          return (state.data as any)?.metrics;
+          const metrics = asRecord(state.data)?.metrics;
+          return asRecord(metrics) ? (metrics as NodeMetricsInfo) : undefined;
         })();
         const telemetryLastUpdatedInfo = (() => {
           if (streamLastEvent && streamLastEvent > 0) {
@@ -1010,7 +1018,7 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
             : hasMetricsFlag
               ? 'No metrics available'
               : 'Not applicable';
-        const data = state.data as any;
+        const data = asRecord(state.data);
         let count = (() => {
           if (!data) {
             return 0;
@@ -1021,8 +1029,10 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
                 return 0;
               }
               return data.namespaces.length;
-            case 'cluster-overview':
-              return data.overview?.totalNodes ?? 0;
+            case 'cluster-overview': {
+              const totalNodes = asRecord(data.overview)?.totalNodes;
+              return typeof totalNodes === 'number' ? totalNodes : 0;
+            }
             case 'nodes':
               return Array.isArray(data.rows) ? data.rows.length : 0;
             case 'object-maintenance':
@@ -1074,9 +1084,7 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
         const stats = state.stats;
         let truncated = Boolean(stats?.truncated);
         let totalItems = stats?.totalItems ?? (truncated ? count : undefined);
-        let warnings = (stats?.warnings ?? []).filter(
-          (warning) => warning && warning.trim().length
-        );
+        let warnings = (stats?.warnings ?? []).filter((warning) => warning?.trim().length);
         if (domain === 'catalog') {
           const catalogTotal =
             stats?.totalItems ??
@@ -1102,7 +1110,8 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
         const countTooltip = warnings.length > 0 ? warnings.join('\n') : undefined;
         const countClassName = warnings.length > 0 ? 'diagnostics-count-warning' : undefined;
 
-        const version = state.version != null ? String(state.version) : '—';
+        const version =
+          state.version !== null && state.version !== undefined ? String(state.version) : '—';
         const streamActive = isResourceStreamDomain
           ? Boolean(streamHealth && streamHealth.reason !== 'inactive')
           : Boolean(streamTelemetry?.activeSessions);
@@ -1190,7 +1199,7 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
       const stats = state.stats;
       const truncated = Boolean(stats?.truncated);
       const totalItems = stats?.totalItems ?? (truncated ? count : undefined);
-      let warnings = (stats?.warnings ?? []).filter((warning) => warning && warning.trim().length);
+      let warnings = (stats?.warnings ?? []).filter((warning) => warning?.trim().length);
       if (truncated && totalItems !== undefined && warnings.length === 0 && count !== totalItems) {
         warnings = [`Showing most recent ${count} of ${totalItems} pods`];
       }
@@ -1198,7 +1207,8 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
         truncated && totalItems !== undefined ? `${count} / ${totalItems}` : String(count);
       const countTooltip = warnings.length > 0 ? warnings.join('\n') : undefined;
       const countClassName = warnings.length > 0 ? 'diagnostics-count-warning' : undefined;
-      const version = state.version != null ? String(state.version) : '—';
+      const version =
+        state.version !== null && state.version !== undefined ? String(state.version) : '—';
       const streamHealth = toStreamHealthSummary(
         resourceStreamManager.getHealthSnapshot('pods', scope)
       );
@@ -1346,7 +1356,7 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
       const stats = state.stats;
       const truncated = Boolean(stats?.truncated);
       const totalItems = stats?.totalItems ?? (truncated ? count : undefined);
-      let warnings = (stats?.warnings ?? []).filter((warning) => warning && warning.trim().length);
+      let warnings = (stats?.warnings ?? []).filter((warning) => warning?.trim().length);
       if (truncated && totalItems !== undefined && warnings.length === 0 && count !== totalItems) {
         warnings = [`Showing most recent ${count} of ${totalItems} entries`];
       }
@@ -1414,7 +1424,7 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
     const buildObjectPanelRows = (
       domain: RefreshDomain,
       tabName: string,
-      entries: Array<[string, DomainSnapshotState<any>]>
+      entries: Array<[string, DomainSnapshotState<unknown>]>
     ): DiagnosticsRow[] => {
       return entries.map(([scope, state]) => {
         const lastUpdated = state.lastUpdated ?? state.lastAutoRefresh ?? state.lastManualRefresh;
@@ -1425,7 +1435,8 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
         const name = parts.slice(2).join(':');
         const namespaceLabel = namespace && namespace !== CLUSTER_SCOPE ? namespace : '-';
         const label = name ? `ObjPanel - ${tabName} - ${name}` : `ObjPanel - ${tabName}`;
-        const version = state.version != null ? String(state.version) : '—';
+        const version =
+          state.version !== null && state.version !== undefined ? String(state.version) : '—';
         const scopeDetails = resolveScopeDetails(scope, selectedClusterId, getClusterMeta);
         const roleDetails = resolveScopeRole(domain, scope);
         const healthDetails = resolveHealthDetails({
@@ -1710,7 +1721,9 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
         row.scope === 'Cluster' ||
         row.pendingCount > 0 ||
         row.inFlightCount > 0 ||
-        (activeNamespaceKey != null && row.scope.toLowerCase() === activeNamespaceKey);
+        (activeNamespaceKey !== null &&
+          activeNamespaceKey !== undefined &&
+          row.scope.toLowerCase() === activeNamespaceKey);
       if (isCurrent) {
         current.push(row);
       } else {
@@ -1799,7 +1812,7 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
 
       const direction = event.shiftKey ? 'backward' : 'forward';
       const target = event.target as HTMLElement | null;
-      if (target && target.closest('.diagnostics-content')) {
+      if (target?.closest('.diagnostics-content')) {
         return false;
       }
 

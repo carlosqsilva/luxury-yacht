@@ -10,10 +10,11 @@ import {
   ApplyObjectYaml,
   CheckObjectYamlOwnership,
   MergeObjectYamlWithLatest,
-} from '@wailsjs/go/backend/App';
-import type { ObjectIdentity } from './yamlValidation';
+} from '@/core/backend-api';
 import type { ObjectYamlMutationResponse } from './yamlErrors';
 import { YAML_STRINGIFY_OPTIONS } from './yamlTabConfig';
+import type { ObjectIdentity } from './yamlValidation';
+
 export { sanitizeYamlForSemanticCompare } from './yamlFieldPolicy';
 
 export const normalizeYamlString = (raw: string): string => {
@@ -47,7 +48,9 @@ export const prepareDraftYaml = (raw: string, includeManagedFields: boolean): st
 };
 
 export const applyResourceVersionToYaml = (yamlText: string, resourceVersion: string): string => {
-  if (!resourceVersion) return yamlText;
+  if (!resourceVersion) {
+    return yamlText;
+  }
   try {
     const doc = YAML.parseDocument(yamlText);
     doc.setIn(['metadata', 'resourceVersion'], resourceVersion);

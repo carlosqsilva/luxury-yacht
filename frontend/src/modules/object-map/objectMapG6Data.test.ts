@@ -4,10 +4,15 @@
  * Tests conversion from object-map layout data into G6 graph data.
  */
 
-import { describe, expect, it } from 'vitest';
 import type { ObjectMapReference } from '@core/refresh/types';
+import { describe, expect, it } from 'vitest';
 import { formatAge } from '@/utils/ageFormatter';
-import type { ObjectMapLayout, PositionedEdge, PositionedNode } from './objectMapLayout';
+import {
+  OBJECT_MAP_G6_CARD_NODE,
+  OBJECT_MAP_G6_PATH_EDGE,
+  objectMapG6CardDetailLevelForZoom,
+} from './objectMapG6Constants';
+import type { ObjectMapG6Palette } from './objectMapG6Data';
 import {
   objectMapG6EdgeState,
   objectMapG6EdgeStroke,
@@ -15,12 +20,7 @@ import {
   parseObjectMapG6Path,
   toObjectMapG6Data,
 } from './objectMapG6Data';
-import {
-  OBJECT_MAP_G6_CARD_NODE,
-  OBJECT_MAP_G6_PATH_EDGE,
-  objectMapG6CardDetailLevelForZoom,
-} from './objectMapG6Constants';
-import type { ObjectMapG6Palette } from './objectMapG6Data';
+import type { ObjectMapLayout, PositionedEdge, PositionedNode } from './objectMapLayout';
 import type { ObjectMapSelectionState } from './objectMapRendererTypes';
 
 const ref = (kind: string, name: string, namespace?: string): ObjectMapReference => ({
@@ -277,28 +277,12 @@ describe('objectMapG6Data', () => {
   });
 
   it('updates card age text from an explicit age clock without moving layout', () => {
-    const first = toObjectMapG6Data(
-      layout,
-      selectionState('deploy'),
-      () => null,
-      palette,
-      undefined,
-      false,
-      'full',
-      'routed',
-      Date.parse('2024-01-01T00:00:10Z')
-    );
-    const second = toObjectMapG6Data(
-      layout,
-      selectionState('deploy'),
-      () => null,
-      palette,
-      undefined,
-      false,
-      'full',
-      'routed',
-      Date.parse('2024-01-01T00:00:11Z')
-    );
+    const first = toObjectMapG6Data(layout, selectionState('deploy'), () => null, palette, {
+      ageNow: Date.parse('2024-01-01T00:00:10Z'),
+    });
+    const second = toObjectMapG6Data(layout, selectionState('deploy'), () => null, palette, {
+      ageNow: Date.parse('2024-01-01T00:00:11Z'),
+    });
 
     const firstDeploy = first.nodes?.find((entry) => entry.id === 'deploy');
     const secondDeploy = second.nodes?.find((entry) => entry.id === 'deploy');
@@ -371,12 +355,8 @@ describe('objectMapG6Data', () => {
   });
 
   it('uses the centralized kind badge style resolver for card kind badges', () => {
-    const graphData = toObjectMapG6Data(
-      layout,
-      selectionState(null),
-      () => null,
-      palette,
-      (kind) => ({
+    const graphData = toObjectMapG6Data(layout, selectionState(null), () => null, palette, {
+      kindBadgeStyleForKind: (kind) => ({
         className: `kind-badge ${kind}`,
         backgroundColor: '#123456',
         color: '#abcdef',
@@ -388,8 +368,8 @@ describe('objectMapG6Data', () => {
         letterSpacing: 1,
         paddingX: 6,
         paddingY: 3,
-      })
-    );
+      }),
+    });
 
     const deploy = graphData.nodes?.find((entry) => entry.id === 'deploy');
     expect(deploy?.style).toEqual(
@@ -409,14 +389,9 @@ describe('objectMapG6Data', () => {
   });
 
   it('uses short resource names for card kind labels when enabled', () => {
-    const graphData = toObjectMapG6Data(
-      layout,
-      selectionState(null),
-      () => null,
-      palette,
-      undefined,
-      true
-    );
+    const graphData = toObjectMapG6Data(layout, selectionState(null), () => null, palette, {
+      useShortResourceNames: true,
+    });
 
     const deploy = graphData.nodes?.find((entry) => entry.id === 'deploy');
     expect(deploy?.data).toEqual(
@@ -443,15 +418,9 @@ describe('objectMapG6Data', () => {
   });
 
   it('passes the requested card detail level to G6 nodes', () => {
-    const graphData = toObjectMapG6Data(
-      layout,
-      selectionState(null),
-      () => null,
-      palette,
-      undefined,
-      false,
-      'compact'
-    );
+    const graphData = toObjectMapG6Data(layout, selectionState(null), () => null, palette, {
+      cardDetailLevel: 'compact',
+    });
 
     expect(graphData.nodes?.[0].style).toEqual(
       expect.objectContaining({ cardDetailLevel: 'compact' })
@@ -459,16 +428,9 @@ describe('objectMapG6Data', () => {
   });
 
   it('uses simple straight link paths without dashes when requested', () => {
-    const graphData = toObjectMapG6Data(
-      layout,
-      selectionState(null),
-      () => null,
-      palette,
-      undefined,
-      false,
-      'full',
-      'simple'
-    );
+    const graphData = toObjectMapG6Data(layout, selectionState(null), () => null, palette, {
+      edgeDetailLevel: 'simple',
+    });
 
     const uses = graphData.edges?.find((entry) => entry.id === 'edge-uses');
     expect(uses?.style).toEqual(

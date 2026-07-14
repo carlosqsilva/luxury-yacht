@@ -6,9 +6,16 @@
  */
 
 import React, { act } from 'react';
-import ReactDOM from 'react-dom/client';
-import * as YAML from 'yaml';
+import * as ReactDOM from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as YAML from 'yaml';
+import { requireValue } from '@/test-utils/requireValue';
+
+interface CapturedCodeMirrorProps {
+  value: string;
+  onCreateEditor?: (view: unknown) => void;
+  ref?: React.Ref<unknown>;
+}
 
 // ---------------------------------------------------------------------------
 // Hoisted mocks
@@ -38,7 +45,7 @@ const autoRefreshLoadingState = vi.hoisted(() => ({
 }));
 
 const codeMirrorState = {
-  latestProps: { current: null as any },
+  latestProps: { current: { value: '' } as CapturedCodeMirrorProps },
   editorView: {
     state: {
       selection: { main: { from: 0, to: 0 } },
@@ -50,25 +57,24 @@ const codeMirrorState = {
   value: '',
 };
 
-const CodeMirrorMock = React.forwardRef((_props: any, ref) => {
-  const props = _props;
+const CodeMirrorMock = ({ ref, ...props }: CapturedCodeMirrorProps) => {
   const { onCreateEditor } = props;
   codeMirrorState.value = props.value;
   codeMirrorState.latestProps.current = props;
   if (ref && typeof ref === 'object') {
     (ref as React.RefObject<{ view: typeof codeMirrorState.editorView } | null>).current = {
-      view: codeMirrorState.editorView as any,
+      view: codeMirrorState.editorView,
     };
   }
   React.useEffect(() => {
-    onCreateEditor?.(codeMirrorState.editorView as any);
+    onCreateEditor?.(codeMirrorState.editorView);
   }, [onCreateEditor]);
   return (
     <div data-testid="code-mirror" data-value={props.value}>
       {props.value}
     </div>
   );
-});
+};
 CodeMirrorMock.displayName = 'CodeMirrorMock';
 
 const themeMocks = vi.hoisted(() => ({
@@ -140,17 +146,15 @@ vi.mock('@codemirror/lang-yaml', () => ({
 }));
 
 vi.mock('@codemirror/view', () => ({
-  EditorView: class {
-    static contentAttributes = {
+  EditorView: Object.assign(class EditorViewMock {}, {
+    contentAttributes: {
       of: (attrs: unknown) => ({ type: 'contentAttributes', attrs }),
-    };
-
-    static domEventHandlers(handlers: unknown) {
+    },
+    domEventHandlers(handlers: unknown) {
       return handlers;
-    }
-
-    static lineWrapping = 'lineWrapping';
-  },
+    },
+    lineWrapping: 'lineWrapping',
+  }),
   keymap: {
     of: (bindings: unknown) => bindings,
   },
@@ -264,9 +268,10 @@ const clickSegmentedOption = async (container: HTMLElement, label: string) => {
   const btn = Array.from(container.querySelectorAll('.segmented-button__option')).find(
     (el) => el.textContent === label
   );
-  expect(btn).toBeTruthy();
   await act(async () => {
-    btn!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    requireValue(btn, 'expected test value in ValuesTab.test.tsx').dispatchEvent(
+      new MouseEvent('click', { bubbles: true })
+    );
   });
   await waitForUpdates();
 };
@@ -283,7 +288,7 @@ describe('ValuesTab', () => {
       error: null,
     };
     codeMirrorState.value = '';
-    codeMirrorState.latestProps.current = null;
+    codeMirrorState.latestProps.current = { value: '' };
     codeMirrorState.editorView.dispatch.mockClear();
     codeMirrorState.editorView.focus.mockClear();
     refreshMocks.setScopedDomainEnabled.mockClear();
@@ -358,6 +363,34 @@ describe('ValuesTab', () => {
     expect(parsed.replicaCount).toBe(3);
     expect(parsed.image).toEqual({ repository: 'nginx', tag: 'v2.0' });
     expect(parsed.service).toEqual({ type: 'ClusterIP', port: 80 });
+
+    await unmount();
+  });
+
+  it('ignores inherited properties when deriving Helm value modes', async () => {
+    const allValues = Object.assign(Object.create({ inheritedDefault: 'not-a-value' }), {
+      ownDefault: 'default',
+      ownOverride: 'base',
+    });
+    const userValues = Object.assign(Object.create({ inheritedOverride: 'not-an-override' }), {
+      ownOverride: 'override',
+    });
+    snapshotState.current = {
+      status: 'ready',
+      data: { values: { allValues, userValues } },
+      error: null,
+    };
+
+    const { container, unmount } = await renderValuesTab();
+    await waitForUpdates();
+
+    expect(parsedValue()).toEqual({ ownDefault: 'default' });
+
+    await clickSegmentedOption(container, 'Overrides');
+    expect(parsedValue()).toEqual({ ownOverride: 'override' });
+
+    await clickSegmentedOption(container, 'Merged');
+    expect(parsedValue()).toEqual({ ownDefault: 'default', ownOverride: 'override' });
 
     await unmount();
   });

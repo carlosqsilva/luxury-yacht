@@ -5,22 +5,24 @@
  * Covers key behaviors and edge cases for DiagnosticsPanel.
  */
 
-import React from 'react';
-import ReactDOM from 'react-dom/client';
-import { act } from 'react';
-import { describe, expect, test, vi, beforeEach, afterEach, beforeAll } from 'vitest';
 import { KeyboardProvider } from '@ui/shortcuts';
-import type { ViewType } from '@/types/navigation/views';
-import type { KubernetesAPIClientDiagnostics } from '../client';
-import type { TelemetrySummary } from '../types';
+import React, { act } from 'react';
+import * as ReactDOM from 'react-dom/client';
+import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
+import { PERMISSION_FEATURES } from '@/core/capabilities';
 import type {
   PermissionQueryDiagnostics,
   PermissionStatus,
 } from '@/core/capabilities/permissionTypes';
+import { buildClusterScope } from '@/core/refresh/clusterScope';
+import { requireValue } from '@/test-utils/requireValue';
+import type { ViewType } from '@/types/navigation/views';
+import type { KubernetesAPIClientDiagnostics } from '../client';
+import { makeTelemetrySummary } from '../refreshContractTestBuilders';
 import type { DomainSnapshotState } from '../store';
 import { resourceStreamManager } from '../streaming/resourceStreamManager';
-import { buildClusterScope } from '@/core/refresh/clusterScope';
-import { PERMISSION_FEATURES } from '@/core/capabilities';
+import type { TelemetrySummary } from '../types';
+import type { DiagnosticsPanelProps } from './diagnostics/diagnosticsPanelTypes';
 
 const fetchTelemetrySummaryMock = vi.hoisted(() =>
   vi.fn<() => Promise<TelemetrySummary>>(async () => {
@@ -125,8 +127,8 @@ vi.mock('@ui/dockable', () => ({
   }) => React.createElement('div', { ref: panelRef }, children),
 }));
 
-const domainStateMap: Record<string, DomainSnapshotState<any>> = {};
-const scopedEntriesMap: Record<string, Array<[string, DomainSnapshotState<any>]>> = {};
+const domainStateMap: Record<string, DomainSnapshotState<unknown>> = {};
+const scopedEntriesMap: Record<string, Array<[string, DomainSnapshotState<unknown>]>> = {};
 let refreshState: { pendingRequests: number } = { pendingRequests: 0 };
 
 const mockRefreshManager = vi.hoisted(() => ({
@@ -184,11 +186,10 @@ vi.mock('../store', async () => {
   };
 });
 
-let getPermissionKeyRef: (typeof import('@/core/capabilities'))['getPermissionKey'];
+let getPermissionKeyRef: typeof import('@/core/capabilities')['getPermissionKey'];
 
 beforeAll(async () => {
   ({ getPermissionKey: getPermissionKeyRef } = await import('@/core/capabilities'));
-  (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 });
 
 const getPermissionKeySafe = (
@@ -203,21 +204,28 @@ const getPermissionKeySafe = (
   return getPermissionKeyRef(resourceKind, verb, namespace, subresource);
 };
 
-const setDomainState = (domain: string, state: DomainSnapshotState<any>) => {
+const setDomainState = (domain: string, state: DomainSnapshotState<unknown>) => {
   domainStateMap[domain] = state;
 };
 
-const setScopedEntries = (domain: string, entries: Array<[string, DomainSnapshotState<any>]>) => {
+const setScopedEntries = (
+  domain: string,
+  entries: Array<[string, DomainSnapshotState<unknown>]>
+) => {
   scopedEntriesMap[domain] = entries;
 };
 
 const resetDomainStates = () => {
-  Object.keys(domainStateMap).forEach((key) => delete domainStateMap[key]);
-  Object.keys(scopedEntriesMap).forEach((key) => delete scopedEntriesMap[key]);
+  Object.keys(domainStateMap).forEach((key) => {
+    delete domainStateMap[key];
+  });
+  Object.keys(scopedEntriesMap).forEach((key) => {
+    delete scopedEntriesMap[key];
+  });
   refreshState = { pendingRequests: 0 };
 };
 
-const createReadyState = (data: any = null): DomainSnapshotState<any> => ({
+const createReadyState = (data: unknown = null): DomainSnapshotState<unknown> => ({
   status: 'ready',
   data,
   stats: null,
@@ -241,7 +249,7 @@ const flushAsync = async () => {
 const selectDiagnosticsTab = async (container: HTMLElement, index: number) => {
   const tabButtons = container.querySelectorAll<HTMLElement>('[role="tab"]');
   await act(async () => {
-    tabButtons[index].click();
+    requireValue(tabButtons[index], `expected diagnostics tab at index ${index}`).click();
     await Promise.resolve();
   });
   await flushAsync();
@@ -251,7 +259,7 @@ const selectRefreshDomainsTab = async (container: HTMLElement) =>
   selectDiagnosticsTab(container, 1);
 
 const renderDiagnosticsPanel = async (
-  DiagnosticsPanelComponent: React.ComponentType<any>,
+  DiagnosticsPanelComponent: React.ComponentType<DiagnosticsPanelProps>,
   props: Partial<{ isOpen: boolean; onClose: () => void }> = {},
   options: { keyboardDisabled?: boolean } = {}
 ) => {
@@ -264,14 +272,16 @@ const renderDiagnosticsPanel = async (
     onClose: () => undefined,
     ...props,
   };
+  const renderTree = () => {
+    const providerProps: React.ComponentProps<typeof KeyboardProvider> = {
+      disabled: keyboardDisabled,
+      children: React.createElement(DiagnosticsPanelComponent, currentProps),
+    };
+    return React.createElement(KeyboardProvider, providerProps);
+  };
 
   await act(async () => {
-    root.render(
-      React.createElement(KeyboardProvider, {
-        disabled: keyboardDisabled,
-        children: React.createElement(DiagnosticsPanelComponent, currentProps),
-      })
-    );
+    root.render(renderTree());
     await Promise.resolve();
   });
 
@@ -280,12 +290,7 @@ const renderDiagnosticsPanel = async (
     rerender: async (nextProps: Partial<{ isOpen: boolean; onClose: () => void }> = {}) => {
       currentProps = { ...currentProps, ...nextProps };
       await act(async () => {
-        root.render(
-          React.createElement(KeyboardProvider, {
-            disabled: keyboardDisabled,
-            children: React.createElement(DiagnosticsPanelComponent, currentProps),
-          })
-        );
+        root.render(renderTree());
         await Promise.resolve();
       });
     },
@@ -547,7 +552,7 @@ describe('DiagnosticsPanel component', () => {
       ],
     ]);
 
-    scopedEntriesMap['pods'] = [
+    scopedEntriesMap.pods = [
       [
         'node:worker-1',
         {
@@ -706,7 +711,7 @@ describe('DiagnosticsPanel component', () => {
     seedBaseDomainStates();
     const now = Date.now();
 
-    scopedEntriesMap['pods'] = [
+    scopedEntriesMap.pods = [
       [
         'namespace:team-a',
         {
@@ -743,7 +748,7 @@ describe('DiagnosticsPanel component', () => {
     seedBaseDomainStates();
     const now = Date.now();
 
-    scopedEntriesMap['pods'] = [
+    scopedEntriesMap.pods = [
       [
         'cluster-a|namespace:team-a',
         {
@@ -1084,7 +1089,7 @@ describe('DiagnosticsPanel component', () => {
 
     refreshState = { pendingRequests: 2 };
 
-    const telemetrySummary: TelemetrySummary = {
+    const telemetrySummary: TelemetrySummary = makeTelemetrySummary({
       snapshots: [
         {
           domain: 'catalog',
@@ -1111,6 +1116,7 @@ describe('DiagnosticsPanel component', () => {
         consecutiveFailures: 0,
         successCount: 7,
         failureCount: 1,
+        active: true,
       },
       streams: [
         {
@@ -1156,7 +1162,7 @@ describe('DiagnosticsPanel component', () => {
           lastSkipReason: 'per-scope target cap',
         },
       ],
-    };
+    });
 
     const resourceStreamSpy = vi
       .spyOn(resourceStreamManager, 'getTelemetrySummary')
@@ -1190,8 +1196,10 @@ describe('DiagnosticsPanel component', () => {
       firstBatchLatencyMs: 900,
     });
     catalogState.stats = {
+      itemCount: 0,
+      buildDurationMs: 0,
       timeToFirstRowMs: 450,
-    } as any;
+    };
     setDomainState('catalog', catalogState);
 
     scopedEntriesMap['container-logs'] = [
@@ -1297,29 +1305,31 @@ describe('DiagnosticsPanel component', () => {
       [clusterScope, { ...createReadyState({ namespaces: [] }), scope: clusterScope }],
     ]);
 
-    fetchTelemetrySummaryMock.mockResolvedValueOnce({
-      snapshots: [
-        {
-          domain: 'namespaces',
-          scope: clusterScope,
-          lastStatus: 'success',
-          lastDurationMs: 12,
-          lastUpdated: Date.now(),
+    fetchTelemetrySummaryMock.mockResolvedValueOnce(
+      makeTelemetrySummary({
+        snapshots: [
+          {
+            domain: 'namespaces',
+            scope: clusterScope,
+            lastStatus: 'success',
+            lastDurationMs: 12,
+            lastUpdated: Date.now(),
+            successCount: 1,
+            failureCount: 0,
+            // Cold-start build blocked 1500ms on the initial-LIST gate.
+            maxInformerSyncWaitMs: 1500,
+          },
+        ],
+        metrics: {
+          lastCollected: Date.now(),
+          lastDurationMs: 0,
+          consecutiveFailures: 0,
           successCount: 1,
           failureCount: 0,
-          // Cold-start build blocked 1500ms on the initial-LIST gate.
-          maxInformerSyncWaitMs: 1500,
         },
-      ],
-      metrics: {
-        lastCollected: Date.now(),
-        lastDurationMs: 0,
-        consecutiveFailures: 0,
-        successCount: 1,
-        failureCount: 0,
-      },
-      streams: [],
-    });
+        streams: [],
+      })
+    );
 
     const { DiagnosticsPanel } = await import('./DiagnosticsPanel');
     const rendered = await renderDiagnosticsPanel(DiagnosticsPanel, { isOpen: true });
@@ -1396,29 +1406,31 @@ describe('DiagnosticsPanel component', () => {
     // cluster-config is now a scoped domain, so set scoped entries instead of domain state.
     setScopedEntries('cluster-config', [[scope, configState]]);
 
-    fetchTelemetrySummaryMock.mockResolvedValueOnce({
-      snapshots: [],
-      metrics: {
-        lastCollected: now - 2000,
-        lastDurationMs: 120,
-        consecutiveFailures: 0,
-        successCount: 3,
-        failureCount: 0,
-        active: true,
-      },
-      streams: [
-        {
-          name: 'resources',
-          activeSessions: 1,
-          totalMessages: 5,
-          droppedMessages: 1,
-          skippedTargets: 0,
-          errorCount: 0,
-          lastConnect: now - 4000,
-          lastEvent: now - 1500,
+    fetchTelemetrySummaryMock.mockResolvedValueOnce(
+      makeTelemetrySummary({
+        snapshots: [],
+        metrics: {
+          lastCollected: now - 2000,
+          lastDurationMs: 120,
+          consecutiveFailures: 0,
+          successCount: 3,
+          failureCount: 0,
+          active: true,
         },
-      ],
-    });
+        streams: [
+          {
+            name: 'resources',
+            activeSessions: 1,
+            totalMessages: 5,
+            droppedMessages: 1,
+            skippedTargets: 0,
+            errorCount: 0,
+            lastConnect: now - 4000,
+            lastEvent: now - 1500,
+          },
+        ],
+      })
+    );
 
     const healthSpy = vi
       .spyOn(resourceStreamManager, 'getHealthSnapshot')
@@ -1475,39 +1487,41 @@ describe('DiagnosticsPanel component', () => {
     vi.setSystemTime(new Date('2024-01-01T12:00:00Z'));
     const now = Date.now();
 
-    fetchTelemetrySummaryMock.mockResolvedValueOnce({
-      snapshots: [],
-      metrics: {
-        lastCollected: now,
-        lastDurationMs: 200,
-        consecutiveFailures: 0,
-        successCount: 1,
-        failureCount: 0,
-        active: true,
-      },
-      streams: [
-        {
-          name: 'resources',
-          activeSessions: 1,
-          totalMessages: 5,
-          droppedMessages: 0,
-          skippedTargets: 0,
-          errorCount: 0,
-          lastConnect: now - 1000,
-          lastEvent: now - 500,
+    fetchTelemetrySummaryMock.mockResolvedValueOnce(
+      makeTelemetrySummary({
+        snapshots: [],
+        metrics: {
+          lastCollected: now,
+          lastDurationMs: 200,
+          consecutiveFailures: 0,
+          successCount: 1,
+          failureCount: 0,
+          active: true,
         },
-        {
-          name: 'events',
-          activeSessions: 2,
-          totalMessages: 10,
-          droppedMessages: 1,
-          skippedTargets: 0,
-          errorCount: 0,
-          lastConnect: now - 1200,
-          lastEvent: now - 700,
-        },
-      ],
-    });
+        streams: [
+          {
+            name: 'resources',
+            activeSessions: 1,
+            totalMessages: 5,
+            droppedMessages: 0,
+            skippedTargets: 0,
+            errorCount: 0,
+            lastConnect: now - 1000,
+            lastEvent: now - 500,
+          },
+          {
+            name: 'events',
+            activeSessions: 2,
+            totalMessages: 10,
+            droppedMessages: 1,
+            skippedTargets: 0,
+            errorCount: 0,
+            lastConnect: now - 1200,
+            lastEvent: now - 700,
+          },
+        ],
+      })
+    );
 
     const { DiagnosticsPanel } = await import('./DiagnosticsPanel');
     const rendered = await renderDiagnosticsPanel(DiagnosticsPanel, { isOpen: true });
@@ -1525,9 +1539,17 @@ describe('DiagnosticsPanel component', () => {
 
     const streamsSection = rendered.container.querySelector('.diagnostics-section');
     expect(streamsSection).toBeTruthy();
-    expect(streamsSection!.querySelectorAll('button, input').length).toBe(0);
+    expect(
+      requireValue(
+        streamsSection,
+        'expected test value in DiagnosticsPanel.test.ts'
+      ).querySelectorAll('button, input').length
+    ).toBe(0);
 
-    const streamRows = streamsSection!.querySelectorAll('tbody tr');
+    const streamRows = requireValue(
+      streamsSection,
+      'expected test value in DiagnosticsPanel.test.ts'
+    ).querySelectorAll('tbody tr');
     expect(Array.from(streamRows).some((row) => row.textContent?.includes('Resources'))).toBe(true);
     expect(Array.from(streamRows).some((row) => row.textContent?.includes('Events'))).toBe(true);
 
@@ -1539,41 +1561,43 @@ describe('DiagnosticsPanel component', () => {
     vi.setSystemTime(new Date('2024-01-01T12:00:00Z'));
     const now = Date.now();
 
-    fetchTelemetrySummaryMock.mockResolvedValueOnce({
-      snapshots: [],
-      metrics: {
-        lastCollected: now,
-        lastDurationMs: 200,
-        consecutiveFailures: 0,
-        successCount: 1,
-        failureCount: 0,
-        active: true,
-      },
-      streams: [
-        {
-          name: 'resources',
-          activeSessions: 1,
-          totalMessages: 5,
-          droppedMessages: 0,
-          skippedTargets: 0,
-          errorCount: 1,
-          lastConnect: now - 1000,
-          lastEvent: now - 500,
-          lastError: 'Resource stream disconnected',
+    fetchTelemetrySummaryMock.mockResolvedValueOnce(
+      makeTelemetrySummary({
+        snapshots: [],
+        metrics: {
+          lastCollected: now,
+          lastDurationMs: 200,
+          consecutiveFailures: 0,
+          successCount: 1,
+          failureCount: 0,
+          active: true,
         },
-        {
-          name: 'catalog',
-          activeSessions: 1,
-          totalMessages: 3,
-          droppedMessages: 2,
-          skippedTargets: 0,
-          errorCount: 1,
-          lastConnect: now - 1200,
-          lastEvent: now - 700,
-          lastError: 'Catalog stream disconnected',
-        },
-      ],
-    });
+        streams: [
+          {
+            name: 'resources',
+            activeSessions: 1,
+            totalMessages: 5,
+            droppedMessages: 0,
+            skippedTargets: 0,
+            errorCount: 1,
+            lastConnect: now - 1000,
+            lastEvent: now - 500,
+            lastError: 'Resource stream disconnected',
+          },
+          {
+            name: 'catalog',
+            activeSessions: 1,
+            totalMessages: 3,
+            droppedMessages: 2,
+            skippedTargets: 0,
+            errorCount: 1,
+            lastConnect: now - 1200,
+            lastEvent: now - 700,
+            lastError: 'Catalog stream disconnected',
+          },
+        ],
+      })
+    );
     const resourceStreamSpy = vi
       .spyOn(resourceStreamManager, 'getTelemetrySummary')
       .mockReturnValue({
@@ -1609,13 +1633,19 @@ describe('DiagnosticsPanel component', () => {
 
     // Both fixtures are domain-less stream header rows: Name | Delivered |
     // Dropped | Errors(3) | Resyncs(4) | Fallbacks(5) | Last Event | Last Error(7).
-    const catalogCells = catalogRow!.querySelectorAll('td');
+    const catalogCells = requireValue(
+      catalogRow,
+      'expected test value in DiagnosticsPanel.test.ts'
+    ).querySelectorAll('td');
     expect(catalogCells[3]?.textContent?.trim()).toBe('1');
     expect(catalogCells[4]?.textContent?.trim()).toBe('—');
     expect(catalogCells[5]?.textContent?.trim()).toBe('—');
     expect(catalogCells[7]?.textContent?.trim()).toBe('Catalog stream disconnected');
 
-    const resourceCells = resourcesRow!.querySelectorAll('td');
+    const resourceCells = requireValue(
+      resourcesRow,
+      'expected test value in DiagnosticsPanel.test.ts'
+    ).querySelectorAll('td');
     expect(resourceCells[3]?.textContent?.trim()).toBe('1');
     expect(resourceCells[4]?.textContent?.trim()).toBe('—');
     expect(resourceCells[5]?.textContent?.trim()).toBe('—');
@@ -1632,19 +1662,21 @@ describe('DiagnosticsPanel component', () => {
     vi.setSystemTime(new Date('2024-01-01T12:00:00Z'));
     const now = Date.now();
 
-    fetchTelemetrySummaryMock.mockResolvedValueOnce({
-      snapshots: [],
-      metrics: {
-        lastCollected: now - 1000,
-        lastDurationMs: 120,
-        consecutiveFailures: 0,
-        lastError: '',
-        successCount: 3,
-        failureCount: 0,
-        active: false,
-      },
-      streams: [],
-    });
+    fetchTelemetrySummaryMock.mockResolvedValueOnce(
+      makeTelemetrySummary({
+        snapshots: [],
+        metrics: {
+          lastCollected: now - 1000,
+          lastDurationMs: 120,
+          consecutiveFailures: 0,
+          lastError: '',
+          successCount: 3,
+          failureCount: 0,
+          active: false,
+        },
+        streams: [],
+      })
+    );
 
     const { DiagnosticsPanel } = await import('./DiagnosticsPanel');
     const rendered = await renderDiagnosticsPanel(DiagnosticsPanel, { isOpen: true });
@@ -1874,7 +1906,10 @@ describe('DiagnosticsPanel component', () => {
 
     const permissionsBody = rendered.container.querySelector('.diagnostics-table tbody');
     expect(permissionsBody).toBeTruthy();
-    const scopedRows = permissionsBody!.querySelectorAll('tr');
+    const scopedRows = requireValue(
+      permissionsBody,
+      'expected test value in DiagnosticsPanel.test.ts'
+    ).querySelectorAll('tr');
     expect(scopedRows.length).toBe(2);
     expect(scopedRows[0].textContent).toContain('default');
     expect(scopedRows[0].textContent).toContain('deployments (get)');

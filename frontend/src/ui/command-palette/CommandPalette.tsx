@@ -5,24 +5,26 @@
  * Implements CommandPalette logic for the UI layer.
  */
 
-import React, { useState, useEffect, useRef, useCallback, useMemo, memo } from 'react';
-import { useShortcut, useKeyboardContext, useShortcuts } from '@ui/shortcuts';
-import { useKeyboardSurface } from '@ui/shortcuts/surfaces';
+import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
+import { useObjectPanel } from '@modules/object-panel/hooks/useObjectPanel';
+import { ErrorBoundary } from '@shared/components/errors/ErrorBoundary';
+import { getKindColorClass } from '@shared/utils/kindBadgeColors';
+import { buildRequiredObjectReference } from '@shared/utils/objectIdentity';
+import { withStableListKeys } from '@shared/utils/stableListKeys';
+import { useKeyboardContext, useShortcut, useShortcuts } from '@ui/shortcuts';
 import { KeyboardShortcutPriority } from '@ui/shortcuts/priorities';
+import { useKeyboardSurface } from '@ui/shortcuts/surfaces';
+import { EventsOn } from '@wailsjs/runtime/runtime';
+import type React from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useEventBus } from '@/core/events';
 import { fetchSnapshot } from '@/core/refresh/client';
 import { buildClusterScope } from '@/core/refresh/clusterScope';
 import type { CatalogItem, CatalogSnapshotPayload } from '@/core/refresh/types';
-import { useObjectPanel } from '@modules/object-panel/hooks/useObjectPanel';
-import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
-import { getDisplayKind, aliasToKindMap, canonicalKinds } from '@/utils/kindAliasMap';
-import { getKindColorClass } from '@shared/utils/kindBadgeColors';
 import { useShortNames } from '@/hooks/useShortNames';
-import { buildRequiredObjectReference } from '@shared/utils/objectIdentity';
-import { Command } from './CommandPaletteCommands';
+import { aliasToKindMap, canonicalKinds, getDisplayKind } from '@/utils/kindAliasMap';
 import { isMacPlatform } from '@/utils/platform';
-import { ErrorBoundary } from '@shared/components/errors/ErrorBoundary';
-import { EventsOn } from '@wailsjs/runtime/runtime';
-import { useEventBus } from '@/core/events';
+import type { Command } from './CommandPaletteCommands';
 import './CommandPalette.css';
 
 interface CommandPaletteProps {
@@ -104,6 +106,11 @@ export const parseQueryTokens = (query: string): ParsedQueryTokens => {
 
   return { kindTokens, otherTokens };
 };
+
+// The palette is either a general search or a single-category picker; one
+// union (instead of a boolean per picker) makes overlapping modes
+// unrepresentable, so switching pickers can never leave a stale mode behind.
+type PaletteSelectMode = 'none' | 'namespaces' | 'kubeconfigs';
 
 type PaletteItem =
   | {
@@ -199,12 +206,13 @@ export function buildCatalogDisplayEntries(
   return scored.slice(0, limit).map(({ score: _score, ...entry }) => entry);
 }
 
-export const CommandPalette = memo(function CommandPalette({ commands = [] }: CommandPaletteProps) {
+export const CommandPalette = memo(function CommandPaletteComponent({
+  commands = [],
+}: CommandPaletteProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedIndex, setSelectedIndex] = useState(0);
-  const [namespaceSelectMode, setNamespaceSelectMode] = useState(false);
-  const [kubeconfigSelectMode, setKubeconfigSelectMode] = useState(false);
+  const [selectMode, setSelectMode] = useState<PaletteSelectMode>('none');
   const [hideCursor, setHideCursor] = useState(false);
   const [mouseSelectionArmed, setMouseSelectionArmed] = useState(false);
   const [catalogResults, setCatalogResults] = useState<CatalogItem[]>([]);
@@ -217,7 +225,7 @@ export const CommandPalette = memo(function CommandPalette({ commands = [] }: Co
   const inputRef = useRef<HTMLInputElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const resultsRef = useRef<HTMLDivElement>(null);
-  const itemRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const itemRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const selectedIndexRef = useRef(0);
   // True when the palette was opened straight into a sub-mode (e.g. kubeconfig
   // mode via the "+"/⌘O event). Then Escape closes in one press instead of
@@ -244,13 +252,11 @@ export const CommandPalette = memo(function CommandPalette({ commands = [] }: Co
   const filteredCommands = useMemo(() => {
     let filteredList = commands;
 
-    // If in namespace select mode, only show namespace commands
-    if (namespaceSelectMode) {
+    // A selection sub-mode narrows the palette to that single category.
+    if (selectMode === 'namespaces') {
       filteredList = commands.filter((cmd) => cmd.category === 'Namespaces');
     }
-
-    // If in kubeconfig select mode, only show kubeconfig commands
-    if (kubeconfigSelectMode) {
+    if (selectMode === 'kubeconfigs') {
       filteredList = commands.filter((cmd) => cmd.category === 'Kubeconfigs');
     }
 
@@ -269,7 +275,7 @@ export const CommandPalette = memo(function CommandPalette({ commands = [] }: Co
 
       return matchesLabel || matchesDescription || matchesCategory || matchesKeywords;
     });
-  }, [commands, searchQuery, namespaceSelectMode, kubeconfigSelectMode]);
+  }, [commands, searchQuery, selectMode]);
 
   // Group commands by category
   const groupedCommands = useMemo(() => {
@@ -292,8 +298,12 @@ export const CommandPalette = memo(function CommandPalette({ commands = [] }: Co
       }
 
       // If only one is in the order array, it comes first
-      if (indexA !== -1) return -1;
-      if (indexB !== -1) return 1;
+      if (indexA !== -1) {
+        return -1;
+      }
+      if (indexB !== -1) {
+        return 1;
+      }
 
       // If neither is in the order array, sort alphabetically
       return a[0].localeCompare(b[0]);
@@ -301,8 +311,8 @@ export const CommandPalette = memo(function CommandPalette({ commands = [] }: Co
   }, [filteredCommands]);
 
   const showCatalogSearch = useMemo(
-    () => isOpen && !namespaceSelectMode && !kubeconfigSelectMode && searchQuery.trim().length > 0,
-    [isOpen, namespaceSelectMode, kubeconfigSelectMode, searchQuery]
+    () => isOpen && selectMode === 'none' && searchQuery.trim().length > 0,
+    [isOpen, selectMode, searchQuery]
   );
 
   useEffect(() => {
@@ -434,6 +444,16 @@ export const CommandPalette = memo(function CommandPalette({ commands = [] }: Co
     });
     return flattened;
   }, [groupedCommands, catalogDisplayItems]);
+
+  const resultsId = 'command-palette-results';
+  const selectedOptionId =
+    paletteItems.length > 0 ? `command-palette-option-${selectedIndex}` : undefined;
+  const inputLabel =
+    selectMode === 'namespaces'
+      ? 'Select a namespace'
+      : selectMode === 'kubeconfigs'
+        ? 'Select a kubeconfig'
+        : 'Search commands and Kubernetes objects';
   const paletteItemCount = paletteItems.length;
 
   const hasCommandResults = filteredCommands.length > 0;
@@ -461,8 +481,7 @@ export const CommandPalette = memo(function CommandPalette({ commands = [] }: Co
     selectedIndexRef.current = 0;
     mouseSelectionArmedRef.current = false;
     setMouseSelectionArmed(false);
-    setNamespaceSelectMode(false);
-    setKubeconfigSelectMode(false);
+    setSelectMode('none');
     openedDirectlyRef.current = false;
     setHideCursor(false);
     setCatalogResults([]);
@@ -478,13 +497,21 @@ export const CommandPalette = memo(function CommandPalette({ commands = [] }: Co
     selectedIndexRef.current = 0;
     mouseSelectionArmedRef.current = false;
     setMouseSelectionArmed(false);
-    setNamespaceSelectMode(false);
-    setKubeconfigSelectMode(false);
+    setSelectMode('none');
     openedDirectlyRef.current = false;
     setHideCursor(false);
     setCatalogResults([]);
     setCatalogStats(null);
     setCatalogLoading(false);
+  }, []);
+
+  // Switch the open palette into a selection sub-mode with a clean query and
+  // selection.
+  const enterSelectMode = useCallback((mode: PaletteSelectMode) => {
+    setSelectMode(mode);
+    setSearchQuery('');
+    setSelectedIndex(0);
+    selectedIndexRef.current = 0;
   }, []);
 
   // Execute selected item (command or catalog object)
@@ -494,18 +521,12 @@ export const CommandPalette = memo(function CommandPalette({ commands = [] }: Co
         const command = item.command;
 
         if (command.id === 'select-namespace') {
-          setNamespaceSelectMode(true);
-          setSearchQuery('');
-          setSelectedIndex(0);
-          selectedIndexRef.current = 0;
+          enterSelectMode('namespaces');
           return;
         }
 
         if (command.id === 'select-kubeconfig') {
-          setKubeconfigSelectMode(true);
-          setSearchQuery('');
-          setSelectedIndex(0);
-          selectedIndexRef.current = 0;
+          enterSelectMode('kubeconfigs');
           return;
         }
 
@@ -522,7 +543,7 @@ export const CommandPalette = memo(function CommandPalette({ commands = [] }: Co
         openWithObject(buildRequiredObjectReference(catalogItem));
       }, 100);
     },
-    [close, openWithObject]
+    [close, enterSelectMode, openWithObject]
   );
 
   const updateSelection = useCallback((index: number) => {
@@ -625,15 +646,14 @@ export const CommandPalette = memo(function CommandPalette({ commands = [] }: Co
     if (!isOpen) {
       return false;
     }
-    if (namespaceSelectMode || kubeconfigSelectMode) {
+    if (selectMode !== 'none') {
       // If the palette was opened straight into this sub-mode, Escape closes it;
       // otherwise it backs out to the general palette it was navigated from.
       if (openedDirectlyRef.current) {
         close();
         return true;
       }
-      setNamespaceSelectMode(false);
-      setKubeconfigSelectMode(false);
+      setSelectMode('none');
       setSearchQuery('');
       updateSelection(0);
       setHideCursor(false);
@@ -641,7 +661,7 @@ export const CommandPalette = memo(function CommandPalette({ commands = [] }: Co
     }
     close();
     return true;
-  }, [isOpen, namespaceSelectMode, kubeconfigSelectMode, close, updateSelection]);
+  }, [isOpen, selectMode, close, updateSelection]);
 
   useKeyboardSurface({
     kind: 'palette',
@@ -774,25 +794,44 @@ export const CommandPalette = memo(function CommandPalette({ commands = [] }: Co
     return dispose;
   }, []);
 
-  // Open the palette directly in kubeconfig-select mode. This is the "Open
-  // Cluster" surface: the "+" in the cluster tab bar, ⌘O, and File → Open Cluster
-  // all emit this event. open() resets the mode, so set it after.
+  // Open the palette directly in a selection sub-mode: kubeconfigs is the
+  // "Open Cluster" surface (the "+" in the cluster tab bar, ⌘O, and File →
+  // Open Cluster all emit that event); namespaces is the ⇧⌘N shortcut below.
+  // open() resets the mode, so set it after.
+  const openInSelectMode = useCallback(
+    (mode: PaletteSelectMode) => {
+      if (isOpen) {
+        enterSelectMode(mode);
+        return true;
+      }
+      if (hasActiveBlockingSurface()) {
+        return false;
+      }
+      open();
+      setSelectMode(mode);
+      openedDirectlyRef.current = true;
+      return true;
+    },
+    [enterSelectMode, hasActiveBlockingSurface, isOpen, open]
+  );
   const openInKubeconfigMode = useCallback(() => {
-    if (isOpen) {
-      setKubeconfigSelectMode(true);
-      setSearchQuery('');
-      setSelectedIndex(0);
-      selectedIndexRef.current = 0;
-      return;
-    }
-    if (hasActiveBlockingSurface()) {
-      return;
-    }
-    open();
-    setKubeconfigSelectMode(true);
-    openedDirectlyRef.current = true;
-  }, [hasActiveBlockingSurface, isOpen, open]);
+    openInSelectMode('kubeconfigs');
+  }, [openInSelectMode]);
   useEventBus('command-palette:open-kubeconfigs', openInKubeconfigMode, [openInKubeconfigMode]);
+  const openInNamespaceMode = useCallback(() => openInSelectMode('namespaces'), [openInSelectMode]);
+  // The search button in the sidebar's Namespaces header emits this event.
+  useEventBus('command-palette:open-namespaces', openInNamespaceMode, [openInNamespaceMode]);
+  // Open the palette straight into namespace selection. Registered in the
+  // frontend shortcut system (not the native menu), like ⌘⇧P above.
+  useShortcut({
+    key: 'n',
+    modifiers: macPlatform ? { meta: true, shift: true } : { ctrl: true, shift: true },
+    handler: openInNamespaceMode,
+    description: 'Select namespace',
+    category: 'Global',
+    enabled: true,
+    priority: 100,
+  });
   // The header search button opens the palette in its normal (search) mode via
   // the same guarded open path as the keyboard shortcut.
   useEventBus('command-palette:open', () => openShortcutRef.current(), []);
@@ -839,7 +878,9 @@ export const CommandPalette = memo(function CommandPalette({ commands = [] }: Co
 
   // Handle clicks outside to close
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen) {
+      return;
+    }
 
     const handleClickOutside = (event: MouseEvent) => {
       if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
@@ -853,7 +894,36 @@ export const CommandPalette = memo(function CommandPalette({ commands = [] }: Co
     };
   }, [isOpen, close]);
 
-  if (!isOpen) return null;
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+    const container = containerRef.current;
+    if (!container) {
+      return;
+    }
+
+    const handlePointerMove = (event: PointerEvent) => {
+      if (!mouseSelectionArmedRef.current) {
+        mouseSelectionArmedRef.current = true;
+        setMouseSelectionArmed(true);
+      }
+      setHideCursor(false);
+      const targetElement = event.target instanceof HTMLElement ? event.target : null;
+      const targetItem = targetElement?.closest<HTMLButtonElement>('.command-palette-item') ?? null;
+      const targetIndex = itemRefs.current.indexOf(targetItem);
+      if (targetIndex !== -1 && targetIndex !== selectedIndexRef.current) {
+        updateSelection(targetIndex);
+      }
+    };
+
+    container.addEventListener('pointermove', handlePointerMove);
+    return () => container.removeEventListener('pointermove', handlePointerMove);
+  }, [isOpen, updateSelection]);
+
+  if (!isOpen) {
+    return null;
+  }
 
   return (
     <ErrorBoundary
@@ -863,10 +933,10 @@ export const CommandPalette = memo(function CommandPalette({ commands = [] }: Co
           <div className="command-palette-error">
             <h4>Command Palette Error</h4>
             <p>An error occurred. Please try again.</p>
-            <button className="button generic" onClick={reset}>
+            <button type="button" className="button generic" onClick={reset}>
               Retry
             </button>
-            <button className="button generic" onClick={close}>
+            <button type="button" className="button generic" onClick={close}>
               Close
             </button>
           </div>
@@ -882,21 +952,6 @@ export const CommandPalette = memo(function CommandPalette({ commands = [] }: Co
           .filter(Boolean)
           .join(' ')}
         ref={containerRef}
-        onMouseMove={(event) => {
-          if (!mouseSelectionArmedRef.current) {
-            mouseSelectionArmedRef.current = true;
-            setMouseSelectionArmed(true);
-          }
-          if (hideCursor) {
-            setHideCursor(false);
-          }
-          const targetElement = event.target instanceof HTMLElement ? event.target : null;
-          const targetItem = targetElement?.closest('.command-palette-item');
-          const targetIndex = itemRefs.current.findIndex((item) => item === targetItem);
-          if (targetIndex !== -1 && targetIndex !== selectedIndexRef.current) {
-            updateSelection(targetIndex);
-          }
-        }}
       >
         <div className="command-palette-header">
           <input
@@ -904,13 +959,19 @@ export const CommandPalette = memo(function CommandPalette({ commands = [] }: Co
             type="text"
             className="command-palette-input"
             placeholder={
-              namespaceSelectMode
+              selectMode === 'namespaces'
                 ? 'Select a namespace...'
-                : kubeconfigSelectMode
+                : selectMode === 'kubeconfigs'
                   ? 'Select a kubeconfig...'
                   : 'Type a command or search...'
             }
             value={searchQuery}
+            role="combobox"
+            aria-label={inputLabel}
+            aria-autocomplete="list"
+            aria-expanded="true"
+            aria-controls={resultsId}
+            aria-activedescendant={selectedOptionId}
             onChange={(e) => {
               setSearchQuery(e.target.value);
               setSelectedIndex(0);
@@ -919,7 +980,13 @@ export const CommandPalette = memo(function CommandPalette({ commands = [] }: Co
           />
         </div>
 
-        <div className="command-palette-results" ref={resultsRef}>
+        <div
+          className="command-palette-results"
+          ref={resultsRef}
+          id={resultsId}
+          role="listbox"
+          aria-label={`${inputLabel} results`}
+        >
           {noResults ? (
             <div className="command-palette-empty">
               {searchQuery.trim().length > 0
@@ -930,18 +997,23 @@ export const CommandPalette = memo(function CommandPalette({ commands = [] }: Co
             <>
               {hasCommandResults &&
                 groupedCommands.map(([category, categoryCommands]) => (
-                  <div key={category}>
-                    <div className="command-palette-group-header">{category}</div>
+                  <fieldset key={category} className="command-palette-group">
+                    <legend className="command-palette-group-header">{category}</legend>
                     {categoryCommands.map((command) => {
                       const currentIndex = commandIndexMap.get(command.id) ?? 0;
                       const isSelected = currentIndex === selectedIndex;
                       return (
-                        <div
+                        <button
+                          type="button"
                           key={command.id}
                           ref={(el) => {
                             itemRefs.current[currentIndex] = el;
                           }}
                           className={`command-palette-item ${isSelected ? 'selected' : ''}`}
+                          id={`command-palette-option-${currentIndex}`}
+                          role="option"
+                          aria-selected={isSelected}
+                          tabIndex={-1}
                           onClick={() => executePaletteItem({ type: 'command', command })}
                           onMouseEnter={() => {
                             if (mouseSelectionArmedRef.current) {
@@ -963,29 +1035,33 @@ export const CommandPalette = memo(function CommandPalette({ commands = [] }: Co
                               {command.renderLabel ?? command.label}
                             </div>
                           </div>
-                          {command.shortcut && (
+                          {!!command.shortcut && (
                             <div className="keycap">
                               {Array.isArray(command.shortcut) ? (
-                                command.shortcut.map((key, idx) => <kbd key={idx}>{key}</kbd>)
+                                withStableListKeys(command.shortcut, (key) => key).map(
+                                  ({ key: stableKey, value: shortcutKey }) => (
+                                    <kbd key={stableKey}>{shortcutKey}</kbd>
+                                  )
+                                )
                               ) : (
                                 <kbd>{command.shortcut}</kbd>
                               )}
                             </div>
                           )}
-                        </div>
+                        </button>
                       );
                     })}
-                  </div>
+                  </fieldset>
                 ))}
 
-              {(catalogLoading || hasCatalogResults) && (
-                <div>
-                  <div className="command-palette-group-header">
+              {!!(catalogLoading || hasCatalogResults) && (
+                <fieldset className="command-palette-group">
+                  <legend className="command-palette-group-header">
                     Catalog Results
                     {catalogStats?.truncated && hasCatalogResults
                       ? ` (${catalogDisplayItems.length} / ${catalogStats.total})`
                       : ''}
-                  </div>
+                  </legend>
                   {catalogLoading && catalogDisplayItems.length === 0 && (
                     <div className="command-palette-loading">Searching catalog…</div>
                   )}
@@ -993,12 +1069,17 @@ export const CommandPalette = memo(function CommandPalette({ commands = [] }: Co
                     const currentIndex = catalogBaseIndex + idx;
                     const isSelected = currentIndex === selectedIndex;
                     return (
-                      <div
+                      <button
+                        type="button"
                         key={entry.item.uid}
                         ref={(el) => {
                           itemRefs.current[currentIndex] = el;
                         }}
                         className={`command-palette-item ${isSelected ? 'selected' : ''}`}
+                        id={`command-palette-option-${currentIndex}`}
+                        role="option"
+                        aria-selected={isSelected}
+                        tabIndex={-1}
                         onClick={() => executePaletteItem({ type: 'catalog', item: entry.item })}
                         onMouseEnter={() => {
                           if (mouseSelectionArmedRef.current) {
@@ -1014,7 +1095,7 @@ export const CommandPalette = memo(function CommandPalette({ commands = [] }: Co
                             <span className="command-palette-item-name">{entry.displayName}</span>
                           </div>
                         </div>
-                      </div>
+                      </button>
                     );
                   })}
                   {catalogStats?.truncated && catalogDisplayItems.length > 0 && (
@@ -1023,7 +1104,7 @@ export const CommandPalette = memo(function CommandPalette({ commands = [] }: Co
                       Refine your search to narrow further.
                     </div>
                   )}
-                </div>
+                </fieldset>
               )}
             </>
           )}

@@ -5,13 +5,12 @@
  * Covers key behaviors and edge cases for ClusterOverview.
  */
 
-import { act, type ReactNode } from 'react';
-import ReactDOM from 'react-dom/client';
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-
-import { eventBus } from '@/core/events';
-import type { ClusterOverviewPayload } from '@/core/refresh/types';
 import { ALL_NAMESPACES_SCOPE } from '@modules/namespace/constants';
+import { act, type ReactNode } from 'react';
+import * as ReactDOM from 'react-dom/client';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { eventBus } from '@/core/events';
+import type { ClusterOverviewPayload, ClusterOverviewSnapshotPayload } from '@/core/refresh/types';
 import ClusterOverview from './ClusterOverview';
 
 const {
@@ -242,10 +241,6 @@ vi.mock('@/core/settings/appPreferences', () => ({
 describe('ClusterOverview', () => {
   let cleanupRoot: (() => void) | null = null;
 
-  beforeAll(() => {
-    (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
-  });
-
   beforeEach(() => {
     domainStateRef.current = createDomainState('loading');
     kubeconfigStateRef.current = {
@@ -387,6 +382,11 @@ describe('ClusterOverview', () => {
         (element) => element.textContent
       )
     ).toEqual(['40ready', '1starting', '1failing', '2terminating', '7restarts', '9not ready']);
+    expect(
+      Array.from(container.querySelectorAll('.pod-status-card')).every(
+        (element) => element.tagName === 'BUTTON'
+      )
+    ).toBe(true);
     expect(container.querySelector('.pod-status-card--ready')).not.toBeNull();
     expect(container.querySelector('.pod-status-card--starting')).not.toBeNull();
     expect(container.querySelector('.pod-status-card--failing')).not.toBeNull();
@@ -516,7 +516,7 @@ describe('ClusterOverview', () => {
           totalNamespaces: 4,
           totalPods: 99,
         },
-      } as any,
+      },
       error: null,
     };
 
@@ -731,8 +731,8 @@ describe('ClusterOverview', () => {
 
     const restartedCard = container.querySelector('[data-testid="cluster-pod-status-restarted"]');
     const notReadyCard = container.querySelector('[data-testid="cluster-pod-status-not-ready"]');
-    expect(restartedCard?.getAttribute('role')).toBe('button');
-    expect(notReadyCard?.getAttribute('role')).toBe('button');
+    expect(restartedCard?.tagName).toBe('BUTTON');
+    expect(notReadyCard?.tagName).toBe('BUTTON');
 
     act(() => {
       restartedCard?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
@@ -823,6 +823,7 @@ describe('ClusterOverview', () => {
 
     const row = container.querySelector('.recent-events__row--clickable');
     expect(row).not.toBeNull();
+    expect(row?.tagName).toBe('BUTTON');
 
     await act(async () => {
       row?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
@@ -985,7 +986,7 @@ describe('ClusterOverview', () => {
           successCount: 0,
           failureCount: 0,
         },
-      } as any,
+      },
       error: null,
     };
 
@@ -1189,7 +1190,13 @@ function statValueFor(container: HTMLElement, label: string): string {
 function createDomainState(
   status: 'loading' | 'idle' | 'ready' | 'updating' | 'error',
   overrides: Partial<{ overview: ClusterOverviewPayload; error: string }> = {}
-) {
+): {
+  status: 'loading' | 'idle' | 'ready' | 'updating' | 'error';
+  data:
+    | (Partial<ClusterOverviewSnapshotPayload> & Pick<ClusterOverviewSnapshotPayload, 'overview'>)
+    | null;
+  error: string | null;
+} {
   if (status === 'ready' || status === 'updating') {
     if (!overrides.overview) {
       throw new Error('createDomainState requires overview data when status is ready or updating');

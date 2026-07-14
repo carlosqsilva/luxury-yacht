@@ -6,17 +6,18 @@
  * namespace, and filter settings.
  */
 
-import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { useModalFocusTrap } from '@shared/components/modals/useModalFocusTrap';
-import { Dropdown } from '@shared/components/dropdowns/Dropdown';
-import Tooltip from '@shared/components/Tooltip';
-import ConfirmationModal from '@shared/components/modals/ConfirmationModal';
-import ModalSurface from '@shared/components/modals/ModalSurface';
-import ModalHeader from '@shared/components/modals/ModalHeader';
-import { FavoriteGenericIcon } from '@shared/components/icons/FavoriteIcons';
 import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
-import { useNamespace } from '@modules/namespace/contexts/NamespaceContext';
 import { ALL_NAMESPACES_SCOPE } from '@modules/namespace/constants';
+import { useNamespace } from '@modules/namespace/contexts/NamespaceContext';
+import { Dropdown } from '@shared/components/dropdowns/Dropdown';
+import { FavoriteGenericIcon } from '@shared/components/icons/FavoriteIcons';
+import ConfirmationModal from '@shared/components/modals/ConfirmationModal';
+import ModalHeader from '@shared/components/modals/ModalHeader';
+import ModalSurface from '@shared/components/modals/ModalSurface';
+import { useModalFocusTrap } from '@shared/components/modals/useModalFocusTrap';
+import Tooltip from '@shared/components/Tooltip';
+import type React from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { Favorite, FavoriteFilters, FavoriteTableState } from '@/core/persistence/favorites';
 import '@shared/components/KubeconfigSelector.css';
 import './FavSaveModal.css';
@@ -103,7 +104,7 @@ export interface FavSaveModalProps {
 /** Resolve view tab id from a view label (e.g. "Pods" -> "pods"). */
 /** Resolve a view label (e.g. "Pods") to a view ID (e.g. "pods") for the given scope. */
 const resolveViewId = (label: string, viewType: string): string => {
-  const prefix = viewType + ':';
+  const prefix = `${viewType}:`;
   const scopedViews = ALL_VIEWS.filter((v) => v.value.startsWith(prefix));
   const lower = label.toLowerCase();
   const match = scopedViews.find(
@@ -118,33 +119,71 @@ const arraysEqual = (a: string[], b: string[]): boolean =>
   a.length === b.length && a.every((v, i) => v === b[i]);
 
 /** Compare current form state against an existing favorite to detect changes. */
+interface FavoriteFormState {
+  name: string;
+  clusterSpecific: boolean;
+  clusterSelection: string;
+  scope: 'cluster' | 'namespace';
+  view: string;
+  namespace: string;
+  filterText: string;
+  filterKinds: string[];
+  filterNamespaces: string[];
+  caseSensitive: boolean;
+  includeMetadata: boolean;
+}
+
 const hasFormChanges = (
   existing: Favorite,
-  name: string,
-  clusterSpecific: boolean,
-  clusterSelection: string,
-  scope: 'cluster' | 'namespace',
-  view: string,
-  namespace: string,
-  filterText: string,
-  filterKinds: string[],
-  filterNamespaces: string[],
-  caseSensitive: boolean,
-  includeMetadata: boolean
+  {
+    name,
+    clusterSpecific,
+    clusterSelection,
+    scope,
+    view,
+    namespace,
+    filterText,
+    filterKinds,
+    filterNamespaces,
+    caseSensitive,
+    includeMetadata,
+  }: FavoriteFormState
 ): boolean => {
-  if (name !== existing.name) return true;
+  if (name !== existing.name) {
+    return true;
+  }
   const existingIsClusterSpecific = existing.clusterSelection !== '';
-  if (clusterSpecific !== existingIsClusterSpecific) return true;
-  if (clusterSpecific && clusterSelection !== existing.clusterSelection) return true;
-  if (scope !== existing.viewType) return true;
-  if (view !== existing.view) return true;
-  if (scope === 'namespace' && namespace !== existing.namespace) return true;
+  if (clusterSpecific !== existingIsClusterSpecific) {
+    return true;
+  }
+  if (clusterSpecific && clusterSelection !== existing.clusterSelection) {
+    return true;
+  }
+  if (scope !== existing.viewType) {
+    return true;
+  }
+  if (view !== existing.view) {
+    return true;
+  }
+  if (scope === 'namespace' && namespace !== existing.namespace) {
+    return true;
+  }
   if (existing.filters) {
-    if (filterText !== (existing.filters.search ?? '')) return true;
-    if (!arraysEqual(filterKinds, existing.filters.kinds ?? [])) return true;
-    if (!arraysEqual(filterNamespaces, existing.filters.namespaces ?? [])) return true;
-    if (caseSensitive !== (existing.filters.caseSensitive ?? false)) return true;
-    if (includeMetadata !== (existing.filters.includeMetadata ?? false)) return true;
+    if (filterText !== (existing.filters.search ?? '')) {
+      return true;
+    }
+    if (!arraysEqual(filterKinds, existing.filters.kinds ?? [])) {
+      return true;
+    }
+    if (!arraysEqual(filterNamespaces, existing.filters.namespaces ?? [])) {
+      return true;
+    }
+    if (caseSensitive !== (existing.filters.caseSensitive ?? false)) {
+      return true;
+    }
+    if (includeMetadata !== (existing.filters.includeMetadata ?? false)) {
+      return true;
+    }
   }
   return false;
 };
@@ -170,7 +209,8 @@ const FavSaveModal: React.FC<FavSaveModalProps> = ({
   onSave,
   onDelete,
 }) => {
-  const isEditing = existingFavorite != null;
+  const elementIdPrefix = useId();
+  const isEditing = Boolean(existingFavorite);
   const { kubeconfigs, getClusterMeta } = useKubeconfig();
   const { namespaces } = useNamespace();
   const modalRef = useRef<HTMLDivElement>(null);
@@ -191,7 +231,9 @@ const FavSaveModal: React.FC<FavSaveModalProps> = ({
 
   // ----- Initialize form when modal opens -----
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen) {
+      return;
+    }
     if (existingFavorite) {
       setName(existingFavorite.name);
       setClusterSpecific(existingFavorite.clusterSelection !== '');
@@ -232,7 +274,9 @@ const FavSaveModal: React.FC<FavSaveModalProps> = ({
     ref: modalRef,
     disabled: !isOpen || showDeleteConfirm,
     onEscape: () => {
-      if (!isOpen || showDeleteConfirm) return false;
+      if (!isOpen || showDeleteConfirm) {
+        return false;
+      }
       onClose();
       return true;
     },
@@ -245,7 +289,9 @@ const FavSaveModal: React.FC<FavSaveModalProps> = ({
     const seen = new Set<string>();
     return kubeconfigs.map((kc) => {
       const isFirstForFile = !seen.has(kc.name);
-      if (isFirstForFile) seen.add(kc.name);
+      if (isFirstForFile) {
+        seen.add(kc.name);
+      }
       return {
         value: `${kc.path}:${kc.context}`,
         label: `${kc.name} [${kc.context}]`,
@@ -265,7 +311,9 @@ const FavSaveModal: React.FC<FavSaveModalProps> = ({
     const opts = [{ value: ALL_NAMESPACES_SCOPE, label: 'All Namespaces' }];
     namespaces.forEach((ns) => {
       // Skip the synthetic "All Namespaces" item already added above.
-      if (ns.isSynthetic) return;
+      if (ns.isSynthetic) {
+        return;
+      }
       opts.push({ value: ns.scope || ns.name, label: ns.name });
     });
     return opts;
@@ -274,7 +322,9 @@ const FavSaveModal: React.FC<FavSaveModalProps> = ({
   // Kind filter dropdown: merge available kinds with any saved kinds not in the list.
   const kindDropdownOptions = useMemo(() => {
     const all = new Set(availableKinds ?? []);
-    filterKinds.forEach((k) => all.add(k));
+    filterKinds.forEach((k) => {
+      all.add(k);
+    });
     return Array.from(all)
       .sort()
       .map((k) => ({ value: k, label: k }));
@@ -283,7 +333,9 @@ const FavSaveModal: React.FC<FavSaveModalProps> = ({
   // Namespace filter dropdown: merge available filter namespaces with saved ones.
   const nsFilterDropdownOptions = useMemo(() => {
     const all = new Set(availableFilterNamespaces ?? []);
-    filterNamespaces.forEach((ns) => all.add(ns));
+    filterNamespaces.forEach((ns) => {
+      all.add(ns);
+    });
     return Array.from(all)
       .sort()
       .map((ns) => ({ value: ns, label: ns }));
@@ -307,22 +359,22 @@ const FavSaveModal: React.FC<FavSaveModalProps> = ({
   const isNamespaceScope = scope === 'namespace';
 
   // Detect whether Save should be enabled when editing.
-  const changesDetected = isEditing
-    ? hasFormChanges(
-        existingFavorite!,
-        name.trim() || defaultName,
-        clusterSpecific,
-        clusterSelection,
-        scope,
-        activeView,
-        selectedNamespace,
-        filterText,
-        filterKinds,
-        filterNamespaces,
-        caseSensitive,
-        includeMetadataState
-      )
-    : true;
+  const changesDetected =
+    isEditing && existingFavorite
+      ? hasFormChanges(existingFavorite, {
+          name: name.trim() || defaultName,
+          clusterSpecific,
+          clusterSelection,
+          scope,
+          view: activeView,
+          namespace: selectedNamespace,
+          filterText,
+          filterKinds,
+          filterNamespaces,
+          caseSensitive,
+          includeMetadata: includeMetadataState,
+        })
+      : true;
 
   // ----- Handlers -----
 
@@ -363,7 +415,9 @@ const FavSaveModal: React.FC<FavSaveModalProps> = ({
     onClose();
   };
 
-  if (!isOpen) return null;
+  if (!isOpen) {
+    return null;
+  }
 
   return (
     <>
@@ -387,7 +441,7 @@ const FavSaveModal: React.FC<FavSaveModalProps> = ({
             <div className="modal-form-items">
               <div className="modal-form-field">
                 <input
-                  id="fav-name"
+                  id={`${elementIdPrefix}-fav-name`}
                   type="text"
                   className="modal-input"
                   value={name}
@@ -398,7 +452,7 @@ const FavSaveModal: React.FC<FavSaveModalProps> = ({
                       (e.target as HTMLInputElement).select();
                     }
                   }}
-                  autoFocus
+                  data-modal-initial-focus
                 />
               </div>
             </div>
@@ -438,7 +492,9 @@ const FavSaveModal: React.FC<FavSaveModalProps> = ({
                   placeholder="Select cluster..."
                   disabled={!clusterSpecific}
                   renderValue={(val) => {
-                    if (!clusterSpecific) return 'Select cluster...';
+                    if (!clusterSpecific) {
+                      return 'Select cluster...';
+                    }
                     const match = clusterOptions.find((o) => o.value === val);
                     return match?.metadata?.context ?? val ?? 'Select cluster...';
                   }}
@@ -446,7 +502,7 @@ const FavSaveModal: React.FC<FavSaveModalProps> = ({
                     <div
                       className={`kubeconfig-option${!option.metadata?.isFirstForFile ? ' no-filename' : ''}${option.metadata?.isCurrentContext ? ' current-context' : ''}`}
                     >
-                      {option.metadata?.isFirstForFile && (
+                      {!!option.metadata?.isFirstForFile && (
                         <div className="kubeconfig-filename">{option.metadata.filename}</div>
                       )}
                       <div className="kubeconfig-context">
@@ -464,8 +520,9 @@ const FavSaveModal: React.FC<FavSaveModalProps> = ({
             <h3>View</h3>
             <div className="modal-form-items">
               <div className="modal-form-field modal-form-field-inline fav-save-inline-row">
-                <label>View</label>
+                <label htmlFor={`${elementIdPrefix}-favorite-view`}>View</label>
                 <Dropdown
+                  id={`${elementIdPrefix}-favorite-view`}
                   options={ALL_VIEWS}
                   value={selectedView}
                   onChange={(val) => setSelectedView(val as string)}
@@ -474,8 +531,9 @@ const FavSaveModal: React.FC<FavSaveModalProps> = ({
               </div>
               {isNamespaceScope && (
                 <div className="modal-form-field modal-form-field-inline fav-save-inline-row">
-                  <label>Namespace</label>
+                  <label htmlFor={`${elementIdPrefix}-favorite-namespace`}>Namespace</label>
                   <Dropdown
+                    id={`${elementIdPrefix}-favorite-namespace`}
                     options={namespaceOptions}
                     value={selectedNamespace}
                     onChange={(val) => setSelectedNamespace(val as string)}
@@ -491,8 +549,9 @@ const FavSaveModal: React.FC<FavSaveModalProps> = ({
             <div className="modal-form-items">
               {kindDropdownOptions.length > 0 && (
                 <div className="modal-form-field modal-form-field-inline fav-save-inline-row">
-                  <label>Kinds</label>
+                  <label htmlFor={`${elementIdPrefix}-favorite-kinds`}>Kinds</label>
                   <Dropdown
+                    id={`${elementIdPrefix}-favorite-kinds`}
                     options={kindDropdownOptions}
                     value={filterKinds}
                     onChange={(val) => setFilterKinds(Array.isArray(val) ? val : val ? [val] : [])}
@@ -500,8 +559,12 @@ const FavSaveModal: React.FC<FavSaveModalProps> = ({
                     multiple
                     renderValue={(val) => {
                       const count = Array.isArray(val) ? val.length : val ? 1 : 0;
-                      if (count === 0) return 'All kinds';
-                      if (count === 1) return Array.isArray(val) ? val[0] : val;
+                      if (count === 0) {
+                        return 'All kinds';
+                      }
+                      if (count === 1) {
+                        return Array.isArray(val) ? val[0] : val;
+                      }
                       return `${count} selected`;
                     }}
                   />
@@ -509,8 +572,11 @@ const FavSaveModal: React.FC<FavSaveModalProps> = ({
               )}
               {nsFilterDropdownOptions.length > 0 && (
                 <div className="modal-form-field modal-form-field-inline fav-save-inline-row">
-                  <label>Namespaces</label>
+                  <label htmlFor={`${elementIdPrefix}-favorite-filter-namespaces`}>
+                    Namespaces
+                  </label>
                   <Dropdown
+                    id={`${elementIdPrefix}-favorite-filter-namespaces`}
                     options={nsFilterDropdownOptions}
                     value={filterNamespaces}
                     onChange={(val) =>
@@ -520,17 +586,21 @@ const FavSaveModal: React.FC<FavSaveModalProps> = ({
                     multiple
                     renderValue={(val) => {
                       const count = Array.isArray(val) ? val.length : val ? 1 : 0;
-                      if (count === 0) return 'All namespaces';
-                      if (count === 1) return Array.isArray(val) ? val[0] : val;
+                      if (count === 0) {
+                        return 'All namespaces';
+                      }
+                      if (count === 1) {
+                        return Array.isArray(val) ? val[0] : val;
+                      }
                       return `${count} selected`;
                     }}
                   />
                 </div>
               )}
               <div className="modal-form-field modal-form-field-inline fav-save-inline-row">
-                <label htmlFor="fav-filter-text">Filter Text</label>
+                <label htmlFor={`${elementIdPrefix}-fav-filter-text`}>Filter Text</label>
                 <input
-                  id="fav-filter-text"
+                  id={`${elementIdPrefix}-fav-filter-text`}
                   type="text"
                   className="modal-input"
                   value={filterText}
@@ -569,15 +639,16 @@ const FavSaveModal: React.FC<FavSaveModalProps> = ({
 
         <div className="modal-footer">
           {isEditing && (
-            <button className="button danger" onClick={handleDelete}>
+            <button type="button" className="button danger" onClick={handleDelete}>
               Delete
             </button>
           )}
           <div className="fav-save-footer-spacer" />
-          <button className="button cancel" onClick={onClose}>
+          <button type="button" className="button cancel" onClick={onClose}>
             Cancel
           </button>
           <button
+            type="button"
             className="button save"
             onClick={handleSave}
             disabled={isEditing && !changesDetected}

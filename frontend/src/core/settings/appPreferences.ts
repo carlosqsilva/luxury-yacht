@@ -5,28 +5,28 @@
  */
 
 import {
-  SaveTheme,
-  DeleteTheme,
-  ReorderThemes,
-  ApplyTheme,
-  MatchThemeForCluster,
-  ValidateThemeClusterPattern,
-  UpdateAppPreferences,
-} from '@wailsjs/go/backend/App';
-import { types } from '@wailsjs/go/models';
+  DEFAULT_TABLE_PAGE_SIZE,
+  normalizeTablePageSize,
+  TABLE_PAGE_SIZE_OPTIONS,
+  type TablePageSize,
+} from '@shared/components/tables/pageSizeOptions';
+import type { types } from '@wailsjs/go/models';
 import {
   readAppSettings,
   readAppSettingsSchema,
   readThemes,
   requestAppState,
 } from '@/core/app-state-access';
-import { eventBus } from '@/core/events';
 import {
-  DEFAULT_TABLE_PAGE_SIZE,
-  TABLE_PAGE_SIZE_OPTIONS,
-  normalizeTablePageSize,
-  type TablePageSize,
-} from '@shared/components/tables/pageSizeOptions';
+  ApplyTheme,
+  DeleteTheme,
+  MatchThemeForCluster,
+  ReorderThemes,
+  SaveTheme,
+  UpdateAppPreferences,
+  ValidateThemeClusterPattern,
+} from '@/core/backend-api';
+import { eventBus } from '@/core/events';
 import {
   APPEARANCE_BOOTSTRAP_STORAGE_KEY,
   saveAppearanceBootstrapToLocalStorage,
@@ -542,14 +542,19 @@ export const normalizeIntegerPreferenceValue = (
   options?: { defaultOnNonPositive?: boolean }
 ): number => {
   const metadata = getIntegerPreferenceMetadata(key);
-  if (value == null || Number.isNaN(value) || (options?.defaultOnNonPositive && value <= 0)) {
+  if (
+    value === null ||
+    value === undefined ||
+    Number.isNaN(value) ||
+    (options?.defaultOnNonPositive && value <= 0)
+  ) {
     return numericPreferenceDefault(key);
   }
   const floored = Math.floor(value);
-  if (metadata.min != null && floored < metadata.min) {
+  if (metadata.min !== null && metadata.min !== undefined && floored < metadata.min) {
     return metadata.min;
   }
-  if (metadata.max != null && floored > metadata.max) {
+  if (metadata.max !== null && metadata.max !== undefined && floored > metadata.max) {
     return metadata.max;
   }
   return floored;
@@ -752,7 +757,7 @@ const updatePreferenceCache = (updates: Partial<AppPreferences>): void => {
 };
 
 const wailsRuntimeAvailable = (): boolean => {
-  return Boolean((window as any)?.go?.backend?.App);
+  return Boolean(window.go?.backend?.App);
 };
 
 interface LocalStorageSnapshot {
@@ -773,7 +778,7 @@ const captureLocalStorageSnapshot = (): LocalStorageSnapshot => {
 
 const restoreLocalStorageValue = (key: string, value: string | null): void => {
   try {
-    if (value == null) {
+    if (value === null || value === undefined) {
       localStorage.removeItem(key);
     } else {
       localStorage.setItem(key, value);

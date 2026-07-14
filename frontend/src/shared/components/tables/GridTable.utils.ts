@@ -5,13 +5,13 @@
  * Provides shared helper functions for the shared components.
  */
 
-import React from 'react';
 import type {
   ColumnWidthInput,
   ColumnWidthUnit,
   GridColumnDefinition,
 } from '@shared/components/tables/GridTable.types';
 import { getKindColorClass } from '@shared/utils/kindBadgeColors';
+import React from 'react';
 
 export const DEFAULT_COLUMN_WIDTH = 150;
 export const DEFAULT_COLUMN_MIN_WIDTH = 72;
@@ -19,40 +19,53 @@ export const DEFAULT_FONT_SIZE = 16;
 
 const FIXED_KIND_KEYS = new Set(['kind']);
 
+const asRecord = (value: unknown): Record<string, unknown> | null =>
+  value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : null;
+
+interface TextElementProps {
+  'data-gridtable-export-text'?: string;
+  children?: React.ReactNode;
+  title?: string;
+}
+
 export const isKindColumnKey = (key: string) => FIXED_KIND_KEYS.has(key);
 export const isFixedColumnKey = (key: string) => isKindColumnKey(key);
 export const isSortableColumn = <T>(column: GridColumnDefinition<T> | null | undefined) =>
-  column != null && column.sortable !== false;
+  column !== null && column !== undefined && column.sortable !== false;
 
 export const normalizeKindClass = (value: string) => getKindColorClass(value);
 
-export const defaultGetKind = (row: any): string | null => {
-  if (!row || typeof row !== 'object') {
+export const defaultGetKind = (row: unknown): string | null => {
+  const record = asRecord(row);
+  if (!record) {
     return null;
   }
-  if (typeof row.kindDisplay === 'string') {
-    return row.kindDisplay;
+  if (typeof record.kindDisplay === 'string') {
+    return record.kindDisplay;
   }
-  if (typeof row.kind === 'string') {
-    return row.kind;
+  if (typeof record.kind === 'string') {
+    return record.kind;
   }
-  if (row.item && typeof row.item.kind === 'string') {
-    return row.item.kind;
+  const item = asRecord(record.item);
+  if (typeof item?.kind === 'string') {
+    return item.kind;
   }
   return null;
 };
 
-export const defaultGetNamespace = (row: any): string | null => {
-  if (!row || typeof row !== 'object') {
+export const defaultGetNamespace = (row: unknown): string | null => {
+  const record = asRecord(row);
+  if (!record) {
     return null;
   }
+  const item = asRecord(record.item);
   const value =
-    typeof row.namespaceDisplay === 'string'
-      ? row.namespaceDisplay
-      : typeof row.namespace === 'string'
-        ? row.namespace
-        : row.item && typeof row.item.namespace === 'string'
-          ? row.item.namespace
+    typeof record.namespaceDisplay === 'string'
+      ? record.namespaceDisplay
+      : typeof record.namespace === 'string'
+        ? record.namespace
+        : typeof item?.namespace === 'string'
+          ? item.namespace
           : null;
   if (value === '—') {
     return '';
@@ -60,18 +73,20 @@ export const defaultGetNamespace = (row: any): string | null => {
   return value;
 };
 
-const defaultGetClusterId = (row: any): string | null => {
-  if (!row || typeof row !== 'object') {
+const defaultGetClusterId = (row: unknown): string | null => {
+  const record = asRecord(row);
+  if (!record) {
     return null;
   }
-  if (typeof row.clusterId === 'string') {
-    return row.clusterId;
+  if (typeof record.clusterId === 'string') {
+    return record.clusterId;
   }
-  if (row.item && typeof row.item.clusterId === 'string') {
-    return row.item.clusterId;
+  const item = asRecord(record.item);
+  if (typeof item?.clusterId === 'string') {
+    return item.clusterId;
   }
   // Warn in development when clusterId is missing - this may indicate a payload issue.
-  if (import.meta.env.DEV && (row.clusterName || row.item?.clusterName)) {
+  if (import.meta.env.DEV && (record.clusterName || item?.clusterName)) {
     console.warn('GridTable: row has clusterName but missing clusterId', row);
   }
   return null;
@@ -80,17 +95,17 @@ const defaultGetClusterId = (row: any): string | null => {
 // Prefix row keys with cluster identity to keep multi-cluster rows stable.
 // Throws when clusterId is missing — a key collision in a multi-cluster view
 // is worse than a crash, so callers must ensure clusterId is always populated.
-export const buildClusterScopedKey = (row: any, baseKey: string): string => {
+export const buildClusterScopedKey = (row: unknown, baseKey: string): string => {
   const clusterId = defaultGetClusterId(row);
   const trimmed = typeof clusterId === 'string' ? clusterId.trim() : '';
   if (trimmed) {
     return `${trimmed}|${baseKey}`;
   }
   throw new Error(
-    `GridTable: buildClusterScopedKey requires clusterId on every row. ` +
+    'GridTable: buildClusterScopedKey requires clusterId on every row. ' +
       `Row with key "${baseKey}" has no clusterId — this will cause key ` +
-      `collisions in multi-cluster views. Ensure the data source populates ` +
-      `clusterId on all rows.`
+      'collisions in multi-cluster views. Ensure the data source populates ' +
+      'clusterId on all rows.'
   );
 };
 
@@ -98,10 +113,7 @@ export const buildClusterScopedKey = (row: any, baseKey: string): string => {
 // Hex-encodes characters outside [a-zA-Z0-9_-] so distinct keys always
 // produce distinct IDs — unlike the old lossy replace-with-underscore approach.
 export const getStableRowId = (rowKey: string): string => {
-  const safe = rowKey.replace(
-    /[^a-zA-Z0-9_-]/g,
-    (ch) => '_x' + ch.charCodeAt(0).toString(16) + '_'
-  );
+  const safe = rowKey.replace(/[^a-zA-Z0-9_-]/g, (ch) => `_x${ch.charCodeAt(0).toString(16)}_`);
   return `gridtable-row-${safe}`;
 };
 
@@ -137,8 +149,9 @@ export const findGridTableCellByColumnKey = (
   return null;
 };
 
-export const defaultGetSearchText = (row: any): string[] => {
-  if (!row || typeof row !== 'object') {
+export const defaultGetSearchText = (row: unknown): string[] => {
+  const record = asRecord(row);
+  if (!record) {
     return [];
   }
   const values = new Set<string>();
@@ -147,16 +160,17 @@ export const defaultGetSearchText = (row: any): string[] => {
       values.add(value.trim());
     }
   };
-  add(row.name);
-  add(row.title);
-  add(row.namespace);
-  add(row.namespaceDisplay);
-  add(row.kind);
-  add(row.kindDisplay);
-  if (row.item && typeof row.item === 'object') {
-    add(row.item.name);
-    add(row.item.namespace);
-    add(row.item.kind);
+  add(record.name);
+  add(record.title);
+  add(record.namespace);
+  add(record.namespaceDisplay);
+  add(record.kind);
+  add(record.kindDisplay);
+  const item = asRecord(record.item);
+  if (item) {
+    add(item.name);
+    add(item.namespace);
+    add(item.kind);
   }
   return Array.from(values);
 };
@@ -168,8 +182,8 @@ export const getTextContent = (node: React.ReactNode): string => {
   if (Array.isArray(node)) {
     return node.map(getTextContent).join('');
   }
-  if (React.isValidElement(node)) {
-    const props = node.props as any;
+  if (React.isValidElement<TextElementProps>(node)) {
+    const props = node.props;
     const exportText = props['data-gridtable-export-text'];
     if (typeof exportText === 'string') {
       return exportText;
@@ -177,7 +191,7 @@ export const getTextContent = (node: React.ReactNode): string => {
     if (props.children) {
       return getTextContent(props.children);
     }
-    if (props.title) {
+    if (typeof props.title === 'string') {
       return props.title;
     }
   }
@@ -203,7 +217,7 @@ export const detectWidthUnit = (input: ColumnWidthInput | undefined | null): Col
 };
 
 export const parseWidthInputToNumber = (input: ColumnWidthInput | undefined): number | null => {
-  if (input == null) {
+  if (input === null || input === undefined) {
     return null;
   }
   if (typeof input === 'number') {

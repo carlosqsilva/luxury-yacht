@@ -5,7 +5,9 @@
  * Displays an overview of the connected Kubernetes cluster, including resource usage,
  * node and workload summaries, and pod status with navigation links.
  */
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+
+import captainK8s from '@assets/captain-k8s-color.png';
+import logo from '@assets/luxury-yacht-color-vert.png';
 import ResourceBar from '@shared/components/ResourceBar';
 import {
   USAGE_CRITICAL_THRESHOLD_PERCENT,
@@ -17,50 +19,49 @@ import {
   formatCpuValue,
   formatMemoryValue,
 } from '@shared/utils/resourceCalculations';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { requestRefreshDomain, setRefreshDomainEnabled } from '@/core/data-access';
+import { eventBus } from '@/core/events';
 import { useRefreshScopedDomain } from '@/core/refresh';
-import { useStreamSignalRefetch } from '@/core/refresh/hooks/useStreamSignalRefetch';
-import { buildClusterScope } from '@/core/refresh/clusterScope';
 import {
   canActivateClusterOverviewRefresh,
   shouldSuppressClusterOverviewUnavailableError,
 } from '@/core/refresh/clusterOverviewLifecycle';
-import { eventBus } from '@/core/events';
+import { buildClusterScope } from '@/core/refresh/clusterScope';
+import { useStreamSignalRefetch } from '@/core/refresh/hooks/useStreamSignalRefetch';
 import type { ClusterOverviewPayload } from '@/core/refresh/types';
-import logo from '@assets/luxury-yacht-color-vert.png';
-import captainK8s from '@assets/captain-k8s-color.png';
 import './ClusterOverview.css';
-import { useMetricsBannerInfo } from '@shared/hooks/useMetricsBannerInfo';
-import { useNamespace } from '@modules/namespace/contexts/NamespaceContext';
-import { ALL_NAMESPACES_SCOPE } from '@modules/namespace/constants';
-import { useViewState } from '@/core/contexts/ViewStateContext';
+import { useClusterLifecycle } from '@core/contexts/ClusterLifecycleContext';
+import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
 import {
   emitPodsUnhealthySignal,
   type PodsFilterMode,
 } from '@modules/namespace/components/podsFilterSignals';
-import { useClusterLifecycle } from '@core/contexts/ClusterLifecycleContext';
-import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
-import { useClusterHealthListener } from '@/hooks/useWailsRuntimeEvents';
-import { useActiveClusterAuthState } from '@/core/contexts/AuthErrorContext';
-import { buildConnectivityPresentation } from '@/core/connection/connectivityPresentation';
-import { useAutoRefreshLoadingState } from '@/core/refresh/hooks/useAutoRefreshLoadingState';
-import { useObjectPanel } from '@modules/object-panel/hooks/useObjectPanel';
-import { LiveAgeText } from '@shared/components/LiveAgeText';
+import { ALL_NAMESPACES_SCOPE } from '@modules/namespace/constants';
+import { useNamespace } from '@modules/namespace/contexts/NamespaceContext';
 import {
   objectPanelId,
   useObjectPanelState,
 } from '@modules/object-panel/contexts/ObjectPanelStateContext';
-import type { RecentEventEntry } from '@/core/refresh/types';
+import { useObjectPanel } from '@modules/object-panel/hooks/useObjectPanel';
+import { LiveAgeText } from '@shared/components/LiveAgeText';
+import { useMetricsBannerInfo } from '@shared/hooks/useMetricsBannerInfo';
 import {
   canResolveEventObjectReference,
   resolveEventObjectReference,
 } from '@shared/utils/eventObjectIdentity';
+import { buildConnectivityPresentation } from '@/core/connection/connectivityPresentation';
+import { useActiveClusterAuthState } from '@/core/contexts/AuthErrorContext';
+import { useViewState } from '@/core/contexts/ViewStateContext';
+import { useAutoRefreshLoadingState } from '@/core/refresh/hooks/useAutoRefreshLoadingState';
+import type { RecentEventEntry } from '@/core/refresh/types';
 import {
   clusterOverviewCpuValue,
   clusterOverviewMemoryValue,
   clusterOverviewResourceMetrics,
   clusterWorkloadUsageValue,
 } from '@/core/resource-metrics';
+import { useClusterHealthListener } from '@/hooks/useWailsRuntimeEvents';
 import ClusterOverviewRestrictionNotice, {
   type OverviewRestriction,
 } from './ClusterOverviewRestrictionNotice';
@@ -136,7 +137,7 @@ const ClusterOverview: React.FC<ClusterOverviewProps> = ({ clusterContext }) => 
   const authState = useActiveClusterAuthState(selectedClusterId);
   const { namespaceReady, setSelectedNamespace } = useNamespace();
   const { isPaused, suppressPassiveLoading } = useAutoRefreshLoadingState();
-  const lifecycleState = selectedClusterId ? getClusterState(selectedClusterId) : '';
+  const lifecycleState = selectedClusterId ? getClusterState(selectedClusterId) : undefined;
 
   // Cluster Overview is a foreground per-cluster page, so it must never
   // reuse a multi-cluster overview scope from other selected tabs.
@@ -293,7 +294,7 @@ const ClusterOverview: React.FC<ClusterOverviewProps> = ({ clusterContext }) => 
       isLoading ||
       overviewDomain.status === 'idle' ||
       suppressUnavailableError ||
-      lifecycleState === '' ||
+      lifecycleState === undefined ||
       lifecycleState === 'connecting' ||
       lifecycleState === 'connected');
 
@@ -387,19 +388,6 @@ const ClusterOverview: React.FC<ClusterOverviewProps> = ({ clusterContext }) => 
     ]
   );
 
-  const handlePodStatusKeyDown = useCallback(
-    (event: React.KeyboardEvent<HTMLDivElement>, filter: PodStatusFilter, count: number) => {
-      if (count <= 0) {
-        return;
-      }
-      if (event.key === 'Enter' || event.key === ' ') {
-        event.preventDefault();
-        handlePodStatusNavigate(filter, count);
-      }
-    },
-    [handlePodStatusNavigate]
-  );
-
   const podStatusItems = [
     {
       key: 'ready',
@@ -456,25 +444,29 @@ const ClusterOverview: React.FC<ClusterOverviewProps> = ({ clusterContext }) => 
   }) => {
     const clickable = item.clickable !== false && item.value > 0;
     const itemClass = `pod-status-card pod-status-card--${item.variant}${clickable ? ' pod-status-card--clickable' : ''}`;
-    return (
-      <div
-        key={item.key}
-        className={itemClass}
-        role={clickable ? 'button' : undefined}
-        tabIndex={clickable ? 0 : undefined}
-        onClick={clickable ? () => handlePodStatusNavigate(item.filter, item.value) : undefined}
-        onKeyDown={
-          clickable ? (event) => handlePodStatusKeyDown(event, item.filter, item.value) : undefined
-        }
-        aria-disabled={!clickable}
-        data-testid={`cluster-pod-status-${item.key}`}
-      >
+    const content = (
+      <>
         <span className="pod-status-card__count">
           {showSkeleton || podsUnavailable ? DASH : item.value}
         </span>
         <span className="pod-status-card__label" title={item.label}>
           {item.label}
         </span>
+      </>
+    );
+    return clickable ? (
+      <button
+        type="button"
+        key={item.key}
+        className={itemClass}
+        onClick={() => handlePodStatusNavigate(item.filter, item.value)}
+        data-testid={`cluster-pod-status-${item.key}`}
+      >
+        {content}
+      </button>
+    ) : (
+      <div key={item.key} className={itemClass} data-testid={`cluster-pod-status-${item.key}`}>
+        {content}
       </div>
     );
   };
@@ -862,7 +854,7 @@ const ClusterOverview: React.FC<ClusterOverviewProps> = ({ clusterContext }) => 
                 {showSkeleton ? '—' : displayOverview.clusterVersion || 'Unknown'}
               </span>
             </span>
-            {overviewStatus.summary && (
+            {!!overviewStatus.summary && (
               <span className="cluster-info-item">
                 <span className="cluster-info-label">Status</span>
                 <span className={`cluster-info-value cluster-info-value--${overviewStatus.status}`}>
@@ -873,12 +865,18 @@ const ClusterOverview: React.FC<ClusterOverviewProps> = ({ clusterContext }) => 
           </div>
         </div>
         <div className="overview-top__hero">
-          <img src={captainK8s} alt="Captain K8s" className="captain-k8s-small" />
-          <img src={logo} alt="Luxury Yacht" className="logo-small" />
+          <img
+            src={captainK8s}
+            alt="Captain K8s"
+            className="captain-k8s-small"
+            width={1024}
+            height={1024}
+          />
+          <img src={logo} alt="Luxury Yacht" className="logo-small" width={827} height={500} />
         </div>
       </div>
 
-      {errorMessage && (
+      {!!errorMessage && (
         <div className="cluster-overview-loading-inline">
           <ClusterOverviewRestrictionNotice
             restrictions={[
@@ -915,7 +913,7 @@ const ClusterOverview: React.FC<ClusterOverviewProps> = ({ clusterContext }) => 
               <div className="metric-header__title-group">
                 <h3>CPU</h3>
                 <span className="metric-header__usage">
-                  {showSkeleton ? DASH : cpuUsageSummary}
+                  {showSkeleton ? DASH : (cpuUsageSummary ?? '')}
                 </span>
               </div>
               <div
@@ -958,7 +956,7 @@ const ClusterOverview: React.FC<ClusterOverviewProps> = ({ clusterContext }) => 
               <div className="metric-header__title-group">
                 <h3>Memory</h3>
                 <span className="metric-header__usage">
-                  {showSkeleton ? DASH : memoryUsageSummary}
+                  {showSkeleton ? DASH : (memoryUsageSummary ?? '')}
                 </span>
               </div>
               <div
@@ -1014,7 +1012,7 @@ const ClusterOverview: React.FC<ClusterOverviewProps> = ({ clusterContext }) => 
               />
               Legend
             </button>
-            {legendExpanded && (
+            {!!legendExpanded && (
               <div className="utilization-legend__items" data-testid="utilization-legend">
                 <div className="utilization-legend__item">
                   <span className="utilization-legend__swatch utilization-legend__swatch--usage-normal" />
@@ -1164,7 +1162,7 @@ const ClusterOverview: React.FC<ClusterOverviewProps> = ({ clusterContext }) => 
               <h3>By Type</h3>
               <div className="metric-legend__total">
                 <span className="metric-legend__total-value">
-                  {showSkeleton ? DASH : workloadTotal}
+                  {showSkeleton ? DASH : String(workloadTotal)}
                 </span>
                 <span className="metric-legend__total-label"> total</span>
               </div>
@@ -1252,31 +1250,29 @@ const ClusterOverview: React.FC<ClusterOverviewProps> = ({ clusterContext }) => 
                 const rowClass = `recent-events__row${
                   clickable ? ' recent-events__row--clickable' : ''
                 }`;
+                const content = (
+                  <>
+                    <LiveAgeText timestamp={event.timestamp} className="recent-events__age" />
+                    <span className="recent-events__reason">{event.reason}</span>
+                    <span className="recent-events__message">{event.message}</span>
+                  </>
+                );
                 return (
                   <li key={event.eventUid}>
-                    <div
-                      className={rowClass}
-                      role={clickable ? 'button' : undefined}
-                      tabIndex={clickable ? 0 : undefined}
-                      onClick={clickable ? () => void handleRecentEventOpen(event) : undefined}
-                      onKeyDown={
-                        clickable
-                          ? (e) => {
-                              if (e.key === 'Enter' || e.key === ' ') {
-                                e.preventDefault();
-                                void handleRecentEventOpen(event);
-                              }
-                            }
-                          : undefined
-                      }
-                      title={`${event.objectKind}/${event.objectName}${
-                        event.objectNamespace ? ` · ${event.objectNamespace}` : ''
-                      }`}
-                    >
-                      <LiveAgeText timestamp={event.timestamp} className="recent-events__age" />
-                      <span className="recent-events__reason">{event.reason}</span>
-                      <span className="recent-events__message">{event.message}</span>
-                    </div>
+                    {clickable ? (
+                      <button
+                        type="button"
+                        className={rowClass}
+                        onClick={() => void handleRecentEventOpen(event)}
+                        title={`${event.objectKind}/${event.objectName}${
+                          event.objectNamespace ? ` · ${event.objectNamespace}` : ''
+                        }`}
+                      >
+                        {content}
+                      </button>
+                    ) : (
+                      <div className={rowClass}>{content}</div>
+                    )}
                   </li>
                 );
               })}

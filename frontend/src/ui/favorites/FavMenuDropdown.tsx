@@ -6,8 +6,10 @@
  * Clicking a favorite navigates to the saved view state.
  */
 
-import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { DeleteIcon } from '@shared/components/icons/SharedIcons';
+import { useFavorites } from '@core/contexts/FavoritesContext';
+import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
+import { isAllNamespaces } from '@modules/namespace/constants';
+import { useNamespace } from '@modules/namespace/contexts/NamespaceContext';
 import {
   ChevronDownIcon,
   ChevronUpIcon,
@@ -15,11 +17,9 @@ import {
   FavoriteGenericIcon,
   FavoritePinIcon,
 } from '@shared/components/icons/FavoriteIcons';
-import { useFavorites } from '@core/contexts/FavoritesContext';
+import { DeleteIcon } from '@shared/components/icons/SharedIcons';
 import { useKeyboardSurface } from '@ui/shortcuts';
-import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
-import { useNamespace } from '@modules/namespace/contexts/NamespaceContext';
-import { isAllNamespaces } from '@modules/namespace/constants';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { Favorite } from '@/core/persistence/favorites';
 import { navigateToFavorite } from './navigateToFavorite';
 import './FavMenuDropdown.css';
@@ -51,7 +51,9 @@ const FavMenuDropdown: React.FC = () => {
 
   // Close the dropdown when clicking outside.
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen) {
+      return;
+    }
 
     const handleClickOutside = (e: MouseEvent) => {
       if (anchorRef.current && !anchorRef.current.contains(e.target as Node)) {
@@ -66,6 +68,17 @@ const FavMenuDropdown: React.FC = () => {
   const toggleOpen = useCallback(() => setIsOpen((prev) => !prev), []);
   const closeDropdown = useCallback(() => setIsOpen(false), []);
 
+  const handleTriggerKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLButtonElement>) => {
+      if (event.key !== 'Enter' && event.key !== ' ') {
+        return;
+      }
+      event.preventDefault();
+      toggleOpen();
+    },
+    [toggleOpen]
+  );
+
   // Register the open menu as a keyboard surface so Escape closes it, matching
   // the menu/dropdown keyboard contract (docs/frontend/keyboard.md).
   useKeyboardSurface({
@@ -77,22 +90,13 @@ const FavMenuDropdown: React.FC = () => {
       return true;
     },
   });
-  const handleTriggerKeyDown = useCallback(
-    (event: React.KeyboardEvent<HTMLDivElement>) => {
-      if (event.key !== 'Enter' && event.key !== ' ') {
-        return;
-      }
-      event.preventDefault();
-      toggleOpen();
-    },
-    [toggleOpen]
-  );
-
   // -- Reorder --
 
   const moveUp = useCallback(
     async (index: number) => {
-      if (index <= 0) return;
+      if (index <= 0) {
+        return;
+      }
       const ids = favorites.map((f) => f.id);
       [ids[index - 1], ids[index]] = [ids[index], ids[index - 1]];
       await reorderFavorites(ids);
@@ -102,7 +106,9 @@ const FavMenuDropdown: React.FC = () => {
 
   const moveDown = useCallback(
     async (index: number) => {
-      if (index >= favorites.length - 1) return;
+      if (index >= favorites.length - 1) {
+        return;
+      }
       const ids = favorites.map((f) => f.id);
       [ids[index], ids[index + 1]] = [ids[index + 1], ids[index]];
       await reorderFavorites(ids);
@@ -141,10 +147,16 @@ const FavMenuDropdown: React.FC = () => {
   // Generic favorites are disabled when their namespace isn't available.
   const isDisabled = useCallback(
     (fav: Favorite): boolean => {
-      if (fav.clusterSelection !== '') return false;
-      if (fav.viewType !== 'namespace' || !fav.namespace) return false;
+      if (fav.clusterSelection !== '') {
+        return false;
+      }
+      if (fav.viewType !== 'namespace' || !fav.namespace) {
+        return false;
+      }
       // The synthetic "All Namespaces" scope is always available.
-      if (isAllNamespaces(fav.namespace)) return false;
+      if (isAllNamespaces(fav.namespace)) {
+        return false;
+      }
       const ns = namespaceCtx.namespaces;
       return (
         ns.length > 0 && !ns.some((n) => n.scope === fav.namespace || n.name === fav.namespace)
@@ -155,19 +167,18 @@ const FavMenuDropdown: React.FC = () => {
 
   return (
     <div className="fav-dropdown-anchor" ref={anchorRef}>
-      <div
+      <button
+        type="button"
         className="settings-button"
         onClick={toggleOpen}
         onKeyDown={handleTriggerKeyDown}
         title="Favorites"
         aria-label="Favorites"
-        role="button"
-        tabIndex={0}
       >
         <FavoriteFilledIcon width={14} height={14} />
-      </div>
+      </button>
 
-      {isOpen && (
+      {!!isOpen && (
         <div className="fav-dropdown-panel" role="menu">
           {/* Item list */}
           <div className="fav-dropdown-items">
@@ -182,10 +193,26 @@ const FavMenuDropdown: React.FC = () => {
                 return (
                   <div
                     key={fav.id}
-                    className={'fav-dropdown-row' + (disabled ? ' disabled' : '')}
+                    className={`fav-dropdown-row${disabled ? ' disabled' : ''}`}
                     role="menuitem"
+                    aria-disabled={disabled}
+                    tabIndex={disabled ? -1 : 0}
                     onClick={() => {
-                      if (!disabled) handleNavigate(fav);
+                      if (!disabled) {
+                        handleNavigate(fav);
+                      }
+                    }}
+                    onKeyDown={(event) => {
+                      if (
+                        event.target !== event.currentTarget ||
+                        (event.key !== 'Enter' && event.key !== ' ')
+                      ) {
+                        return;
+                      }
+                      event.preventDefault();
+                      if (!disabled) {
+                        handleNavigate(fav);
+                      }
                     }}
                   >
                     <TypeIcon clusterSelection={fav.clusterSelection} />
@@ -193,26 +220,33 @@ const FavMenuDropdown: React.FC = () => {
 
                     <span className="fav-dropdown-hover-actions">
                       <button
+                        type="button"
                         className={`fav-dropdown-action-btn${idx === 0 ? ' disabled' : ''}`}
                         title="Move up"
                         onClick={(e) => {
                           e.stopPropagation();
-                          if (idx > 0) void moveUp(idx);
+                          if (idx > 0) {
+                            void moveUp(idx);
+                          }
                         }}
                       >
                         <ChevronUpIcon width={14} height={14} />
                       </button>
                       <button
+                        type="button"
                         className={`fav-dropdown-action-btn${idx === favorites.length - 1 ? ' disabled' : ''}`}
                         title="Move down"
                         onClick={(e) => {
                           e.stopPropagation();
-                          if (idx < favorites.length - 1) void moveDown(idx);
+                          if (idx < favorites.length - 1) {
+                            void moveDown(idx);
+                          }
                         }}
                       >
                         <ChevronDownIcon width={14} height={14} />
                       </button>
                       <button
+                        type="button"
                         className="fav-dropdown-action-btn danger"
                         title="Delete favorite"
                         onClick={(e) => {

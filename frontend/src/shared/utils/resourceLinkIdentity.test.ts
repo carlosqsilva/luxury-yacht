@@ -10,13 +10,13 @@ vi.mock('@wailsjs/go/backend/App', () => ({
   FindCatalogObjectMatch: (...args: unknown[]) => findCatalogObjectMatchMock(...args),
 }));
 
+import type { ResourceLink, ResourceRef } from '@core/refresh/types';
 import {
   resolveCatalogObjectByUID,
   resolveCatalogObjectMatch,
   resourceLinkToObjectReference,
   validateResourceLink,
 } from './resourceLinkIdentity';
-import type { ResourceLink, ResourceRef } from '@core/refresh/types';
 
 beforeEach(() => {
   findCatalogObjectByUIDMock.mockReset();
@@ -60,11 +60,11 @@ describe('resourceLinkIdentity', () => {
   });
 
   it('rejects openable refs that did not carry apiGroup', () => {
-    const missingGroup = { ...ref };
-    delete (missingGroup as Partial<ResourceRef>).group;
+    const { group: _group, ...missingGroup } = ref;
+    const missingGroupLink = { ref: missingGroup } as unknown as ResourceLink;
 
-    expect(validateResourceLink({ ref: missingGroup })).toBe(false);
-    expect(resourceLinkToObjectReference({ ref: missingGroup })).toBeUndefined();
+    expect(validateResourceLink(missingGroupLink)).toBe(false);
+    expect(resourceLinkToObjectReference(missingGroupLink)).toBeUndefined();
   });
 
   it('rejects custom-resource refs with an empty apiGroup', () => {

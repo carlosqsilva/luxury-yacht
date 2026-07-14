@@ -3,7 +3,7 @@ import '../styles/index.css';
 
 // Stub Wails globals so generated .js files work outside the Wails desktop shell.
 // The Wails runtime.js calls window.runtime.*, and App.js calls window.go.backend.App.*.
-const noOp = () => {};
+const noOp = () => undefined;
 const noOpAsync = () => Promise.resolve();
 
 // Proxy that returns noOp for any property access — handles window.runtime.*
@@ -28,7 +28,7 @@ const runtimeProxy = new Proxy(
 // setMockAppInfo() in .storybook/mocks/wailsBackendApp.ts.
 // Pre-seed overrides for layout providers that mount immediately.
 // Individual stories can add more overrides in their decorators.
-(window as any).__storybookGoOverrides = {
+window.__storybookGoOverrides = {
   GetKubeconfigs: () => Promise.resolve([]),
   GetSelectedKubeconfigs: () => Promise.resolve([]),
   SetSelectedKubeconfigs: () => Promise.resolve(),
@@ -76,7 +76,7 @@ const goProxy = new Proxy(
               {},
               {
                 get(_target: object, method: string) {
-                  const overrides = (window as any).__storybookGoOverrides;
+                  const overrides = window.__storybookGoOverrides;
                   if (overrides[method]) {
                     return overrides[method];
                   }
@@ -91,8 +91,8 @@ const goProxy = new Proxy(
   }
 );
 
-(window as any).runtime = runtimeProxy;
-(window as any).go = goProxy;
+window.runtime = runtimeProxy as WailsRuntime;
+window.go = goProxy as NonNullable<Window['go']>;
 
 const preview: Preview = {
   parameters: {
@@ -120,9 +120,15 @@ const preview: Preview = {
         ];
         const ai = order.indexOf(a.id);
         const bi = order.indexOf(b.id);
-        if (ai !== -1 && bi !== -1) return ai - bi;
-        if (ai !== -1) return -1;
-        if (bi !== -1) return 1;
+        if (ai !== -1 && bi !== -1) {
+          return ai - bi;
+        }
+        if (ai !== -1) {
+          return -1;
+        }
+        if (bi !== -1) {
+          return 1;
+        }
         return a.id.localeCompare(b.id, undefined, { numeric: true });
       },
     },

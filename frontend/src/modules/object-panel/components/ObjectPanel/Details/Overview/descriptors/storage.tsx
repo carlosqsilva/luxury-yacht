@@ -7,11 +7,12 @@
  * and the shared status block.
  */
 
-import React from 'react';
-import { persistentvolume, persistentvolumeclaim, storageclass } from '@wailsjs/go/models';
-import { StatusChip, type StatusChipVariant } from '@shared/components/StatusChip';
 import { ObjectPanelLink } from '@shared/components/ObjectPanelLink';
+import { StatusChip, type StatusChipVariant } from '@shared/components/StatusChip';
 import { buildRequiredObjectReference } from '@shared/utils/objectIdentity';
+import { withStableListKeys } from '@shared/utils/stableListKeys';
+import { persistentvolume, persistentvolumeclaim, storageclass } from '@wailsjs/go/models';
+import type React from 'react';
 import type { OverviewContext, OverviewDescriptor } from '../schema';
 import '../shared/OverviewBlocks.css';
 
@@ -26,28 +27,36 @@ const clusterMeta = (context: OverviewContext) => ({
 });
 
 const reclaimPolicyVariant = (policy?: string): StatusChipVariant => {
-  if (policy === 'Delete') return 'warning';
+  if (policy === 'Delete') {
+    return 'warning';
+  }
   return 'info';
 };
 
 const reclaimPolicyTooltip = (policy?: string): string | undefined => {
-  if (policy === 'Delete')
+  if (policy === 'Delete') {
     return 'Volumes are destroyed when their PVC is deleted. Data is not recoverable.';
-  if (policy === 'Retain')
+  }
+  if (policy === 'Retain') {
     return 'Volumes are kept after their PVC is deleted. Manual cleanup required.';
+  }
   return undefined;
 };
 
 const bindingModeVariant = (mode?: string): StatusChipVariant => {
-  if (mode === 'Immediate') return 'warning';
+  if (mode === 'Immediate') {
+    return 'warning';
+  }
   return 'info';
 };
 
 const bindingModeTooltip = (mode?: string): string | undefined => {
-  if (mode === 'Immediate')
+  if (mode === 'Immediate') {
     return 'Volumes are bound as soon as the PVC is created, without considering where pods will be scheduled. In multi-zone clusters this can result in volumes that can’t actually be used by their pods.';
-  if (mode === 'WaitForFirstConsumer')
+  }
+  if (mode === 'WaitForFirstConsumer') {
     return 'Volume binding is delayed until a pod is scheduled, so the provisioner can match the pod’s zone and topology constraints.';
+  }
   return undefined;
 };
 
@@ -70,8 +79,8 @@ const accessModeTooltip = (mode: string): string | undefined => {
 
 const renderAccessModes = (modes: string[]): React.ReactNode => (
   <div className="overview-condition-list">
-    {modes.map((mode) => (
-      <StatusChip key={mode} variant="info" tooltip={accessModeTooltip(mode)}>
+    {withStableListKeys(modes, (mode) => mode).map(({ key, value: mode }) => (
+      <StatusChip key={key} variant="info" tooltip={accessModeTooltip(mode)}>
         {mode}
       </StatusChip>
     ))}
@@ -99,7 +108,9 @@ const renderStorageClassLink = (
   storageClass: string | undefined,
   context: OverviewContext
 ): React.ReactNode => {
-  if (!storageClass) return storageClass;
+  if (!storageClass) {
+    return storageClass;
+  }
   return (
     <ObjectPanelLink
       objectRef={buildRequiredObjectReference({
@@ -165,9 +176,11 @@ export const pvcDescriptor: OverviewDescriptor<PersistentVolumeClaimDetails> = {
         hidden: (d) => !d.dataSource,
         render: (d, context) => {
           const ds = d.dataSource;
-          if (!ds) return undefined;
+          if (!ds) {
+            return undefined;
+          }
           const label = `${ds.kind}/${ds.name}`;
-          let ref;
+          let ref: ReturnType<typeof buildRequiredObjectReference> | null;
           try {
             ref = buildRequiredObjectReference({
               kind: ds.kind.toLowerCase(),
@@ -190,10 +203,12 @@ export const pvcDescriptor: OverviewDescriptor<PersistentVolumeClaimDetails> = {
         hidden: (d) => !(d.mountedBy && d.mountedBy.length > 0),
         render: (d) => (
           <div>
-            {(d.mountedBy ?? []).map((podRef, index) => (
-              <div
-                key={`${podRef.clusterId}-${podRef.group}-${podRef.version}-${podRef.kind}-${podRef.namespace ?? ''}-${podRef.name ?? index}`}
-              >
+            {withStableListKeys(
+              d.mountedBy ?? [],
+              (podRef) =>
+                `${podRef.clusterId}-${podRef.group}-${podRef.version}-${podRef.kind}-${podRef.namespace ?? ''}-${podRef.name ?? ''}`
+            ).map(({ key, value: podRef }) => (
+              <div key={key}>
                 <ObjectPanelLink
                   objectRef={{ ...podRef, group: podRef.group, version: podRef.version }}
                   title={`Click to view pod: ${podRef.name ?? podRef.kind}`}
@@ -265,10 +280,12 @@ export const pvDescriptor: OverviewDescriptor<PersistentVolumeDetails> = {
         field: 'volumeSource',
         label: 'Source',
         fullWidth: true,
-        hidden: (d) => !(d.volumeSource && d.volumeSource.type),
+        hidden: (d) => !d.volumeSource?.type,
         render: (d) => {
           const source = d.volumeSource;
-          if (!source || !source.type) return undefined;
+          if (!source?.type) {
+            return undefined;
+          }
           return (
             <div className="overview-stacked">
               <div>
@@ -295,9 +312,11 @@ export const pvDescriptor: OverviewDescriptor<PersistentVolumeDetails> = {
         hidden: (d) => !(d.nodeAffinity && d.nodeAffinity.length > 0),
         render: (d) => (
           <div className="overview-stacked">
-            {(d.nodeAffinity ?? []).map((entry, i) => (
-              <span key={i}>{entry}</span>
-            ))}
+            {withStableListKeys(d.nodeAffinity ?? [], (entry) => entry).map(
+              ({ key, value: entry }) => (
+                <span key={key}>{entry}</span>
+              )
+            )}
           </div>
         ),
       },
@@ -395,10 +414,15 @@ export const storageClassDescriptor: OverviewDescriptor<StorageClassDetails> = {
         hidden: (d) => !(d.allowedTopologies && d.allowedTopologies.length > 0),
         render: (d) => (
           <div className="overview-stacked">
-            {(d.allowedTopologies ?? []).map((selector, si) => (
-              <div key={si} className="overview-condition-list">
-                {selector.matchLabelExpressions.map((req, ri) => (
-                  <StatusChip key={`${si}-${ri}`} variant="info">
+            {withStableListKeys(d.allowedTopologies ?? [], (selector) =>
+              JSON.stringify(selector)
+            ).map(({ key, value: selector }) => (
+              <div key={key} className="overview-condition-list">
+                {withStableListKeys(
+                  selector.matchLabelExpressions,
+                  (req) => `${req.key}:${req.values.join(',')}`
+                ).map(({ key: requirementKey, value: req }) => (
+                  <StatusChip key={requirementKey} variant="info">
                     {req.key}: {req.values.join(', ')}
                   </StatusChip>
                 ))}

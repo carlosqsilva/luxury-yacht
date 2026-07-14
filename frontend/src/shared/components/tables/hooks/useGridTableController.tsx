@@ -9,39 +9,39 @@
  * Extracted from GridTable.tsx — no behavioral change, purely mechanical.
  */
 
-import { useEffect, useMemo, useRef } from 'react';
-import type { ReactElement, ReactNode, RefObject } from 'react';
+import type { GridTableProps } from '@shared/components/tables/GridTable.types';
+import {
+  isKindColumnKey as defaultIsKindColumnKey,
+  getTextContent,
+  isFixedColumnKey,
+  normalizeKindClass,
+} from '@shared/components/tables/GridTable.utils';
+import { useGridTableKeyboardScopes } from '@shared/components/tables/GridTableKeys';
+import { hasNarrowingGridTableFilters } from '@shared/components/tables/gridTableFilterState';
+import { useColumnVisibilityController } from '@shared/components/tables/hooks/useColumnVisibilityController';
+import { useGridTableCellCache } from '@shared/components/tables/hooks/useGridTableCellCache';
+import { useGridTableColumnLayout } from '@shared/components/tables/hooks/useGridTableColumnLayout';
+import { useGridTableColumnsDropdown } from '@shared/components/tables/hooks/useGridTableColumnsDropdown';
+import { useGridTableExternalWidths } from '@shared/components/tables/hooks/useGridTableExternalWidths';
+import { useGridTableFiltersWiring } from '@shared/components/tables/hooks/useGridTableFiltersWiring';
+import { useGridTableHeaderActions } from '@shared/components/tables/hooks/useGridTableHeaderActions';
+import { useGridTableHeaderRow } from '@shared/components/tables/hooks/useGridTableHeaderRow';
+import { useGridTableHeaderSyncEffects } from '@shared/components/tables/hooks/useGridTableHeaderSyncEffects';
+import type { HoverState } from '@shared/components/tables/hooks/useGridTableHoverSync';
+import { useGridTableInteractionWiring } from '@shared/components/tables/hooks/useGridTableInteractionWiring';
+import { useGridTableKeyboardNavigation } from '@shared/components/tables/hooks/useGridTableKeyboardNavigation';
+import { useGridTableProfiler } from '@shared/components/tables/hooks/useGridTableProfiler';
+import type { RenderRowContentFn } from '@shared/components/tables/hooks/useGridTableRowRenderer';
+import { useGridTableRowRenderer } from '@shared/components/tables/hooks/useGridTableRowRenderer';
+import { useGridTableShortcuts } from '@shared/components/tables/hooks/useGridTableShortcuts';
+import { useGridTableVirtualization } from '@shared/components/tables/hooks/useGridTableVirtualization';
 import {
   recordGridTablePerformanceSample,
   recordGridTablePerformanceSnapshot,
   recordGridTableScrollFrameSample,
 } from '@shared/components/tables/performance/gridTablePerformanceStore';
-import type { HoverState } from '@shared/components/tables/hooks/useGridTableHoverSync';
-import { useGridTableVirtualization } from '@shared/components/tables/hooks/useGridTableVirtualization';
-import { useGridTableRowRenderer } from '@shared/components/tables/hooks/useGridTableRowRenderer';
-import type { RenderRowContentFn } from '@shared/components/tables/hooks/useGridTableRowRenderer';
-import { useGridTableHeaderRow } from '@shared/components/tables/hooks/useGridTableHeaderRow';
-import { useColumnVisibilityController } from '@shared/components/tables/hooks/useColumnVisibilityController';
-import { useGridTableProfiler } from '@shared/components/tables/hooks/useGridTableProfiler';
-import { useGridTableCellCache } from '@shared/components/tables/hooks/useGridTableCellCache';
-import { useGridTableHeaderSyncEffects } from '@shared/components/tables/hooks/useGridTableHeaderSyncEffects';
-import { useGridTableExternalWidths } from '@shared/components/tables/hooks/useGridTableExternalWidths';
-import { useGridTableFiltersWiring } from '@shared/components/tables/hooks/useGridTableFiltersWiring';
-import { useGridTableColumnsDropdown } from '@shared/components/tables/hooks/useGridTableColumnsDropdown';
-import { useGridTableShortcuts } from '@shared/components/tables/hooks/useGridTableShortcuts';
-import { useGridTableKeyboardNavigation } from '@shared/components/tables/hooks/useGridTableKeyboardNavigation';
-import { useGridTableColumnLayout } from '@shared/components/tables/hooks/useGridTableColumnLayout';
-import { useGridTableInteractionWiring } from '@shared/components/tables/hooks/useGridTableInteractionWiring';
-import { useGridTableHeaderActions } from '@shared/components/tables/hooks/useGridTableHeaderActions';
-import { useGridTableKeyboardScopes } from '@shared/components/tables/GridTableKeys';
-import type { GridTableProps } from '@shared/components/tables/GridTable.types';
-import {
-  getTextContent,
-  isFixedColumnKey,
-  isKindColumnKey as defaultIsKindColumnKey,
-  normalizeKindClass,
-} from '@shared/components/tables/GridTable.utils';
-import { hasNarrowingGridTableFilters } from '@shared/components/tables/gridTableFilterState';
+import type { ReactElement, ReactNode, RefObject } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 
 // Stable default to avoid re-creating lock lists on every render.
 const DEFAULT_NON_HIDEABLE_COLUMNS: string[] = [];
@@ -53,8 +53,9 @@ const DEFAULT_NON_HIDEABLE_COLUMNS: string[] = [];
 export interface GridTableControllerResult<T> {
   // Refs needed by sub-components
   wrapperRef: RefObject<HTMLDivElement | null>;
-  tableRef: RefObject<HTMLDivElement | null>;
-  headerInnerRef: RefObject<HTMLDivElement | null>;
+  gridRef: RefObject<HTMLTableElement | null>;
+  tableRef: RefObject<HTMLTableSectionElement | null>;
+  headerInnerRef: RefObject<HTMLTableElement | null>;
 
   // Filtered data
   tableData: T[];
@@ -62,8 +63,8 @@ export interface GridTableControllerResult<T> {
 
   // Focus
   focusedRowKey: string | null;
-  handleWrapperFocus: (e: React.FocusEvent<HTMLDivElement>) => void;
-  handleWrapperBlur: (e: React.FocusEvent<HTMLDivElement>) => void;
+  handleWrapperFocus: (e: React.FocusEvent<HTMLElement>) => void;
+  handleWrapperBlur: (e: React.FocusEvent<HTMLElement>) => void;
 
   // Hover
   hoverState: HoverState;
@@ -78,7 +79,7 @@ export interface GridTableControllerResult<T> {
   virtualRows: T[];
   virtualRange: { start: number; end: number };
   totalVirtualHeight: number;
-  virtualOffset: number;
+  getRowTop: (index: number) => number;
   scrollbarWidth: number;
 
   // Columns
@@ -112,6 +113,7 @@ export function useGridTableController<T>({
   getRowClassName,
   getRowStyle,
   onRowClick,
+  onRowPointerClick,
   onSort,
   sortConfig,
   loading = false,
@@ -147,8 +149,9 @@ export function useGridTableController<T>({
     [inputData]
   );
   const wrapperRef = useRef<HTMLDivElement>(null);
-  const tableRef = useRef<HTMLDivElement>(null);
-  const headerInnerRef = useRef<HTMLDivElement | null>(null);
+  const gridRef = useRef<HTMLTableElement>(null);
+  const tableRef = useRef<HTMLTableSectionElement>(null);
+  const headerInnerRef = useRef<HTMLTableElement | null>(null);
   const previousInputDataRef = useRef(inputData);
   const contextMenuActiveRef = useRef(false);
   const clusterKeyCheckRef = useRef(false);
@@ -268,11 +271,13 @@ export function useGridTableController<T>({
     keyExtractor,
     getRowClassName,
     onRowClick,
+    onRowPointerClick,
     enableContextMenu,
     getCustomContextMenuItems,
     sortConfig,
     onSort,
     wrapperRef,
+    gridRef,
     headerInnerRef,
     hideHeader,
     contextMenuActiveRef,
@@ -287,6 +292,9 @@ export function useGridTableController<T>({
     tableContentWidth,
     tableViewportWidth,
     handleResizeStart,
+    handleResizeKeyDown,
+    getColumnMinWidth,
+    getColumnMaxWidth,
     autoSizeColumn,
     markVisibleAutoColumnsDirty,
   } = useGridTableColumnLayout<T>({
@@ -321,7 +329,6 @@ export function useGridTableController<T>({
     virtualRange,
     virtualRowHeight,
     totalVirtualHeight,
-    virtualOffset,
     measureRowRef,
     getRowTop,
     scrollbarWidth,
@@ -342,7 +349,12 @@ export function useGridTableController<T>({
     hideHeader,
   });
 
+  // The dirty queue hashes rendered cells before measuring. Row virtualization changes that
+  // visible signature without changing the callback identity, so both range bounds must invalidate
+  // this effect after the new virtual rows commit.
   useEffect(() => {
+    void virtualRange.start;
+    void virtualRange.end;
     markVisibleAutoColumnsDirty();
   }, [markVisibleAutoColumnsDirty, virtualRange.end, virtualRange.start]);
 
@@ -367,6 +379,7 @@ export function useGridTableController<T>({
     filtersContainerRef,
     filterFocusIndexRef,
     wrapperRef,
+    focusRef: gridRef,
     tableDataLength: tableData.length,
     focusedRowKey,
     suppressFocusedRowHighlight,
@@ -410,7 +423,7 @@ export function useGridTableController<T>({
       warnDevOnce(
         `GridTable: keyExtractor returned "${sampleKey}" which does not appear ` +
           `cluster-scoped (missing "|" separator). Use buildClusterScopedKey() ` +
-          `to prevent key collisions in multi-cluster views.`
+          'to prevent key collisions in multi-cluster views.'
       );
     }
   }
@@ -449,12 +462,16 @@ export function useGridTableController<T>({
     handleHeaderClick,
     renderSortIndicator,
     handleResizeStart,
+    handleResizeKeyDown,
+    getColumnMinWidth,
+    getColumnMaxWidth,
     autoSizeColumn,
     sortConfig,
   });
 
   return {
     wrapperRef,
+    gridRef,
     tableRef,
     headerInnerRef,
     tableData,
@@ -470,7 +487,7 @@ export function useGridTableController<T>({
     virtualRows,
     virtualRange,
     totalVirtualHeight,
-    virtualOffset,
+    getRowTop,
     scrollbarWidth,
     tableContentWidth,
     tableViewportWidth,

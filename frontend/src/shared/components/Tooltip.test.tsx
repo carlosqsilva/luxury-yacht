@@ -5,10 +5,9 @@
  * Covers trigger modes, placement, delay, variants, disabled state, and portal rendering.
  */
 
-import React from 'react';
-import ReactDOMClient from 'react-dom/client';
+import React, { act } from 'react';
 import * as ReactDOM from 'react-dom';
-import { act } from 'react';
+import * as ReactDOMClient from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Mock createPortal so tooltip content renders inline for assertions
@@ -16,7 +15,7 @@ vi.mock('react-dom', async () => {
   const actual = await vi.importActual<typeof import('react-dom')>('react-dom');
   return {
     ...actual,
-    createPortal: vi.fn((element: any) => element),
+    createPortal: vi.fn((element: unknown) => element),
   };
 });
 
@@ -79,7 +78,9 @@ const renderTooltipInside = async (
 // ---------------------------------------------------------------------------
 
 beforeEach(() => {
-  vi.mocked(ReactDOM.createPortal).mockImplementation((element: any) => element as any);
+  vi.mocked(ReactDOM.createPortal).mockImplementation(
+    ((element: React.ReactNode) => element) as unknown as typeof ReactDOM.createPortal
+  );
   vi.useRealTimers();
 });
 
@@ -107,7 +108,11 @@ describe('Tooltip', () => {
   it('renders children as the trigger element', async () => {
     const { container, cleanup } = await renderTooltip({
       content: 'Tip',
-      children: <button data-testid="btn">Hover me</button>,
+      children: (
+        <button type="button" data-testid="btn">
+          Hover me
+        </button>
+      ),
     });
 
     const trigger = container.querySelector('.tooltip-trigger');
@@ -142,6 +147,10 @@ describe('Tooltip', () => {
     });
     expect(container.querySelector('.tooltip')).toBeTruthy();
     expect(container.querySelector('.tooltip')?.textContent).toBe('Delayed tip');
+    const tooltip = container.querySelector('.tooltip');
+    expect(tooltip?.getAttribute('role')).toBe('tooltip');
+    expect(tooltip?.id).toBeTruthy();
+    expect(trigger.getAttribute('aria-describedby')).toBe(tooltip?.id);
 
     cleanup();
     vi.useRealTimers();
@@ -213,6 +222,44 @@ describe('Tooltip', () => {
 
     await act(async () => {
       document.dispatchEvent(new Event('scroll', { bubbles: true }));
+    });
+    expect(container.querySelector('.tooltip')).toBeFalsy();
+
+    cleanup();
+    vi.useRealTimers();
+  });
+
+  it('keeps an interactive tooltip open while its own content scrolls', async () => {
+    // The document-level scroll dismisser exists because the tooltip is
+    // fixed-positioned and would detach from its trigger when the page
+    // scrolls. A scroll INSIDE the tooltip (e.g. the update chip's capped
+    // release-notes region) must not dismiss it — otherwise scrollable
+    // tooltip content is unreachable.
+    vi.useFakeTimers();
+
+    const { container, cleanup } = await renderTooltip({
+      content: <div data-testid="tooltip-scrollable">long scrollable notes</div>,
+      interactive: true,
+    });
+
+    const trigger = container.querySelector('.tooltip-trigger') as HTMLElement;
+
+    await act(async () => {
+      trigger.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+      vi.advanceTimersByTime(250);
+    });
+    expect(container.querySelector('.tooltip')).toBeTruthy();
+
+    // Scroll originating inside the tooltip content: stays open.
+    const scrollable = container.querySelector('[data-testid="tooltip-scrollable"]') as HTMLElement;
+    await act(async () => {
+      scrollable.dispatchEvent(new Event('scroll'));
+    });
+    expect(container.querySelector('.tooltip')).toBeTruthy();
+
+    // Page-level scroll: still dismisses.
+    await act(async () => {
+      document.dispatchEvent(new Event('scroll'));
     });
     expect(container.querySelector('.tooltip')).toBeFalsy();
 

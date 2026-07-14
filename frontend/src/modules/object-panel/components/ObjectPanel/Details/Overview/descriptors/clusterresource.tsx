@@ -9,11 +9,11 @@
  * namespace value on the DTO).
  */
 
-import React from 'react';
-import { admission, apiextensions, ingressclass, namespaces } from '@wailsjs/go/models';
-import { StatusChip } from '@shared/components/StatusChip';
 import { ObjectPanelLink } from '@shared/components/ObjectPanelLink';
+import { StatusChip } from '@shared/components/StatusChip';
 import { buildRequiredObjectReference } from '@shared/utils/objectIdentity';
+import { admission, apiextensions, ingressclass, namespaces } from '@wailsjs/go/models';
+import type React from 'react';
 import type { OverviewDescriptor } from '../schema';
 import '@styles/components/badges.css';
 
@@ -98,8 +98,12 @@ const renderCRDVersions = (versions: apiextensions.CRDVersion[] | undefined): Re
         // position/color. "primary" is deliberately NOT a flag because
         // the hoisting and default-color styling already communicate it.
         const flags: string[] = [];
-        if (version.served === false) flags.push('not served');
-        if (version.deprecated) flags.push('deprecated');
+        if (version.served === false) {
+          flags.push('not served');
+        }
+        if (version.deprecated) {
+          flags.push('deprecated');
+        }
         const rowStyle: React.CSSProperties = { marginTop: index > 0 ? '4px' : 0 };
         if (!version.storage) {
           rowStyle.color = 'var(--color-text-secondary)';
@@ -184,12 +188,14 @@ export const ingressClassDescriptor: OverviewDescriptor<IngressClassDetails> = {
         hidden: (d) => !d.parameters,
         render: (d, context) => {
           const params = d.parameters;
-          if (!params) return undefined;
+          if (!params) {
+            return undefined;
+          }
           const label = `${params.kind}/${params.name}`;
           // Built-in kinds resolve through GVK lookup; CRD-backed parameters (the common case for
           // cloud providers) only have an apiGroup on the wire and can't build a strict ref. Fall
           // back to plain text in that case rather than throwing.
-          let ref;
+          let ref: ReturnType<typeof buildRequiredObjectReference> | null;
           try {
             ref = buildRequiredObjectReference({
               kind: params.kind.toLowerCase(),

@@ -5,13 +5,11 @@
  * Covers key behaviors and edge cases for GridTableHeader.
  */
 
-import ReactDOM from 'react-dom/client';
-import { act } from 'react';
-import { afterEach, describe, expect, it } from 'vitest';
-
 import GridTableHeader from '@shared/components/tables/GridTableHeader';
-
-(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+import { act } from 'react';
+import * as ReactDOM from 'react-dom/client';
+import { afterEach, describe, expect, it } from 'vitest';
+import { requireValue } from '@/test-utils/requireValue';
 
 afterEach(() => {
   document.body.innerHTML = '';
@@ -22,7 +20,7 @@ describe('GridTableHeader', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = ReactDOM.createRoot(container);
-    const headerRef = { current: null as HTMLDivElement | null };
+    const headerRef = { current: null as HTMLTableElement | null };
 
     await act(async () => {
       root.render(
@@ -31,7 +29,11 @@ describe('GridTableHeader', () => {
           tableClassName="table"
           useShortNames
           scrollbarWidth={12}
-          headerRow={<div className="row">Header</div>}
+          headerRow={
+            <tr className="row">
+              <th>Header</th>
+            </tr>
+          }
           hideHeader={false}
           trailingBoundaryOffset={96}
         />
@@ -40,7 +42,9 @@ describe('GridTableHeader', () => {
 
     const wrapper = container.querySelector('.gridtable-header-container') as HTMLElement | null;
     expect(wrapper).not.toBeNull();
-    expect(wrapper!.style.paddingRight).toBe('12px');
+    expect(
+      requireValue(wrapper, 'expected test value in GridTableHeader.test.tsx').style.paddingRight
+    ).toBe('12px');
     expect(container.querySelector('.row')?.textContent).toBe('Header');
     const boundary = container.querySelector<HTMLElement>('.gridtable-trailing-boundary--header');
     expect(boundary).not.toBeNull();
@@ -51,21 +55,23 @@ describe('GridTableHeader', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = ReactDOM.createRoot(container);
-    const headerRef = { current: null as HTMLDivElement | null };
+    const headerRef = { current: null as HTMLTableElement | null };
 
     await act(async () => {
       root.render(
-        <>
-          <GridTableHeader
-            headerInnerRef={headerRef}
-            tableClassName="table"
-            useShortNames={false}
-            scrollbarWidth={0}
-            headerRow={<div>Hidden</div>}
-            hideHeader
-            trailingBoundaryOffset={null}
-          />
-        </>
+        <GridTableHeader
+          headerInnerRef={headerRef}
+          tableClassName="table"
+          useShortNames={false}
+          scrollbarWidth={0}
+          headerRow={
+            <tr>
+              <th>Hidden</th>
+            </tr>
+          }
+          hideHeader
+          trailingBoundaryOffset={null}
+        />
       );
     });
 
@@ -76,7 +82,7 @@ describe('GridTableHeader', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = ReactDOM.createRoot(container);
-    const headerRef = { current: null as HTMLDivElement | null };
+    const headerRef = { current: null as HTMLTableElement | null };
 
     await act(async () => {
       root.render(
@@ -85,7 +91,11 @@ describe('GridTableHeader', () => {
           tableClassName="table"
           useShortNames={false}
           scrollbarWidth={0}
-          headerRow={<div className="row">Header</div>}
+          headerRow={
+            <tr className="row">
+              <th>Header</th>
+            </tr>
+          }
           hideHeader={false}
           trailingBoundaryOffset={null}
         />

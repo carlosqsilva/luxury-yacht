@@ -108,7 +108,7 @@ const getOrCreateEntry = (options: BeginBrokerReadOptions): BrokerReadDiagnostic
 };
 
 const normalizeError = (error: unknown): string | null => {
-  if (error == null) {
+  if (error === null || error === undefined) {
     return null;
   }
   if (error instanceof Error) {
@@ -161,7 +161,8 @@ export const beginBrokerRead = (options: BeginBrokerReadOptions): string => {
   entry.lastBlockedReason = null;
   entry.lastError = null;
 
-  const token = `broker-read-${(requestSequence += 1)}`;
+  requestSequence += 1;
+  const token = `broker-read-${requestSequence}`;
   pendingReads.set(token, {
     ...options,
     startedAt,

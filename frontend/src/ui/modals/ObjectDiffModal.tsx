@@ -5,14 +5,37 @@
  * clusters, namespaces, kinds, and catalog matches.
  */
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type React from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import './ObjectDiffModal.css';
+import { useRefreshScopedDomain } from '@core/refresh';
+import { buildClusterScope, buildObjectScope } from '@core/refresh/clusterScope';
+import type { DomainStatus } from '@core/refresh/store';
+import type { CatalogItem, CatalogSnapshotPayload } from '@core/refresh/types';
+import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
+import {
+  CLUSTER_SCOPE,
+  INACTIVE_SCOPE,
+} from '@modules/object-panel/components/ObjectPanel/constants';
+import DiffViewer from '@shared/components/diff/DiffViewer';
+import { OBJECT_DIFF_BUDGETS } from '@shared/components/diff/diffBudgets';
+import {
+  countVisibleDiffRows,
+  formatTooLargeDiffMessage,
+  mergeDiffLines,
+} from '@shared/components/diff/diffUtils';
+import { computeBudgetedLineDiff, type LineDiffResult } from '@shared/components/diff/lineDiff';
+import type {
+  ObjectDiffOpenRequest,
+  ObjectDiffSelectionSeed,
+} from '@shared/components/diff/objectDiffSelection';
 import Dropdown from '@shared/components/dropdowns/Dropdown/Dropdown';
-import { DiffIcon } from '@shared/components/icons/SharedIcons';
 import type { DropdownOption } from '@shared/components/dropdowns/Dropdown/types';
-import { useModalFocusTrap } from '@shared/components/modals/useModalFocusTrap';
-import ModalSurface from '@shared/components/modals/ModalSurface';
+import { DiffIcon } from '@shared/components/icons/SharedIcons';
 import ModalHeader from '@shared/components/modals/ModalHeader';
+import ModalSurface from '@shared/components/modals/ModalSurface';
+import { useModalFocusTrap } from '@shared/components/modals/useModalFocusTrap';
+
 import {
   readCatalogObjectMatchForRef,
   requestData,
@@ -20,34 +43,14 @@ import {
   resetRefreshDomain,
   setRefreshDomainEnabled,
 } from '@/core/data-access';
-import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
-import { buildClusterScope, buildObjectScope } from '@core/refresh/clusterScope';
-import { useRefreshScopedDomain } from '@core/refresh';
-import type { CatalogItem, CatalogSnapshotPayload } from '@core/refresh/types';
-import { computeBudgetedLineDiff, type LineDiffResult } from '@shared/components/diff/lineDiff';
-import { OBJECT_DIFF_BUDGETS } from '@shared/components/diff/diffBudgets';
-import {
-  countVisibleDiffRows,
-  formatTooLargeDiffMessage,
-  mergeDiffLines,
-} from '@shared/components/diff/diffUtils';
-import DiffViewer from '@shared/components/diff/DiffViewer';
+import { useShortNames } from '@/hooks/useShortNames';
+import { formatAge, formatFullDate } from '@/utils/ageFormatter';
+import { getDisplayKind } from '@/utils/kindAliasMap';
 import {
   buildIgnoredMetadataLineSet,
   maskMutedMetadataLines,
   sanitizeYamlForDiff,
 } from './objectDiffUtils';
-import {
-  CLUSTER_SCOPE,
-  INACTIVE_SCOPE,
-} from '@modules/object-panel/components/ObjectPanel/constants';
-import { getDisplayKind } from '@/utils/kindAliasMap';
-import { formatAge, formatFullDate } from '@/utils/ageFormatter';
-import { useShortNames } from '@/hooks/useShortNames';
-import type {
-  ObjectDiffOpenRequest,
-  ObjectDiffSelectionSeed,
-} from '@shared/components/diff/objectDiffSelection';
 
 interface ObjectDiffModalProps {
   isOpen: boolean;
@@ -117,7 +120,7 @@ const buildNamespaceScope = (namespace?: string) => {
   return trimmed ? trimmed : CLUSTER_SCOPE;
 };
 
-const buildSelectionParts = (item: CatalogItem | null, useShortNames: boolean) => {
+const buildSelectionParts = (item: CatalogItem | null, shortNamesEnabled: boolean) => {
   if (!item) {
     return {
       hasSelection: false,
@@ -129,7 +132,7 @@ const buildSelectionParts = (item: CatalogItem | null, useShortNames: boolean) =
   }
   const namespaceLabel = buildNamespaceLabel(item.namespace);
   const clusterLabel = item.clusterName?.trim() || item.clusterId?.trim() || '';
-  const kindLabel = getDisplayKind(item.kind, useShortNames);
+  const kindLabel = getDisplayKind(item.kind, shortNamesEnabled);
   return {
     hasSelection: true,
     clusterLabel,
@@ -139,7 +142,8 @@ const buildSelectionParts = (item: CatalogItem | null, useShortNames: boolean) =
   };
 };
 
-const isSnapshotLoading = (status: string) => status === 'loading' || status === 'initialising';
+const isSnapshotLoading = (status: DomainStatus) =>
+  status === 'loading' || status === 'initialising';
 
 // Format a concise, user-friendly age label for change notifications.
 const formatChangeAge = (timestamp: number): string => {
@@ -189,7 +193,7 @@ const buildCatalogItemFromSelectionSeed = (
     creationTimestamp: '',
     scope: selection.namespace ? 'Namespace' : 'Cluster',
     clusterId: selection.clusterId,
-    clusterName: selection.clusterName,
+    clusterName: selection.clusterName ?? '',
   };
 };
 
@@ -273,14 +277,14 @@ const resolveNamespaceList = (payload: CatalogSnapshotPayload | null): string[] 
   return Array.from(fromItems);
 };
 
-const buildKindOptions = (kinds: string[], useShortNames: boolean): DropdownOption[] => {
+const buildKindOptions = (kinds: string[], shortNamesEnabled: boolean): DropdownOption[] => {
   const options = new Map<string, DropdownOption>();
   kinds.forEach((kind) => {
     const value = kind.trim();
     if (!value) {
       return;
     }
-    options.set(value.toLowerCase(), { value, label: getDisplayKind(value, useShortNames) });
+    options.set(value.toLowerCase(), { value, label: getDisplayKind(value, shortNamesEnabled) });
   });
   return Array.from(options.values()).sort((a, b) => a.label.localeCompare(b.label));
 };
@@ -374,6 +378,7 @@ const ObjectDiffModal: React.FC<ObjectDiffModalProps> = ({
   initialRequest = null,
   onClose,
 }) => {
+  const elementIdPrefix = useId();
   const { selectedKubeconfigs, getClusterMeta } = useKubeconfig();
   const [isClosing, setIsClosing] = useState(false);
   const [shouldRender, setShouldRender] = useState(false);
@@ -483,7 +488,9 @@ const ObjectDiffModal: React.FC<ObjectDiffModalProps> = ({
     focusableSelector: '.dropdown-trigger, button, input',
     disabled: !shouldRender,
     onEscape: () => {
-      if (!isOpen) return false;
+      if (!isOpen) {
+        return false;
+      }
       onClose();
       return true;
     },
@@ -770,12 +777,14 @@ const ObjectDiffModal: React.FC<ObjectDiffModalProps> = ({
 
   // Reset change tracking when the user swaps objects.
   useEffect(() => {
+    void leftObjectUid;
     leftChecksumRef.current = null;
     setLeftChangedAt(null);
     setLeftYamlStable('');
   }, [leftObjectUid]);
 
   useEffect(() => {
+    void rightObjectUid;
     rightChecksumRef.current = null;
     setRightChangedAt(null);
     setRightYamlStable('');
@@ -1092,7 +1101,7 @@ const ObjectDiffModal: React.FC<ObjectDiffModalProps> = ({
     }
     return (
       <>
-        {parts.clusterLabel && (
+        {!!parts.clusterLabel && (
           <span className="object-diff-column-meta">{parts.clusterLabel}/</span>
         )}
         <span className="object-diff-column-meta">{parts.namespaceLabel}/</span>
@@ -1119,8 +1128,8 @@ const ObjectDiffModal: React.FC<ObjectDiffModalProps> = ({
     if (leftYamlError || rightYamlError) {
       return (
         <div className="object-diff-empty object-diff-error">
-          {leftYamlError && <div>Left YAML error: {leftYamlError}</div>}
-          {rightYamlError && <div>Right YAML error: {rightYamlError}</div>}
+          {!!leftYamlError && <div>Left YAML error: {leftYamlError}</div>}
+          {!!rightYamlError && <div>Right YAML error: {rightYamlError}</div>}
         </div>
       );
     }
@@ -1153,7 +1162,9 @@ const ObjectDiffModal: React.FC<ObjectDiffModalProps> = ({
     );
   };
 
-  if (!shouldRender) return null;
+  if (!shouldRender) {
+    return null;
+  }
 
   return (
     <ModalSurface
@@ -1200,13 +1211,16 @@ const ObjectDiffModal: React.FC<ObjectDiffModalProps> = ({
                 </button>
               </div>
             </div>
-            {leftNoMatch && <div className="object-diff-match-message">No match found</div>}
+            {!!leftNoMatch && <div className="object-diff-match-message">No match found</div>}
             <div className="object-diff-field">
-              <label className="object-diff-label" htmlFor="object-diff-left-cluster">
+              <label
+                className="object-diff-label"
+                htmlFor={`${elementIdPrefix}-object-diff-left-cluster`}
+              >
                 Cluster
               </label>
               <Dropdown
-                id="object-diff-left-cluster"
+                id={`${elementIdPrefix}-object-diff-left-cluster`}
                 options={clusterOptions}
                 value={leftClusterId}
                 onChange={handleLeftClusterChange}
@@ -1216,11 +1230,14 @@ const ObjectDiffModal: React.FC<ObjectDiffModalProps> = ({
               />
             </div>
             <div className="object-diff-field">
-              <label className="object-diff-label" htmlFor="object-diff-left-namespace">
+              <label
+                className="object-diff-label"
+                htmlFor={`${elementIdPrefix}-object-diff-left-namespace`}
+              >
                 Namespace
               </label>
               <Dropdown
-                id="object-diff-left-namespace"
+                id={`${elementIdPrefix}-object-diff-left-namespace`}
                 options={leftNamespaceOptions}
                 value={leftNamespace}
                 onChange={handleLeftNamespaceChange}
@@ -1232,11 +1249,14 @@ const ObjectDiffModal: React.FC<ObjectDiffModalProps> = ({
               />
             </div>
             <div className="object-diff-field">
-              <label className="object-diff-label" htmlFor="object-diff-left-kind">
+              <label
+                className="object-diff-label"
+                htmlFor={`${elementIdPrefix}-object-diff-left-kind`}
+              >
                 Kind
               </label>
               <Dropdown
-                id="object-diff-left-kind"
+                id={`${elementIdPrefix}-object-diff-left-kind`}
                 options={leftKindOptions}
                 value={leftKind}
                 onChange={handleLeftKindChange}
@@ -1248,11 +1268,14 @@ const ObjectDiffModal: React.FC<ObjectDiffModalProps> = ({
               />
             </div>
             <div className="object-diff-field">
-              <label className="object-diff-label" htmlFor="object-diff-left-object">
+              <label
+                className="object-diff-label"
+                htmlFor={`${elementIdPrefix}-object-diff-left-object`}
+              >
                 Object
               </label>
               <Dropdown
-                id="object-diff-left-object"
+                id={`${elementIdPrefix}-object-diff-left-object`}
                 options={leftObjectOptions}
                 value={leftObjectUid}
                 onChange={handleLeftSelectionChange}
@@ -1268,7 +1291,7 @@ const ObjectDiffModal: React.FC<ObjectDiffModalProps> = ({
                 ariaLabel="Left object"
               />
             </div>
-            {leftCatalogError && (
+            {!!leftCatalogError && (
               <div className="object-diff-error-message">Catalog error: {leftCatalogError}</div>
             )}
           </div>
@@ -1299,13 +1322,16 @@ const ObjectDiffModal: React.FC<ObjectDiffModalProps> = ({
                 </button>
               </div>
             </div>
-            {rightNoMatch && <div className="object-diff-match-message">No match found</div>}
+            {!!rightNoMatch && <div className="object-diff-match-message">No match found</div>}
             <div className="object-diff-field">
-              <label className="object-diff-label" htmlFor="object-diff-right-cluster">
+              <label
+                className="object-diff-label"
+                htmlFor={`${elementIdPrefix}-object-diff-right-cluster`}
+              >
                 Cluster
               </label>
               <Dropdown
-                id="object-diff-right-cluster"
+                id={`${elementIdPrefix}-object-diff-right-cluster`}
                 options={clusterOptions}
                 value={rightClusterId}
                 onChange={handleRightClusterChange}
@@ -1315,11 +1341,14 @@ const ObjectDiffModal: React.FC<ObjectDiffModalProps> = ({
               />
             </div>
             <div className="object-diff-field">
-              <label className="object-diff-label" htmlFor="object-diff-right-namespace">
+              <label
+                className="object-diff-label"
+                htmlFor={`${elementIdPrefix}-object-diff-right-namespace`}
+              >
                 Namespace
               </label>
               <Dropdown
-                id="object-diff-right-namespace"
+                id={`${elementIdPrefix}-object-diff-right-namespace`}
                 options={rightNamespaceOptions}
                 value={rightNamespace}
                 onChange={handleRightNamespaceChange}
@@ -1331,11 +1360,14 @@ const ObjectDiffModal: React.FC<ObjectDiffModalProps> = ({
               />
             </div>
             <div className="object-diff-field">
-              <label className="object-diff-label" htmlFor="object-diff-right-kind">
+              <label
+                className="object-diff-label"
+                htmlFor={`${elementIdPrefix}-object-diff-right-kind`}
+              >
                 Kind
               </label>
               <Dropdown
-                id="object-diff-right-kind"
+                id={`${elementIdPrefix}-object-diff-right-kind`}
                 options={rightKindOptions}
                 value={rightKind}
                 onChange={handleRightKindChange}
@@ -1347,11 +1379,14 @@ const ObjectDiffModal: React.FC<ObjectDiffModalProps> = ({
               />
             </div>
             <div className="object-diff-field">
-              <label className="object-diff-label" htmlFor="object-diff-right-object">
+              <label
+                className="object-diff-label"
+                htmlFor={`${elementIdPrefix}-object-diff-right-object`}
+              >
                 Object
               </label>
               <Dropdown
-                id="object-diff-right-object"
+                id={`${elementIdPrefix}-object-diff-right-object`}
                 options={rightObjectOptions}
                 value={rightObjectUid}
                 onChange={handleRightSelectionChange}
@@ -1367,7 +1402,7 @@ const ObjectDiffModal: React.FC<ObjectDiffModalProps> = ({
                 ariaLabel="Right object"
               />
             </div>
-            {rightCatalogError && (
+            {!!rightCatalogError && (
               <div className="object-diff-error-message">Catalog error: {rightCatalogError}</div>
             )}
           </div>
@@ -1380,6 +1415,7 @@ const ObjectDiffModal: React.FC<ObjectDiffModalProps> = ({
                 <div className="object-diff-viewer-title">Diff Viewer</div>
                 <span
                   className="object-diff-info-indicator"
+                  role="img"
                   title="Ignored fields: metadata.managedFields. Muted fields: metadata.resourceVersion, metadata.creationTimestamp, metadata.uid."
                   aria-label="Diff metadata field info"
                 >
@@ -1402,7 +1438,7 @@ const ObjectDiffModal: React.FC<ObjectDiffModalProps> = ({
                 {renderSelectionLabel(leftSelection)}
               </span>
               {/* Show per-side update indicators alongside each selection label. */}
-              {leftChangedAt && (
+              {!!leftChangedAt && (
                 <span
                   className="object-diff-column-update"
                   title={`Left updated ${formatFullDate(leftChangedAt)}`}
@@ -1415,7 +1451,7 @@ const ObjectDiffModal: React.FC<ObjectDiffModalProps> = ({
               <span className="object-diff-column-label">
                 {renderSelectionLabel(rightSelection)}
               </span>
-              {rightChangedAt && (
+              {!!rightChangedAt && (
                 <span
                   className="object-diff-column-update"
                   title={`Right updated ${formatFullDate(rightChangedAt)}`}

@@ -8,10 +8,11 @@
  * `drainInProgress`/`onOpenDrain` from the OverviewContext the renderer threads through.
  */
 
-import React from 'react';
-import { nodes } from '@wailsjs/go/models';
-import { StatusChip, type StatusChipVariant } from '@shared/components/StatusChip';
 import { DrainIcon } from '@shared/components/icons/SharedIcons';
+import { StatusChip, type StatusChipVariant } from '@shared/components/StatusChip';
+import { withStableListKeys } from '@shared/utils/stableListKeys';
+import { nodes } from '@wailsjs/go/models';
+import type React from 'react';
 import type { OverviewContext, OverviewDescriptor } from '../schema';
 import '../shared/OverviewBlocks.css';
 import '../NodeOverview.css';
@@ -29,7 +30,9 @@ const PRESSURE_CONDITION_TYPES = new Set([
 ]);
 
 const nodeConditionVariant = (type: string, status: string): StatusChipVariant => {
-  if (status === 'Unknown') return 'warning';
+  if (status === 'Unknown') {
+    return 'warning';
+  }
   const healthyStatus = PRESSURE_CONDITION_TYPES.has(type) ? 'False' : 'True';
   return status === healthyStatus ? 'healthy' : 'unhealthy';
 };
@@ -43,7 +46,9 @@ const hasSystemInfo = (d: NodeDetails): boolean =>
  * exists for this node (`drainInProgress`) and the open-drain handler is wired.
  */
 const renderDrainIcon = (_d: NodeDetails, context: OverviewContext): React.ReactNode => {
-  if (!(context.drainInProgress && context.onOpenDrain)) return null;
+  if (!(context.drainInProgress && context.onOpenDrain)) {
+    return null;
+  }
   return (
     <button
       type="button"
@@ -91,14 +96,16 @@ const renderRoles = (d: NodeDetails): React.ReactNode => (
 
 const renderTaints = (d: NodeDetails): React.ReactNode => (
   <div className="overview-condition-list">
-    {(d.taints ?? []).map((taint, index) => {
-      const label = `${taint.key}${taint.value ? `=${taint.value}` : ''}:${taint.effect}`;
-      return (
-        <StatusChip key={`${label}-${index}`} variant="warning">
-          {label}
-        </StatusChip>
-      );
-    })}
+    {withStableListKeys(d.taints ?? [], (taint) => JSON.stringify(taint)).map(
+      ({ key, value: taint }) => {
+        const label = `${taint.key}${taint.value ? `=${taint.value}` : ''}:${taint.effect}`;
+        return (
+          <StatusChip key={key} variant="warning">
+            {label}
+          </StatusChip>
+        );
+      }
+    )}
   </div>
 );
 

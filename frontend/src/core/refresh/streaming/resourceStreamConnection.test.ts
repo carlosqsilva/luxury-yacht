@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { installWindowProperty } from '@/test-utils/windowProperty';
 
 const ensureRefreshBaseURLMock = vi.hoisted(() => vi.fn(async () => 'http://127.0.0.1:0'));
 const invalidateRefreshBaseURLMock = vi.hoisted(() => vi.fn());
@@ -11,8 +12,10 @@ vi.mock('../client', () => ({
 import { ResourceStreamConnection } from './resourceStreamConnection';
 
 const createdSockets: FakeWebSocket[] = [];
+let restoreWebSocket: (() => void) | undefined;
 
 class FakeWebSocket {
+  readonly url: string;
   static OPEN = 1;
   readyState = FakeWebSocket.OPEN;
   onopen: ((event?: Event) => void) | null = null;
@@ -22,7 +25,8 @@ class FakeWebSocket {
   send = vi.fn();
   close = vi.fn();
 
-  constructor(readonly url: string) {
+  constructor(url: string) {
+    this.url = url;
     createdSockets.push(this);
   }
 }
@@ -39,9 +43,15 @@ describe('ResourceStreamConnection', () => {
         writable: true,
       });
     }
-    (window as any).setTimeout = globalThis.setTimeout;
-    (window as any).clearTimeout = globalThis.clearTimeout;
-    (globalThis as any).WebSocket = FakeWebSocket;
+    window.setTimeout = globalThis.setTimeout;
+    window.clearTimeout = globalThis.clearTimeout;
+    restoreWebSocket = installWindowProperty('WebSocket', FakeWebSocket);
+    vi.useRealTimers();
+  });
+
+  afterEach(() => {
+    restoreWebSocket?.();
+    restoreWebSocket = undefined;
     vi.useRealTimers();
   });
 
@@ -95,8 +105,8 @@ describe('ResourceStreamConnection', () => {
 
   it('invalidates the base URL and reconnects after socket close', async () => {
     vi.useFakeTimers();
-    (window as any).setTimeout = globalThis.setTimeout;
-    (window as any).clearTimeout = globalThis.clearTimeout;
+    window.setTimeout = globalThis.setTimeout;
+    window.clearTimeout = globalThis.clearTimeout;
     const delegate = {
       handleConnectionOpen: vi.fn(),
       handleMessage: vi.fn(),

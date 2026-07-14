@@ -4,32 +4,32 @@
  * Namespace-level relationship map. Uses the shared object-map renderer with
  * a namespace scope instead of an object seed scope.
  */
-import React, { useCallback, useEffect, useMemo } from 'react';
+import type React from 'react';
+import { useCallback, useEffect, useMemo } from 'react';
 import './NsViewMap.css';
-import { requestRefreshDomain, setRefreshDomainEnabled } from '@/core/data-access';
-import { useRefreshScopedDomain } from '@/core/refresh';
-import type { ObjectMapReference, ObjectMapSnapshotPayload } from '@/core/refresh/types';
 import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
-import { useNamespace } from '@modules/namespace/contexts/NamespaceContext';
 import { ALL_NAMESPACES_SCOPE, isAllNamespaces } from '@modules/namespace/constants';
+import { useNamespace } from '@modules/namespace/contexts/NamespaceContext';
+import {
+  isMapSnapshotLoading,
+  isMapSnapshotRefreshing,
+} from '@modules/object-map/mapSnapshotStatus';
 import ObjectMap from '@modules/object-map/ObjectMap';
+import { buildResolvedFromMapRef } from '@modules/object-map/objectMapNavigation';
 import {
   buildNamespaceObjectMapScope,
   OBJECT_MAP_MAX_NODES,
 } from '@modules/object-map/objectMapScope';
-import { buildResolvedFromMapRef } from '@modules/object-map/objectMapNavigation';
 import { useObjectPanel } from '@modules/object-panel/hooks/useObjectPanel';
 import { useNavigateToView } from '@shared/hooks/useNavigateToView';
+import { requestRefreshDomain, setRefreshDomainEnabled } from '@/core/data-access';
+import { useRefreshScopedDomain } from '@/core/refresh';
+import type { ObjectMapReference, ObjectMapSnapshotPayload } from '@/core/refresh/types';
 import { errorHandler } from '@/utils/errorHandler';
 
 interface NsViewMapProps {
   namespace: string;
 }
-
-const isLoadingState = (status: string): boolean =>
-  status === 'idle' || status === 'loading' || status === 'initialising' || status === 'updating';
-const isRefreshingState = (status: string): boolean =>
-  status === 'loading' || status === 'initialising' || status === 'updating';
 
 const NsViewMap: React.FC<NsViewMapProps> = ({ namespace }) => {
   const { selectedClusterId } = useKubeconfig();
@@ -63,7 +63,9 @@ const NsViewMap: React.FC<NsViewMapProps> = ({ namespace }) => {
 
   const fetchMap = useCallback(
     (reason: 'startup' | 'user' = 'startup') => {
-      if (!mapScope) return;
+      if (!mapScope) {
+        return;
+      }
       void requestRefreshDomain({
         domain: 'object-map',
         scope: mapScope,
@@ -86,7 +88,9 @@ const NsViewMap: React.FC<NsViewMapProps> = ({ namespace }) => {
   const handleOpenPanel = useCallback(
     (ref: ObjectMapReference) => {
       const resolved = buildResolvedFromMapRef(ref);
-      if (resolved) openWithObject(resolved);
+      if (resolved) {
+        openWithObject(resolved);
+      }
     },
     [openWithObject]
   );
@@ -94,7 +98,9 @@ const NsViewMap: React.FC<NsViewMapProps> = ({ namespace }) => {
   const handleNavigateView = useCallback(
     (ref: ObjectMapReference) => {
       const resolved = buildResolvedFromMapRef(ref);
-      if (resolved) navigateToView(resolved);
+      if (resolved) {
+        navigateToView(resolved);
+      }
     },
     [navigateToView]
   );
@@ -102,14 +108,16 @@ const NsViewMap: React.FC<NsViewMapProps> = ({ namespace }) => {
   const handleOpenObjectMap = useCallback(
     (ref: ObjectMapReference) => {
       const resolved = buildResolvedFromMapRef(ref);
-      if (resolved) openWithObject(resolved, { initialTab: 'map' });
+      if (resolved) {
+        openWithObject(resolved, { initialTab: 'map' });
+      }
     },
     [openWithObject]
   );
 
   const payload = snapshot.data as ObjectMapSnapshotPayload | null;
-  const loading = isLoadingState(snapshot.status) && !payload;
-  const refreshing = isRefreshingState(snapshot.status) && snapshot.isManual === true;
+  const loading = isMapSnapshotLoading(snapshot.status) && !payload;
+  const refreshing = isMapSnapshotRefreshing(snapshot.status) && snapshot.isManual === true;
 
   if (namespace === ALL_NAMESPACES_SCOPE) {
     return (
@@ -127,8 +135,8 @@ const NsViewMap: React.FC<NsViewMapProps> = ({ namespace }) => {
             {snapshot.error}
           </div>
         )}
-        {loading && <div className="namespace-map__message">Loading namespace map...</div>}
-        {payload && (
+        {!!loading && <div className="namespace-map__message">Loading namespace map...</div>}
+        {!!payload && (
           <ObjectMap
             payload={payload}
             onRefresh={() => fetchMap('user')}

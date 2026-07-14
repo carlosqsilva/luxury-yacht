@@ -5,29 +5,32 @@
  * Handles rendering and interactions for the shared components.
  */
 
-import {
-  useState,
-  useEffect,
-  useCallback,
-  useRef,
-  useMemo,
-  useLayoutEffect,
-  type CSSProperties,
-  type KeyboardEvent,
-  type PointerEvent,
-} from 'react';
-import { ClearAppLogs, SetAppLogsPanelVisible } from '@wailsjs/go/backend/App';
-import { errorHandler } from '@utils/errorHandler';
-import LoadingSpinner from '@shared/components/LoadingSpinner';
-import { useShortcut, useKeyboardSurface } from '@ui/shortcuts';
-import { KeyboardScopePriority, KeyboardShortcutPriority } from '@ui/shortcuts/priorities';
-import { DockablePanel } from '@ui/dockable';
 import { Dropdown } from '@shared/components/dropdowns/Dropdown';
 import IconBar, { type IconBarItem } from '@shared/components/IconBar/IconBar';
 import { AutoScrollIcon, CopyIcon } from '@shared/components/icons/LogIcons';
 import { DeleteIcon } from '@shared/components/icons/SharedIcons';
+import LoadingSpinner from '@shared/components/LoadingSpinner';
+import { AriaGridColumnHeader, AriaGridRow } from '@shared/components/tables/AriaGridPrimitives';
+
+import { withStableListKeys } from '@shared/utils/stableListKeys';
+import { DockablePanel } from '@ui/dockable';
+import { useKeyboardSurface, useShortcut } from '@ui/shortcuts';
+import { KeyboardScopePriority, KeyboardShortcutPriority } from '@ui/shortcuts/priorities';
+import { errorHandler } from '@utils/errorHandler';
+import {
+  type CSSProperties,
+  type KeyboardEvent,
+  type PointerEvent,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { readAppLogs, readAppLogsSince } from '@/core/app-state-access';
-import { subscribeAppLogsAdded, type AppLogsAddedEvent } from '@/core/logging/appLogsClient';
+import { ClearAppLogs, SetAppLogsPanelVisible } from '@/core/backend-api';
+import { type AppLogsAddedEvent, subscribeAppLogsAdded } from '@/core/logging/appLogsClient';
 import './AppLogsPanel.css';
 
 interface LogEntry {
@@ -263,12 +266,11 @@ function AppLogsPanel({ isOpen, onClose }: AppLogsPanelProps) {
 
   const renderHeaderCell = useCallback(
     (column: LogColumnKey | 'message', label: string, className: string) => (
-      <span className={`app-logs-header-cell ${className}`} role="columnheader">
+      <AriaGridColumnHeader className={`app-logs-header-cell ${className}`}>
         <span className="app-logs-header-label">{label}</span>
         {column !== 'message' && (
-          <span
+          <hr
             className="app-logs-column-resizer"
-            role="separator"
             tabIndex={0}
             aria-label={`Resize ${label} column`}
             aria-orientation="vertical"
@@ -279,7 +281,7 @@ function AppLogsPanel({ isOpen, onClose }: AppLogsPanelProps) {
             onKeyDown={(event) => handleColumnResizeKeyDown(column, event)}
           />
         )}
-      </span>
+      </AriaGridColumnHeader>
     ),
     [columnWidths, handleColumnResizeKeyDown, handleColumnResizePointerDown]
   );
@@ -295,7 +297,7 @@ function AppLogsPanel({ isOpen, onClose }: AppLogsPanelProps) {
     prevScrollTopRef.current = container.scrollTop;
     prevScrollHeightRef.current = container.scrollHeight;
     offsetFromBottomRef.current = Math.max(distanceFromBottom, 0);
-  }, [SCROLL_THRESHOLD]);
+  }, []);
 
   const handleLogsScroll = useCallback(() => {
     updatePinnedState();
@@ -312,6 +314,10 @@ function AppLogsPanel({ isOpen, onClose }: AppLogsPanelProps) {
 
   // Auto-scroll when logs change
   useLayoutEffect(() => {
+    void logLevelFilter;
+    void componentFilter;
+    void clusterFilter;
+    void textFilter;
     const container = logsContainerRef.current;
     if (!container) {
       return;
@@ -335,7 +341,7 @@ function AppLogsPanel({ isOpen, onClose }: AppLogsPanelProps) {
         0
       );
     }
-  }, [logs, logLevelFilter, componentFilter, clusterFilter, textFilter, isAutoScroll]);
+  }, [logs, isAutoScroll, logLevelFilter, componentFilter, clusterFilter, textFilter]);
 
   useEffect(() => {
     if (!isAutoScroll) {
@@ -402,13 +408,14 @@ function AppLogsPanel({ isOpen, onClose }: AppLogsPanelProps) {
 
   const formatTimestamp = useCallback((timestamp: string) => {
     try {
-      const formatter = new Intl.DateTimeFormat('en-US', {
+      const options: Intl.DateTimeFormatOptions & { fractionalSecondDigits: number } = {
         hour: '2-digit',
         minute: '2-digit',
         second: '2-digit',
         hour12: false,
         fractionalSecondDigits: 3,
-      } as any);
+      };
+      const formatter = new Intl.DateTimeFormat('en-US', options);
 
       return formatter.format(new Date(timestamp));
     } catch {
@@ -866,7 +873,7 @@ function AppLogsPanel({ isOpen, onClose }: AppLogsPanelProps) {
       contentClassName="app-logs-panel-content"
     >
       {/* Panel-specific controls toolbar (moved from header for tab support) */}
-      <div className="app-logs-panel-toolbar" onMouseDown={(e) => e.stopPropagation()}>
+      <div className="app-logs-panel-toolbar">
         <div className="app-logs-panel-controls">
           <Dropdown
             options={clusterOptions}
@@ -917,8 +924,9 @@ function AppLogsPanel({ isOpen, onClose }: AppLogsPanelProps) {
               title="Filter by text (searches message and source)"
               ref={textFilterInputRef}
             />
-            {textFilter && (
+            {!!textFilter && (
               <button
+                type="button"
                 className="app-logs-filter-clear"
                 onClick={() => setTextFilter('')}
                 title="Clear filter"
@@ -937,18 +945,21 @@ function AppLogsPanel({ isOpen, onClose }: AppLogsPanelProps) {
         </div>
       </div>
 
-      <div
+      <table
         className="app-logs-header"
-        role="row"
         aria-label="Application log columns"
         style={columnWidthStyle}
       >
-        {renderHeaderCell('timestamp', 'Time', 'log-timestamp')}
-        {renderHeaderCell('level', 'Level', 'log-level')}
-        {renderHeaderCell('source', 'Source', 'log-source')}
-        {renderHeaderCell('cluster', 'Cluster', 'log-cluster')}
-        {renderHeaderCell('message', 'Message', 'log-message')}
-      </div>
+        <thead>
+          <AriaGridRow>
+            {renderHeaderCell('timestamp', 'Time', 'log-timestamp')}
+            {renderHeaderCell('level', 'Level', 'log-level')}
+            {renderHeaderCell('source', 'Source', 'log-source')}
+            {renderHeaderCell('cluster', 'Cluster', 'log-cluster')}
+            {renderHeaderCell('message', 'Message', 'log-message')}
+          </AriaGridRow>
+        </thead>
+      </table>
 
       <div
         ref={logsContainerRef}
@@ -964,8 +975,10 @@ function AppLogsPanel({ isOpen, onClose }: AppLogsPanelProps) {
         ) : filteredLogs.length === 0 ? (
           <div className="app-logs-empty">No logs match the selected filter</div>
         ) : (
-          filteredLogs.map((log, index) => (
-            <div key={index} className={`log-entry ${getLevelClass(log.level)}`}>
+          withStableListKeys(filteredLogs, (log) =>
+            String(log.sequence ?? `${log.timestamp}:${log.source ?? ''}:${log.message}`)
+          ).map(({ key, value: log }) => (
+            <div key={key} className={`log-entry ${getLevelClass(log.level)}`}>
               <span className="log-timestamp">{formatTimestamp(log.timestamp)}</span>
               <span className={`log-level ${log.level.toUpperCase()}`}>{log.level}</span>
               <span className="log-source">{log.source ? `[${log.source}]` : ''}</span>

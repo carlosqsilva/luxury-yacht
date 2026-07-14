@@ -8,8 +8,9 @@
  * missing Port Forward / Delete" regressions.
  */
 
-import ReactDOM from 'react-dom/client';
+import { ZoomProvider } from '@core/contexts/ZoomContext';
 import { act } from 'react';
+import * as ReactDOM from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@/core/capabilities/permissionRead', () => ({
@@ -35,6 +36,7 @@ vi.mock('@shared/hooks/useNavigateToView', () => ({
 
 vi.mock('@ui/shortcuts', () => ({
   useShortcut: vi.fn(),
+  useKeyboardSurface: vi.fn(),
   useKeyboardContext: () => ({
     registerShortcut: vi.fn(),
     unregisterShortcut: vi.fn(),
@@ -50,10 +52,10 @@ vi.mock('@ui/shortcuts', () => ({
   }),
 }));
 
-import { ActionsMenu } from './ActionsMenu';
 import { OBJECT_ACTION_IDS } from '@shared/actions/objectActionContract';
 import { queryNamespacePermissions } from '@/core/capabilities';
 import { __resetForTests } from '@/core/capabilities/permissionStore';
+import { ActionsMenu } from './ActionsMenu';
 
 const flush = async () => {
   await act(async () => {
@@ -100,7 +102,11 @@ describe('ActionsMenu + real permission store', () => {
     };
 
     await act(async () => {
-      root.render(<ActionsMenu object={actionObject} />);
+      root.render(
+        <ZoomProvider>
+          <ActionsMenu object={actionObject} />
+        </ZoomProvider>
+      );
       await Promise.resolve();
     });
     await flush();
@@ -111,7 +117,7 @@ describe('ActionsMenu + real permission store', () => {
       trigger?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
-    const items = Array.from(container.querySelectorAll<HTMLElement>('.context-menu-item'));
+    const items = Array.from(document.body.querySelectorAll<HTMLElement>('.context-menu-item'));
     const portForwardItem = items.find(
       (item) => item.dataset.contextActionId === OBJECT_ACTION_IDS.portForward
     );

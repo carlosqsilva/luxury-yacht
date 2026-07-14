@@ -5,8 +5,8 @@
  * Provides shared helper functions for the shared components.
  */
 
-import { formatAge, formatFullDate } from '@/utils/ageFormatter';
 import { stripClusterScope } from '@/core/refresh/clusterScope';
+import { formatAge, formatFullDate } from '@/utils/ageFormatter';
 import type { RefreshDomain } from '../../types';
 
 export const formatInterval = (intervalMs: number | null): string => {
@@ -67,7 +67,12 @@ export const formatLastUpdated = (value?: number): { display: string; tooltip: s
 };
 
 export const formatDurationMs = (durationMs?: number | null): string => {
-  if (durationMs == null || Number.isNaN(durationMs) || durationMs <= 0) {
+  if (
+    durationMs === null ||
+    durationMs === undefined ||
+    Number.isNaN(durationMs) ||
+    durationMs <= 0
+  ) {
     return '—';
   }
   if (durationMs < 1000) {

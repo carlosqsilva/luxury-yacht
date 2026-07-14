@@ -10,7 +10,8 @@
  * get a minimum visible width so a one-second job is still findable.
  */
 
-import React, { useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type React from 'react';
+import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import './JobTimeline.css';
 
 interface JobLike {
@@ -99,16 +100,24 @@ const WINDOWS: WindowOption[] = [
 const DEFAULT_WINDOW = WINDOWS[1]; // 3h
 
 const parseStart = (raw: unknown): number | null => {
-  if (typeof raw !== 'string' || !raw) return null;
+  if (typeof raw !== 'string' || !raw) {
+    return null;
+  }
   const t = new Date(raw).getTime();
-  return isNaN(t) ? null : t;
+  return Number.isNaN(t) ? null : t;
 };
 
 const variantClass = (status?: string): string => {
   const s = (status ?? '').toLowerCase();
-  if (s.includes('complete') || s === 'succeeded') return 'job-timeline-bar--healthy';
-  if (s.includes('fail')) return 'job-timeline-bar--unhealthy';
-  if (s.includes('run') || s.includes('active')) return 'job-timeline-bar--running';
+  if (s.includes('complete') || s === 'succeeded') {
+    return 'job-timeline-bar--healthy';
+  }
+  if (s.includes('fail')) {
+    return 'job-timeline-bar--unhealthy';
+  }
+  if (s.includes('run') || s.includes('active')) {
+    return 'job-timeline-bar--running';
+  }
   return 'job-timeline-bar--info';
 };
 
@@ -177,14 +186,22 @@ export const JobTimeline: React.FC<JobTimelineProps> = ({ jobs, onJobClick }) =>
   // the user sees anything.
   useLayoutEffect(() => {
     const el = stripRef.current;
-    if (!el) return;
+    if (!el) {
+      return;
+    }
     const measured = el.getBoundingClientRect().width;
-    if (measured > 0) setStripWidth(measured);
-    if (typeof ResizeObserver === 'undefined') return;
+    if (measured > 0) {
+      setStripWidth(measured);
+    }
+    if (typeof ResizeObserver === 'undefined') {
+      return;
+    }
     const ro = new ResizeObserver((entries) => {
       for (const entry of entries) {
         const w = entry.contentRect.width;
-        if (w > 0) setStripWidth(w);
+        if (w > 0) {
+          setStripWidth(w);
+        }
       }
     });
     ro.observe(el);
@@ -199,20 +216,28 @@ export const JobTimeline: React.FC<JobTimelineProps> = ({ jobs, onJobClick }) =>
     const positioned: PositionedJob[] = [];
     for (const job of jobs) {
       const startMs = parseStart(job.startTime);
-      if (startMs === null) continue;
+      if (startMs === null) {
+        continue;
+      }
       const dur = Math.max(0, (job.durationSeconds ?? 0) * 1000);
       const endMs = isActiveStatus(job.status) ? nowMs : startMs + dur;
       // Skip runs that ended before the window started.
-      if (endMs < cutoffMs) continue;
+      if (endMs < cutoffMs) {
+        continue;
+      }
 
       const clippedStart = startMs < cutoffMs;
       const visibleStart = Math.max(startMs, cutoffMs);
       const visibleEnd = Math.min(endMs, nowMs);
       const leftPct = ((visibleStart - cutoffMs) / windowMs) * 100;
       let widthPct = ((visibleEnd - visibleStart) / windowMs) * 100;
-      if (widthPct < MIN_BAR_WIDTH_PCT) widthPct = MIN_BAR_WIDTH_PCT;
+      if (widthPct < MIN_BAR_WIDTH_PCT) {
+        widthPct = MIN_BAR_WIDTH_PCT;
+      }
       // Don't run off the right edge.
-      if (leftPct + widthPct > 100) widthPct = Math.max(MIN_BAR_WIDTH_PCT, 100 - leftPct);
+      if (leftPct + widthPct > 100) {
+        widthPct = Math.max(MIN_BAR_WIDTH_PCT, 100 - leftPct);
+      }
 
       positioned.push({ job, leftPct, widthPct, row: 0, clippedStart });
     }
@@ -268,9 +293,9 @@ export const JobTimeline: React.FC<JobTimelineProps> = ({ jobs, onJobClick }) =>
         {/* Grid lines — one vertical mark per axis tick, behind the
             bars, so users can read where each labeled time falls
             relative to a bar without dropping eyes to the axis. */}
-        {ticks.map((t, i) => (
+        {ticks.map((t) => (
           <div
-            key={`grid-${i}`}
+            key={`grid:${t.leftPct}:${t.label}`}
             className="job-timeline-gridline"
             style={{ left: `${t.leftPct}%` }}
           />
@@ -278,7 +303,7 @@ export const JobTimeline: React.FC<JobTimelineProps> = ({ jobs, onJobClick }) =>
         {runs.length === 0 && (
           <div className="job-timeline-empty">No runs in last {windowOpt.label}</div>
         )}
-        {runs.map((r, i) => {
+        {runs.map((r) => {
           const startMs = parseStart(r.job.startTime) ?? now;
           const startStr = new Date(startMs).toLocaleString();
           const tooltip = [
@@ -298,7 +323,7 @@ export const JobTimeline: React.FC<JobTimelineProps> = ({ jobs, onJobClick }) =>
             top: r.row * (ROW_HEIGHT + ROW_GAP),
             height: ROW_HEIGHT,
           };
-          const key = `${r.job.name ?? 'job'}-${i}`;
+          const key = `${r.job.name ?? 'job'}:${r.job.startTime ?? ''}`;
 
           if (onJobClick && r.job.name) {
             const jobName = r.job.name;
@@ -319,8 +344,12 @@ export const JobTimeline: React.FC<JobTimelineProps> = ({ jobs, onJobClick }) =>
       </div>
 
       <div className="job-timeline-axis">
-        {ticks.map((t, i) => (
-          <div key={i} className="job-timeline-tick" style={{ left: `${t.leftPct}%` }}>
+        {ticks.map((t) => (
+          <div
+            key={`tick:${t.leftPct}:${t.label}`}
+            className="job-timeline-tick"
+            style={{ left: `${t.leftPct}%` }}
+          >
             <span className="job-timeline-tick-label">{t.label}</span>
           </div>
         ))}

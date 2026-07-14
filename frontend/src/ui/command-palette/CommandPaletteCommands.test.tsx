@@ -5,16 +5,17 @@
  * Covers key behaviors and edge cases for CommandPaletteCommands.
  */
 
-import ReactDOM from 'react-dom/client';
-import { act } from 'react';
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { useCommandPaletteCommands, type Command } from './CommandPaletteCommands';
-import type { types } from '@wailsjs/go/models';
 import { DockablePanelProvider } from '@ui/dockable/DockablePanelProvider';
+import type { types } from '@wailsjs/go/models';
+import { act } from 'react';
+import * as ReactDOM from 'react-dom/client';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   resetAppPreferencesCacheForTesting,
   setAppPreferencesForTesting,
 } from '@/core/settings/appPreferences';
+import { installWindowProperty } from '@/test-utils/windowProperty';
+import { type Command, useCommandPaletteCommands } from './CommandPaletteCommands';
 
 const { mocks } = vi.hoisted(() => ({
   mocks: {
@@ -155,9 +156,7 @@ const renderHook = () => {
 };
 
 describe('CommandPaletteCommands', () => {
-  beforeAll(() => {
-    (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
-  });
+  let restoreGo: () => void;
 
   beforeEach(() => {
     mocks.kubeconfig.kubeconfigs = [];
@@ -175,13 +174,35 @@ describe('CommandPaletteCommands', () => {
     mocks.autoRefresh.toggle.mockReset();
     mocks.appSettings.UpdateAppPreferences.mockReset();
     mocks.appSettings.UpdateAppPreferences.mockResolvedValue({ settings: {}, changedKeys: [] });
-    (window as any).go = { backend: { App: {} } };
+    restoreGo = installWindowProperty('go', { backend: { App: {} } });
     resetAppPreferencesCacheForTesting();
   });
 
   afterEach(() => {
-    delete (window as any).go;
+    restoreGo();
     document.body.innerHTML = '';
+  });
+
+  it('shows the direct-open shortcut on the select-namespace command', () => {
+    const { getCommands, unmount } = renderHook();
+    const command = getCommands().find((entry) => entry.id === 'select-namespace');
+
+    expect(command).toBeTruthy();
+    const isMac = /Mac/i.test((navigator.platform || '') + (navigator.userAgent || ''));
+    expect(command?.shortcut).toEqual(isMac ? ['⇧', '⌘', 'N'] : ['Ctrl', 'Shift', 'N']);
+
+    unmount();
+  });
+
+  it('shows the Open Cluster shortcut on the select-kubeconfig command', () => {
+    const { getCommands, unmount } = renderHook();
+    const command = getCommands().find((entry) => entry.id === 'select-kubeconfig');
+
+    expect(command).toBeTruthy();
+    const isMac = /Mac/i.test((navigator.platform || '') + (navigator.userAgent || ''));
+    expect(command?.shortcut).toEqual(isMac ? ['⌘', 'O'] : ['Ctrl', 'O']);
+
+    unmount();
   });
 
   it('opens a cluster tab when the kubeconfig is inactive', () => {

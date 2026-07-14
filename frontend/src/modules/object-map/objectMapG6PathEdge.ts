@@ -4,9 +4,8 @@
  * Custom G6 edge implementation that draws precomputed object-map paths.
  */
 
-import { BaseEdge, ExtensionCategory, register } from '@antv/g6';
-import type { DisplayObjectConfig } from '@antv/g';
 import type { BaseEdgeStyleProps, PathArray } from '@antv/g6';
+import { BaseEdge, ExtensionCategory, register } from '@antv/g6';
 import { OBJECT_MAP_G6_PATH_EDGE } from './objectMapG6Constants';
 
 interface ObjectMapG6PathEdgeStyleProps extends BaseEdgeStyleProps {
@@ -14,10 +13,6 @@ interface ObjectMapG6PathEdgeStyleProps extends BaseEdgeStyleProps {
 }
 
 class ObjectMapG6PathEdge extends BaseEdge {
-  constructor(options: DisplayObjectConfig<ObjectMapG6PathEdgeStyleProps>) {
-    super(options);
-  }
-
   protected getKeyPath(attributes: Required<ObjectMapG6PathEdgeStyleProps>): PathArray {
     if (attributes.objectMapPath) {
       return attributes.objectMapPath;
@@ -33,7 +28,9 @@ class ObjectMapG6PathEdge extends BaseEdge {
 let isRegistered = false;
 
 export const ensureObjectMapG6PathEdgeRegistered = (): void => {
-  if (isRegistered) return;
+  if (isRegistered) {
+    return;
+  }
   register(ExtensionCategory.EDGE, OBJECT_MAP_G6_PATH_EDGE, ObjectMapG6PathEdge);
   isRegistered = true;
 };

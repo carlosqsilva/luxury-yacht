@@ -2,7 +2,7 @@ import { useMemo } from 'react';
 
 import { useScopedRefreshDomainLifecycle } from '@/core/data-access/useScopedRefreshDomainLifecycle';
 import { useStreamSignalRefetch } from '@/core/refresh/hooks/useStreamSignalRefetch';
-import { useRefreshScopedDomain } from '@/core/refresh/store';
+import { type DomainStatus, useRefreshScopedDomain } from '@/core/refresh/store';
 import type {
   ClusterNodeSnapshotPayload,
   NamespaceWorkloadSnapshotPayload,
@@ -12,14 +12,18 @@ import type {
 import type { KubernetesObjectReference } from '@/types/view-state';
 import { buildResourceMetricsReference, resolveResourceMetricsScope } from './scope';
 import { selectNodeMetrics, selectPodMetrics, selectWorkloadMetrics } from './selectors';
-import type { ResourceMetricsResolution, ResourceMetricsResult } from './types';
+import type {
+  ResourceMetricsData,
+  ResourceMetricsResolution,
+  ResourceMetricsResult,
+} from './types';
 
 const disabledDomain: RefreshDomain = 'pods';
 const disabledScope = '__resource_metrics_disabled__';
 
 const stateStatusToResult = (
   resolution: ResourceMetricsResolution,
-  status: string,
+  status: DomainStatus,
   error?: string | null
 ): ResourceMetricsResult['status'] => {
   if (resolution.kind === 'invalid') {
@@ -87,7 +91,7 @@ export const useResourceMetrics = (
       };
     }
 
-    let metrics = null;
+    let metrics: ResourceMetricsData | null = null;
     if (resolution.domain === 'pods') {
       metrics = selectPodMetrics(state.data as PodSnapshotPayload | null, ref);
     } else if (resolution.domain === 'namespace-workloads') {

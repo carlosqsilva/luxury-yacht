@@ -5,32 +5,33 @@
  * Encapsulates state and side effects for the shared components.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { SortConfig } from '@hooks/useTableSort';
 import type {
   ColumnWidthState,
   GridColumnDefinition,
   GridTableFilterState,
 } from '@shared/components/tables/GridTable.types';
-import type { SortConfig } from '@hooks/useTableSort';
+import { DEFAULT_GRID_TABLE_FILTER_STATE } from '@shared/components/tables/gridTableFilterState';
 import {
   buildGridTableStorageKey,
   buildPersistedStateForSave,
+  clearPersistedState,
   computeClusterHash,
+  type GridTableFilterPersistenceOptions,
+  type GridTablePersistenceKeyParts,
   hydrateGridTablePersistence,
   loadPersistedState,
   prunePersistedState,
   savePersistedState,
-  clearPersistedState,
-  type GridTablePersistenceKeyParts,
-  type GridTableFilterPersistenceOptions,
 } from '@shared/components/tables/persistence/gridTablePersistence';
+import { subscribeGridTableResetAll } from '@shared/components/tables/persistence/gridTablePersistenceReset';
 import {
+  type GridTablePersistenceMode,
   getGridTablePersistenceMode,
   subscribeGridTablePersistenceMode,
-  type GridTablePersistenceMode,
 } from '@shared/components/tables/persistence/gridTablePersistenceSettings';
-import { subscribeGridTableResetAll } from '@shared/components/tables/persistence/gridTablePersistenceReset';
-import { DEFAULT_GRID_TABLE_FILTER_STATE } from '@shared/components/tables/gridTableFilterState';
+
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 export interface UseGridTablePersistenceParams<T> {
   viewId: string;
@@ -129,6 +130,7 @@ export function useGridTablePersistence<T>({
   }, [clusterHash, viewId, namespace, isNamespaceScoped, enabled, persistenceMode]);
 
   useEffect(() => {
+    void storageKey;
     // Force re-hydration when the storage key changes (e.g., namespace switch).
     setHydrated(false);
     lastSavePayloadRef.current = '';

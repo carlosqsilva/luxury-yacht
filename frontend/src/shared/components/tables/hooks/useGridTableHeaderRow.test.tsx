@@ -5,38 +5,41 @@
  * Covers key behaviors and edge cases for useGridTableHeaderRow.
  */
 
-import ReactDOM from 'react-dom/client';
-import { act } from 'react';
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { useGridTableHeaderRow } from '@shared/components/tables/hooks/useGridTableHeaderRow';
 import type { GridColumnDefinition } from '@shared/components/tables/GridTable.types';
+import { useGridTableHeaderRow } from '@shared/components/tables/hooks/useGridTableHeaderRow';
+import { act } from 'react';
+import * as ReactDOM from 'react-dom/client';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const renderSortIndicator = vi.fn((key: string) => <span data-testid={`sort-${key}`} />);
 const handleHeaderClick = vi.fn();
 const handleHeaderContextMenu = vi.fn();
 const handleResizeStart = vi.fn();
+const handleResizeKeyDown = vi.fn();
 const autoSizeColumn = vi.fn();
 
-const columns: GridColumnDefinition<any>[] = [
+type Row = { name: string; age: string; role: string; kind?: string };
+
+const columns: GridColumnDefinition<Row>[] = [
   {
     key: 'name',
     header: 'Name',
     sortable: true,
     className: 'col-name',
-    render: (row: any) => row?.name ?? null,
+    render: (row) => row.name,
   },
   {
     key: 'age',
     header: 'Age',
     sortable: false,
     className: 'col-age',
-    render: (row: any) => row?.age ?? null,
+    render: (row) => row.age,
   },
   {
     key: 'role',
     header: 'Role',
     className: 'col-role',
-    render: (row: any) => row?.role ?? null,
+    render: (row) => row.role,
   },
 ];
 
@@ -56,6 +59,9 @@ const HeaderHarness: React.FC<{
     handleHeaderClick,
     renderSortIndicator,
     handleResizeStart,
+    handleResizeKeyDown,
+    getColumnMinWidth: () => 40,
+    getColumnMaxWidth: () => 400,
     autoSizeColumn,
   });
   return <>{node}</>;
@@ -65,10 +71,6 @@ describe('useGridTableHeaderRow', () => {
   let container: HTMLDivElement;
   let root: ReactDOM.Root;
 
-  beforeAll(() => {
-    (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
-  });
-
   beforeEach(() => {
     container = document.createElement('div');
     document.body.appendChild(container);
@@ -76,6 +78,7 @@ describe('useGridTableHeaderRow', () => {
     handleHeaderClick.mockClear();
     handleHeaderContextMenu.mockClear();
     handleResizeStart.mockClear();
+    handleResizeKeyDown.mockClear();
     autoSizeColumn.mockClear();
     renderSortIndicator.mockClear();
   });
@@ -97,7 +100,7 @@ describe('useGridTableHeaderRow', () => {
     expect(renderSortIndicator).toHaveBeenCalledWith('name');
     expect(renderSortIndicator).toHaveBeenCalledWith('role');
 
-    const nameHeader = headerCells[0].querySelector('span > span') as HTMLSpanElement;
+    const nameHeader = headerCells[0].querySelector('button') as HTMLButtonElement;
     await act(async () => {
       nameHeader.dispatchEvent(new MouseEvent('click', { bubbles: true }));
       await Promise.resolve();
@@ -106,6 +109,9 @@ describe('useGridTableHeaderRow', () => {
 
     const resizeHandles = container.querySelectorAll('.resize-handle');
     expect(resizeHandles).toHaveLength(2);
+    expect(resizeHandles[0]?.tagName).toBe('HR');
+    expect(resizeHandles[0]?.getAttribute('tabindex')).toBe('0');
+    expect(resizeHandles[0]?.getAttribute('aria-valuenow')).toBe('120');
 
     await act(async () => {
       resizeHandles[0].dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
@@ -115,6 +121,15 @@ describe('useGridTableHeaderRow', () => {
     const resizeArgs = handleResizeStart.mock.calls[0];
     expect(resizeArgs[1]).toBe('name');
     expect(resizeArgs[2]).toBe('age');
+
+    await act(async () => {
+      resizeHandles[0].dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true })
+      );
+      await Promise.resolve();
+    });
+    expect(handleResizeKeyDown).toHaveBeenCalled();
+    expect(handleResizeKeyDown.mock.calls[0][1]).toBe('name');
 
     await act(async () => {
       resizeHandles[0].dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
@@ -134,7 +149,7 @@ describe('useGridTableHeaderRow', () => {
     });
     expect(container.querySelectorAll('.resize-handle')).toHaveLength(0);
 
-    const roleHeader = container.querySelector('[data-column="role"] span > span') as HTMLElement;
+    const roleHeader = container.querySelector('[data-column="role"] button') as HTMLElement;
     await act(async () => {
       roleHeader.dispatchEvent(new MouseEvent('click', { bubbles: true }));
       await Promise.resolve();
@@ -144,9 +159,9 @@ describe('useGridTableHeaderRow', () => {
   });
 
   it('renders a passive separator after the Kind column when it is fixed', async () => {
-    const kindColumns: GridColumnDefinition<any>[] = [
-      { key: 'kind', header: 'Kind', sortable: true, render: (row: any) => row?.kind ?? null },
-      { key: 'name', header: 'Name', sortable: true, render: (row: any) => row?.name ?? null },
+    const kindColumns: GridColumnDefinition<Row>[] = [
+      { key: 'kind', header: 'Kind', sortable: true, render: (row) => row.kind ?? null },
+      { key: 'name', header: 'Name', sortable: true, render: (row) => row.name },
     ];
 
     const KindHarness: React.FC = () => {
@@ -159,6 +174,9 @@ describe('useGridTableHeaderRow', () => {
         handleHeaderClick,
         renderSortIndicator,
         handleResizeStart,
+        handleResizeKeyDown,
+        getColumnMinWidth: () => 40,
+        getColumnMaxWidth: () => 400,
         autoSizeColumn,
       });
       return <>{node}</>;
@@ -172,31 +190,19 @@ describe('useGridTableHeaderRow', () => {
     expect(container.querySelectorAll('.column-separator')).toHaveLength(1);
   });
 
-  it('activates sort via Enter and Space keys on sortable headers', async () => {
+  it('uses a native button for sortable-header activation', async () => {
     await act(async () => {
       root.render(<HeaderHarness enableResizing={false} />);
     });
 
-    const sortableSpan = container.querySelector(
-      '[data-column="name"] span > span[role="button"]'
-    ) as HTMLElement;
-    expect(sortableSpan).not.toBeNull();
-    expect(sortableSpan.tabIndex).toBe(0);
-    expect(sortableSpan.getAttribute('aria-label')).toBe('Sort by Name');
+    const sortableButton = container.querySelector(
+      '[data-column="name"] button[aria-label="Sort by Name"]'
+    ) as HTMLButtonElement;
+    expect(sortableButton).not.toBeNull();
+    expect(sortableButton.tabIndex).toBe(0);
 
-    // Enter triggers sort.
     await act(async () => {
-      sortableSpan.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-      await Promise.resolve();
-    });
-    expect(handleHeaderClick).toHaveBeenCalledTimes(1);
-    expect(handleHeaderClick).toHaveBeenCalledWith(columns[0]);
-
-    handleHeaderClick.mockClear();
-
-    // Space triggers sort.
-    await act(async () => {
-      sortableSpan.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true }));
+      sortableButton.click();
       await Promise.resolve();
     });
     expect(handleHeaderClick).toHaveBeenCalledTimes(1);

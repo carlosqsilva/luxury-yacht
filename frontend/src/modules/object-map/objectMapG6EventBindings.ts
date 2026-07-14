@@ -4,23 +4,22 @@
  * Registers G6 canvas, node, and edge events for the object-map renderer.
  */
 
-import { CanvasEvent, CommonEvent, EdgeEvent, GraphEvent, NodeEvent } from '@antv/g6';
 import type { Graph } from '@antv/g6';
+import { CanvasEvent, CommonEvent, EdgeEvent, GraphEvent, NodeEvent } from '@antv/g6';
 import type { MutableRefObject } from 'react';
-import type { ObjectMapLayout, PositionedEdge } from './objectMapLayout';
-import { objectMapG6EdgeState, objectMapG6NodeState } from './objectMapG6Data';
 import type { ObjectMapG6Palette } from './objectMapG6Data';
+import { objectMapG6EdgeState, objectMapG6NodeState } from './objectMapG6Data';
 import {
+  handleObjectMapG6CanvasContextMenu,
   handleObjectMapG6Drag,
   handleObjectMapG6DragEnd,
-  handleObjectMapG6CanvasContextMenu,
   handleObjectMapG6NodeClick,
   handleObjectMapG6NodeContextMenu,
   handleObjectMapG6NodePointerDown,
   handleObjectMapG6PointerUp,
-  objectMapG6TooltipPoint,
   type ObjectMapG6ElementPointerEvent,
   type ObjectMapG6NodeInteractionHandlers,
+  objectMapG6TooltipPoint,
 } from './objectMapG6Interactions';
 import {
   findObjectMapG6Edge,
@@ -29,6 +28,7 @@ import {
   objectMapG6EndpointLabel,
 } from './objectMapG6RendererOptions';
 import { isObjectMapZoomWheelEvent, objectMapWheelZoomRatio } from './objectMapG6Viewport';
+import type { ObjectMapLayout, PositionedEdge } from './objectMapLayout';
 import type { ObjectMapNodeGestureState } from './objectMapNodeGesture';
 import type { ObjectMapHoverEdge, ObjectMapSelectionState } from './objectMapRendererTypes';
 
@@ -59,7 +59,9 @@ const setConnectionHoverState = (
   edge: PositionedEdge,
   hovered: boolean
 ) => {
-  if (graph.destroyed) return;
+  if (graph.destroyed) {
+    return;
+  }
   const states: Record<string, string[]> = {
     [edge.id]: hovered
       ? [...objectMapG6EdgeState(edge, selectionState), 'hovered']
@@ -67,7 +69,9 @@ const setConnectionHoverState = (
   };
   [edge.sourceId, edge.targetId].forEach((nodeId) => {
     const node = findObjectMapG6Node(layout, nodeId);
-    if (!node) return;
+    if (!node) {
+      return;
+    }
     const nodeStates = objectMapG6NodeState(node, selectionState);
     states[nodeId] = hovered ? [...nodeStates, 'edgeHovered'] : nodeStates;
   });
@@ -178,7 +182,9 @@ export const bindObjectMapG6Events = (options: ObjectMapG6EventBindingOptions): 
   graph.on(EdgeEvent.POINTER_ENTER, (rawEvent) => {
     const event = rawEvent as ObjectMapG6ElementPointerEvent;
     const edge = findObjectMapG6Edge(layoutRef.current, event.target.id);
-    if (!edge) return;
+    if (!edge) {
+      return;
+    }
     const previousHoverEdgeId = hoveredEdgeIdRef.current;
     hoveredEdgeIdRef.current = edge.id;
     if (previousHoverEdgeId && previousHoverEdgeId !== edge.id) {
@@ -200,7 +206,9 @@ export const bindObjectMapG6Events = (options: ObjectMapG6EventBindingOptions): 
   graph.on(EdgeEvent.POINTER_MOVE, (rawEvent) => {
     const event = rawEvent as ObjectMapG6ElementPointerEvent;
     const edge = findObjectMapG6Edge(layoutRef.current, event.target.id);
-    if (!edge || hoveredEdgeIdRef.current !== edge.id) return;
+    if (!edge || hoveredEdgeIdRef.current !== edge.id) {
+      return;
+    }
     emitConnectionHover(edge, event, options);
   });
 
@@ -230,9 +238,13 @@ export const bindObjectMapG6Events = (options: ObjectMapG6EventBindingOptions): 
   graph.on(GraphEvent.AFTER_SIZE_CHANGE, updateTooltipPosition);
 
   const handleWheelZoom = (event: WheelEvent) => {
-    if (graph.destroyed) return;
+    if (graph.destroyed) {
+      return;
+    }
     onUserViewportChangeRef.current?.();
-    if (!isObjectMapZoomWheelEvent(event)) return;
+    if (!isObjectMapZoomWheelEvent(event)) {
+      return;
+    }
     event.preventDefault();
     const rect = container.getBoundingClientRect();
     const origin: [number, number] = [event.clientX - rect.left, event.clientY - rect.top];

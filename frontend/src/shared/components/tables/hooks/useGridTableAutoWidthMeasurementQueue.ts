@@ -5,12 +5,11 @@
  * Encapsulates state and side effects for the shared components.
  */
 
-import { useCallback, useEffect, useRef } from 'react';
-import type { RefObject } from 'react';
-
 import type { GridColumnDefinition } from '@shared/components/tables/GridTable.types';
 import { parseWidthInputToNumber } from '@shared/components/tables/GridTable.utils';
 import type { ColumnWidthPhase } from '@shared/components/tables/hooks/useGridTableColumnWidths';
+import type { RefObject } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 
 // Auto-width measurement queue for GridTable.
 // - When a column is marked autoWidth, we keep an eye on its rendered text/content.
@@ -29,7 +28,7 @@ const getAutoSizeMaxWidth = <T>(
 ) => {
   const configuredMaxWidth = getColumnMaxWidth(column);
   const autoSizeMaxWidth = parseWidthInputToNumber(column.autoSizeMaxWidth);
-  return autoSizeMaxWidth != null
+  return autoSizeMaxWidth !== null && autoSizeMaxWidth !== undefined
     ? Math.min(configuredMaxWidth, autoSizeMaxWidth)
     : configuredMaxWidth;
 };
@@ -72,7 +71,7 @@ const createVisibleColumnSignature = (
   const nodes = Array.from(table.querySelectorAll<HTMLElement>('.grid-cell[data-column]'))
     .filter((cell) => cell.dataset.column === columnKey)
     .map((cell) => cell.querySelector<HTMLElement>('.grid-cell-content'))
-    .filter((node): node is HTMLElement => node != null);
+    .filter((node): node is HTMLElement => node !== null && node !== undefined);
   if (nodes.length === 0) {
     return null;
   }
@@ -113,7 +112,7 @@ export function useDirtyQueue<T>({
     if (typeof window === 'undefined') {
       return;
     }
-    if (dirtyTimerRef.current != null) {
+    if (dirtyTimerRef.current !== null && dirtyTimerRef.current !== undefined) {
       window.clearTimeout(dirtyTimerRef.current);
     }
     dirtyTimerRef.current = window.setTimeout(() => {
@@ -128,7 +127,11 @@ export function useDirtyQueue<T>({
     dirtyColumnsRef.current.clear();
     columnHashesRef.current.clear();
     allowShrinkColumnsRef.current.clear();
-    if (dirtyTimerRef.current != null && typeof window !== 'undefined') {
+    if (
+      dirtyTimerRef.current !== null &&
+      dirtyTimerRef.current !== undefined &&
+      typeof window !== 'undefined'
+    ) {
       window.clearTimeout(dirtyTimerRef.current);
     }
     dirtyTimerRef.current = null;
@@ -144,9 +147,11 @@ export function useDirtyQueue<T>({
       const dirty = dirtyColumnsRef.current;
       const columns = renderedColumnsRef.current;
       for (const key of keys) {
-        if (!key) continue;
+        if (!key) {
+          continue;
+        }
         const column = columns.find((col) => col.key === key);
-        if (!column || !column.autoWidth) {
+        if (!column?.autoWidth) {
           continue;
         }
         if (manuallyResizedColumnsRef.current.has(key)) {
@@ -189,7 +194,9 @@ export function useDirtyQueue<T>({
       if (type === 'drag') {
         // Per-column cleanup while dragging — no phase change.
         keys.forEach((key) => {
-          if (!key) return;
+          if (!key) {
+            return;
+          }
           dirtyColumnsRef.current.delete(key);
           columnHashesRef.current.delete(key);
           allowShrinkColumnsRef.current.delete(key);
@@ -200,7 +207,9 @@ export function useDirtyQueue<T>({
       if (type === 'dragEnd') {
         // Per-column cleanup, then resume idle.
         keys.forEach((key) => {
-          if (!key) return;
+          if (!key) {
+            return;
+          }
           dirtyColumnsRef.current.delete(key);
           columnHashesRef.current.delete(key);
           allowShrinkColumnsRef.current.delete(key);
@@ -214,7 +223,9 @@ export function useDirtyQueue<T>({
         // Clear stale queue state, then re-queue with allowShrink.
         clearMeasurementQueue();
         keys.forEach((key) => {
-          if (!key) return;
+          if (!key) {
+            return;
+          }
           allowShrinkColumnsRef.current.add(key);
         });
         markColumnsDirty(keys);
@@ -272,7 +283,7 @@ export function useDirtyQueue<T>({
 
     dirtyKeys.forEach((key) => {
       const column = renderedColumnsRef.current.find((col) => col.key === key);
-      if (!column || !column.autoWidth) {
+      if (!column?.autoWidth) {
         columnHashesRef.current.delete(key);
         allowShrinkColumnsRef.current.delete(key);
         return;
@@ -284,7 +295,7 @@ export function useDirtyQueue<T>({
       }
 
       const signature = createVisibleColumnSignature(tableRef, key);
-      if (signature == null) {
+      if (signature === null || signature === undefined) {
         retryKeys.push(key);
         return;
       }
@@ -312,7 +323,9 @@ export function useDirtyQueue<T>({
 
     // If cells are not yet rendered, retry a moment later.
     if (retryKeys.length > 0) {
-      retryKeys.forEach((key) => dirtyColumnsRef.current.add(key));
+      retryKeys.forEach((key) => {
+        dirtyColumnsRef.current.add(key);
+      });
       pendingRetryRef.current = true;
       scheduleDirtyFlush(50);
     } else {
@@ -362,7 +375,11 @@ export function useDirtyQueue<T>({
   useEffect(() => {
     return () => {
       isMountedRef.current = false;
-      if (dirtyTimerRef.current != null && typeof window !== 'undefined') {
+      if (
+        dirtyTimerRef.current !== null &&
+        dirtyTimerRef.current !== undefined &&
+        typeof window !== 'undefined'
+      ) {
         window.clearTimeout(dirtyTimerRef.current);
       }
     };

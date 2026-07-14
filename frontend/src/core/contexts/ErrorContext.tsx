@@ -4,8 +4,23 @@
  * Error notification context and actions.
  * Provides a way to manage and display error notifications across the application.
  */
-import React, { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
-import { ErrorDetails, ErrorSeverity, errorHandler, subscribeToErrors } from '@utils/errorHandler';
+
+import {
+  type ErrorDetails,
+  ErrorSeverity,
+  errorHandler,
+  subscribeToErrors,
+} from '@utils/errorHandler';
+import type React from 'react';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useEffectEvent,
+  useRef,
+  useState,
+} from 'react';
 
 export interface ErrorNotification extends ErrorDetails {
   id: string;
@@ -126,11 +141,13 @@ export const ErrorProvider: React.FC<ErrorProviderProps> = ({
   );
 
   // Replay any errors captured before the provider mounted (once only)
-  useEffect(() => {
+  const replayInitialErrors = useEffectEvent(() => {
     const history = errorHandler.getHistory();
-    history.forEach((error) => addError(error));
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally runs once on mount
-  }, []);
+    history.forEach((error) => {
+      addError(error);
+    });
+  });
+  useEffect(() => replayInitialErrors(), []);
 
   // Subscribe to future errors from the global handler
   useEffect(() => {
@@ -143,7 +160,9 @@ export const ErrorProvider: React.FC<ErrorProviderProps> = ({
     return () => {
       unsubscribe();
       // Clear auto-dismiss timers when subscription resets
-      timers.forEach((timer) => clearTimeout(timer));
+      timers.forEach((timer) => {
+        clearTimeout(timer);
+      });
     };
   }, [addError]);
 
@@ -153,7 +172,9 @@ export const ErrorProvider: React.FC<ErrorProviderProps> = ({
   useEffect(() => {
     const animTimers = animationTimers.current;
     return () => {
-      animTimers.forEach((timer) => clearTimeout(timer));
+      animTimers.forEach((timer) => {
+        clearTimeout(timer);
+      });
     };
   }, []);
 
@@ -161,7 +182,9 @@ export const ErrorProvider: React.FC<ErrorProviderProps> = ({
     setErrors((prev) => prev.map((error) => ({ ...error, dismissed: true })));
 
     // Clear all timers
-    dismissTimers.current.forEach((timer) => clearTimeout(timer));
+    dismissTimers.current.forEach((timer) => {
+      clearTimeout(timer);
+    });
     dismissTimers.current.clear();
 
     // Remove all errors after animation
@@ -174,7 +197,9 @@ export const ErrorProvider: React.FC<ErrorProviderProps> = ({
 
   const clearErrors = useCallback(() => {
     // Clear all timers
-    dismissTimers.current.forEach((timer) => clearTimeout(timer));
+    dismissTimers.current.forEach((timer) => {
+      clearTimeout(timer);
+    });
     dismissTimers.current.clear();
     setErrors([]);
   }, []);

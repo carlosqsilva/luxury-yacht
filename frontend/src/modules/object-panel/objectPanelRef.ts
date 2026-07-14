@@ -6,23 +6,23 @@
  * checks from one shared object reference contract.
  */
 
-import { buildClusterScope, buildObjectScope } from '@/core/refresh/clusterScope';
 import { buildObjectPanelPodsScope } from '@modules/object-panel/components/ObjectPanel/Pods/objectPanelPodsScope';
-import type { KubernetesObjectReference } from '@/types/view-state';
+import { resolveBuiltinGroupVersion } from '@shared/constants/builtinGroupVersions';
 import {
   buildObjectReference,
   buildRequiredObjectReference,
+  type ClusterObjectReference,
   type ResolvedObjectReference,
 } from '@shared/utils/objectIdentity';
-import { resolveBuiltinGroupVersion } from '@shared/constants/builtinGroupVersions';
+import { buildClusterScope, buildObjectScope } from '@/core/refresh/clusterScope';
+import type { KubernetesObjectReference } from '@/types/view-state';
 
-export interface ObjectPanelRef extends ResolvedObjectReference {
-  clusterId: string;
-  group: string;
-  version: string;
-  kind: string;
-  name: string;
-}
+/**
+ * The panel system's reference currency: a cluster-complete object reference.
+ * Everything past useObjectPanel.openWithObject's validation boundary carries
+ * this shape, so a panel ref without full identity does not compile.
+ */
+export type ObjectPanelRef = ClusterObjectReference;
 
 export interface ObjectPanelRefOptions {
   clusterScope?: string;
@@ -114,7 +114,7 @@ const normalizePanelInput = (input: KubernetesObjectReference): KubernetesObject
 
 const hasExplicitScopeGVK = (input: KubernetesObjectReference): boolean => {
   const version = normalizeOptional(input.version);
-  if (input.group == null || !version) {
+  if (input.group === null || input.group === undefined || !version) {
     return false;
   }
   const group = input.group.trim();
@@ -138,10 +138,9 @@ export const buildObjectPanelRef = (
   if (!clusterId) {
     throw new Error('Object panel reference is missing clusterId');
   }
-  const ref = buildRequiredObjectReference(normalizePanelInput(input), {
+  return buildRequiredObjectReference(normalizePanelInput(input), {
     fallbackClusterId: clusterId,
   });
-  return ref as ObjectPanelRef;
 };
 
 export const objectPanelId = (ref: KubernetesObjectReference): string => {
@@ -170,7 +169,8 @@ export const hasCompleteObjectMapReference = (
     Boolean(objectData.clusterId?.trim()) &&
     Boolean(objectData.kind?.trim()) &&
     Boolean(objectData.name?.trim()) &&
-    objectData.group != null &&
+    objectData.group !== null &&
+    objectData.group !== undefined &&
     Boolean(objectData.version?.trim())
   );
 };

@@ -5,16 +5,13 @@
  * Covers key behaviors and edge cases for useFrameSampler.
  */
 
-import React, { act, useImperativeHandle } from 'react';
-import ReactDOM from 'react-dom/client';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-
 import {
-  useFrameSampler,
   type FrameSamplerSample,
+  useFrameSampler,
 } from '@shared/components/tables/hooks/useFrameSampler';
-
-(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+import React, { act, useImperativeHandle } from 'react';
+import * as ReactDOM from 'react-dom/client';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 type HarnessHandle = {
   start: () => void;
@@ -35,7 +32,10 @@ const createHarness = async (props: HarnessProps) => {
   document.body.appendChild(container);
   const root = ReactDOM.createRoot(container);
 
-  const Harness = React.forwardRef<HarnessHandle, HarnessProps>((incomingProps, ref) => {
+  const Harness = ({
+    ref: samplerRef,
+    ...incomingProps
+  }: HarnessProps & { ref?: React.Ref<HarnessHandle> }) => {
     const sampler = useFrameSampler({
       enabled: incomingProps.enabled ?? true,
       sampleLabel: 'GridTable scroll',
@@ -48,13 +48,13 @@ const createHarness = async (props: HarnessProps) => {
       clearTimeoutImpl: incomingProps.clearTimeoutImpl,
     });
 
-    useImperativeHandle(ref, () => ({
+    useImperativeHandle(samplerRef, () => ({
       start: sampler.start,
       stop: sampler.stop,
     }));
 
     return null;
-  });
+  };
 
   const ref = React.createRef<HarnessHandle>();
 

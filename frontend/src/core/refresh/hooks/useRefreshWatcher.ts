@@ -5,11 +5,11 @@
  * Encapsulates state and side effects for the core layer.
  */
 
-import { useEffect, useRef, useCallback, useState, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { eventBus } from '@/core/events';
 import { useRefreshManagerContext } from '../contexts/RefreshManagerContext';
 import type { RefresherState } from '../RefreshManager';
 import type { RefresherName } from '../refresherTypes';
-import { eventBus } from '@/core/events';
 
 interface UseRefreshWatcherOptions {
   /**
@@ -30,7 +30,7 @@ interface UseRefreshWatcherOptions {
   /**
    * Dependencies that trigger re-subscription
    */
-  dependencies?: any[];
+  dependencies?: unknown[];
 }
 
 /**
@@ -61,6 +61,7 @@ export const useRefreshWatcher = (options: UseRefreshWatcherOptions) => {
 
   // Subscribe to refresh events
   useEffect(() => {
+    void dependenciesSignature;
     // Unsubscribe previous subscription
     if (unsubscribeRef.current) {
       unsubscribeRef.current();

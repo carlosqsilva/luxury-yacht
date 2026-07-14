@@ -5,19 +5,16 @@
  * Covers key behaviors and edge cases for useGridTableContextMenu.
  */
 
-import React, { forwardRef, useImperativeHandle } from 'react';
-import ReactDOM from 'react-dom/client';
-import { act } from 'react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-
-import type { GridColumnDefinition } from '@shared/components/tables/GridTable.types';
 import type { ContextMenuItem } from '@shared/components/ContextMenu';
+import type { GridColumnDefinition } from '@shared/components/tables/GridTable.types';
 import {
-  useGridTableContextMenu,
   type GridTableContextMenuState,
+  useGridTableContextMenu,
 } from '@shared/components/tables/hooks/useGridTableContextMenu';
-
-(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+import React, { act, useImperativeHandle } from 'react';
+import * as ReactDOM from 'react-dom/client';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { requireValue } from '@/test-utils/requireValue';
 
 type SampleRow = { id: string; name: string };
 
@@ -63,61 +60,65 @@ interface HarnessProps {
   wrapperItems?: ContextMenuItem[];
 }
 
-const Harness = forwardRef<HarnessHandle, HarnessProps>(
-  ({ enableContextMenu = true, wrapperItems }, ref) => {
-    const contextMenu = useGridTableContextMenu<SampleRow>({
-      enableContextMenu,
-      columns,
-      getCustomContextMenuItems: (item, columnKey) => [
-        { label: `Inspect ${columnKey}`, onClick: vi.fn() },
-        { label: `Select ${item.name}`, onClick: vi.fn() },
-      ],
-      getContextMenuItems: (columnKey, item, source) => {
-        if (source === 'empty') {
-          return wrapperItems ?? [];
-        }
-        return item
-          ? [{ label: `Sort ${columnKey}`, onClick: vi.fn() }]
-          : [{ label: 'noop', onClick: vi.fn() }];
+const Harness = ({
+  enableContextMenu = true,
+  wrapperItems,
+  ref,
+}: HarnessProps & { ref?: React.Ref<HarnessHandle> }) => {
+  const contextMenu = useGridTableContextMenu<SampleRow>({
+    enableContextMenu,
+    columns,
+    getCustomContextMenuItems: (item, columnKey) => [
+      { label: `Inspect ${columnKey}`, onClick: vi.fn() },
+      { label: `Select ${item.name}`, onClick: vi.fn() },
+    ],
+    getContextMenuItems: (columnKey, item, source) => {
+      if (source === 'empty') {
+        return wrapperItems ?? [];
+      }
+      return item
+        ? [{ label: `Sort ${columnKey}`, onClick: vi.fn() }]
+        : [{ label: 'noop', onClick: vi.fn() }];
+    },
+    onSort: vi.fn(),
+  });
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      openCellMenu(opts) {
+        const event = buildMouseEvent({ ctrlKey: opts?.enable === false });
+        return contextMenu.openCellContextMenu(event, 'name', { id: '1', name: 'Row 1' });
       },
-      onSort: vi.fn(),
-    });
+      openCellMenuViaKeyboard(element?: HTMLElement) {
+        return contextMenu.openCellContextMenuFromKeyboard(
+          'name',
+          { id: '1', name: 'Row 1' },
+          element
+        );
+      },
+      openWrapperMenu(opts) {
+        const target = document.createElement('div');
+        target.classList.add('gridtable-wrapper');
+        opts?.classList?.forEach((cls) => {
+          target.classList.add(cls);
+        });
+        const event = buildMouseEvent({
+          ctrlKey: opts?.enable === false,
+          clientX: 16,
+          clientY: 18,
+          target,
+        });
+        return contextMenu.openWrapperContextMenu(event);
+      },
+      getContextMenu: () => contextMenu.contextMenu,
+      close: () => contextMenu.closeContextMenu(),
+    }),
+    [contextMenu]
+  );
 
-    useImperativeHandle(
-      ref,
-      () => ({
-        openCellMenu(opts) {
-          const event = buildMouseEvent({ ctrlKey: opts?.enable === false });
-          return contextMenu.openCellContextMenu(event, 'name', { id: '1', name: 'Row 1' });
-        },
-        openCellMenuViaKeyboard(element?: HTMLElement) {
-          return contextMenu.openCellContextMenuFromKeyboard(
-            'name',
-            { id: '1', name: 'Row 1' },
-            element
-          );
-        },
-        openWrapperMenu(opts) {
-          const target = document.createElement('div');
-          target.classList.add('gridtable-wrapper');
-          opts?.classList?.forEach((cls) => target.classList.add(cls));
-          const event = buildMouseEvent({
-            ctrlKey: opts?.enable === false,
-            clientX: 16,
-            clientY: 18,
-            target,
-          });
-          return contextMenu.openWrapperContextMenu(event);
-        },
-        getContextMenu: () => contextMenu.contextMenu,
-        close: () => contextMenu.closeContextMenu(),
-      }),
-      [contextMenu]
-    );
-
-    return null;
-  }
-);
+  return null;
+};
 
 const renderHarness = async (props?: HarnessProps) => {
   const container = document.createElement('div');
@@ -164,8 +165,12 @@ describe('useGridTableContextMenu', () => {
 
     const menu = harness.getHandle().getContextMenu();
     expect(menu).not.toBeNull();
-    expect(menu!.source).toBe('cell');
-    expect(menu!.columnKey).toBe('name');
+    expect(
+      requireValue(menu, 'expected test value in useGridTableContextMenu.test.tsx').source
+    ).toBe('cell');
+    expect(
+      requireValue(menu, 'expected test value in useGridTableContextMenu.test.tsx').columnKey
+    ).toBe('name');
 
     await act(async () => {
       harness.getHandle().close();
@@ -204,8 +209,12 @@ describe('useGridTableContextMenu', () => {
 
     const menu = harness.getHandle().getContextMenu();
     expect(menu).not.toBeNull();
-    expect(menu!.source).toBe('empty');
-    expect(menu!.itemsOverride).toEqual(wrapperItems);
+    expect(
+      requireValue(menu, 'expected test value in useGridTableContextMenu.test.tsx').source
+    ).toBe('empty');
+    expect(
+      requireValue(menu, 'expected test value in useGridTableContextMenu.test.tsx').itemsOverride
+    ).toEqual(wrapperItems);
 
     await harness.unmount();
   });
@@ -228,8 +237,12 @@ describe('useGridTableContextMenu', () => {
 
     const menu = harness.getHandle().getContextMenu();
     expect(menu).not.toBeNull();
-    expect(menu!.position.x).toBeCloseTo(50);
-    expect(menu!.position.y).toBeCloseTo(40);
+    expect(
+      requireValue(menu, 'expected test value in useGridTableContextMenu.test.tsx').position.x
+    ).toBeCloseTo(50);
+    expect(
+      requireValue(menu, 'expected test value in useGridTableContextMenu.test.tsx').position.y
+    ).toBeCloseTo(40);
 
     await harness.unmount();
   });

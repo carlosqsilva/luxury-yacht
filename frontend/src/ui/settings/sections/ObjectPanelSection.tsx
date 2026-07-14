@@ -5,25 +5,25 @@
  * detail panel.
  */
 
-import { useState, useMemo, type FC } from 'react';
 import {
+  type AppPreferenceKey,
   getDefaultObjectPanelPosition,
   getIntegerPreferenceMetadata,
-  setDefaultObjectPanelPosition,
   getObjectPanelLayoutDefaults,
   normalizeIntegerPreferenceValue,
-  setObjectPanelLayoutDefaults,
-  type AppPreferenceKey,
-  type ObjectPanelPosition,
   type ObjectPanelLayoutDefaults,
+  type ObjectPanelPosition,
+  setDefaultObjectPanelPosition,
+  setObjectPanelLayoutDefaults,
 } from '@core/settings/appPreferences';
-import { useDockablePanelContext } from '@ui/dockable';
-import { getContentBounds } from '@ui/dockable/dockablePanelLayout';
 import {
   DockBottomIcon,
   DockRightIcon,
   FloatPanelIcon,
 } from '@shared/components/icons/DockableIcons';
+import { useDockablePanelContext } from '@ui/dockable';
+import { getContentBounds } from '@ui/dockable/dockablePanelLayout';
+import { type FC, useId, useMemo, useState } from 'react';
 
 const objectPanelPositionOptions = [
   { value: 'right', label: 'Right', icon: DockRightIcon },
@@ -36,6 +36,7 @@ const objectPanelPositionOptions = [
 }>;
 
 function ObjectPanelSection() {
+  const elementIdPrefix = useId();
   const { applyLayoutDefaultsAcrossClusters } = useDockablePanelContext();
   const [objectPanelPosition, setObjectPanelPositionState] = useState<ObjectPanelPosition>(() =>
     getDefaultObjectPanelPosition()
@@ -147,11 +148,7 @@ function ObjectPanelSection() {
           </div>
         </div>
         <div className="settings-row-control">
-          <div
-            className="settings-choice-buttons"
-            role="group"
-            aria-label="Default Object Panel position"
-          >
+          <fieldset className="settings-choice-buttons" aria-label="Default Object Panel position">
             {objectPanelPositionOptions.map((option) => {
               const Icon = option.icon;
               const isSelected = objectPanelPosition === option.value;
@@ -168,7 +165,7 @@ function ObjectPanelSection() {
                 </button>
               );
             })}
-          </div>
+          </fieldset>
         </div>
       </div>
 
@@ -182,7 +179,7 @@ function ObjectPanelSection() {
             <div className="setting-item setting-item-inline">
               <span className="opd-field-label">Right</span>
               <input
-                id="panel-docked-right-width"
+                id={`${elementIdPrefix}-panel-docked-right-width`}
                 type="number"
                 min={fieldMetadata.dockedRightWidth.min}
                 max={fieldMetadata.dockedRightWidth.max}
@@ -197,7 +194,7 @@ function ObjectPanelSection() {
               <span className="opd-unit-gap">px</span>
               <span className="opd-field-label">Bottom</span>
               <input
-                id="panel-docked-bottom-height"
+                id={`${elementIdPrefix}-panel-docked-bottom-height`}
                 type="number"
                 min={fieldMetadata.dockedBottomHeight.min}
                 max={fieldMetadata.dockedBottomHeight.max}
@@ -225,7 +222,7 @@ function ObjectPanelSection() {
             <div className="setting-item setting-item-inline">
               <span className="opd-field-label">Width</span>
               <input
-                id="panel-floating-width"
+                id={`${elementIdPrefix}-panel-floating-width`}
                 type="number"
                 min={fieldMetadata.floatingWidth.min}
                 max={fieldMetadata.floatingWidth.max}
@@ -238,7 +235,7 @@ function ObjectPanelSection() {
               <span className="opd-unit-gap">px</span>
               <span className="opd-field-label">Height</span>
               <input
-                id="panel-floating-height"
+                id={`${elementIdPrefix}-panel-floating-height`}
                 type="number"
                 min={fieldMetadata.floatingHeight.min}
                 max={fieldMetadata.floatingHeight.max}
@@ -264,7 +261,7 @@ function ObjectPanelSection() {
             <div className="setting-item setting-item-inline">
               <span className="opd-field-label">Top</span>
               <input
-                id="panel-floating-y"
+                id={`${elementIdPrefix}-panel-floating-y`}
                 type="number"
                 min={fieldMetadata.floatingY.min}
                 max={fieldMetadata.floatingY.max}
@@ -277,7 +274,7 @@ function ObjectPanelSection() {
               <span className="opd-unit-gap">px</span>
               <span className="opd-field-label">Left</span>
               <input
-                id="panel-floating-x"
+                id={`${elementIdPrefix}-panel-floating-x`}
                 type="number"
                 min={fieldMetadata.floatingX.min}
                 max={fieldMetadata.floatingX.max}

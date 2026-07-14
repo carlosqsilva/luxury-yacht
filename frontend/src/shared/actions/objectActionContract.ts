@@ -65,7 +65,12 @@ export const MUTATING_OBJECT_ACTION_IDS = [
 export type MutatingObjectActionId = (typeof MUTATING_OBJECT_ACTION_IDS)[number];
 
 export type ObjectActionPayloadField =
-  'replicas' | 'suspend' | 'drainOptions' | 'portForward' | 'debugContainer' | 'revision';
+  | 'replicas'
+  | 'suspend'
+  | 'drainOptions'
+  | 'portForward'
+  | 'debugContainer'
+  | 'revision';
 
 export type ObjectActionPermissionSlot =
   | 'restart'
@@ -131,7 +136,9 @@ const sourceClusterId = (source: ObjectActionIdentitySource): string | undefined
   trimOptional(source.clusterId);
 
 const sourceGroup = (source: ObjectActionIdentitySource): string | undefined => {
-  if (source.group === null || source.group === undefined) return undefined;
+  if (source.group === null || source.group === undefined) {
+    return undefined;
+  }
   return source.group.trim();
 };
 
@@ -161,7 +168,9 @@ const targetObjectDescriptor = ({
   kind?: string;
 }): ObjectActionPermissionDescriptor | null => {
   const resourceKind = sourceKind(source, kind);
-  if (!resourceKind) return null;
+  if (!resourceKind) {
+    return null;
+  }
   return {
     id: capabilityId,
     actionId,
@@ -473,7 +482,9 @@ export const buildObjectActionCapabilityDescriptor = (
   source: ObjectActionIdentitySource
 ): CapabilityDescriptor | null => {
   const descriptor = buildObjectActionPermissionDescriptor(actionId, source);
-  if (!descriptor) return null;
+  if (!descriptor) {
+    return null;
+  }
   return {
     id: descriptor.id,
     clusterId: descriptor.clusterId,

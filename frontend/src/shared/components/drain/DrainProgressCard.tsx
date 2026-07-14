@@ -7,16 +7,19 @@
  * just-finished historical job.
  */
 
+import { assertNever } from '@shared/utils/assertNever';
 import { useEffect, useMemo, useState } from 'react';
 import type { NodeMaintenanceDrainJob } from '@/core/refresh/types';
 import {
-  deriveDrainProgress,
   type DrainPhase,
   type DrainPodProgress,
   type DrainPodStatus,
   type DrainProgress,
+  deriveDrainProgress,
 } from './drainProgress';
 import './DrainProgressCard.css';
+
+type DrainJobStatus = NodeMaintenanceDrainJob['status'];
 
 interface DrainProgressCardProps {
   job: NodeMaintenanceDrainJob;
@@ -26,7 +29,10 @@ interface DrainProgressCardProps {
   cancelDisabledReason?: string | null;
 }
 
-const ACTIVE_STATUSES = new Set(['running', 'canceling']);
+const ACTIVE_STATUSES: ReadonlySet<DrainJobStatus> = new Set<DrainJobStatus>([
+  'running',
+  'canceling',
+]);
 
 export function DrainProgressCard({
   job,
@@ -74,7 +80,7 @@ export function DrainProgressCard({
           </span>
           <span>{phaseLabel(progress.phase, isActive)}</span>
         </div>
-        {showCancel && (
+        {!!showCancel && (
           <button
             type="button"
             className="button warning"
@@ -96,7 +102,7 @@ export function DrainProgressCard({
 
       <ProgressBar progress={progress} />
 
-      {progress.hasError && progress.errorMessage && (
+      {!!(progress.hasError && progress.errorMessage) && (
         <div className="drain-progress-error" role="alert">
           {progress.errorMessage}
         </div>
@@ -201,7 +207,7 @@ function summaryLine(progress: DrainProgress, usingDelete: boolean): string {
   const total = progress.totalPlanned;
   const seen = progress.totalSeen;
   const head =
-    total != null
+    total !== null && total !== undefined
       ? `${progress.done} of ${total} pods ${verb}`
       : seen > 0
         ? `${progress.done} of ${seen} pods ${verb}`
@@ -216,14 +222,23 @@ function summaryLine(progress: DrainProgress, usingDelete: boolean): string {
   return parts.join(' · ');
 }
 
-function getStatusClass(status: string): string {
-  if (status === 'running') return 'info';
-  if (status === 'canceling' || status === 'cancelled') return 'warning';
-  if (status === 'failed') return 'error';
-  return 'success';
+function getStatusClass(status: DrainJobStatus): string {
+  switch (status) {
+    case 'running':
+      return 'info';
+    case 'canceling':
+    case 'cancelled':
+      return 'warning';
+    case 'failed':
+      return 'error';
+    case 'succeeded':
+      return 'success';
+    default:
+      return assertNever(status, 'drain job status');
+  }
 }
 
-function getStatusLabel(status: string): string {
+function getStatusLabel(status: DrainJobStatus): string {
   switch (status) {
     case 'running':
       return 'Running';
@@ -236,7 +251,7 @@ function getStatusLabel(status: string): string {
     case 'succeeded':
       return 'Completed';
     default:
-      return status;
+      return assertNever(status, 'drain job status');
   }
 }
 

@@ -1,14 +1,14 @@
-import React from 'react';
-import ReactDOM from 'react-dom/client';
-import { act } from 'react';
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { KeyboardProvider } from '@ui/shortcuts/context';
-import { useKeyboardSurface } from '@ui/shortcuts/surfaces';
 import ModalSurface from '@shared/components/modals/ModalSurface';
 import { useModalFocusTrap } from '@shared/components/modals/useModalFocusTrap';
-import type { Command } from './CommandPaletteCommands';
+import { KeyboardProvider } from '@ui/shortcuts/context';
+import { useKeyboardSurface } from '@ui/shortcuts/surfaces';
+import React, { act } from 'react';
+import * as ReactDOM from 'react-dom/client';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eventBus } from '@/core/events';
+import { requireValue } from '@/test-utils/requireValue';
 import { CommandPalette } from './CommandPalette';
+import type { Command } from './CommandPaletteCommands';
 
 const openWithObjectMock = vi.fn();
 
@@ -52,6 +52,24 @@ const dispatchOpenShortcut = (target: EventTarget = document) => {
   return event;
 };
 
+const dispatchNamespaceShortcut = (target: EventTarget = document) => {
+  const event = new KeyboardEvent('keydown', {
+    key: 'N',
+    bubbles: true,
+    cancelable: true,
+    shiftKey: true,
+    ...(macPlatform ? { metaKey: true } : { ctrlKey: true }),
+  });
+
+  if (target instanceof Node) {
+    target.dispatchEvent(event);
+  } else {
+    document.dispatchEvent(event);
+  }
+
+  return event;
+};
+
 function BlockingSurfaceHarness() {
   const ref = React.useRef<HTMLDivElement>(null);
 
@@ -67,6 +85,7 @@ function BlockingSurfaceHarness() {
 
 function SharedModalHarness() {
   const modalRef = React.useRef<HTMLDivElement>(null);
+  const titleId = React.useId();
 
   useModalFocusTrap({
     ref: modalRef,
@@ -76,16 +95,16 @@ function SharedModalHarness() {
   return (
     <ModalSurface
       modalRef={modalRef}
-      labelledBy="blocking-modal-title"
-      onClose={() => {}}
+      labelledBy={titleId}
+      onClose={() => undefined}
       containerClassName="test-blocking-modal"
       closeOnBackdrop={false}
     >
       <div className="modal-header">
-        <h2 id="blocking-modal-title">Blocking modal</h2>
+        <h2 id={titleId}>Blocking modal</h2>
       </div>
       <div className="modal-content">
-        <button>Inside modal</button>
+        <button type="button">Inside modal</button>
       </div>
     </ModalSurface>
   );
@@ -96,7 +115,6 @@ describe('CommandPalette keyboard integration', () => {
   let root: ReactDOM.Root;
 
   beforeAll(() => {
-    (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     if (!Element.prototype.scrollIntoView) {
       Element.prototype.scrollIntoView = vi.fn();
     }
@@ -230,6 +248,69 @@ describe('CommandPalette keyboard integration', () => {
       input?.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
       );
+      await Promise.resolve();
+    });
+
+    expect(document.querySelector('.command-palette')).toBeNull();
+  });
+
+  it('opens directly in namespaces mode on the namespace shortcut and closes on first Escape', async () => {
+    const commands: Command[] = [
+      { id: 'ns-prod', label: 'prod', category: 'Namespaces', action: vi.fn() },
+      { id: 'view-x', label: 'Toggle X', category: 'View', action: vi.fn() },
+    ];
+
+    await act(async () => {
+      root.render(
+        <KeyboardProvider>
+          <CommandPalette commands={commands} />
+        </KeyboardProvider>
+      );
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      dispatchNamespaceShortcut();
+      await Promise.resolve();
+    });
+
+    const input = requireValue(
+      document.querySelector<HTMLInputElement>('.command-palette-input'),
+      'expected the command-palette input'
+    );
+    expect(input.placeholder).toBe('Select a namespace...');
+    const labels = Array.from(
+      document.querySelectorAll<HTMLDivElement>('.command-palette-item-label')
+    ).map((el) => el.textContent);
+    expect(labels).toEqual(['prod']);
+
+    await act(async () => {
+      input?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+      );
+      await Promise.resolve();
+    });
+
+    expect(document.querySelector('.command-palette')).toBeNull();
+  });
+
+  it('does not open in namespaces mode while another blocking surface is active', async () => {
+    const commands: Command[] = [
+      { id: 'ns-prod', label: 'prod', category: 'Namespaces', action: vi.fn() },
+    ];
+
+    await act(async () => {
+      root.render(
+        <KeyboardProvider>
+          <BlockingSurfaceHarness />
+          <CommandPalette commands={commands} />
+        </KeyboardProvider>
+      );
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      dispatchNamespaceShortcut();
       await Promise.resolve();
     });
 

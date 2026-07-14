@@ -5,9 +5,8 @@
  * Covers the plain-text representation copied from error notifications.
  */
 
+import { ErrorCategory, type ErrorDetails, ErrorSeverity } from '@utils/errorHandler';
 import { describe, expect, it } from 'vitest';
-
-import { ErrorCategory, ErrorDetails, ErrorSeverity } from '@utils/errorHandler';
 import { formatErrorForClipboard } from './formatErrorForClipboard';
 
 const baseError = (overrides: Partial<ErrorDetails> = {}): ErrorDetails => ({
@@ -63,7 +62,7 @@ describe('formatErrorForClipboard', () => {
       baseError({
         userMessage: 'retryable failure',
         // retryFn is a function; JSON.stringify drops it, leaving no useful context.
-        context: { retryFn: async () => {} },
+        context: { retryFn: async () => undefined },
       })
     );
 
@@ -75,7 +74,7 @@ describe('formatErrorForClipboard', () => {
     const text = formatErrorForClipboard(
       baseError({
         userMessage: 'mixed context',
-        context: { action: 'retryThing', retryFn: async () => {} },
+        context: { action: 'retryThing', retryFn: async () => undefined },
       })
     );
 

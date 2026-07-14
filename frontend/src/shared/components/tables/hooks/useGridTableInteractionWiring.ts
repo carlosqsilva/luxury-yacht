@@ -1,18 +1,17 @@
-import { useCallback, useLayoutEffect } from 'react';
-import type React from 'react';
-import type { ReactNode, RefObject } from 'react';
-
 import type { ContextMenuItem } from '@shared/components/ContextMenu';
 import type { GridColumnDefinition } from '@shared/components/tables/GridTable.types';
-import { useGridTableHoverSync } from '@shared/components/tables/hooks/useGridTableHoverSync';
+import { useGridTableContextMenuWiring } from '@shared/components/tables/hooks/useGridTableContextMenuWiring';
+import { useGridTableExternalFocus } from '@shared/components/tables/hooks/useGridTableExternalFocus';
+import { useGridTableFocusNavigation } from '@shared/components/tables/hooks/useGridTableFocusNavigation';
+import { useGridTableHoverFallback } from '@shared/components/tables/hooks/useGridTableHoverFallback';
 import type {
   HoverState,
   UpdateHoverOptions,
 } from '@shared/components/tables/hooks/useGridTableHoverSync';
-import { useGridTableFocusNavigation } from '@shared/components/tables/hooks/useGridTableFocusNavigation';
-import { useGridTableExternalFocus } from '@shared/components/tables/hooks/useGridTableExternalFocus';
-import { useGridTableContextMenuWiring } from '@shared/components/tables/hooks/useGridTableContextMenuWiring';
-import { useGridTableHoverFallback } from '@shared/components/tables/hooks/useGridTableHoverFallback';
+import { useGridTableHoverSync } from '@shared/components/tables/hooks/useGridTableHoverSync';
+import type React from 'react';
+import type { ReactNode, RefObject } from 'react';
+import { useCallback, useLayoutEffect } from 'react';
 
 const GRIDTABLE_SHORTCUT_OPT_OUT_SELECTOR = '[data-gridtable-shortcut-optout="true"]';
 const GRIDTABLE_ROWCLICK_SUPPRESS_SELECTOR = '[data-gridtable-rowclick="suppress"]';
@@ -29,11 +28,13 @@ interface UseGridTableInteractionWiringOptions<T> {
   keyExtractor: (item: T, index: number) => string;
   getRowClassName?: (item: T, index: number) => string | undefined | null;
   onRowClick?: (item: T) => void;
+  onRowPointerClick?: (item: T) => void;
   enableContextMenu: boolean;
   getCustomContextMenuItems?: (item: T, columnKey: string) => ContextMenuItem[];
   sortConfig?: { key: string; direction: 'asc' | 'desc' | null };
   onSort?: (key: string, targetDirection?: 'asc' | 'desc' | null) => void;
   wrapperRef: RefObject<HTMLDivElement | null>;
+  gridRef: RefObject<HTMLTableElement | null>;
   headerInnerRef: RefObject<HTMLDivElement | null>;
   hideHeader: boolean;
   contextMenuActiveRef: RefObject<boolean>;
@@ -50,8 +51,8 @@ interface GridTableInteractionWiring<T> {
   suppressFocusedRowHighlight: () => void;
   shortcutsActive: boolean;
   lastNavigationMethodRef: RefObject<'pointer' | 'keyboard'>;
-  handleWrapperFocus: (event: React.FocusEvent<HTMLDivElement>) => void;
-  handleWrapperBlur: (event: React.FocusEvent<HTMLDivElement>) => void;
+  handleWrapperFocus: (event: React.FocusEvent<HTMLElement>) => void;
+  handleWrapperBlur: (event: React.FocusEvent<HTMLElement>) => void;
   handleRowClick: (item: T, index: number, event: React.MouseEvent) => void;
   getRowClassNameWithFocus: (item: T, index: number) => string;
   contextMenuNode: ReactNode;
@@ -75,11 +76,13 @@ export function useGridTableInteractionWiring<T>({
   keyExtractor,
   getRowClassName,
   onRowClick,
+  onRowPointerClick,
   enableContextMenu,
   getCustomContextMenuItems,
   sortConfig,
   onSort,
   wrapperRef,
+  gridRef,
   headerInnerRef,
   hideHeader,
   contextMenuActiveRef,
@@ -139,8 +142,10 @@ export function useGridTableInteractionWiring<T>({
     tableData,
     keyExtractor,
     onRowClick,
+    onRowPointerClick,
     isShortcutOptOutTarget,
     wrapperRef,
+    focusRef: gridRef,
     updateHoverForElement,
     getRowClassName,
     shouldIgnoreRowClick,
@@ -182,6 +187,7 @@ export function useGridTableInteractionWiring<T>({
     focusedRowIndex,
     focusedRowKey,
     wrapperRef,
+    focusRef: gridRef,
     contextMenuActiveRef,
   });
 
@@ -206,7 +212,12 @@ export function useGridTableInteractionWiring<T>({
   );
 
   const activateFocusedRow = useCallback(() => {
-    if (focusedRowIndex == null || focusedRowIndex < 0 || focusedRowIndex >= tableData.length) {
+    if (
+      focusedRowIndex === null ||
+      focusedRowIndex === undefined ||
+      focusedRowIndex < 0 ||
+      focusedRowIndex >= tableData.length
+    ) {
       return false;
     }
     const item = tableData[focusedRowIndex];

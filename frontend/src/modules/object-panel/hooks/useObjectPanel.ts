@@ -7,15 +7,15 @@
  * Also provides CurrentObjectPanelContext so child components inside an ObjectPanel
  * instance can access the correct objectData for their specific panel.
  */
-import { createContext, useCallback, useContext, useEffect, useRef } from 'react';
-import { useDockablePanelContext } from '@ui/dockable';
-import { useObjectPanelState } from '@modules/object-panel/contexts/ObjectPanelStateContext';
-import {
-  assertObjectRefHasRequiredIdentity,
-  type KubernetesObjectReference,
-} from '@/types/view-state';
-import { getGroupForPanel } from '@ui/dockable/tabGroupState';
+
 import type { ViewType } from '@modules/object-panel/components/ObjectPanel/types';
+import { useObjectPanelState } from '@modules/object-panel/contexts/ObjectPanelStateContext';
+import type { ObjectPanelRef } from '@modules/object-panel/objectPanelRef';
+import { assertObjectRefHasRequiredIdentity } from '@shared/utils/objectIdentity';
+import { useDockablePanelContext } from '@ui/dockable';
+import { getGroupForPanel } from '@ui/dockable/tabGroupState';
+import { createContext, useCallback, useContext, useEffect, useRef } from 'react';
+import type { KubernetesObjectReference } from '@/types/view-state';
 
 export interface OpenWithObjectOptions {
   /**
@@ -36,7 +36,7 @@ export interface OpenWithObjectOptions {
  * without relying on a single global selected object.
  */
 interface CurrentObjectPanelContextValue {
-  objectData: KubernetesObjectReference | null;
+  objectData: ObjectPanelRef | null;
   panelId: string | null;
   // Object creation time (RFC3339 UTC) for the current object. The shared
   // ResourceHeader formats it into Age for every kind. Empty/absent when the

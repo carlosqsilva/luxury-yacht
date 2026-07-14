@@ -5,7 +5,7 @@
  * Encapsulates state and side effects for the shared components.
  */
 
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 export function useDropdownState(
   value: string | string[],
@@ -17,7 +17,7 @@ export function useDropdownState(
   const [highlightedIndex, setHighlightedIndex] = useState<number>(-1);
   const [searchQuery, setSearchQuery] = useState('');
   const dropdownRef = useRef<HTMLDivElement>(null);
-  const triggerRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
   const openDropdown = useCallback(() => {

@@ -5,7 +5,9 @@
  * Covers key behaviors and edge cases for containerLogsStreamManager.
  */
 
-import { beforeEach, afterEach, describe, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import { requireValue } from '@/test-utils/requireValue';
+import { installWindowProperty } from '@/test-utils/windowProperty';
 
 vi.mock('@wailsjs/go/backend/App', () => ({
   GetRefreshBaseURL: vi.fn(async () => 'http://127.0.0.1:0'),
@@ -25,13 +27,19 @@ vi.mock('@utils/errorHandler', () => ({
   errorHandler: errorHandlerMock,
 }));
 
-import { getScopedDomainState, resetScopedDomainState } from '../store';
 import {
   resetContainerLogsStreamScopeParamsCacheForTesting,
   setContainerLogsStreamScopeParams,
 } from '@modules/object-panel/components/ObjectPanel/Logs/containerLogsStreamScopeParamsCache';
+import { getScopedDomainState, resetScopedDomainState } from '../store';
 
 const SCOPE = 'default:pod:example';
+let restoreEventSource: (() => void) | undefined;
+
+const installEventSource = (eventSource: unknown) => {
+  restoreEventSource?.();
+  restoreEventSource = installWindowProperty('EventSource', eventSource);
+};
 
 beforeEach(() => {
   ensureRefreshBaseURLMock.mockResolvedValue('http://127.0.0.1:0');
@@ -54,7 +62,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  delete (globalThis as any).EventSource;
+  restoreEventSource?.();
+  restoreEventSource = undefined;
   vi.useRealTimers();
   if (typeof window !== 'undefined') {
     Object.assign(window, {
@@ -158,6 +167,38 @@ describe('ContainerLogsStreamManager', () => {
     expect(state.stats?.warnings).toBeUndefined();
   });
 
+  test('applyPayload treats a null warning list as a warning clear', async () => {
+    const { ContainerLogsStreamManager } = await import('./containerLogsStreamManager');
+    const manager = new ContainerLogsStreamManager();
+
+    manager.applyPayload(
+      SCOPE,
+      {
+        domain: 'container-logs',
+        scope: SCOPE,
+        sequence: 1,
+        generatedAt: 123,
+        warnings: ['selection truncated'],
+        entries: [],
+      },
+      'stream'
+    );
+    manager.applyPayload(
+      SCOPE,
+      {
+        domain: 'container-logs',
+        scope: SCOPE,
+        sequence: 2,
+        generatedAt: 124,
+        warnings: null,
+        entries: [],
+      },
+      'stream'
+    );
+
+    expect(getScopedDomainState('container-logs', SCOPE).stats?.warnings).toBeUndefined();
+  });
+
   test('applyPayload uses permission denied details when provided', async () => {
     const { ContainerLogsStreamManager } = await import('./containerLogsStreamManager');
     const manager = new ContainerLogsStreamManager();
@@ -205,17 +246,21 @@ describe('ContainerLogsStreamManager', () => {
     });
     class MockEventSource {
       static instances: MockEventSource[] = [];
-      listeners: Record<string, (evt?: any) => void> = {};
+      listeners: Record<string, (evt?: unknown) => void> = {};
       constructor(_url: string) {
         MockEventSource.instances.push(this);
       }
-      addEventListener(type: string, handler: (evt?: any) => void) {
+      addEventListener(type: string, handler: (evt?: unknown) => void) {
         this.listeners[type] = handler;
       }
-      removeEventListener(): void {}
-      close(): void {}
+      removeEventListener(): void {
+        // Listener removal is intentionally inert in this test double.
+      }
+      close(): void {
+        // Closing is intentionally inert in this test double.
+      }
     }
-    (globalThis as any).EventSource = MockEventSource as any;
+    installEventSource(MockEventSource);
 
     ensureRefreshBaseURLMock.mockRejectedValueOnce(new Error('not ready yet'));
     ensureRefreshBaseURLMock.mockRejectedValueOnce(new Error('still failing'));
@@ -224,7 +269,7 @@ describe('ContainerLogsStreamManager', () => {
     const { ContainerLogsStreamManager } = await import('./containerLogsStreamManager');
     const manager = new ContainerLogsStreamManager();
     const errorSpy = vi.spyOn(
-      manager as unknown as { handleStreamError: (...args: any[]) => void },
+      manager as unknown as { handleStreamError: (...args: unknown[]) => void },
       'handleStreamError'
     );
 
@@ -263,12 +308,12 @@ describe('ContainerLogsStreamManager', () => {
 
     class MockEventSource {
       static instances: MockEventSource[] = [];
-      listeners: Record<string, (evt?: any) => void> = {};
+      listeners: Record<string, (evt?: unknown) => void> = {};
       closed = false;
       constructor(_url: string) {
         MockEventSource.instances.push(this);
       }
-      addEventListener(type: string, handler: (evt?: any) => void) {
+      addEventListener(type: string, handler: (evt?: unknown) => void) {
         this.listeners[type] = handler;
       }
       removeEventListener(type: string): void {
@@ -277,11 +322,11 @@ describe('ContainerLogsStreamManager', () => {
       close(): void {
         this.closed = true;
       }
-      emit(type: string, evt?: any) {
+      emit(type: string, evt?: unknown) {
         this.listeners[type]?.(evt);
       }
     }
-    (globalThis as any).EventSource = MockEventSource as any;
+    installEventSource(MockEventSource);
 
     const { ContainerLogsStreamManager } = await import('./containerLogsStreamManager');
     const manager = new ContainerLogsStreamManager();
@@ -289,7 +334,10 @@ describe('ContainerLogsStreamManager', () => {
     await manager.startStream(SCOPE);
     expect(MockEventSource.instances).toHaveLength(1);
 
-    const firstStream = MockEventSource.instances[0]!;
+    const firstStream = requireValue(
+      MockEventSource.instances[0],
+      'expected test value in containerLogsStreamManager.test.ts'
+    );
     firstStream.emit('error');
     firstStream.emit('error');
 
@@ -303,20 +351,24 @@ describe('ContainerLogsStreamManager', () => {
   test('refreshOnce streams once and resolves when reset payload arrives', async () => {
     class MockEventSource {
       static instances: MockEventSource[] = [];
-      listeners: Record<string, (evt?: any) => void> = {};
+      listeners: Record<string, (evt?: unknown) => void> = {};
       constructor() {
         MockEventSource.instances.push(this);
       }
-      addEventListener(type: string, handler: (evt?: any) => void) {
+      addEventListener(type: string, handler: (evt?: unknown) => void) {
         this.listeners[type] = handler;
       }
-      removeEventListener(): void {}
-      close(): void {}
-      emit(type: string, evt?: any) {
+      removeEventListener(): void {
+        // Listener removal is intentionally inert in this test double.
+      }
+      close(): void {
+        // Closing is intentionally inert in this test double.
+      }
+      emit(type: string, evt?: unknown) {
         this.listeners[type]?.(evt);
       }
     }
-    (globalThis as any).EventSource = MockEventSource as any;
+    installEventSource(MockEventSource);
 
     const { ContainerLogsStreamManager } = await import('./containerLogsStreamManager');
     const manager = new ContainerLogsStreamManager();
@@ -337,6 +389,7 @@ describe('ContainerLogsStreamManager', () => {
           pod: 'pod-a',
           container: 'sidecar',
           line: 'manual line',
+          isInit: false,
         },
       ],
     };
@@ -352,20 +405,172 @@ describe('ContainerLogsStreamManager', () => {
     expect(errorHandlerMock.handle).not.toHaveBeenCalled();
   });
 
+  test('accepts a null warning list from the stream as a warning clear', async () => {
+    class MockEventSource {
+      static instances: MockEventSource[] = [];
+      listeners: Record<string, (evt?: unknown) => void> = {};
+      constructor() {
+        MockEventSource.instances.push(this);
+      }
+      addEventListener(type: string, handler: (evt?: unknown) => void) {
+        this.listeners[type] = handler;
+      }
+      removeEventListener(): void {
+        // Listener removal is intentionally inert in this test double.
+      }
+      close(): void {
+        // Closing is intentionally inert in this test double.
+      }
+      emit(type: string, evt?: unknown) {
+        this.listeners[type]?.(evt);
+      }
+    }
+    installEventSource(MockEventSource);
+
+    const { ContainerLogsStreamManager } = await import('./containerLogsStreamManager');
+    const manager = new ContainerLogsStreamManager();
+    manager.applyPayload(
+      SCOPE,
+      {
+        domain: 'container-logs',
+        scope: SCOPE,
+        sequence: 1,
+        generatedAt: 123,
+        warnings: ['selection truncated'],
+        entries: [],
+      },
+      'stream'
+    );
+
+    await manager.startStream(SCOPE);
+    MockEventSource.instances[0]?.emit('log', {
+      data: JSON.stringify({
+        domain: 'container-logs',
+        scope: SCOPE,
+        sequence: 2,
+        generatedAt: 124,
+        warnings: null,
+        entries: [],
+      }),
+    });
+
+    const state = getScopedDomainState('container-logs', SCOPE);
+    expect(state.status).toBe('ready');
+    expect(state.stats?.warnings).toBeUndefined();
+    expect(errorHandlerMock.handle).not.toHaveBeenCalled();
+  });
+
+  test('rejects a stream payload whose log entry is missing backend-required fields', async () => {
+    class MockEventSource {
+      static instances: MockEventSource[] = [];
+      listeners: Record<string, (evt?: unknown) => void> = {};
+      constructor() {
+        MockEventSource.instances.push(this);
+      }
+      addEventListener(type: string, handler: (evt?: unknown) => void) {
+        this.listeners[type] = handler;
+      }
+      removeEventListener(): void {
+        // Listener removal is intentionally inert in this test double.
+      }
+      close(): void {
+        // Closing is intentionally inert in this test double.
+      }
+      emit(type: string, evt?: unknown) {
+        this.listeners[type]?.(evt);
+      }
+    }
+    installEventSource(MockEventSource);
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const { ContainerLogsStreamManager } = await import('./containerLogsStreamManager');
+    const manager = new ContainerLogsStreamManager();
+    await manager.startStream(SCOPE);
+
+    MockEventSource.instances[0]?.emit('log', {
+      data: JSON.stringify({
+        domain: 'container-logs',
+        scope: SCOPE,
+        sequence: 1,
+        generatedAt: 123,
+        entries: [{ pod: 'pod-a', container: 'app' }],
+      }),
+    });
+
+    const state = getScopedDomainState('container-logs', SCOPE);
+    expect(state.data).toBeNull();
+    expect(consoleError).toHaveBeenCalledWith('Invalid container logs stream payload structure');
+    consoleError.mockRestore();
+  });
+
+  test('rejects a manual refresh when its reset frame violates the log entry contract', async () => {
+    class MockEventSource {
+      static instances: MockEventSource[] = [];
+      listeners: Record<string, (evt?: unknown) => void> = {};
+      constructor() {
+        MockEventSource.instances.push(this);
+      }
+      addEventListener(type: string, handler: (evt?: unknown) => void) {
+        this.listeners[type] = handler;
+      }
+      removeEventListener(): void {
+        // Listener removal is intentionally inert in this test double.
+      }
+      close(): void {
+        // Closing is intentionally inert in this test double.
+      }
+      emit(type: string, evt?: unknown) {
+        this.listeners[type]?.(evt);
+      }
+    }
+    installEventSource(MockEventSource);
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const { ContainerLogsStreamManager } = await import('./containerLogsStreamManager');
+    const manager = new ContainerLogsStreamManager();
+    const refreshPromise = manager.refreshOnce(SCOPE);
+    await Promise.resolve();
+
+    MockEventSource.instances[0]?.emit('log', {
+      data: JSON.stringify({
+        domain: 'container-logs',
+        scope: SCOPE,
+        sequence: 1,
+        generatedAt: 123,
+        reset: true,
+        entries: [{ pod: 'pod-a', container: 'app' }],
+      }),
+    });
+
+    await expect(refreshPromise).rejects.toThrow('Invalid container logs stream payload');
+    expect(getScopedDomainState('container-logs', SCOPE).status).toBe('error');
+    expect(errorHandlerMock.handle).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'Invalid container logs stream payload' }),
+      expect.objectContaining({ scope: SCOPE })
+    );
+    consoleError.mockRestore();
+  });
+
   test('startStream appends cluster-prefixed scope and cached selection filters to the stream URL', async () => {
     class MockEventSource {
       static instances: MockEventSource[] = [];
-      listeners: Record<string, (evt?: any) => void> = {};
-      constructor(public url: string) {
+      listeners: Record<string, (evt?: unknown) => void> = {};
+      url: string;
+      constructor(url: string) {
+        this.url = url;
         MockEventSource.instances.push(this);
       }
-      addEventListener(type: string, handler: (evt?: any) => void) {
+      addEventListener(type: string, handler: (evt?: unknown) => void) {
         this.listeners[type] = handler;
       }
-      removeEventListener(): void {}
-      close(): void {}
+      removeEventListener(): void {
+        // Listener removal is intentionally inert in this test double.
+      }
+      close(): void {
+        // Closing is intentionally inert in this test double.
+      }
     }
-    (globalThis as any).EventSource = MockEventSource as any;
+    installEventSource(MockEventSource);
 
     const logScope = 'cluster-a|default:apps/v1:deployment:web';
     setContainerLogsStreamScopeParams(logScope, {
@@ -379,7 +584,12 @@ describe('ContainerLogsStreamManager', () => {
     await manager.startStream(logScope);
 
     expect(MockEventSource.instances).toHaveLength(1);
-    const streamURL = new URL(MockEventSource.instances[0]!.url);
+    const streamURL = new URL(
+      requireValue(
+        MockEventSource.instances[0],
+        'expected test value in containerLogsStreamManager.test.ts'
+      ).url
+    );
     expect(streamURL.searchParams.get('scope')).toBe(logScope);
     expect(streamURL.searchParams.get('container')).toBe('app');
     expect(streamURL.searchParams.getAll('selectedFilter')).toEqual(['pod:web-2', 'container:app']);
@@ -388,20 +598,24 @@ describe('ContainerLogsStreamManager', () => {
   test('refreshOnce rejects and marks error when the stream fails', async () => {
     class MockEventSource {
       static instances: MockEventSource[] = [];
-      listeners: Record<string, (evt?: any) => void> = {};
+      listeners: Record<string, (evt?: unknown) => void> = {};
       constructor() {
         MockEventSource.instances.push(this);
       }
-      addEventListener(type: string, handler: (evt?: any) => void) {
+      addEventListener(type: string, handler: (evt?: unknown) => void) {
         this.listeners[type] = handler;
       }
-      removeEventListener(): void {}
-      close(): void {}
-      emit(type: string, evt?: any) {
+      removeEventListener(): void {
+        // Listener removal is intentionally inert in this test double.
+      }
+      close(): void {
+        // Closing is intentionally inert in this test double.
+      }
+      emit(type: string, evt?: unknown) {
         this.listeners[type]?.(evt);
       }
     }
-    (globalThis as any).EventSource = MockEventSource as any;
+    installEventSource(MockEventSource);
 
     const { ContainerLogsStreamManager } = await import('./containerLogsStreamManager');
     const manager = new ContainerLogsStreamManager();
@@ -424,15 +638,21 @@ describe('ContainerLogsStreamManager', () => {
   test('stopAll with reset clears scoped buffers and state', async () => {
     class MockEventSource {
       static instances: MockEventSource[] = [];
-      listeners: Record<string, (evt?: any) => void> = {};
+      listeners: Record<string, (evt?: unknown) => void> = {};
       constructor() {
         MockEventSource.instances.push(this);
       }
-      addEventListener(): void {}
-      removeEventListener(): void {}
-      close(): void {}
+      addEventListener(): void {
+        // Listener registration is intentionally inert in this test double.
+      }
+      removeEventListener(): void {
+        // Listener removal is intentionally inert in this test double.
+      }
+      close(): void {
+        // Closing is intentionally inert in this test double.
+      }
     }
-    (globalThis as any).EventSource = MockEventSource as any;
+    installEventSource(MockEventSource);
 
     const { ContainerLogsStreamManager } = await import('./containerLogsStreamManager');
     const manager = new ContainerLogsStreamManager();
@@ -447,8 +667,8 @@ describe('ContainerLogsStreamManager', () => {
         generatedAt: Date.now(),
         reset: true,
         entries: [
-          { timestamp: 't1', pod: 'pod-1', container: 'app', line: 'line 1' },
-          { timestamp: 't2', pod: 'pod-1', container: 'app', line: 'line 2' },
+          { timestamp: 't1', pod: 'pod-1', container: 'app', line: 'line 1', isInit: false },
+          { timestamp: 't2', pod: 'pod-1', container: 'app', line: 'line 2', isInit: false },
         ],
       },
       'stream'
@@ -465,20 +685,22 @@ describe('ContainerLogsStreamManager', () => {
   test('kubeconfig:changing resets active container logs streams and scoped state', async () => {
     class MockEventSource {
       static instances: MockEventSource[] = [];
-      listeners: Record<string, (evt?: any) => void> = {};
+      listeners: Record<string, (evt?: unknown) => void> = {};
       closed = false;
       constructor() {
         MockEventSource.instances.push(this);
       }
-      addEventListener(type: string, handler: (evt?: any) => void): void {
+      addEventListener(type: string, handler: (evt?: unknown) => void): void {
         this.listeners[type] = handler;
       }
-      removeEventListener(): void {}
+      removeEventListener(): void {
+        // Listener removal is intentionally inert in this test double.
+      }
       close(): void {
         this.closed = true;
       }
     }
-    (globalThis as any).EventSource = MockEventSource as any;
+    installEventSource(MockEventSource);
 
     const { eventBus } = await import('@/core/events');
     const { ContainerLogsStreamManager } = await import('./containerLogsStreamManager');
@@ -493,7 +715,9 @@ describe('ContainerLogsStreamManager', () => {
         sequence: 2,
         generatedAt: Date.now(),
         reset: true,
-        entries: [{ timestamp: 't1', pod: 'pod-1', container: 'app', line: 'line 1' }],
+        entries: [
+          { timestamp: 't1', pod: 'pod-1', container: 'app', line: 'line 1', isInit: false },
+        ],
       },
       'stream'
     );
@@ -517,6 +741,7 @@ describe('ContainerLogsStreamManager', () => {
       pod: `pod-${Math.floor(index / 10)}`,
       container: 'app',
       line: `line-${index}`,
+      isInit: false,
     }));
 
     manager.applyPayload(

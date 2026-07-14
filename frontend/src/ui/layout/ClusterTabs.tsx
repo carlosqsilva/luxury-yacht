@@ -3,15 +3,7 @@
  *
  * Cluster tab strip for multi-cluster navigation.
  */
-import React, {
-  useMemo,
-  useState,
-  useEffect,
-  useCallback,
-  useRef,
-  type HTMLAttributes,
-} from 'react';
-import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
+
 import {
   getClusterTabOrder,
   hydrateClusterTabOrder,
@@ -19,9 +11,18 @@ import {
   setClusterTabOrder,
   subscribeClusterTabOrder,
 } from '@core/persistence/clusterTabOrder';
+import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
 import { CloseIcon, PlusIcon } from '@shared/components/icons/SharedIcons';
-import { Tabs, type TabDescriptor } from '@shared/components/tabs';
+import { type TabDescriptor, Tabs } from '@shared/components/tabs';
 import { useTabDragSourceFactory, useTabDropTarget } from '@shared/components/tabs/dragCoordinator';
+import React, {
+  type HTMLAttributes,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import './ClusterTabs.css';
 
 const ordersMatch = (left: string[], right: string[]) =>
@@ -105,7 +106,9 @@ const ClusterTabs: React.FC<ClusterTabsProps> = ({ onOpenCluster }) => {
 
   const tabsById = useMemo(() => {
     const map = new Map<string, ClusterTab>();
-    tabs.forEach((tab) => map.set(tab.id, tab));
+    tabs.forEach((tab) => {
+      map.set(tab.id, tab);
+    });
     return map;
   }, [tabs]);
 
@@ -153,9 +156,13 @@ const ClusterTabs: React.FC<ClusterTabsProps> = ({ onOpenCluster }) => {
       // is insertIndex - 1. When source is at or after the insert index, no
       // shift is needed.
       const sourceIdx = mergedOrder.indexOf(payload.clusterId);
-      if (sourceIdx < 0) return;
+      if (sourceIdx < 0) {
+        return;
+      }
       const adjustedInsert = sourceIdx < insertIndex ? insertIndex - 1 : insertIndex;
-      if (adjustedInsert === sourceIdx) return; // no-op drop onto itself
+      if (adjustedInsert === sourceIdx) {
+        return; // no-op drop onto itself
+      }
       const nextOrder = [...mergedOrder];
       nextOrder.splice(sourceIdx, 1);
       nextOrder.splice(adjustedInsert, 0, payload.clusterId);
@@ -178,6 +185,7 @@ const ClusterTabs: React.FC<ClusterTabsProps> = ({ onOpenCluster }) => {
   );
 
   useEffect(() => {
+    void orderedTabs.length;
     // Expose the tab strip height so dockable panels can respect the top chrome.
     if (typeof document === 'undefined') {
       return;
@@ -204,6 +212,7 @@ const ClusterTabs: React.FC<ClusterTabsProps> = ({ onOpenCluster }) => {
   }, [orderedTabs.length]);
 
   useEffect(() => {
+    void orderedTabs.length;
     // Show "Open Cluster" beside the "+" while the bar has room; collapse to just
     // "+" when the tabs need the space. The test compares the tabs' full content
     // width to the wrapper minus the EXPANDED button width, so it doesn't
@@ -273,7 +282,9 @@ const ClusterTabs: React.FC<ClusterTabsProps> = ({ onOpenCluster }) => {
           activeId={activeTabId}
           onActivate={(id) => {
             const tab = tabsById.get(id);
-            if (tab) handleTabClick(tab.selection);
+            if (tab) {
+              handleTabClick(tab.selection);
+            }
           }}
           dropInsertIndex={dropInsertIndex}
           className="cluster-tabs"
@@ -289,7 +300,7 @@ const ClusterTabs: React.FC<ClusterTabsProps> = ({ onOpenCluster }) => {
         aria-label="Open Cluster"
         onClick={() => onOpenCluster?.()}
       >
-        {showAddLabel && <span className="cluster-tabs-add__label">Open Cluster</span>}
+        {!!showAddLabel && <span className="cluster-tabs-add__label">Open Cluster</span>}
         <PlusIcon width={14} height={14} />
       </button>
     </div>

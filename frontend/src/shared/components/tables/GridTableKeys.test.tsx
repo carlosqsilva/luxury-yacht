@@ -6,18 +6,17 @@
  * GridTableFiltersBar.tsx. Prevents selector / attribute drift.
  */
 
-import React from 'react';
-import ReactDOM from 'react-dom/client';
-import { act } from 'react';
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-
+import { ZoomProvider } from '@core/contexts/ZoomContext';
 import GridTableFiltersBar from '@shared/components/tables/GridTableFiltersBar';
 import { useGridTableKeyboardScopes } from '@shared/components/tables/GridTableKeys';
-import { ZoomProvider } from '@core/contexts/ZoomContext';
+import React, { act } from 'react';
+import * as ReactDOM from 'react-dom/client';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { requireValue } from '@/test-utils/requireValue';
 
 const registeredSurfaces: Array<{
   kind: string;
-  onKeyDown?: (event: KeyboardEvent) => boolean | 'handled-no-prevent' | void;
+  onKeyDown?: (event: KeyboardEvent) => boolean | 'handled-no-prevent' | undefined;
 }> = [];
 
 // Mock the keyboard shortcuts hooks — we only need the rendered DOM.
@@ -25,24 +24,24 @@ vi.mock('@ui/shortcuts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@ui/shortcuts')>();
   return {
     ...actual,
-    useSearchShortcutTarget: () => {},
+    useSearchShortcutTarget: () => undefined,
     useKeyboardContext: () => ({
       registerShortcut: () => 'mock-id',
-      unregisterShortcut: () => {},
+      unregisterShortcut: () => undefined,
       getAvailableShortcuts: () => [],
       isShortcutAvailable: () => false,
-      setEnabled: () => {},
+      setEnabled: () => undefined,
       isEnabled: true,
       registerSurface: () => 'mock-surface-id',
-      unregisterSurface: () => {},
-      updateSurface: () => {},
+      unregisterSurface: () => undefined,
+      updateSurface: () => undefined,
       dispatchNativeAction: () => false,
       hasActiveBlockingSurface: () => false,
     }),
-    useShortcuts: () => {},
+    useShortcuts: () => undefined,
     useKeyboardSurface: (surface: {
       kind: string;
-      onKeyDown?: (event: KeyboardEvent) => boolean | 'handled-no-prevent' | void;
+      onKeyDown?: (event: KeyboardEvent) => boolean | 'handled-no-prevent' | undefined;
     }) => {
       registeredSurfaces.push(surface);
     },
@@ -57,10 +56,6 @@ vi.mock('@wailsjs/go/backend/App', () => ({
 describe('GridTableKeys filter target selectors', () => {
   let container: HTMLDivElement;
   let root: ReactDOM.Root;
-
-  beforeAll(() => {
-    (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
-  });
 
   beforeEach(() => {
     container = document.createElement('div');
@@ -134,7 +129,9 @@ describe('GridTableKeys filter target selectors', () => {
 
     const searchInput = el.querySelector<HTMLInputElement>(SELECTORS.search);
     expect(searchInput).not.toBeNull();
-    expect(searchInput!.tagName).toBe('INPUT');
+    expect(requireValue(searchInput, 'expected test value in GridTableKeys.test.tsx').tagName).toBe(
+      'INPUT'
+    );
   });
 
   it('reset selector matches the reset button', async () => {
@@ -142,7 +139,9 @@ describe('GridTableKeys filter target selectors', () => {
 
     const resetBtn = el.querySelector<HTMLElement>(SELECTORS.reset);
     expect(resetBtn).not.toBeNull();
-    expect(resetBtn!.tagName).toBe('BUTTON');
+    expect(requireValue(resetBtn, 'expected test value in GridTableKeys.test.tsx').tagName).toBe(
+      'BUTTON'
+    );
   });
 
   it('kind selector matches the kind dropdown trigger', async () => {
@@ -168,7 +167,9 @@ describe('GridTableKeys filter target selectors', () => {
     // Search must always be reachable regardless of dropdown visibility.
     const searchInput = el.querySelector<HTMLInputElement>(SELECTORS.search);
     expect(searchInput).not.toBeNull();
-    expect(searchInput!.tagName).toBe('INPUT');
+    expect(requireValue(searchInput, 'expected test value in GridTableKeys.test.tsx').tagName).toBe(
+      'INPUT'
+    );
   });
 
   it('columns selector matches the columns dropdown trigger', async () => {
@@ -187,6 +188,7 @@ describe('GridTableKeys filter target selectors', () => {
     const HookHarness = () => {
       const filtersContainerRef = React.useRef<HTMLDivElement | null>(null);
       const wrapperRef = React.useRef<HTMLDivElement | null>(null);
+      const focusRef = React.useRef<HTMLTableElement | null>(null);
       const filterFocusIndexRef = React.useRef<number | null>(null);
 
       useGridTableKeyboardScopes({
@@ -196,6 +198,7 @@ describe('GridTableKeys filter target selectors', () => {
         filtersContainerRef,
         filterFocusIndexRef,
         wrapperRef,
+        focusRef,
         tableDataLength: 1,
         focusedRowKey: 'row-1',
         suppressFocusedRowHighlight: vi.fn(),
@@ -261,7 +264,9 @@ describe('GridTableKeys filter target selectors', () => {
               },
             ]}
           />
-          <div ref={wrapperRef} />
+          <div ref={wrapperRef}>
+            <table ref={focusRef} />
+          </div>
         </>
       );
     };
@@ -278,7 +283,7 @@ describe('GridTableKeys filter target selectors', () => {
     const searchInput = container.querySelector<HTMLInputElement>(SELECTORS.search);
     expect(searchInput).not.toBeNull();
     await act(async () => {
-      searchInput!.focus();
+      requireValue(searchInput, 'expected test value in GridTableKeys.test.tsx').focus();
       await Promise.resolve();
     });
 
@@ -322,6 +327,7 @@ describe('GridTableKeys filter target selectors', () => {
     const HookHarness = () => {
       const filtersContainerRef = React.useRef<HTMLDivElement | null>(null);
       const wrapperRef = React.useRef<HTMLDivElement | null>(null);
+      const focusRef = React.useRef<HTMLTableElement | null>(null);
       const filterFocusIndexRef = React.useRef<number | null>(null);
 
       useGridTableKeyboardScopes({
@@ -331,6 +337,7 @@ describe('GridTableKeys filter target selectors', () => {
         filtersContainerRef,
         filterFocusIndexRef,
         wrapperRef,
+        focusRef,
         tableDataLength: 1,
         focusedRowKey: 'row-1',
         suppressFocusedRowHighlight: vi.fn(),
@@ -340,7 +347,9 @@ describe('GridTableKeys filter target selectors', () => {
       return (
         <>
           <div ref={filtersContainerRef} />
-          <div ref={wrapperRef} />
+          <div ref={wrapperRef}>
+            <table ref={focusRef} />
+          </div>
         </>
       );
     };
@@ -372,6 +381,7 @@ describe('GridTableKeys filter target selectors', () => {
     const HookHarness = () => {
       const filtersContainerRef = React.useRef<HTMLDivElement | null>(null);
       const wrapperRef = React.useRef<HTMLDivElement | null>(null);
+      const focusRef = React.useRef<HTMLTableElement | null>(null);
       const filterFocusIndexRef = React.useRef<number | null>(null);
 
       useGridTableKeyboardScopes({
@@ -381,6 +391,7 @@ describe('GridTableKeys filter target selectors', () => {
         filtersContainerRef,
         filterFocusIndexRef,
         wrapperRef,
+        focusRef,
         tableDataLength: 1,
         focusedRowKey: 'row-1',
         suppressFocusedRowHighlight,
@@ -392,7 +403,9 @@ describe('GridTableKeys filter target selectors', () => {
           <div ref={filtersContainerRef}>
             <button type="button">Columns</button>
           </div>
-          <div ref={wrapperRef} />
+          <div ref={wrapperRef}>
+            <table ref={focusRef} />
+          </div>
         </>
       );
     };

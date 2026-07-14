@@ -2,19 +2,19 @@
  * frontend/src/modules/object-panel/components/ObjectPanel/Details/DetailsTab.tsx
  */
 
-import React from 'react';
-import Overview from '@modules/object-panel/components/ObjectPanel/Details/Overview';
-import Utilization from '@modules/object-panel/components/ObjectPanel/Details/DetailsTabUtilization';
 import Containers from '@modules/object-panel/components/ObjectPanel/Details/DetailsTabContainers';
-import RBACRules from '@modules/object-panel/components/ObjectPanel/Details/DetailsTabRBACRules';
 import DataSection from '@modules/object-panel/components/ObjectPanel/Details/DetailsTabData';
+import RBACRules from '@modules/object-panel/components/ObjectPanel/Details/DetailsTabRBACRules';
+import Utilization from '@modules/object-panel/components/ObjectPanel/Details/DetailsTabUtilization';
+import Overview from '@modules/object-panel/components/ObjectPanel/Details/Overview';
 import { WarningIcon } from '@shared/components/icons/SharedIcons';
+import type React from 'react';
 import './DetailsTab.css';
 import './DetailsTabData.css';
 
 // Import from extracted modules
 import type { DetailsTabProps } from './detailsTabTypes';
-import { useUtilizationData, useHasUtilization } from './useUtilizationData';
+import { useHasUtilization, useUtilizationData } from './useUtilizationData';
 
 // Action-relevant fields read off the active detail DTO for the Overview/ActionsMenu.
 interface ActionDetail {
@@ -53,7 +53,7 @@ const DetailsTabContent: React.FC<DetailsTabProps> = ({
   return (
     <div className="object-panel-tab-content">
       {/* Deleted Resource Warning */}
-      {resourceDeleted && (
+      {!!resourceDeleted && (
         <div className="resource-deleted-warning">
           <WarningIcon />
           <span>
@@ -65,7 +65,7 @@ const DetailsTabContent: React.FC<DetailsTabProps> = ({
       {/* Details Content */}
       <div className="details-content">
         {/* Loading Overlay - only show on initial load */}
-        {detailsLoading && (
+        {!!detailsLoading && (
           <div className="loading-overlay">
             <div className="loading-spinner-wrapper">
               <div className="spinner"></div>
@@ -76,9 +76,11 @@ const DetailsTabContent: React.FC<DetailsTabProps> = ({
           </div>
         )}
 
-        {detailsError && <div className="error-message">Error loading details: {detailsError}</div>}
+        {!!detailsError && (
+          <div className="error-message">Error loading details: {detailsError}</div>
+        )}
 
-        {objectData && (
+        {!!objectData && (
           <Overview
             kind={objectData.kind ?? ''}
             name={objectData.name ?? ''}
@@ -112,7 +114,9 @@ const DetailsTabContent: React.FC<DetailsTabProps> = ({
 
         {/* Containers Section - Only for Pods and core Workloads (not Jobs/CronJobs) */}
         {(() => {
-          if (!model.containerSection) return null;
+          if (!model.containerSection) {
+            return null;
+          }
 
           return (
             <div className="details-section-spaced">
@@ -128,7 +132,9 @@ const DetailsTabContent: React.FC<DetailsTabProps> = ({
             rules are the primary content of the resource. */}
         {(() => {
           const rules = model.roleRules;
-          if (!rules || rules.length === 0) return null;
+          if (!rules || rules.length === 0) {
+            return null;
+          }
           return (
             <div className="details-section-spaced">
               <RBACRules policyRules={rules} />
@@ -136,7 +142,7 @@ const DetailsTabContent: React.FC<DetailsTabProps> = ({
           );
         })()}
 
-        {dataInfo && (
+        {!!dataInfo && (
           <div className="details-section-spaced">
             <DataSection
               data={dataInfo.data}

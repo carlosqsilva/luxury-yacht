@@ -5,22 +5,20 @@
  * Covers key behaviors and edge cases for columnFactories.
  */
 
-import React from 'react';
-import ReactDOM from 'react-dom/client';
-import { act } from 'react';
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-
-import type { GridColumnDefinition } from '@shared/components/tables/GridTable';
 import {
   applyColumnSizing,
+  type ColumnSizingMap,
   createAgeColumn,
   createKindColumn,
   createResourceBarColumn,
   createTextColumn,
   upsertNamespaceColumn,
-  type ColumnSizingMap,
 } from '@shared/components/tables/columnFactories';
+import type { GridColumnDefinition } from '@shared/components/tables/GridTable';
 import { getTextContent } from '@shared/components/tables/GridTable.utils';
+import React, { act } from 'react';
+import * as ReactDOM from 'react-dom/client';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   resetAppPreferencesCacheForTesting,
   setAppPreferencesForTesting,
@@ -35,10 +33,6 @@ interface RowSample {
 }
 
 describe('columnFactories', () => {
-  beforeAll(() => {
-    (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
-  });
-
   beforeEach(() => {
     resetAppPreferencesCacheForTesting();
     localStorage.clear();
@@ -110,7 +104,7 @@ describe('columnFactories', () => {
       );
     });
 
-    it('renders interactive spans and triggers click handlers', () => {
+    it('renders interactive values as native buttons and triggers click handlers', () => {
       const onClick = vi.fn();
       const column = createTextColumn<RowSample>('name', 'Name', {
         onClick,
@@ -121,29 +115,25 @@ describe('columnFactories', () => {
 
       const element = column.render({ id: '1', name: 'Row' });
       expect(React.isValidElement(element)).toBe(true);
-      const span = element as React.ReactElement<{
+      expect((element as React.ReactElement).type).toBe('button');
+      const button = element as React.ReactElement<{
         className: string;
         title?: string;
         onClick?: (event: unknown) => void;
         onKeyDown?: (event: unknown) => void;
-        ['data-gridtable-shortcut-optout']?: string;
-        ['data-gridtable-rowclick']?: string;
+        'data-gridtable-shortcut-optout'?: string;
+        'data-gridtable-rowclick'?: string;
       }>;
 
-      expect(span.props.className.includes('gridtable-link')).toBe(true);
-      expect(span.props.className.includes('dynamic')).toBe(true);
-      expect(span.props.title).toBe('Title for 1');
-      expect(span.props['data-gridtable-shortcut-optout']).toBe('true');
-      expect(span.props['data-gridtable-rowclick']).toBe('allow');
+      expect(button.props.className.includes('gridtable-link')).toBe(true);
+      expect(button.props.className.includes('dynamic')).toBe(true);
+      expect(button.props.title).toBe('Title for 1');
+      expect(button.props['data-gridtable-shortcut-optout']).toBe('true');
+      expect(button.props['data-gridtable-rowclick']).toBe('allow');
 
-      span.props.onClick?.({ stopPropagation() {} } as any);
-      span.props.onKeyDown?.({
-        key: 'Enter',
-        preventDefault: vi.fn(),
-        stopPropagation: vi.fn(),
-      } as any);
+      button.props.onClick?.({ stopPropagation: () => undefined } as unknown);
 
-      expect(onClick).toHaveBeenCalledTimes(2);
+      expect(onClick).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -187,26 +177,22 @@ describe('columnFactories', () => {
 
       const element = column.render({ id: 'pod', kind: 'Pod', alias: 'P' });
       expect(React.isValidElement(element)).toBe(true);
+      expect((element as React.ReactElement).type).toBe('button');
       const badge = element as React.ReactElement<{
-        ['data-kind-value']: string;
+        'data-kind-value': string;
         children: React.ReactNode;
         onClick?: (event: unknown) => void;
         onKeyDown?: (event: unknown) => void;
-        ['data-gridtable-shortcut-optout']?: string;
-        ['data-gridtable-rowclick']?: string;
+        'data-gridtable-shortcut-optout'?: string;
+        'data-gridtable-rowclick'?: string;
       }>;
       expect(badge.props['data-kind-value']).toBe('Pod');
       expect(badge.props.children).toBe('P');
       expect(badge.props['data-gridtable-shortcut-optout']).toBe('true');
       expect(badge.props['data-gridtable-rowclick']).toBe('allow');
 
-      badge.props.onClick?.({ stopPropagation() {} } as any);
-      badge.props.onKeyDown?.({
-        key: ' ',
-        preventDefault: vi.fn(),
-        stopPropagation: vi.fn(),
-      } as any);
-      expect(onKindClick).toHaveBeenCalledTimes(2);
+      badge.props.onClick?.({ stopPropagation: () => undefined } as unknown);
+      expect(onKindClick).toHaveBeenCalledTimes(1);
     });
   });
 

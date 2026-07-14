@@ -4,10 +4,10 @@
  * Test suite for FavoritesContext.
  * Validates provider hydration, hook guard, and currentFavoriteMatch logic.
  */
-import React from 'react';
-import ReactDOM from 'react-dom/client';
+import type React from 'react';
 import { act } from 'react';
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as ReactDOM from 'react-dom/client';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Favorite } from '@/core/persistence/favorites';
 
 // ---------- Mocks ----------
@@ -15,7 +15,7 @@ import type { Favorite } from '@/core/persistence/favorites';
 // Mock the persistence module before any imports that reference it.
 const persistenceMocks = vi.hoisted(() => ({
   hydrateFavorites: vi.fn().mockResolvedValue([]),
-  subscribeFavorites: vi.fn().mockReturnValue(() => {}),
+  subscribeFavorites: vi.fn().mockReturnValue(() => undefined),
   addFavorite: vi.fn(),
   updateFavorite: vi.fn(),
   deleteFavorite: vi.fn(),
@@ -115,10 +115,6 @@ describe('FavoritesContext', () => {
     return null;
   };
 
-  beforeAll(() => {
-    (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
-  });
-
   beforeEach(() => {
     container = document.createElement('div');
     document.body.appendChild(container);
@@ -142,7 +138,7 @@ describe('FavoritesContext', () => {
 
     // Reset persistence mocks
     persistenceMocks.hydrateFavorites.mockResolvedValue([]);
-    persistenceMocks.subscribeFavorites.mockReturnValue(() => {});
+    persistenceMocks.subscribeFavorites.mockReturnValue(() => undefined);
   });
 
   afterEach(() => {
@@ -165,7 +161,7 @@ describe('FavoritesContext', () => {
 
   it('throws when useFavorites is used outside of FavoritesProvider', () => {
     // Suppress React error boundary noise in test output.
-    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     expect(() => {
       const TestComponent = () => {
         useFavorites();
@@ -193,6 +189,38 @@ describe('FavoritesContext', () => {
 
     expect(persistenceMocks.hydrateFavorites).toHaveBeenCalled();
     expect(stateRef.current?.favorites).toEqual(favorites);
+  });
+
+  it('does not apply an unrecognized persisted view as a tab', async () => {
+    // Favorites are persisted strings: a favorite saved before a tab rename
+    // (or corrupted) must not blind-cast into the view unions and set a bogus
+    // tab. Navigation still happens; the tab falls back to the default that
+    // onNamespaceSelect / setActiveClusterView(null) provide.
+    await renderProvider();
+
+    act(() => {
+      stateRef.current?.setPendingFavorite(makeFavorite({ view: 'wrokloads' }));
+    });
+
+    expect(mockSetViewType).toHaveBeenCalledWith('namespace');
+    expect(mockOnNamespaceSelect).toHaveBeenCalledWith('default');
+    expect(mockSetActiveNamespaceTab).not.toHaveBeenCalled();
+
+    mockSetViewType.mockReset();
+    mockSetActiveClusterView.mockReset();
+    act(() => {
+      // Clear first: the apply-once guard only resets when the pending
+      // favorite goes null.
+      stateRef.current?.setPendingFavorite(null);
+    });
+    act(() => {
+      stateRef.current?.setPendingFavorite(
+        makeFavorite({ id: 'fav-2', viewType: 'cluster', view: 'nodess', namespace: '' })
+      );
+    });
+
+    expect(mockSetViewType).toHaveBeenCalledWith('cluster');
+    expect(mockSetActiveClusterView).toHaveBeenCalledWith(null);
   });
 
   it('waits for namespaces before applying namespace favorite navigation', async () => {

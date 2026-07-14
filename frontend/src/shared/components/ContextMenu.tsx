@@ -5,10 +5,12 @@
  * Handles rendering and interactions for the shared components.
  */
 
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
-import { useKeyboardSurface } from '@ui/shortcuts';
 import { useZoom } from '@core/contexts/ZoomContext';
+import { withStableListKeys } from '@shared/utils/stableListKeys';
+import { useKeyboardSurface } from '@ui/shortcuts';
+import type React from 'react';
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import './ContextMenu.css';
 
 export interface ContextMenuItem {
@@ -34,6 +36,7 @@ const ContextMenu: React.FC<ContextMenuProps> = ({ items, position, onClose }) =
   const menuRef = useRef<HTMLDivElement>(null);
   const { zoomLevel } = useZoom();
   const [isPositioned, setIsPositioned] = useState(false);
+  const menuId = useId().replace(/:/g, '');
   const selectableIndexes = useMemo(
     () =>
       items
@@ -52,7 +55,7 @@ const ContextMenu: React.FC<ContextMenuProps> = ({ items, position, onClose }) =
     if (selectableIndexes.length === 0) {
       return;
     }
-    const currentPosition = selectableIndexes.findIndex((idx) => idx === focusedIndex);
+    const currentPosition = selectableIndexes.indexOf(focusedIndex);
     const fallbackPosition = currentPosition === -1 ? 0 : currentPosition;
     const nextPosition =
       (fallbackPosition + direction + selectableIndexes.length) % selectableIndexes.length;
@@ -60,7 +63,7 @@ const ContextMenu: React.FC<ContextMenuProps> = ({ items, position, onClose }) =
   };
 
   const activateFocusedItem = () => {
-    if (focusedIndex == null || focusedIndex < 0) {
+    if (focusedIndex === null || focusedIndex === undefined || focusedIndex < 0) {
       return;
     }
     const item = items[focusedIndex];
@@ -177,15 +180,22 @@ const ContextMenu: React.FC<ContextMenuProps> = ({ items, position, onClose }) =
       }}
       role="menu"
       tabIndex={-1}
+      aria-activedescendant={
+        focusedIndex >= 0 ? `context-menu-${menuId}-item-${focusedIndex}` : undefined
+      }
     >
-      {items.map((item, index) => {
+      {withStableListKeys(items, (item) =>
+        item.divider
+          ? 'divider'
+          : item.actionId || `${item.header ? 'header' : 'item'}:${item.label}`
+      ).map(({ key, value: item }, index) => {
         if (item.divider) {
-          return <div key={index} className="context-menu-divider" />;
+          return <hr key={key} className="context-menu-divider" />;
         }
         // Render non-interactive headers (e.g., permission pending state).
         if (item.header) {
           return (
-            <div key={index} className="context-menu-header" role="presentation">
+            <div key={key} className="context-menu-header" role="presentation">
               {item.label}
             </div>
           );
@@ -195,13 +205,17 @@ const ContextMenu: React.FC<ContextMenuProps> = ({ items, position, onClose }) =
         const isFocused = index === focusedIndex;
 
         return (
-          <div
-            key={index}
+          <button
+            type="button"
+            key={key}
+            id={`context-menu-${menuId}-item-${index}`}
             className={`context-menu-item ${item.disabled ? 'disabled' : ''} ${
               item.danger ? 'danger' : ''
             } ${isFocused ? 'is-focused' : ''}`}
             role="menuitem"
             aria-disabled={item.disabled ? 'true' : 'false'}
+            disabled={item.disabled}
+            tabIndex={-1}
             data-context-action-id={item.actionId}
             data-context-index={index}
             onClick={() => {
@@ -217,12 +231,12 @@ const ContextMenu: React.FC<ContextMenuProps> = ({ items, position, onClose }) =
             }}
             title={tooltip}
           >
-            {item.icon && <span className="context-menu-icon">{item.icon}</span>}
+            {!!item.icon && <span className="context-menu-icon">{item.icon}</span>}
             <span className="context-menu-label">{item.label}</span>
-            {item.disabled && item.disabledReason && (
+            {!!(item.disabled && item.disabledReason) && (
               <span className="context-menu-reason">{item.disabledReason}</span>
             )}
-          </div>
+          </button>
         );
       })}
     </div>,

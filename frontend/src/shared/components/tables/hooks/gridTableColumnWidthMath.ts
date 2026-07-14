@@ -293,9 +293,13 @@ export const reconcileColumnWidthsToContainer = <T>({
 
   const lockedKeys = new Set<string>();
   if (!enableColumnResizing && externalColumnWidths) {
-    Object.keys(externalColumnWidths).forEach((key) => lockedKeys.add(key));
+    Object.keys(externalColumnWidths).forEach((key) => {
+      lockedKeys.add(key);
+    });
   }
-  manuallyResizedColumnKeys.forEach((key) => lockedKeys.add(key));
+  manuallyResizedColumnKeys.forEach((key) => {
+    lockedKeys.add(key);
+  });
 
   const fixedColumns = renderedColumns.filter(
     (column) => isFixedColumnKey(column.key) || lockedKeys.has(column.key)
@@ -366,7 +370,11 @@ export const buildInitialMeasuredColumnWidthPlan = <T>({
     const naturalWidths: Record<string, number> = {};
     renderedColumns.forEach((column) => {
       let width: number | undefined;
-      if (manuallyResizedColumnKeys.has(column.key) && columnWidths[column.key] != null) {
+      if (
+        manuallyResizedColumnKeys.has(column.key) &&
+        columnWidths[column.key] !== null &&
+        columnWidths[column.key] !== undefined
+      ) {
         width = columnWidths[column.key];
       } else if (isFixedColumnKey(column.key)) {
         width = measuredFixedWidths[column.key];

@@ -5,14 +5,11 @@
  * Covers key behaviors and edge cases for useGridTableHoverFallback.
  */
 
-import { forwardRef } from 'react';
-import ReactDOM from 'react-dom/client';
-import { act } from 'react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-
 import { useGridTableHoverFallback } from '@shared/components/tables/hooks/useGridTableHoverFallback';
-
-(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+import type React from 'react';
+import { act } from 'react';
+import * as ReactDOM from 'react-dom/client';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 afterEach(() => {
   document.body.innerHTML = '';
@@ -30,7 +27,7 @@ describe('useGridTableHoverFallback', () => {
 
     const wrapperRef = { current: wrapper };
 
-    const Harness = forwardRef<HTMLDivElement, { visible: boolean }>((props, ref) => {
+    const Harness = ({ ref, ...props }: { visible: boolean; ref?: React.Ref<HTMLDivElement> }) => {
       useGridTableHoverFallback({
         hoverStateVisible: props.visible,
         wrapperRef,
@@ -38,7 +35,7 @@ describe('useGridTableHoverFallback', () => {
         tableLength: 2,
       });
       return <div ref={ref} />;
-    });
+    };
 
     const container = document.createElement('div');
     document.body.appendChild(container);

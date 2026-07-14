@@ -7,10 +7,6 @@
   z-index: 999;
 }
 
-.dockable-panel-layer .dockable-panel {
-  pointer-events: auto;
-}
-
 .dockable-panel {
   position: absolute;
   background: var(--color-bg);
@@ -26,6 +22,7 @@
   --dockable-panel-floating-min-width: 450;
   --dockable-panel-floating-min-height: 200;
   transition: filter 150ms ease;
+  pointer-events: auto;
 }
 
 /* Inactive group: dim non-focused panels */
@@ -69,11 +66,6 @@
   max-height: none;
 }
 
-.dockable-panel--maximized .dockable-panel__header {
-  cursor: default;
-  border-radius: 8px 8px 0 0;
-}
-
 /* Header */
 .dockable-panel__header {
   display: flex;
@@ -87,6 +79,11 @@
   overflow: visible;
   position: relative;
   z-index: 1;
+}
+
+.dockable-panel--maximized .dockable-panel__header {
+  cursor: default;
+  border-radius: 8px 8px 0 0;
 }
 
 .dockable-panel--floating .dockable-panel__header {
@@ -103,6 +100,26 @@
   padding-right: 16px; /* Leave a bit of space between the tabs and controls for dragging the window */
   overflow: visible;
   max-width: 100%;
+}
+
+.dockable-panel__drag-control {
+  align-self: stretch;
+  flex: 0 0 24px;
+  min-width: 24px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: move;
+}
+
+.dockable-panel__drag-control:disabled {
+  cursor: default;
+}
+
+.dockable-panel__drag-control:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
 }
 
 .dockable-panel__title {
@@ -128,6 +145,7 @@
   align-items: center;
   flex-shrink: 0; /* Never shrink */
   margin-left: auto; /* Push to the right */
+  padding-right: 0.25rem;
   z-index: 1; /* Ensure controls are above other content */
   background: var(--color-bg-secondary); /* Opaque so header-content doesn't show through */
 }
@@ -136,8 +154,8 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
+  width: 24px;
+  height: 24px;
   padding: 0;
   background: transparent;
   border: none;
@@ -183,6 +201,9 @@
 /* Resize handles */
 .dockable-panel__resize-handle {
   position: absolute;
+  margin: 0;
+  padding: 0;
+  border: 0;
   background: transparent;
   z-index: calc(var(--z-index-scrollbar-overlay) + 1);
 }
@@ -243,6 +264,9 @@
 .dockable-panel__resize-zone {
   position: absolute;
   z-index: calc(var(--z-index-scrollbar-overlay) + 1);
+  border: 0;
+  background: transparent;
+  padding: 0;
 
   /* transition: background-color var(--transition-fast); */
 }
@@ -329,12 +353,12 @@
 
 /* Dragging state */
 .dockable-panel--dragging {
-  cursor: move !important;
+  cursor: move;
 }
 
 .dockable-panel--dragging * {
-  cursor: move !important;
-  user-select: none !important;
+  cursor: move;
+  user-select: none;
 }
 
 /* Resizing state */
@@ -343,59 +367,53 @@
 }
 
 .dockable-panel--resizing * {
-  user-select: none !important;
-  pointer-events: none !important;
+  user-select: none;
+  pointer-events: none;
 }
 
-/* Body overrides during drag/resize - disable text selection */
+/* A document-level interaction shield owns the pointer during drag/resize.
+   Because underlying controls are no longer pointer targets, their local
+   cursor and selection declarations do not need cascade overrides. */
 body.dockable-panel-dragging,
-body.dockable-panel-dragging *,
-body.dockable-panel-resizing,
-body.dockable-panel-resizing * {
-  user-select: none !important;
+body.dockable-panel-resizing {
+  user-select: none;
 }
 
-/* Prevent hover events on underlying elements during drag/resize.
-   This stops tooltips/popups from triggering when moving panel edges. */
-body.dockable-panel-dragging .app,
-body.dockable-panel-resizing .app {
-  pointer-events: none !important;
+body.dockable-panel-dragging::after,
+body.dockable-panel-resizing::after {
+  position: fixed;
+  z-index: 2147483647;
+  inset: 0;
+  content: "";
+  cursor: move;
 }
 
-body.dockable-panel-resizing-n,
-body.dockable-panel-resizing-n *,
-body.dockable-panel-resizing-s,
-body.dockable-panel-resizing-s * {
+body.dockable-panel-resizing-n::after,
+body.dockable-panel-resizing-s::after {
   cursor:
     url("../../shared/components/icons/cursors/ns-resize.svg") 12 12,
-    row-resize !important;
+    row-resize;
 }
 
-body.dockable-panel-resizing-e,
-body.dockable-panel-resizing-e *,
-body.dockable-panel-resizing-w,
-body.dockable-panel-resizing-w * {
+body.dockable-panel-resizing-e::after,
+body.dockable-panel-resizing-w::after {
   cursor:
     url("../../shared/components/icons/cursors/ew-resize.svg") 12 12,
-    col-resize !important;
+    col-resize;
 }
 
-body.dockable-panel-resizing-nw,
-body.dockable-panel-resizing-nw *,
-body.dockable-panel-resizing-se,
-body.dockable-panel-resizing-se * {
+body.dockable-panel-resizing-nw::after,
+body.dockable-panel-resizing-se::after {
   cursor:
     url("../../shared/components/icons/cursors/nwse-resize.svg") 12 12,
-    nwse-resize !important;
+    nwse-resize;
 }
 
-body.dockable-panel-resizing-ne,
-body.dockable-panel-resizing-ne *,
-body.dockable-panel-resizing-sw,
-body.dockable-panel-resizing-sw * {
+body.dockable-panel-resizing-ne::after,
+body.dockable-panel-resizing-sw::after {
   cursor:
     url("../../shared/components/icons/cursors/nesw-resize.svg") 12 12,
-    nesw-resize !important;
+    nesw-resize;
 }
 
 /* Dark mode adjustments */
@@ -425,7 +443,7 @@ body.dockable-panel-resizing-sw * {
   border-bottom: none;
 }
 
-.dockable-tab__kind-indicator.kind-badge {
+.dockable-tab-bar .dockable-tab__kind-indicator.kind-badge {
   display: inline-block;
   width: 10px;
   height: 10px;
@@ -434,8 +452,8 @@ body.dockable-panel-resizing-sw * {
   box-sizing: border-box;
   padding: 0;
   border-radius: 6px;
-  background-color: currentColor !important;
-  border-color: currentColor !important;
+  background-color: currentColor;
+  border-color: currentColor;
   font-size: 0;
   line-height: 0;
   flex-shrink: 0;
@@ -471,7 +489,7 @@ body.dockable-panel-resizing-sw * {
   white-space: nowrap;
 }
 
-.dockable-tab-drag-preview__kind.kind-badge {
+.dockable-tab-drag-preview .dockable-tab-drag-preview__kind.kind-badge {
   width: 10px;
   height: 10px;
   min-width: 10px;
@@ -479,8 +497,8 @@ body.dockable-panel-resizing-sw * {
   box-sizing: border-box;
   border-radius: 6px;
   padding: 0;
-  background-color: currentColor !important;
-  border-color: currentColor !important;
+  background-color: currentColor;
+  border-color: currentColor;
   flex-shrink: 0;
 }
 

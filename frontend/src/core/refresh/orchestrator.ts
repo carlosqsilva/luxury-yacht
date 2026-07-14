@@ -5,18 +5,37 @@
  * Implements orchestrator logic for the core layer.
  */
 
+import { type AppEvents, eventBus } from '@/core/events';
+import {
+  APP_LOG_SOURCES,
+  type AppLogsClusterMeta,
+  logAppLogsInfo,
+  logAppLogsWarn,
+} from '@/core/logging/appLogsClient';
+import { getAutoRefreshEnabled } from '@/core/settings/appPreferences';
 import {
   ensureRefreshBaseURL,
   fetchSnapshot,
-  isSnapshotPermissionDenied,
   invalidateRefreshBaseURL,
-  setMetricsActive,
+  isSnapshotPermissionDenied,
   type Snapshot,
+  setMetricsActive,
 } from './client';
-import { eventBus, type AppEvents } from '@/core/events';
-import { refreshManager, type RefreshContext } from './RefreshManager';
+import { clusterReadiness } from './clusterReadiness';
+import { buildClusterScope, parseClusterScope, parseClusterScopeList } from './clusterScope';
+import { registerDefaultRefreshDomains } from './domainRegistrations';
+import { type RefreshContext, refreshManager } from './RefreshManager';
+import { RefreshErrorNotifier } from './refreshErrorNotifier';
+import { type RefresherTiming, refresherConfig } from './refresherConfig';
 import type { RefresherName, StaticRefresherName } from './refresherTypes';
-import { refresherConfig, type RefresherTiming } from './refresherConfig';
+import type { DomainRegistration, StreamingRegistration } from './refreshRegistration';
+import { ClusterRefreshRuntime, makeInFlightKey } from './refreshRuntime';
+import { isResourceStreamDomain, isResourceStreamViewActive } from './resourceStreamViews';
+import {
+  normalizeNamespaceScope as normalizeNamespaceScopeValue,
+  normalizeRefreshDomainScope,
+} from './scopeNormalization';
+import { mergePollingListPayload } from './snapshotMerge';
 import {
   getRefreshState,
   getScopedDomainState,
@@ -26,31 +45,12 @@ import {
   resetScopedDomainState,
   setScopedDomainState,
 } from './store';
-import type { DomainPayloadMap, RefreshDomain } from './types';
-import { resourceStreamManager } from './streaming/resourceStreamManager';
 import {
   doorbellPollingContinues,
   isSupportedDomain as isDoorbellStreamDomain,
 } from './streaming/resourceStreamDomains';
-import {
-  APP_LOG_SOURCES,
-  logAppLogsInfo,
-  logAppLogsWarn,
-  type AppLogsClusterMeta,
-} from '@/core/logging/appLogsClient';
-import { getAutoRefreshEnabled } from '@/core/settings/appPreferences';
-import { buildClusterScope, parseClusterScope, parseClusterScopeList } from './clusterScope';
-import { clusterReadiness } from './clusterReadiness';
-import { ClusterRefreshRuntime, makeInFlightKey } from './refreshRuntime';
-import { mergePollingListPayload } from './snapshotMerge';
-import { registerDefaultRefreshDomains } from './domainRegistrations';
-import type { DomainRegistration, StreamingRegistration } from './refreshRegistration';
-import { isResourceStreamDomain, isResourceStreamViewActive } from './resourceStreamViews';
-import {
-  normalizeNamespaceScope as normalizeNamespaceScopeValue,
-  normalizeRefreshDomainScope,
-} from './scopeNormalization';
-import { RefreshErrorNotifier } from './refreshErrorNotifier';
+import { resourceStreamManager } from './streaming/resourceStreamManager';
+import type { DomainPayloadMap, RefreshDomain } from './types';
 
 type DomainFetchOptions = {
   isManual: boolean;
@@ -68,7 +68,7 @@ type DomainFetchOptions = {
 // registration, regardless of whether the user is on the relevant view.
 // Set autoStart: true on individual domain registrations when needed.
 const DEFAULT_AUTO_START = false;
-const noopStreamingCleanup = () => {};
+const noopStreamingCleanup = () => undefined;
 
 const logInfo = (message: string, cluster?: AppLogsClusterMeta): void => {
   logAppLogsInfo(message, APP_LOG_SOURCES.RefreshOrchestrator, cluster);
@@ -239,7 +239,7 @@ class RefreshOrchestrator {
     this.context = { ...this.context, ...context };
     refreshManager.updateContext(context);
 
-    if (Object.prototype.hasOwnProperty.call(context, 'allConnectedClusterIds')) {
+    if (Object.getOwnPropertyDescriptor(context, 'allConnectedClusterIds') !== undefined) {
       this.pruneRemovedClusterRuntimes(context.allConnectedClusterIds ?? []);
     }
 
@@ -346,7 +346,9 @@ class RefreshOrchestrator {
   private getKnownScopes(domain: RefreshDomain): string[] {
     const scopes = new Set<string>();
     this.getAllRuntimes().forEach((runtime) => {
-      runtime.getKnownScopes(domain).forEach((scope) => scopes.add(scope));
+      runtime.getKnownScopes(domain).forEach((scope) => {
+        scopes.add(scope);
+      });
     });
     return Array.from(scopes);
   }
@@ -770,14 +772,7 @@ class RefreshOrchestrator {
         // visit to a streaming view. Fetch once now; streamSignal bypasses
         // the healthy-stream skip, performFetch dedupes in-flight, and a
         // denied domain gets its typed-403 stamp immediately.
-        if (!streaming.snapshotless && !getScopedDomainState(domain, scope).data) {
-          void this.performFetch(domain, scope, {
-            isManual: false,
-            streamSignal: true,
-          }).catch(() => {
-            // Failures land in the scoped state via performFetch's own path.
-          });
-        }
+        this.reconcileInitialStreamingSnapshot(domain, scope, streaming);
       })
       .catch((error) => {
         runtime.failStreamingStart(domain, scope);
@@ -797,6 +792,22 @@ class RefreshOrchestrator {
     return startPromise.then(() => undefined).catch(() => undefined);
   }
 
+  private reconcileInitialStreamingSnapshot(
+    domain: RefreshDomain,
+    scope: string,
+    streaming: StreamingRegistration
+  ): void {
+    if (streaming.snapshotless || getScopedDomainState(domain, scope).data) {
+      return;
+    }
+    void this.performFetch(domain, scope, {
+      isManual: false,
+      streamSignal: true,
+    }).catch(() => {
+      // Failures land in the scoped state via performFetch's own path.
+    });
+  }
+
   private stopStreamingScope(
     domain: RefreshDomain,
     scope: string,
@@ -808,7 +819,7 @@ class RefreshOrchestrator {
 
     if (pending) {
       pending
-        .then((cleanup) => {
+        .then((streamingCleanup) => {
           // LOAD-BEARING — docs/architecture/refresh-system.md, "Streaming
           // Start Lifecycle": teardown has exactly one owner. The start's
           // own continuation (attached first) already handled a cancelled
@@ -821,9 +832,9 @@ class RefreshOrchestrator {
           }
           runtime.failStreamingStart(domain, scope);
           runtime.clearStreamingCancelled(domain, scope);
-          if (typeof cleanup === 'function') {
+          if (typeof streamingCleanup === 'function') {
             try {
-              cleanup();
+              streamingCleanup();
             } catch (error) {
               console.error(`Failed to stop pending streaming domain ${domain}::${scope}`, error);
             }
@@ -1417,7 +1428,7 @@ class RefreshOrchestrator {
     }
     // A settled denial: block the scope's streaming (cleared on scope change
     // or auth recovery) so it does not resync-loop against a 403 forever.
-    const domain = payload.domain as RefreshDomain;
+    const domain = payload.domain;
     const runtime = this.getRuntimeForScope(domain, scope);
     if (!runtime.blockStreaming(domain, scope)) {
       return;
@@ -1447,7 +1458,7 @@ class RefreshOrchestrator {
       return;
     }
     // Disable streaming for drifted scopes so snapshots remain the source of truth.
-    const domain = payload.domain as RefreshDomain;
+    const domain = payload.domain;
     const runtime = this.getRuntimeForScope(domain, scope);
     if (!runtime.blockStreaming(domain, scope)) {
       return;
@@ -1471,7 +1482,7 @@ class RefreshOrchestrator {
     if (!scope) {
       return;
     }
-    const domain = payload.domain as RefreshDomain;
+    const domain = payload.domain;
     this.getRuntimeForScope(domain, scope).setStreamHealth(domain, scope, payload);
   };
 
@@ -1576,7 +1587,8 @@ class RefreshOrchestrator {
   // Re-evaluate streaming for all scoped domains when the orchestrator context changes.
   private handleStreamingScopeChanges(): void {
     this.configs.forEach((config, domain) => {
-      if (!config.streaming) {
+      const streaming = config.streaming;
+      if (!streaming) {
         return;
       }
 
@@ -1588,11 +1600,11 @@ class RefreshOrchestrator {
 
           if (shouldStream && !alreadyStreaming) {
             // Context now allows streaming for this scope — start it.
-            this.scheduleStreamingStart(domain, scope, config.streaming!);
+            this.scheduleStreamingStart(domain, scope, streaming);
           } else if (!shouldStream && alreadyStreaming) {
             // Context no longer allows streaming — stop it.
             scopeRuntime.clearStreamingReady(domain, scope);
-            this.stopStreamingScope(domain, scope, config.streaming!, false);
+            this.stopStreamingScope(domain, scope, streaming, false);
           }
         });
       });

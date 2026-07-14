@@ -1,0 +1,16 @@
+engine biome(1.0)
+language js(typescript, jsx)
+
+// Keep feature code behind the shared refresh and data-access boundaries instead of issuing
+// network requests directly. The plugin scope exempts those infrastructure layers so they can
+// perform the underlying fetches.
+or {
+  `fetch($...)`,
+  `$receiver.fetch($...)`
+} as $call where {
+  register_diagnostic(
+    span = $call,
+    message = "Use the refresh orchestrator client instead of direct fetch calls.",
+    severity = "error"
+  )
+}

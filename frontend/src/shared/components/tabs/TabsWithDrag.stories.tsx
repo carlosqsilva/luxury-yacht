@@ -22,13 +22,12 @@
  * but fully compliant with the rules of hooks.
  */
 
-import { useState } from 'react';
 import type { Meta, StoryObj } from '@storybook/react';
-
-import { Tabs, type TabDescriptor } from './Tabs';
-import { TabDragProvider, useTabDragSource, useTabDropTarget } from './dragCoordinator';
-import type { TabDragPayload } from './dragCoordinator';
+import { useState } from 'react';
 import { AppearanceModeProviderDecorator } from '../../../../.storybook/decorators/AppearanceModeProviderDecorator';
+import type { TabDragPayload } from './dragCoordinator';
+import { TabDragProvider, useTabDragSource, useTabDropTarget } from './dragCoordinator';
+import { type TabDescriptor, Tabs } from './Tabs';
 import './stories.css';
 
 // Lightweight action logger — mirrors Tabs.stories.tsx since the project
@@ -37,13 +36,15 @@ import './stories.css';
 const logAction =
   (name: string) =>
   (...args: unknown[]): void => {
-    console.log(`[TabsWithDrag story] ${name}`, ...args);
+    console.info(`[TabsWithDrag story] ${name}`, ...args);
   };
 
 /** Reorder: move `fromId` to position `toIndex` in the tab list. */
 function reorder(tabs: TabDescriptor[], fromId: string, toIndex: number): TabDescriptor[] {
   const fromIndex = tabs.findIndex((t) => t.id === fromId);
-  if (fromIndex === -1) return tabs;
+  if (fromIndex === -1) {
+    return tabs;
+  }
   const next = tabs.slice();
   const [moved] = next.splice(fromIndex, 1);
   // If the item was before the target index, removing it shifted everything.

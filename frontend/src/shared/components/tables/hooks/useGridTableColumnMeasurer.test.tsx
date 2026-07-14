@@ -5,14 +5,12 @@
  * Covers key behaviors and edge cases for useGridTableColumnMeasurer.
  */
 
-import React, { act } from 'react';
-import ReactDOM from 'react-dom/client';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-
 import type { GridColumnDefinition } from '@shared/components/tables/GridTable.types';
 import { useGridTableColumnMeasurer } from '@shared/components/tables/hooks/useGridTableColumnMeasurer';
-
-(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+import React, { act } from 'react';
+import * as ReactDOM from 'react-dom/client';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { requireValue } from '@/test-utils/requireValue';
 
 type SampleRow = { name: string; kind?: string };
 
@@ -37,7 +35,7 @@ afterEach(() => {
   if (originalScrollWidthDescriptor) {
     Object.defineProperty(HTMLElement.prototype, 'scrollWidth', originalScrollWidthDescriptor);
   } else {
-    delete (HTMLElement.prototype as any).scrollWidth;
+    Reflect.deleteProperty(HTMLElement.prototype, 'scrollWidth');
   }
   document.body.innerHTML = '';
   vi.restoreAllMocks();
@@ -59,21 +57,29 @@ const renderHarness = async (tableData: SampleRow[]) => {
       tableRef,
       tableData,
       parseWidthInputToNumber: (input) => {
-        if (typeof input === 'number') return input;
-        if (!input || input === 'auto') return null;
+        if (typeof input === 'number') {
+          return input;
+        }
+        if (!input || input === 'auto') {
+          return null;
+        }
         const numeric = Number.parseFloat(input);
         return Number.isFinite(numeric) ? numeric : null;
       },
       defaultColumnWidth: 150,
       isKindColumnKey: (key) => key === 'kind',
       getTextContent: (node) => {
-        if (typeof node === 'string') return node;
+        if (typeof node === 'string') {
+          return node;
+        }
         if (Array.isArray(node)) {
           return node.map((item) => (typeof item === 'string' ? item : '')).join('');
         }
         if (React.isValidElement(node)) {
           const props = node.props as { children?: React.ReactNode };
-          if (typeof props.children === 'string') return props.children;
+          if (typeof props.children === 'string') {
+            return props.children;
+          }
         }
         return '';
       },
@@ -99,7 +105,10 @@ const renderHarness = async (tableData: SampleRow[]) => {
       // The measurement path creates and unmounts a temporary React root.
       // Keep that work inside act() so React test warnings stay clean.
       act(() => {
-        measured = measureColumnWidth!(column);
+        measured = requireValue(
+          measureColumnWidth,
+          'expected test value in useGridTableColumnMeasurer.test.tsx'
+        )(column);
       });
       return measured;
     },
@@ -139,11 +148,21 @@ describe('useGridTableColumnMeasurer', () => {
     Object.defineProperty(HTMLElement.prototype, 'scrollWidth', {
       configurable: true,
       get() {
-        return headerWidths.length ? headerWidths.shift()! : 0;
+        return headerWidths.length
+          ? requireValue(
+              headerWidths.shift(),
+              'expected test value in useGridTableColumnMeasurer.test.tsx'
+            )
+          : 0;
       },
     });
-    HTMLElement.prototype.getBoundingClientRect = function () {
-      const width = cellWidths.length ? cellWidths.shift()! : 0;
+    HTMLElement.prototype.getBoundingClientRect = () => {
+      const width = cellWidths.length
+        ? requireValue(
+            cellWidths.shift(),
+            'expected test value in useGridTableColumnMeasurer.test.tsx'
+          )
+        : 0;
       return {
         width,
         height: 0,

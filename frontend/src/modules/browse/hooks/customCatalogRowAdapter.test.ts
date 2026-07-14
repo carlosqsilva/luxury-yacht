@@ -1,15 +1,15 @@
 import { describe, expect, it } from 'vitest';
-
+import type { CatalogBackedCustomResourceRow } from './customCatalogRowAdapter';
 import {
   catalogItemToFallbackCustomRow,
   customCatalogObjectReference,
   customCatalogRowKey,
   normalizeHydratedCustomRow,
 } from './customCatalogRowAdapter';
-import type { CatalogBackedCustomResourceRow } from './customCatalogRowAdapter';
 
 const row = (group: string): CatalogBackedCustomResourceRow => ({
   clusterId: 'cluster-a',
+  clusterName: 'Cluster A',
   kind: 'DBInstance',
   name: 'primary',
   namespace: 'data',
@@ -28,6 +28,7 @@ describe('customCatalogRowAdapter', () => {
   it('builds object references from canonical custom-resource identity', () => {
     expect(customCatalogObjectReference(row('rds.services.k8s.aws'))).toMatchObject({
       clusterId: 'cluster-a',
+      clusterName: 'Cluster A',
       group: 'rds.services.k8s.aws',
       version: 'v1alpha1',
       kind: 'DBInstance',
@@ -41,6 +42,7 @@ describe('customCatalogRowAdapter', () => {
     const creationTimestamp = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
     const fallback = catalogItemToFallbackCustomRow({
       clusterId: 'cluster-a',
+      clusterName: 'Cluster A',
       kind: 'DBInstance',
       group: 'rds.services.k8s.aws',
       version: 'v1alpha1',
@@ -64,6 +66,7 @@ describe('customCatalogRowAdapter', () => {
   it('uses group/version row fields without api-prefixed aliases', () => {
     const fallback = catalogItemToFallbackCustomRow({
       clusterId: 'cluster-a',
+      clusterName: 'Cluster A',
       kind: 'DBInstance',
       group: 'rds.services.k8s.aws',
       version: 'v1alpha1',
@@ -96,5 +99,26 @@ describe('customCatalogRowAdapter', () => {
     expect(normalized.version).toBe('v1alpha1');
     expect(normalized).not.toHaveProperty('apiGroup');
     expect(normalized).not.toHaveProperty('apiVersion');
+  });
+
+  it.each([
+    'clusterId',
+    'group',
+    'version',
+    'kind',
+    'name',
+  ])('rejects hydrated rows missing required identity field %s', (field) => {
+    const hydrated: Record<string, unknown> = {
+      clusterId: 'cluster-a',
+      group: 'rds.services.k8s.aws',
+      version: 'v1alpha1',
+      kind: 'DBInstance',
+      name: 'primary',
+    };
+    delete hydrated[field];
+
+    expect(() => normalizeHydratedCustomRow(hydrated)).toThrow(
+      `Hydrated catalog row is missing string field "${field}".`
+    );
   });
 });

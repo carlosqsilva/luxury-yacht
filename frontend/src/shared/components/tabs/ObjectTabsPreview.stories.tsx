@@ -34,12 +34,11 @@
  * could theoretically end up in one strip after drags).
  */
 
-import { useCallback, useRef, useState } from 'react';
 import type { Meta, StoryObj } from '@storybook/react';
-
-import { Tabs, type TabDescriptor } from './';
-import { TabDragProvider, useTabDragSource, useTabDropTarget } from './dragCoordinator';
+import { useCallback, useRef, useState } from 'react';
 import { AppearanceModeProviderDecorator } from '../../../../.storybook/decorators/AppearanceModeProviderDecorator';
+import { type TabDescriptor, Tabs } from './';
+import { TabDragProvider, useTabDragSource, useTabDropTarget } from './dragCoordinator';
 // Import the real dockable panel CSS so the preview renders each tab's
 // kind indicator via the production `.dockable-tab__kind-indicator.kind-badge`
 // rules AND the custom drag image via the real `.dockable-tab-drag-preview`
@@ -50,7 +49,7 @@ import './stories.css';
 const logAction =
   (name: string) =>
   (...args: unknown[]): void => {
-    console.log(`[ObjectTabsPreview story] ${name}`, ...args);
+    console.info(`[ObjectTabsPreview story] ${name}`, ...args);
   };
 
 // Small colored kind-indicator span. Markup is byte-identical to the
@@ -272,7 +271,9 @@ interface TabGroup {
 function nextGroupId(existing: Set<string>): string {
   for (let code = 'a'.charCodeAt(0); code <= 'z'.charCodeAt(0); code++) {
     const candidate = String.fromCharCode(code);
-    if (!existing.has(candidate)) return candidate;
+    if (!existing.has(candidate)) {
+      return candidate;
+    }
   }
   return `strip-${Date.now()}`;
 }
@@ -311,13 +312,17 @@ function ObjectTabsPreviewHarness() {
       setGroups((prev) => {
         const sourceGroup = prev.find((g) => g.id === sourceGroupId);
         const tab = sourceGroup?.tabs.find((t) => t.id === panelId);
-        if (!tab) return prev;
+        if (!tab) {
+          return prev;
+        }
 
         // Within-strip reorder — tab count is unchanged, so no group can
         // become empty.
         if (sourceGroupId === targetGroupId) {
           return prev.map((g) => {
-            if (g.id !== sourceGroupId) return g;
+            if (g.id !== sourceGroupId) {
+              return g;
+            }
             const without = g.tabs.filter((t) => t.id !== panelId);
             const clamped = Math.max(0, Math.min(toIndex, without.length));
             return {
@@ -336,7 +341,9 @@ function ObjectTabsPreviewHarness() {
               return { ...g, tabs: g.tabs.filter((t) => t.id !== panelId) };
             }
             if (g.id === targetGroupId) {
-              if (g.tabs.some((t) => t.id === panelId)) return g;
+              if (g.tabs.some((t) => t.id === panelId)) {
+                return g;
+              }
               const clamped = Math.max(0, Math.min(toIndex, g.tabs.length));
               return {
                 ...g,
@@ -360,7 +367,9 @@ function ObjectTabsPreviewHarness() {
     setGroups((prev) => {
       const sourceGroup = prev.find((g) => g.id === sourceGroupId);
       const tab = sourceGroup?.tabs.find((t) => t.id === panelId);
-      if (!tab) return prev;
+      if (!tab) {
+        return prev;
+      }
 
       const newId = nextGroupId(new Set(prev.map((g) => g.id)));
       const newGroup: TabGroup = {
@@ -393,7 +402,7 @@ function ObjectTabsPreviewHarness() {
     <div className="tabs-story-drag-harness">
       {rows.map((row, rowIndex) => (
         <div
-          key={rowIndex}
+          key={row.map((group) => group.id).join(':')}
           className={`tabs-story-drag-row${rowIndex > 0 ? ' tabs-story-drag-row--below' : ''}`}
         >
           {row.map((group) => (

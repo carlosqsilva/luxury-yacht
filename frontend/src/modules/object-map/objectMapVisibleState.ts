@@ -13,13 +13,13 @@ import { contractObjectMapKindFilter, FILTERED_PATH_EDGE_TYPE } from './objectMa
 import {
   computeObjectMapBounds,
   computeObjectMapLayout,
-  routeObjectMapEdges,
   type ObjectMapLayout,
   type PositionedEdge,
   type PositionedNode,
+  routeObjectMapEdges,
 } from './objectMapLayout';
-import { computeObjectMapSelectionState } from './objectMapSelection';
 import type { ObjectMapSelectionState } from './objectMapRendererTypes';
+import { computeObjectMapSelectionState } from './objectMapSelection';
 
 export interface ObjectMapVisibleStateInput {
   layout: ObjectMapLayout;
@@ -66,7 +66,9 @@ const toLayoutEdgeInput = (
 
 const computeRealEdgeTypes = (edges: PositionedEdge[]): Set<string> => {
   const types = new Set<string>();
-  edges.forEach((edge) => types.add(edge.type.trim().toLowerCase()));
+  edges.forEach((edge) => {
+    types.add(edge.type.trim().toLowerCase());
+  });
   return types;
 };
 
@@ -98,7 +100,9 @@ const applyEdgeTypeFilter = (
   layout: ObjectMapLayout,
   enabledEdgeTypes: Set<string> | null
 ): ObjectMapLayout => {
-  if (!enabledEdgeTypes) return layout;
+  if (!enabledEdgeTypes) {
+    return layout;
+  }
   return {
     ...layout,
     edges: layout.edges.filter((edge) => enabledEdgeTypes.has(edge.type)),
@@ -116,7 +120,9 @@ const applyKindFilter = ({
   enabledEdgeTypes: Set<string> | null;
   seedNodeId: string;
 }): ObjectMapLayout => {
-  if (selectedKindSet.size === 0) return layout;
+  if (selectedKindSet.size === 0) {
+    return layout;
+  }
 
   const contracted = contractObjectMapKindFilter(
     layout.nodes.map(toLayoutNodeInput),
@@ -192,7 +198,9 @@ const computeSearchMatches = (
   normalizedSearchQuery: string,
   useShortResourceNames: boolean
 ): PositionedNode[] => {
-  if (!normalizedSearchQuery) return [];
+  if (!normalizedSearchQuery) {
+    return [];
+  }
   return nodes.filter((node) => {
     const namespace = node.ref.namespace ?? '';
     const displayKind = getDisplayKind(node.ref.kind, useShortResourceNames);
@@ -251,7 +259,9 @@ export const pruneObjectMapEnabledEdgeTypes = (
   enabledEdgeTypes: Set<string> | null,
   visibleEdgeTypes: Set<string>
 ): Set<string> | null => {
-  if (!enabledEdgeTypes) return null;
+  if (!enabledEdgeTypes) {
+    return null;
+  }
   const next = new Set(Array.from(enabledEdgeTypes).filter((type) => visibleEdgeTypes.has(type)));
   return next.size === enabledEdgeTypes.size ? enabledEdgeTypes : next;
 };
@@ -260,7 +270,9 @@ export const pruneObjectMapSelectedKinds = (
   selectedKinds: string[],
   kindOptions: DropdownOption[]
 ): string[] => {
-  if (selectedKinds.length === 0) return selectedKinds;
+  if (selectedKinds.length === 0) {
+    return selectedKinds;
+  }
   const available = new Set(kindOptions.map((option) => option.value));
   const next = selectedKinds.filter((kind) => available.has(kind));
   return next.length === selectedKinds.length ? selectedKinds : next;

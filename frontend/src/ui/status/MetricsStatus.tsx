@@ -6,10 +6,10 @@
  * No click action — popover is informational only.
  */
 
-import React from 'react';
 import StatusIndicator, { type StatusState } from '@shared/components/status/StatusIndicator';
-import { useClusterMetricsAvailability } from '@/core/refresh/hooks/useMetricsAvailability';
 import { useMetricsBannerInfo } from '@shared/hooks/useMetricsBannerInfo';
+import React from 'react';
+import { useClusterMetricsAvailability } from '@/core/refresh/hooks/useMetricsAvailability';
 
 const MetricsStatus: React.FC = () => {
   const metricsInfo = useClusterMetricsAvailability();
@@ -19,26 +19,38 @@ const MetricsStatus: React.FC = () => {
 
   /** Map metrics state to shared status state. */
   const getStatus = (): StatusState => {
-    if (!metricsInfo) return 'inactive';
+    if (!metricsInfo) {
+      return 'inactive';
+    }
 
     // No banner info means metrics are healthy.
-    if (!bannerInfo) return 'healthy';
+    if (!bannerInfo) {
+      return 'healthy';
+    }
 
     // Metrics permanently unavailable (no permission / metrics-server absent) is
     // a restriction, not an app fault — show amber (degraded), matching the
     // in-card restriction notices, not alarming red.
-    if (metricsInfo.disabled) return 'degraded';
+    if (metricsInfo.disabled) {
+      return 'degraded';
+    }
 
     // Has an error — distinguish degraded (stale/intermittent) vs unhealthy (unavailable).
-    if (metricsInfo.lastError) return 'unhealthy';
+    if (metricsInfo.lastError) {
+      return 'unhealthy';
+    }
 
     return 'degraded';
   };
 
   /** Generate the popover message. */
   const getMessage = (): string => {
-    if (!metricsInfo) return 'Awaiting metrics data...';
-    if (!bannerInfo) return 'Metrics available';
+    if (!metricsInfo) {
+      return 'Awaiting metrics data...';
+    }
+    if (!bannerInfo) {
+      return 'Metrics available';
+    }
 
     return bannerInfo.message;
   };

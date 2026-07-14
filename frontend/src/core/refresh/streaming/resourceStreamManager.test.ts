@@ -38,8 +38,14 @@ vi.mock('@/core/logging/appLogsClient', () => ({
 }));
 
 import { buildClusterScope } from '../clusterScope';
+import {
+  makeNamespaceAutoscalingSnapshotPayload,
+  makeNamespaceConfigSnapshotPayload,
+  makePodSnapshotEntry,
+  makePodSnapshotPayload,
+} from '../refreshContractTestBuilders';
 import { getScopedDomainState, resetAllScopedDomainStates, setScopedDomainState } from '../store';
-import { ResourceStreamManager, normalizeResourceScope } from './resourceStreamManager';
+import { normalizeResourceScope, ResourceStreamManager } from './resourceStreamManager';
 
 class FakeWebSocket {
   static OPEN = 1;
@@ -57,6 +63,21 @@ class FakeWebSocket {
     createdSockets.push(this);
   }
 }
+
+const installWindowTimers = (): void => {
+  Object.defineProperties(window, {
+    setTimeout: { configurable: true, writable: true, value: globalThis.setTimeout },
+    clearTimeout: { configurable: true, writable: true, value: globalThis.clearTimeout },
+  });
+};
+
+const installFakeWebSocket = (): void => {
+  Object.defineProperty(globalThis, 'WebSocket', {
+    configurable: true,
+    writable: true,
+    value: FakeWebSocket,
+  });
+};
 
 const flushPromises = async () => {
   await Promise.resolve();
@@ -106,9 +127,8 @@ beforeEach(() => {
       writable: true,
     });
   }
-  (window as any).setTimeout = globalThis.setTimeout;
-  (window as any).clearTimeout = globalThis.clearTimeout;
-  (globalThis as any).WebSocket = FakeWebSocket;
+  installWindowTimers();
+  installFakeWebSocket();
 
   resetAllScopedDomainStates('nodes');
   resetAllScopedDomainStates('namespace-workloads');
@@ -147,7 +167,7 @@ afterEach(() => {
   resetAllScopedDomainStates('cluster-custom');
   resetAllScopedDomainStates('catalog');
   resetAllScopedDomainStates('pods');
-  delete (globalThis as any).WebSocket;
+  Reflect.deleteProperty(globalThis, 'WebSocket');
   vi.useRealTimers();
 });
 
@@ -224,36 +244,21 @@ describe('resourceStreamManager helpers', () => {
 describe('ResourceStreamManager', () => {
   test('pod delta is signal-only: updates sourceVersion and leaves rows untouched', () => {
     vi.useFakeTimers();
-    (window as any).setTimeout = globalThis.setTimeout;
-    (window as any).clearTimeout = globalThis.clearTimeout;
+    installWindowTimers();
     const manager = new ResourceStreamManager();
     const storeScope = buildClusterScope('cluster-a', 'namespace:default');
     (
       manager as unknown as { ensureSubscriptions: (...args: unknown[]) => void }
     ).ensureSubscriptions('pods', storeScope);
 
-    const existing = {
-      clusterId: 'cluster-a',
-      name: 'pod-a',
-      namespace: 'default',
-      node: 'node-a',
-      status: 'Running',
-      ready: '1/1',
-      restarts: 0,
-      age: '1m',
-      ownerKind: 'Deployment',
-      ownerName: 'web',
-      cpuRequest: '10m',
-      cpuLimit: '20m',
+    const existing = makePodSnapshotEntry({
       cpuUsage: '50m',
-      memRequest: '10Mi',
-      memLimit: '20Mi',
       memUsage: '40Mi',
-    };
+    });
 
     setScopedDomainState('pods', storeScope, () => ({
       status: 'ready',
-      data: { rows: [existing], clusterId: 'test-cluster' },
+      data: makePodSnapshotPayload({ rows: [existing], clusterId: 'test-cluster' }),
       stats: null,
       error: null,
       droppedAutoRefreshes: 0,
@@ -296,8 +301,7 @@ describe('ResourceStreamManager', () => {
   // streaming-only refresh.
   test('quiet stream is healthy after the server ACKs the subscribe, with zero deliveries', async () => {
     vi.useFakeTimers();
-    (window as any).setTimeout = globalThis.setTimeout;
-    (window as any).clearTimeout = globalThis.clearTimeout;
+    installWindowTimers();
     const manager = new ResourceStreamManager();
     const storeScope = buildClusterScope('cluster-a', '');
 
@@ -337,8 +341,7 @@ describe('ResourceStreamManager', () => {
   // refresher keeps polling as the fallback.
   test('unconfirmed subscribe stays degraded so polling falls back; ERROR stays unhealthy', async () => {
     vi.useFakeTimers();
-    (window as any).setTimeout = globalThis.setTimeout;
-    (window as any).clearTimeout = globalThis.clearTimeout;
+    installWindowTimers();
     const manager = new ResourceStreamManager();
     const storeScope = buildClusterScope('cluster-a', '');
     await manager.start('namespaces', storeScope);
@@ -378,8 +381,7 @@ describe('ResourceStreamManager', () => {
   // it), replacing the sidebar's 2s poll.
   test('namespaces doorbell advances the scoped sourceVersion', () => {
     vi.useFakeTimers();
-    (window as any).setTimeout = globalThis.setTimeout;
-    (window as any).clearTimeout = globalThis.clearTimeout;
+    installWindowTimers();
     const manager = new ResourceStreamManager();
     const storeScope = buildClusterScope('cluster-a', '');
     (
@@ -438,8 +440,7 @@ describe('ResourceStreamManager', () => {
   // polling involved. Non-metric domains must drop it at parse time.
   test('metric doorbell advances sourceVersion on metric-clock domains and is dropped elsewhere', () => {
     vi.useFakeTimers();
-    (window as any).setTimeout = globalThis.setTimeout;
-    (window as any).clearTimeout = globalThis.clearTimeout;
+    installWindowTimers();
     const manager = new ResourceStreamManager();
     const podsScope = buildClusterScope('cluster-a', 'namespace:default');
     const configScope = buildClusterScope('cluster-a', 'namespace:default');
@@ -478,8 +479,7 @@ describe('ResourceStreamManager', () => {
 
   test('signal-only domain delta updates sourceVersion and never retains rows', () => {
     vi.useFakeTimers();
-    (window as any).setTimeout = globalThis.setTimeout;
-    (window as any).clearTimeout = globalThis.clearTimeout;
+    installWindowTimers();
     const manager = new ResourceStreamManager();
     const storeScope = buildClusterScope('cluster-a', 'namespace:default');
     (
@@ -517,8 +517,7 @@ describe('ResourceStreamManager', () => {
 
   test('catalog doorbell updates each active catalog query report scope', () => {
     vi.useFakeTimers();
-    (window as any).setTimeout = globalThis.setTimeout;
-    (window as any).clearTimeout = globalThis.clearTimeout;
+    installWindowTimers();
     const manager = new ResourceStreamManager();
     const pageScope = buildClusterScope(
       'cluster-a',
@@ -560,8 +559,7 @@ describe('ResourceStreamManager', () => {
 
   test('A1 changed signal envelope updates sourceVersion without legacy message type', () => {
     vi.useFakeTimers();
-    (window as any).setTimeout = globalThis.setTimeout;
-    (window as any).clearTimeout = globalThis.clearTimeout;
+    installWindowTimers();
     const manager = new ResourceStreamManager();
     const storeScope = buildClusterScope('cluster-a', 'namespace:default');
     (
@@ -570,7 +568,7 @@ describe('ResourceStreamManager', () => {
 
     setScopedDomainState('pods', storeScope, () => ({
       status: 'ready',
-      data: { rows: [], clusterId: 'cluster-a' },
+      data: makePodSnapshotPayload({ rows: [], clusterId: 'cluster-a' }),
       stats: null,
       error: null,
       droppedAutoRefreshes: 0,
@@ -597,8 +595,7 @@ describe('ResourceStreamManager', () => {
 
   test('A1 reset signal envelope forces a resync without legacy message type', async () => {
     vi.useFakeTimers();
-    (window as any).setTimeout = globalThis.setTimeout;
-    (window as any).clearTimeout = globalThis.clearTimeout;
+    installWindowTimers();
     const manager = new ResourceStreamManager();
     const storeScope = buildClusterScope('cluster-a', 'namespace:default');
     (
@@ -626,8 +623,7 @@ describe('ResourceStreamManager', () => {
 
   test('A1 signal envelope does not fall back across cluster ids', () => {
     vi.useFakeTimers();
-    (window as any).setTimeout = globalThis.setTimeout;
-    (window as any).clearTimeout = globalThis.clearTimeout;
+    installWindowTimers();
     const manager = new ResourceStreamManager();
     const storeScope = buildClusterScope('cluster-a', 'namespace:default');
     (
@@ -655,8 +651,7 @@ describe('ResourceStreamManager', () => {
   // diagnostic/backward-compatible state for legacy signal-only messages.
   test('legacy streamed updates bump diagnostic streamRevision', () => {
     vi.useFakeTimers();
-    (window as any).setTimeout = globalThis.setTimeout;
-    (window as any).clearTimeout = globalThis.clearTimeout;
+    installWindowTimers();
     const manager = new ResourceStreamManager();
     const storeScope = buildClusterScope('cluster-a', 'namespace:default');
     (
@@ -665,7 +660,7 @@ describe('ResourceStreamManager', () => {
 
     setScopedDomainState('namespace-config', storeScope, () => ({
       status: 'ready',
-      data: { rows: [], clusterId: 'cluster-a' },
+      data: makeNamespaceConfigSnapshotPayload({ rows: [], clusterId: 'cluster-a' }),
       stats: null,
       version: 7,
       checksum: 'abc',
@@ -719,8 +714,7 @@ describe('ResourceStreamManager', () => {
 
   test('applies updates when cluster id mismatches but scope is unique', () => {
     vi.useFakeTimers();
-    (window as any).setTimeout = globalThis.setTimeout;
-    (window as any).clearTimeout = globalThis.clearTimeout;
+    installWindowTimers();
     const manager = new ResourceStreamManager();
     const storeScope = buildClusterScope('cluster-a', 'namespace:default');
     (
@@ -729,7 +723,7 @@ describe('ResourceStreamManager', () => {
 
     setScopedDomainState('namespace-config', storeScope, () => ({
       status: 'ready',
-      data: { rows: [], clusterId: 'test-cluster' },
+      data: makeNamespaceConfigSnapshotPayload({ rows: [], clusterId: 'test-cluster' }),
       stats: null,
       error: null,
       droppedAutoRefreshes: 0,
@@ -771,8 +765,7 @@ describe('ResourceStreamManager', () => {
 
   test('applies updates when scope includes a cluster prefix', () => {
     vi.useFakeTimers();
-    (window as any).setTimeout = globalThis.setTimeout;
-    (window as any).clearTimeout = globalThis.clearTimeout;
+    installWindowTimers();
     const manager = new ResourceStreamManager();
     const storeScope = buildClusterScope('cluster-a', 'namespace:default');
     (
@@ -781,7 +774,7 @@ describe('ResourceStreamManager', () => {
 
     setScopedDomainState('namespace-config', storeScope, () => ({
       status: 'ready',
-      data: { rows: [], clusterId: 'test-cluster' },
+      data: makeNamespaceConfigSnapshotPayload({ rows: [], clusterId: 'test-cluster' }),
       stats: null,
       error: null,
       droppedAutoRefreshes: 0,
@@ -822,8 +815,7 @@ describe('ResourceStreamManager', () => {
 
   test('reuses namespace autoscaling rows when an unchanged update is applied', () => {
     vi.useFakeTimers();
-    (window as any).setTimeout = globalThis.setTimeout;
-    (window as any).clearTimeout = globalThis.clearTimeout;
+    installWindowTimers();
     const manager = new ResourceStreamManager();
     const storeScope = buildClusterScope('cluster-a', 'namespace:default');
     (
@@ -845,7 +837,10 @@ describe('ResourceStreamManager', () => {
 
     setScopedDomainState('namespace-autoscaling', storeScope, () => ({
       status: 'ready',
-      data: { rows: [sharedRow], clusterId: 'cluster-a' },
+      data: makeNamespaceAutoscalingSnapshotPayload({
+        rows: [sharedRow],
+        clusterId: 'cluster-a',
+      }),
       stats: null,
       error: null,
       droppedAutoRefreshes: 0,
@@ -885,8 +880,7 @@ describe('ResourceStreamManager', () => {
 
   test('does not create an initial empty payload from pre-baseline stream updates', () => {
     vi.useFakeTimers();
-    (window as any).setTimeout = globalThis.setTimeout;
-    (window as any).clearTimeout = globalThis.clearTimeout;
+    installWindowTimers();
     const manager = new ResourceStreamManager();
     const storeScope = buildClusterScope('cluster-a', '');
     (
@@ -915,8 +909,7 @@ describe('ResourceStreamManager', () => {
 
   test('accepts updates even when resource versions regress if sequences advance', async () => {
     vi.useFakeTimers();
-    (window as any).setTimeout = globalThis.setTimeout;
-    (window as any).clearTimeout = globalThis.clearTimeout;
+    installWindowTimers();
     const manager = new ResourceStreamManager();
     const storeScope = buildClusterScope('cluster-a', 'namespace:default');
     (
@@ -966,8 +959,7 @@ describe('ResourceStreamManager', () => {
 
   test('accepts updates whose resourceVersion exceeds safe integer limits', () => {
     vi.useFakeTimers();
-    (window as any).setTimeout = globalThis.setTimeout;
-    (window as any).clearTimeout = globalThis.clearTimeout;
+    installWindowTimers();
     const manager = new ResourceStreamManager();
     const storeScope = buildClusterScope('cluster-a', '');
     (
@@ -982,7 +974,7 @@ describe('ResourceStreamManager', () => {
         type: 'ADDED',
         domain: 'cluster-rbac',
         scope: '',
-        resourceVersion: String(Number.MAX_SAFE_INTEGER) + '2',
+        resourceVersion: `${String(Number.MAX_SAFE_INTEGER)}2`,
         ref: resourceRef({ kind: 'ClusterRole', name: 'role-a' }),
         row: { name: 'role-a', status: 'Ready', clusterId: 'cluster-a' },
       })
@@ -1098,8 +1090,7 @@ describe('ResourceStreamManager', () => {
 
   test('reconnects and resubscribes after socket close', async () => {
     vi.useFakeTimers();
-    (window as any).setTimeout = globalThis.setTimeout;
-    (window as any).clearTimeout = globalThis.clearTimeout;
+    installWindowTimers();
     const manager = new ResourceStreamManager();
     const storeScope = buildClusterScope('cluster-a', 'namespace:default');
 
@@ -1156,8 +1147,7 @@ describe('ResourceStreamManager', () => {
 
   test('suspends and resumes streams for visibility changes', async () => {
     vi.useFakeTimers();
-    (window as any).setTimeout = globalThis.setTimeout;
-    (window as any).clearTimeout = globalThis.clearTimeout;
+    installWindowTimers();
     const manager = new ResourceStreamManager();
     const storeScope = buildClusterScope('cluster-a', 'namespace:default');
 
@@ -1195,8 +1185,7 @@ describe('ResourceStreamManager', () => {
 
   test('treats the first reset after subscribe as an acknowledgement', async () => {
     vi.useFakeTimers();
-    (window as any).setTimeout = globalThis.setTimeout;
-    (window as any).clearTimeout = globalThis.clearTimeout;
+    installWindowTimers();
     const manager = new ResourceStreamManager();
     const storeScope = buildClusterScope('cluster-a', 'namespace:default');
 
@@ -1255,8 +1244,7 @@ describe('ResourceStreamManager', () => {
 
   test('resyncs on complete and error stream messages', async () => {
     vi.useFakeTimers();
-    (window as any).setTimeout = globalThis.setTimeout;
-    (window as any).clearTimeout = globalThis.clearTimeout;
+    installWindowTimers();
     const manager = new ResourceStreamManager();
     const storeScope = buildClusterScope('cluster-a', 'namespace:default');
 
@@ -1375,8 +1363,7 @@ describe('ResourceStreamManager', () => {
 
   test('accepts newer updates after stale resource versions when sequences advance', async () => {
     vi.useFakeTimers();
-    (window as any).setTimeout = globalThis.setTimeout;
-    (window as any).clearTimeout = globalThis.clearTimeout;
+    installWindowTimers();
     const manager = new ResourceStreamManager();
     const storeScope = buildClusterScope('cluster-a', 'namespace:default');
 
@@ -1430,8 +1417,7 @@ describe('ResourceStreamManager', () => {
 
   test('debounces unsubscribe before sending cancel', async () => {
     vi.useFakeTimers();
-    (window as any).setTimeout = globalThis.setTimeout;
-    (window as any).clearTimeout = globalThis.clearTimeout;
+    installWindowTimers();
     const manager = new ResourceStreamManager();
     const storeScope = buildClusterScope('cluster-a', '');
 
@@ -1468,8 +1454,7 @@ describe('ResourceStreamManager', () => {
 
   test('cancels pending unsubscribe when resubscribed', async () => {
     vi.useFakeTimers();
-    (window as any).setTimeout = globalThis.setTimeout;
-    (window as any).clearTimeout = globalThis.clearTimeout;
+    installWindowTimers();
     const manager = new ResourceStreamManager();
     const storeScope = buildClusterScope('cluster-a', '');
 

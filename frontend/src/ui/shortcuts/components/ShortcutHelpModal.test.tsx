@@ -5,9 +5,9 @@
  * Covers key behaviors and edge cases for ShortcutHelpModal.
  */
 
-import ReactDOM from 'react-dom/client';
 import { act } from 'react';
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as ReactDOM from 'react-dom/client';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ShortcutHelpModal } from './ShortcutHelpModal';
 
@@ -32,10 +32,6 @@ vi.mock('@shared/components/modals/useModalFocusTrap', () => ({
 describe('ShortcutHelpModal', () => {
   let container: HTMLDivElement;
   let root: ReactDOM.Root;
-
-  beforeAll(() => {
-    (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
-  });
 
   beforeEach(() => {
     container = document.createElement('div');
@@ -131,9 +127,9 @@ describe('ShortcutHelpModal', () => {
     await renderModal({ isOpen: true, onClose });
 
     const modal = document.querySelector('.shortcut-help-modal') as HTMLDivElement | null;
-    const overlay = document.querySelector('.shortcut-help-modal-overlay') as HTMLDivElement | null;
+    const backdropDismiss = document.querySelector<HTMLButtonElement>('.modal-backdrop-dismiss');
     expect(modal).toBeTruthy();
-    expect(overlay).toBeTruthy();
+    expect(backdropDismiss).toBeTruthy();
 
     act(() => {
       modal?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
@@ -141,7 +137,7 @@ describe('ShortcutHelpModal', () => {
     expect(onClose).not.toHaveBeenCalled();
 
     act(() => {
-      overlay?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      backdropDismiss?.click();
     });
     expect(onClose).toHaveBeenCalledTimes(1);
   });

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, type RefObject } from 'react';
+import { type RefObject, useCallback, useEffect, useRef } from 'react';
 
 interface LogScrollRestorationOptions {
   rootRef: RefObject<HTMLElement | null>;
@@ -88,7 +88,9 @@ export const useLogScrollRestoration = ({
     const maxScrollTop = scrollEl.scrollHeight - scrollEl.clientHeight;
     const savedScrollTop = forceTailRestoreRef.current ? undefined : getScrollTop(cacheKey);
     const targetScrollTop =
-      savedScrollTop != null ? Math.min(savedScrollTop, maxScrollTop) : maxScrollTop;
+      savedScrollTop !== null && savedScrollTop !== undefined
+        ? Math.min(savedScrollTop, maxScrollTop)
+        : maxScrollTop;
 
     scrollEl.scrollTop = targetScrollTop;
     scrollRestoredRef.current = true;
@@ -96,6 +98,7 @@ export const useLogScrollRestoration = ({
   }, [cacheKey, getScrollContainer, getScrollTop, rowCount]);
 
   useEffect(() => {
+    void rowCount;
     void tailFollowSignal;
     if (!wasAtBottomRef.current || !scrollRestoredRef.current) {
       return;
@@ -137,7 +140,7 @@ export const useLogScrollRestoration = ({
         cancelAnimationFrame(rafId);
       }
     };
-  }, [getScrollContainer, isParsedView, rowCount, tailFollowSignal]);
+  }, [getScrollContainer, isParsedView, tailFollowSignal, rowCount]);
 
   return { getScrollContainer, resetScrollRestoration };
 };

@@ -4,19 +4,20 @@
  * Pod Overview descriptor (X1). Presentation ported verbatim from PodOverview.tsx.
  */
 
-import React from 'react';
-import { types } from '@wailsjs/go/models';
 import { ObjectPanelLink } from '@shared/components/ObjectPanelLink';
 import { StatusChip, type StatusChipVariant } from '@shared/components/StatusChip';
 import {
   buildRequiredObjectReference,
   buildRequiredRelatedObjectReference,
 } from '@shared/utils/objectIdentity';
+import { withStableListKeys } from '@shared/utils/stableListKeys';
+import { types } from '@wailsjs/go/models';
+import type React from 'react';
 import type { OverviewContext, OverviewDescriptor } from '../schema';
 import {
   DEFAULT_TOLERATION_RE,
-  parseToleration,
   type ParsedToleration,
+  parseToleration,
 } from '../shared/tolerations';
 import '../shared/OverviewBlocks.css';
 
@@ -29,8 +30,12 @@ const clusterMeta = (context: OverviewContext) => ({
 });
 
 const qosVariant = (qosClass: string): StatusChipVariant => {
-  if (qosClass === 'Guaranteed') return 'healthy';
-  if (qosClass === 'BestEffort') return 'warning';
+  if (qosClass === 'Guaranteed') {
+    return 'healthy';
+  }
+  if (qosClass === 'BestEffort') {
+    return 'warning';
+  }
   return 'info';
 };
 
@@ -56,8 +61,10 @@ const hasOwner = (d: PodDetailInfo): boolean =>
 const renderOwner = (d: PodDetailInfo, context: OverviewContext): React.ReactNode => {
   // The renderer evaluates `render` before honoring `hidden`, so guard the
   // no-owner case here too.
-  if (!hasOwner(d)) return null;
-  let ownerRef = null;
+  if (!hasOwner(d)) {
+    return null;
+  }
+  let ownerRef: ReturnType<typeof buildRequiredRelatedObjectReference> | null = null;
   try {
     ownerRef = buildRequiredRelatedObjectReference({
       kind: d.ownerKind.toLowerCase(),
@@ -84,12 +91,12 @@ const parsedTolerations = (d: PodDetailInfo): ParsedToleration[] =>
 const hasRuntimeGroup = (d: PodDetailInfo): boolean =>
   Boolean(
     d.qosClass ||
-    d.priorityClass ||
-    (d.restartPolicy && d.restartPolicy !== 'Always') ||
-    (d.serviceAccount && d.serviceAccount !== 'default') ||
-    d.hostNetwork ||
-    d.hostPID ||
-    d.hostIPC
+      d.priorityClass ||
+      (d.restartPolicy && d.restartPolicy !== 'Always') ||
+      (d.serviceAccount && d.serviceAccount !== 'default') ||
+      d.hostNetwork ||
+      d.hostPID ||
+      d.hostIPC
   );
 
 export const podDescriptor: OverviewDescriptor<PodDetailInfo> = {
@@ -106,12 +113,18 @@ export const podDescriptor: OverviewDescriptor<PodDetailInfo> = {
         hidden: (d) => !d.ready,
         render: (d) => {
           // `render` runs before `hidden` is honored, so guard the empty case.
-          if (!d.ready) return null;
+          if (!d.ready) {
+            return null;
+          }
           const parts = d.ready.split('/');
           if (parts.length === 2) {
-            const readyCount = parseInt(parts[0]);
-            const totalCount = parseInt(parts[1]);
-            if (!isNaN(readyCount) && !isNaN(totalCount) && readyCount !== totalCount) {
+            const readyCount = parseInt(parts[0], 10);
+            const totalCount = parseInt(parts[1], 10);
+            if (
+              !Number.isNaN(readyCount) &&
+              !Number.isNaN(totalCount) &&
+              readyCount !== totalCount
+            ) {
               return <span className="status-text warning">{d.ready}</span>;
             }
           }
@@ -173,8 +186,11 @@ export const podDescriptor: OverviewDescriptor<PodDetailInfo> = {
         hidden: (d) => parsedTolerations(d).length === 0,
         render: (d) => (
           <div className="overview-condition-list">
-            {parsedTolerations(d).map((p, i) => (
-              <StatusChip key={`${p.label}-${i}`} variant="info" tooltip={p.tooltip}>
+            {withStableListKeys(
+              parsedTolerations(d),
+              (item) => `${item.label}:${item.tooltip}`
+            ).map(({ key, value: p }) => (
+              <StatusChip key={key} variant="info" tooltip={p.tooltip}>
                 {p.label}
               </StatusChip>
             ))}
@@ -230,7 +246,7 @@ export const podDescriptor: OverviewDescriptor<PodDetailInfo> = {
         hidden: (d) => !(d.hostNetwork || d.hostPID || d.hostIPC),
         render: (d) => (
           <div className="overview-condition-list">
-            {d.hostNetwork && (
+            {!!d.hostNetwork && (
               <StatusChip
                 variant="warning"
                 tooltip="Shares the host's network namespace. Bypasses network policies and can bind to host ports or sniff host traffic."
@@ -238,7 +254,7 @@ export const podDescriptor: OverviewDescriptor<PodDetailInfo> = {
                 Network
               </StatusChip>
             )}
-            {d.hostPID && (
+            {!!d.hostPID && (
               <StatusChip
                 variant="warning"
                 tooltip="Shares the host's process namespace. The pod can see, signal, and attach to every process running on the node."
@@ -246,7 +262,7 @@ export const podDescriptor: OverviewDescriptor<PodDetailInfo> = {
                 PID
               </StatusChip>
             )}
-            {d.hostIPC && (
+            {!!d.hostIPC && (
               <StatusChip
                 variant="warning"
                 tooltip="Shares the host's IPC namespace. The pod can access shared memory and message queues used by host processes."

@@ -7,27 +7,27 @@
  * runs — users reattach via the drain icon next to the node's status.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import ModalSurface from './ModalSurface';
-import ModalHeader from './ModalHeader';
-import { useModalFocusTrap } from './useModalFocusTrap';
-import Tooltip from '@shared/components/Tooltip';
-import { DrainIcon } from '@shared/components/icons/SharedIcons';
-import { CancelDrainNodeJob } from '@wailsjs/go/backend/App';
 import { buildObjectActionTarget, runStartDrain } from '@shared/actions/objectActionClient';
-import { types } from '@wailsjs/go/models';
-import { errorHandler } from '@/utils/errorHandler';
+import { DrainProgressCard } from '@shared/components/drain/DrainProgressCard';
+import { DrainIcon } from '@shared/components/icons/SharedIcons';
+import Tooltip from '@shared/components/Tooltip';
+import {
+  type NodeDrainOperationPermissions,
+  resolveDrainStartPermissionStatus,
+} from '@shared/hooks/nodeActionPermissions';
+import type { types } from '@wailsjs/go/models';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { CancelDrainNodeJob } from '@/core/backend-api';
 import { requestRefreshDomain, setRefreshDomainEnabled } from '@/core/data-access';
 import { useRefreshScopedDomain } from '@/core/refresh';
-import { applyPassiveLoadingPolicy } from '@/core/refresh/loadingPolicy';
 import { buildClusterScope } from '@/core/refresh/clusterScope';
 import { useAutoRefreshLoadingState } from '@/core/refresh/hooks/useAutoRefreshLoadingState';
+import { applyPassiveLoadingPolicy } from '@/core/refresh/loadingPolicy';
 import type { NodeMaintenanceDrainJob, NodeMaintenanceSnapshotPayload } from '@/core/refresh/types';
-import { DrainProgressCard } from '@shared/components/drain/DrainProgressCard';
-import {
-  resolveDrainStartPermissionStatus,
-  type NodeDrainOperationPermissions,
-} from '@shared/hooks/nodeActionPermissions';
+import { errorHandler } from '@/utils/errorHandler';
+import ModalHeader from './ModalHeader';
+import ModalSurface from './ModalSurface';
+import { useModalFocusTrap } from './useModalFocusTrap';
 import './DrainNodeModal.css';
 
 const NODE_SCOPE_PREFIX = 'node:';
@@ -66,12 +66,16 @@ interface DrainNodeModalProps {
 }
 
 const normalizeGraceSeconds = (value: number): number => {
-  if (!Number.isFinite(value)) return 30;
+  if (!Number.isFinite(value)) {
+    return 30;
+  }
   return Math.min(MAX_NODE_DRAIN_GRACE_SECONDS, Math.max(1, Math.floor(value)));
 };
 
 const normalizeTimeoutSeconds = (value: number): number => {
-  if (!Number.isFinite(value)) return DEFAULT_NODE_DRAIN_TIMEOUT_SECONDS;
+  if (!Number.isFinite(value)) {
+    return DEFAULT_NODE_DRAIN_TIMEOUT_SECONDS;
+  }
   return Math.max(1, Math.floor(value));
 };
 
@@ -111,7 +115,9 @@ const DrainNodeModal = ({
   const scope = useMemo(() => {
     const trimmedNode = nodeName.trim();
     const trimmedCluster = clusterId.trim();
-    if (!trimmedNode || !trimmedCluster) return null;
+    if (!trimmedNode || !trimmedCluster) {
+      return null;
+    }
     return buildClusterScope(trimmedCluster, toScope(trimmedNode));
   }, [clusterId, nodeName]);
 
@@ -121,7 +127,9 @@ const DrainNodeModal = ({
   ) as NodeMaintenanceSnapshotPayloadState;
 
   useEffect(() => {
-    if (!scope || !isOpen) return;
+    if (!scope || !isOpen) {
+      return;
+    }
     setRefreshDomainEnabled({ domain: 'object-maintenance', scope, enabled: true });
     return () => {
       setRefreshDomainEnabled({ domain: 'object-maintenance', scope, enabled: false });
@@ -129,7 +137,9 @@ const DrainNodeModal = ({
   }, [scope, isOpen]);
 
   useEffect(() => {
-    if (!scope || !isOpen) return;
+    if (!scope || !isOpen) {
+      return;
+    }
     void requestRefreshDomain({
       domain: 'object-maintenance',
       scope,
@@ -138,7 +148,9 @@ const DrainNodeModal = ({
   }, [scope, isOpen]);
 
   const refreshMaintenance = useCallback(async () => {
-    if (!scope) return;
+    if (!scope) {
+      return;
+    }
     try {
       await requestRefreshDomain({
         domain: 'object-maintenance',
@@ -197,8 +209,13 @@ const DrainNodeModal = ({
   );
 
   const hasCustomGrace =
-    drainOptions.gracePeriodSeconds != null && drainOptions.gracePeriodSeconds > 0;
-  const hasCustomTimeout = drainOptions.timeoutSeconds != null && drainOptions.timeoutSeconds > 0;
+    drainOptions.gracePeriodSeconds !== null &&
+    drainOptions.gracePeriodSeconds !== undefined &&
+    drainOptions.gracePeriodSeconds > 0;
+  const hasCustomTimeout =
+    drainOptions.timeoutSeconds !== null &&
+    drainOptions.timeoutSeconds !== undefined &&
+    drainOptions.timeoutSeconds > 0;
   const selectedStartPermission = permissions
     ? resolveDrainStartPermissionStatus({
         ...permissions,
@@ -206,7 +223,9 @@ const DrainNodeModal = ({
       })
     : null;
   const startPermissionReason = useMemo(() => {
-    if (!permissions) return null;
+    if (!permissions) {
+      return null;
+    }
     if (!permissions.nodeMutation || permissions.nodeMutation.pending) {
       return 'Checking Node maintenance permissions…';
     }
@@ -229,7 +248,9 @@ const DrainNodeModal = ({
     return null;
   }, [drainOptions.disableEviction, permissions]);
   const cancelPermissionReason = useMemo(() => {
-    if (!permissions) return null;
+    if (!permissions) {
+      return null;
+    }
     if (!permissions.nodeMutation || permissions.nodeMutation.pending) {
       return 'Checking Node maintenance permissions…';
     }
@@ -242,7 +263,9 @@ const DrainNodeModal = ({
     drainPending || Boolean(startPermissionReason) || selectedStartPermission?.allowed === false;
 
   const executeDrain = useCallback(async () => {
-    if (!nodeName || !clusterId || startDisabled) return;
+    if (!nodeName || !clusterId || startDisabled) {
+      return;
+    }
     setDrainError(null);
     setDrainPending(true);
     try {
@@ -253,10 +276,17 @@ const DrainNodeModal = ({
         disableEviction: drainOptions.disableEviction,
         skipWaitForPodsToTerminate: drainOptions.skipWaitForPodsToTerminate,
       };
-      if (drainOptions.gracePeriodSeconds != null) {
+      if (
+        drainOptions.gracePeriodSeconds !== null &&
+        drainOptions.gracePeriodSeconds !== undefined
+      ) {
         payload.gracePeriodSeconds = normalizeGraceSeconds(drainOptions.gracePeriodSeconds);
       }
-      if (drainOptions.timeoutSeconds != null && drainOptions.timeoutSeconds > 0) {
+      if (
+        drainOptions.timeoutSeconds !== null &&
+        drainOptions.timeoutSeconds !== undefined &&
+        drainOptions.timeoutSeconds > 0
+      ) {
         payload.timeoutSeconds = normalizeTimeoutSeconds(drainOptions.timeoutSeconds);
       }
       await runStartDrain(
@@ -282,7 +312,9 @@ const DrainNodeModal = ({
   }, [clusterId, drainOptions, nodeName, refreshMaintenance, startDisabled]);
 
   const cancelActiveDrain = useCallback(async () => {
-    if (!clusterId || !activeDrainJob || cancelDrainPending) return;
+    if (!clusterId || !activeDrainJob || cancelDrainPending) {
+      return;
+    }
     setDrainError(null);
     setCancelDrainPending(true);
     try {
@@ -340,7 +372,7 @@ const DrainNodeModal = ({
         <div className="drain-node-modal-target">
           <span className="drain-node-modal-label">Node:</span>
           <span className="drain-node-modal-value">{nodeName}</span>
-          {clusterName && (
+          {!!clusterName && (
             <>
               <span className="drain-node-modal-label">Cluster:</span>
               <span className="drain-node-modal-value">{clusterName}</span>
@@ -348,7 +380,7 @@ const DrainNodeModal = ({
           )}
         </div>
 
-        {primaryDrainJob && (
+        {!!primaryDrainJob && (
           <div className="drain-node-modal-current">
             <DrainProgressCard
               job={primaryDrainJob}
@@ -515,7 +547,7 @@ const DrainNodeModal = ({
           </div>
         )}
 
-        {drainError && <div className="drain-node-modal-error">{drainError}</div>}
+        {!!drainError && <div className="drain-node-modal-error">{drainError}</div>}
         {!activeDrainJob && startPermissionReason && (
           <div className="drain-node-modal-helper" data-test="drain-modal-permission-reason">
             {startPermissionReason}
@@ -525,7 +557,7 @@ const DrainNodeModal = ({
 
       <div className="modal-footer drain-node-modal-footer">
         <button type="button" className="button cancel" onClick={onClose}>
-          {activeDrainJob ? 'Close' : closeLabel}
+          {activeDrainJob ? 'Close' : (closeLabel ?? '')}
         </button>
         {!activeDrainJob && (
           <button

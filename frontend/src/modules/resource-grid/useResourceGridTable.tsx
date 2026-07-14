@@ -4,7 +4,6 @@
  * Coordinates shared resource-grid table state, identity, and context menus.
  */
 
-import { useCallback, useEffect, useMemo } from 'react';
 import { ALL_NAMESPACES_SCOPE } from '@modules/namespace/constants';
 import { useNamespaceFilterOptions } from '@modules/namespace/hooks/useNamespaceFilterOptions';
 import {
@@ -15,12 +14,14 @@ import {
 import { useKindFilterOptions } from '@shared/components/tables/hooks/useKindFilterOptions';
 import { useMetadataSearch } from '@shared/components/tables/hooks/useMetadataSearch';
 import { useGridTablePersistence } from '@shared/components/tables/persistence/useGridTablePersistence';
+
 import { buildRequiredCanonicalObjectRowKey } from '@shared/utils/objectIdentity';
 import { useFavToggle } from '@ui/favorites/FavToggle';
-import { useGridTableBinding } from './useGridTableBinding';
+import { useCallback, useEffect, useMemo } from 'react';
 import {
-  normalizeQueryBackedNamespaceFilters,
+  normalizeQueryBackedNamespaceQueryFilters,
   queryBackedFacetFilterOptions,
+  removeQueryBackedNamespaceFilterSentinels,
 } from './queryBackedTableState';
 import type {
   ClusterResourceGridTableParams,
@@ -33,6 +34,7 @@ import type {
   ResourceGridTableRow,
 } from './resourceGridTableTypes';
 import { isQueryBackedResourceGridTableMode } from './resourceGridTableTypes';
+import { useGridTableBinding } from './useGridTableBinding';
 
 const resourceGridPartialDataLabel = (tableMode: ResourceGridTableMode) =>
   tableMode === 'Local Partial'
@@ -318,7 +320,14 @@ function useResourceGridTableCommon<T extends ResourceGridTableRow>({
   const normalizeTableFilters = useCallback(
     (next: GridTableFilterState) =>
       isQueryBackedResourceGridTableMode(tableMode) && showNamespaceFilters
-        ? normalizeQueryBackedNamespaceFilters(next, availableFilterNamespaces)
+        ? removeQueryBackedNamespaceFilterSentinels(next)
+        : next,
+    [showNamespaceFilters, tableMode]
+  );
+  const normalizeQueryFilters = useCallback(
+    (next: GridTableFilterState) =>
+      isQueryBackedResourceGridTableMode(tableMode) && showNamespaceFilters
+        ? normalizeQueryBackedNamespaceQueryFilters(next, availableFilterNamespaces)
         : next,
     [availableFilterNamespaces, showNamespaceFilters, tableMode]
   );
@@ -335,12 +344,13 @@ function useResourceGridTableCommon<T extends ResourceGridTableRow>({
 
   const persistenceHydrated = persistence.hydrated;
   useEffect(() => {
+    void persistenceHydrated;
     const filters = normalizeTableFilters(persistenceFilters);
     if (filters !== persistenceFilters) {
       setPersistenceFilters(filters);
     }
     onTableStateChange?.({
-      filters,
+      filters: normalizeQueryFilters(filters),
       sortConfig: sortConfig ?? null,
     });
     // persistenceHydrated is a deliberate dependency: hydration may commit
@@ -349,11 +359,12 @@ function useResourceGridTableCommon<T extends ResourceGridTableRow>({
     // value is safe (consumers dedupe by value).
   }, [
     normalizeTableFilters,
+    normalizeQueryFilters,
     onTableStateChange,
     persistenceFilters,
-    persistenceHydrated,
     setPersistenceFilters,
     sortConfig,
+    persistenceHydrated,
   ]);
 
   const useMetadata = Boolean(metadataSearch);

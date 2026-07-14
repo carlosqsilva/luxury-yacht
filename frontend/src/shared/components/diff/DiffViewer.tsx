@@ -5,10 +5,12 @@
  * Renders merged diff lines with expand/collapse, selection, and truncation detection.
  */
 
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { flushSync } from 'react-dom';
 import type { DisplayDiffLine, TruncationMap } from '@shared/components/diff/diffUtils';
 import { areTruncationMapsEqual } from '@shared/components/diff/diffUtils';
+
+import type React from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import './DiffViewer.css';
 
 export interface DiffViewerProps {
@@ -71,6 +73,7 @@ const DiffViewer: React.FC<DiffViewerProps> = ({
   const [forceFullRender, setForceFullRender] = useState(false);
 
   const diffTableRef = useRef<HTMLDivElement>(null);
+  const keyboardControlRef = useRef<HTMLButtonElement>(null);
   const truncatedRowsRef = useRef<TruncationMap>({});
   const rowHeightCacheRef = useRef<Map<number, number>>(new Map());
   const rowObserverMapRef = useRef<Map<number, ResizeObserver>>(new Map());
@@ -91,6 +94,7 @@ const DiffViewer: React.FC<DiffViewerProps> = ({
   const shouldVirtualize = virtualizationCandidate && !forceFullRender;
 
   const rowPositions = useMemo(() => {
+    void rowHeightCacheVersion;
     const positions = new Float64Array(visibleLines.length + 1);
     const cache = rowHeightCacheRef.current;
     for (let index = 0; index < visibleLines.length; index += 1) {
@@ -99,8 +103,7 @@ const DiffViewer: React.FC<DiffViewerProps> = ({
     return positions;
     // rowHeightCacheVersion is load-bearing here: it forces recomputation when
     // measured row heights change even though the cache itself lives in a ref.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rowHeightCacheVersion, visibleLines.length]);
+  }, [visibleLines.length, rowHeightCacheVersion]);
 
   const totalVirtualHeight = useMemo(
     () => (shouldVirtualize ? rowPositions[visibleLines.length] : 0),
@@ -158,6 +161,7 @@ const DiffViewer: React.FC<DiffViewerProps> = ({
   }, [truncatedRows]);
 
   useEffect(() => {
+    void visibleLines;
     setExpandedRows(new Set());
     setTruncatedRows({});
     setForceFullRender(false);
@@ -167,7 +171,9 @@ const DiffViewer: React.FC<DiffViewerProps> = ({
 
   useEffect(
     () => () => {
-      rowObserverMapRef.current.forEach((observer) => observer.disconnect());
+      rowObserverMapRef.current.forEach((observer) => {
+        observer.disconnect();
+      });
       rowObserverMapRef.current.clear();
     },
     []
@@ -199,7 +205,7 @@ const DiffViewer: React.FC<DiffViewerProps> = ({
   );
 
   const handleKeyScroll = useCallback(
-    (event: React.KeyboardEvent<HTMLDivElement>) => {
+    (event: React.KeyboardEvent<HTMLElement>) => {
       const table = diffTableRef.current;
       if (!table || event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) {
         return;
@@ -207,6 +213,7 @@ const DiffViewer: React.FC<DiffViewerProps> = ({
 
       const target = event.target as HTMLElement | null;
       if (
+        target !== keyboardControlRef.current &&
         target?.closest(
           'button, input, textarea, select, [contenteditable="true"], [contenteditable=""]'
         )
@@ -250,7 +257,7 @@ const DiffViewer: React.FC<DiffViewerProps> = ({
     [scrollDiffTableTo]
   );
 
-  const selectSideText = (side: 'left' | 'right') => {
+  const selectSideText = useCallback((side: 'left' | 'right') => {
     const table = diffTableRef.current;
     if (!table) {
       return;
@@ -278,7 +285,7 @@ const DiffViewer: React.FC<DiffViewerProps> = ({
     }
     selection.removeAllRanges();
     selection.addRange(range);
-  };
+  }, []);
 
   const measureRowRef = useCallback(
     (rowIndex: number, node: HTMLDivElement | null) => {
@@ -328,6 +335,7 @@ const DiffViewer: React.FC<DiffViewerProps> = ({
   };
 
   useLayoutEffect(() => {
+    void renderedLineEntries.length;
     const table = diffTableRef.current;
     if (!shouldVirtualize || !table) {
       setVirtualViewportHeight(DIFF_DEFAULT_VIEWPORT_HEIGHT);
@@ -351,7 +359,7 @@ const DiffViewer: React.FC<DiffViewerProps> = ({
     }
 
     return undefined;
-  }, [renderedLineEntries.length, shouldVirtualize]);
+  }, [shouldVirtualize, renderedLineEntries.length]);
 
   useEffect(() => {
     const table = diffTableRef.current;
@@ -457,6 +465,8 @@ const DiffViewer: React.FC<DiffViewerProps> = ({
   }, [expandedRows]);
 
   useEffect(() => {
+    void renderedLineEntries;
+    void visibleLines;
     if (!diffTableRef.current) {
       return;
     }
@@ -583,49 +593,72 @@ const DiffViewer: React.FC<DiffViewerProps> = ({
     .filter(Boolean)
     .join(' ');
 
+  const handleDiffMouseDown = useCallback((event: globalThis.MouseEvent) => {
+    const target = event.target as HTMLElement | null;
+    if (target?.closest('.object-diff-expand-toggle')) {
+      return;
+    }
+    keyboardControlRef.current?.focus({ preventScroll: true });
+    if (target?.closest('.object-diff-cell-left')) {
+      flushSync(() => setSelectionSide('left'));
+      return;
+    }
+    if (target?.closest('.object-diff-cell-right')) {
+      flushSync(() => setSelectionSide('right'));
+    }
+  }, []);
+
+  const handleDiffClick = useCallback(
+    (event: globalThis.MouseEvent) => {
+      if (event.detail !== 3) {
+        return;
+      }
+      const target = event.target as HTMLElement | null;
+      const side = target?.closest('.object-diff-cell-left')
+        ? 'left'
+        : target?.closest('.object-diff-cell-right')
+          ? 'right'
+          : null;
+      if (!side) {
+        return;
+      }
+      event.preventDefault();
+      flushSync(() => {
+        setSelectionSide(side);
+        if (virtualizationCandidate) {
+          setForceFullRender(true);
+        }
+      });
+      selectSideText(side);
+    },
+    [selectSideText, virtualizationCandidate]
+  );
+
+  useEffect(() => {
+    const table = diffTableRef.current;
+    if (!table) {
+      return;
+    }
+    table.addEventListener('mousedown', handleDiffMouseDown);
+    table.addEventListener('click', handleDiffClick);
+    return () => {
+      table.removeEventListener('mousedown', handleDiffMouseDown);
+      table.removeEventListener('click', handleDiffClick);
+    };
+  }, [handleDiffClick, handleDiffMouseDown]);
+
   return (
-    <div
-      className={rootClassName}
-      ref={diffTableRef}
-      onMouseDown={(event) => {
-        const target = event.target as HTMLElement | null;
-        if (target?.closest('.object-diff-expand-toggle')) {
-          return;
-        }
-        diffTableRef.current?.focus({ preventScroll: true });
-        if (target?.closest('.object-diff-cell-left')) {
-          flushSync(() => setSelectionSide('left'));
-          return;
-        }
-        if (target?.closest('.object-diff-cell-right')) {
-          flushSync(() => setSelectionSide('right'));
-        }
-      }}
-      onClick={(event) => {
-        if (event.detail !== 3) {
-          return;
-        }
-        const target = event.target as HTMLElement | null;
-        const side = target?.closest('.object-diff-cell-left')
-          ? 'left'
-          : target?.closest('.object-diff-cell-right')
-            ? 'right'
-            : null;
-        if (!side) {
-          return;
-        }
-        event.preventDefault();
-        flushSync(() => {
-          setSelectionSide(side);
-          if (virtualizationCandidate) {
-            setForceFullRender(true);
-          }
-        });
-        selectSideText(side);
-      }}
-      onKeyDown={handleKeyScroll}
-      tabIndex={0}
-    >
+    <section className={rootClassName} ref={diffTableRef} aria-label="Object difference">
+      <button
+        ref={keyboardControlRef}
+        type="button"
+        className="object-diff-keyboard-control"
+        aria-label="Navigate object difference with arrow and page keys"
+        onClick={() => scrollDiffTableTo(0)}
+        onKeyDown={handleKeyScroll}
+      >
+        Use arrow and page keys to scroll the difference
+      </button>
       {shouldVirtualize ? (
         <div className="object-diff-virtual-body" style={{ height: `${totalVirtualHeight}px` }}>
           <div
@@ -638,7 +671,7 @@ const DiffViewer: React.FC<DiffViewerProps> = ({
       ) : (
         renderedLineEntries.map(({ line, index }) => renderDiffRow(line, index))
       )}
-    </div>
+    </section>
   );
 };
 

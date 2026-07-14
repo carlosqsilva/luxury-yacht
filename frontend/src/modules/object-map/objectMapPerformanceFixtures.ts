@@ -4,12 +4,8 @@
  * Generates large deterministic object-map layouts for performance tests.
  */
 
-import type {
-  ObjectMapEdge,
-  ObjectMapNode,
-  ObjectMapReference,
-  ObjectMapSnapshotPayload,
-} from '@core/refresh/types';
+import type { ObjectMapEdge, ObjectMapNode, ObjectMapReference } from '@core/refresh/types';
+import type { NormalizedObjectMapPayload } from './objectMapPayload';
 
 export interface ObjectMapPerformanceFixtureOptions {
   nodeCount: number;
@@ -56,7 +52,7 @@ const refFor = (index: number): ObjectMapReference => {
 export const createObjectMapPerformanceFixture = ({
   nodeCount,
   edgeCount,
-}: ObjectMapPerformanceFixtureOptions): ObjectMapSnapshotPayload => {
+}: ObjectMapPerformanceFixtureOptions): NormalizedObjectMapPayload => {
   if (nodeCount < 2) {
     throw new Error('object map performance fixtures need at least 2 nodes');
   }
@@ -91,7 +87,9 @@ export const createObjectMapPerformanceFixture = ({
   while (edges.length < edgeCount) {
     for (let sourceIndex = 0; sourceIndex + stride < nodeCount; sourceIndex += 1) {
       addEdge(sourceIndex, sourceIndex + stride, edges.length);
-      if (edges.length >= edgeCount) break;
+      if (edges.length >= edgeCount) {
+        break;
+      }
     }
     stride += 1;
   }

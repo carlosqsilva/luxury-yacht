@@ -5,9 +5,8 @@
  * Encapsulates state and side effects for the shared components.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
-
 import type { GridColumnDefinition } from '@shared/components/tables/GridTable.types';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
 const areVisibilityMapsEqual = (
   a: Record<string, boolean>,
@@ -56,7 +55,7 @@ export function useColumnVisibilityController<T>({
   const [localColumnVisibility, setLocalColumnVisibility] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
-    if (columnVisibility == null) {
+    if (columnVisibility === null || columnVisibility === undefined) {
       return;
     }
     // Avoid re-setting local state when the map is referentially new but equivalent.
@@ -67,7 +66,9 @@ export function useColumnVisibilityController<T>({
 
   const lockedColumns = useMemo(() => {
     const set = new Set<string>(['kind', 'type', 'name']);
-    nonHideableColumns.forEach((key) => set.add(key));
+    nonHideableColumns.forEach((key) => {
+      set.add(key);
+    });
     return set;
   }, [nonHideableColumns]);
 

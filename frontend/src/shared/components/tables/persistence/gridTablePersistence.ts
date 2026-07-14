@@ -10,13 +10,13 @@ import type {
   GridColumnDefinition,
   GridTableFilterState,
 } from '@shared/components/tables/GridTable.types';
-import { requestAppState } from '@/core/app-state-access';
+import { isSortableColumn } from '@shared/components/tables/GridTable.utils';
 import {
   hasNonDefaultGridTableFilters,
   normalizeGridTableFilterArray,
   normalizeGridTableFilterState,
 } from '@shared/components/tables/gridTableFilterState';
-import { isSortableColumn } from '@shared/components/tables/GridTable.utils';
+import { requestAppState } from '@/core/app-state-access';
 
 export interface GridTablePersistedState {
   version: 1;
@@ -60,7 +60,7 @@ const STORAGE_VERSION = 1;
 const LOCKED_COLUMNS = new Set(['kind', 'type', 'name', 'age']);
 
 const normalizeNamespaceKey = (namespace?: string | null): string | null => {
-  if (namespace == null) {
+  if (namespace === null || namespace === undefined) {
     return null;
   }
   const trimmed = namespace.trim();
@@ -134,7 +134,7 @@ const getRuntimeApp = () => {
   if (typeof window === 'undefined') {
     return undefined;
   }
-  return (window as any)?.go?.backend?.App;
+  return window.go?.backend?.App;
 };
 
 const normalizePersistenceMap = (entries: Record<string, unknown>): GridTablePersistenceMap => {
@@ -327,7 +327,9 @@ export const prunePersistedState = <T>(
 
   const pruned: GridTablePersistedState = { version: STORAGE_VERSION };
   const columnMap = new Map<string, GridColumnDefinition<T>>();
-  context.columns.forEach((column) => columnMap.set(column.key, column));
+  context.columns.forEach((column) => {
+    columnMap.set(column.key, column);
+  });
 
   if (persisted.columnVisibility) {
     const visibility: Record<string, boolean> = {};
@@ -359,7 +361,7 @@ export const prunePersistedState = <T>(
     }
   }
 
-  if (persisted.sort && persisted.sort.key) {
+  if (persisted.sort?.key) {
     const column = columnMap.get(persisted.sort.key);
     if (isSortableColumn(column)) {
       pruned.sort = {
@@ -403,7 +405,7 @@ export const prunePersistedState = <T>(
     !pruned.columnWidths &&
     !pruned.sort &&
     !pruned.filters &&
-    pruned.pageSize == null
+    (pruned.pageSize === null || pruned.pageSize === undefined)
   ) {
     return null;
   }
@@ -447,9 +449,9 @@ export const buildPersistedStateForSave = <T>(
     }
   }
 
-  if (context.sort && context.sort.key && columnKeys.has(context.sort.key)) {
+  if (context.sort?.key && columnKeys.has(context.sort.key)) {
     const sortable = context.columns.find(
-      (column) => column.key === context.sort!.key && isSortableColumn(column)
+      (column) => column.key === context.sort?.key && isSortableColumn(column)
     );
     if (sortable) {
       state.sort = {
@@ -486,7 +488,7 @@ export const buildPersistedStateForSave = <T>(
     !state.columnWidths &&
     !state.sort &&
     !state.filters &&
-    state.pageSize == null
+    (state.pageSize === null || state.pageSize === undefined)
   ) {
     return null;
   }

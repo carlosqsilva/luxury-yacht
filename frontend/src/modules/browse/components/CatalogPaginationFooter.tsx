@@ -1,7 +1,7 @@
-import type React from 'react';
-import type { TablePageSize } from '@shared/components/tables/pageSizeOptions';
 import type { BrowseCatalogPagination } from '@modules/browse/hooks/useBrowseCatalog';
 import QueryPaginationControls from '@modules/resource-grid/QueryPaginationControls';
+import type { TablePageSize } from '@shared/components/tables/pageSizeOptions';
+import type React from 'react';
 
 interface CatalogPaginationFooterProps {
   idPrefix: string;
@@ -11,7 +11,7 @@ interface CatalogPaginationFooterProps {
 }
 
 /**
- * GridTable props that map ArrowLeft/ArrowRight to catalog page navigation,
+ * GridTable props that map the modified-arrow shortcuts to catalog page navigation,
  * mirroring the footer buttons' disabled logic. Kept beside the footer for
  * the same reason the footer exists: so the three catalog views cannot drift.
  */

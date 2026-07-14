@@ -5,10 +5,16 @@
  * Handles rendering and interactions for the shared components.
  */
 
-import React, { useEffect, useRef } from 'react';
-import type { RefObject } from 'react';
+import {
+  AriaGrid,
+  AriaGridCell,
+  AriaGridRow,
+  AriaGridRowGroup,
+} from '@shared/components/tables/AriaGridPrimitives';
 import type { RenderRowContentFn } from '@shared/components/tables/hooks/useGridTableRowRenderer';
-import { getStableRowId } from '@shared/components/tables/GridTable.utils';
+import type React from 'react';
+import type { RefObject } from 'react';
+import { useEffect, useRef } from 'react';
 
 interface HoverState {
   visible: boolean;
@@ -20,7 +26,8 @@ interface HoverState {
 
 interface GridTableBodyProps<T> {
   wrapperRef: RefObject<HTMLDivElement | null>;
-  tableRef: RefObject<HTMLDivElement | null>;
+  gridRef: RefObject<HTMLTableElement | null>;
+  tableRef: RefObject<HTMLTableSectionElement | null>;
   tableClassName: string;
   useShortNames: boolean;
   hoverState: HoverState;
@@ -32,17 +39,15 @@ interface GridTableBodyProps<T> {
   virtualRows: T[];
   virtualRangeStart: number;
   totalVirtualHeight: number;
-  virtualOffset: number;
+  getRowTop: (index: number) => number;
   renderRowContent: RenderRowContentFn<T>;
-  onWrapperFocus: (event: React.FocusEvent<HTMLDivElement>) => void;
-  onWrapperBlur: (event: React.FocusEvent<HTMLDivElement>) => void;
+  onWrapperFocus: (event: React.FocusEvent<HTMLElement>) => void;
+  onWrapperBlur: (event: React.FocusEvent<HTMLElement>) => void;
   contentWidth: number;
   allowHorizontalOverflow: boolean;
   viewportWidth: number;
   /** Whether data is currently loading — drives aria-busy on the grid container. */
   loading: boolean;
-  /** Key of the currently focused row — drives aria-activedescendant on the grid container. */
-  focusedRowKey: string | null;
   /** Whether any filter is actively narrowing results. */
   hasActiveFilters: boolean;
   /** Callback to clear all active filters. */
@@ -51,6 +56,7 @@ interface GridTableBodyProps<T> {
 
 function GridTableBody<T>({
   wrapperRef,
+  gridRef,
   tableRef,
   tableClassName,
   useShortNames,
@@ -63,7 +69,7 @@ function GridTableBody<T>({
   virtualRows,
   virtualRangeStart,
   totalVirtualHeight,
-  virtualOffset,
+  getRowTop,
   renderRowContent,
   onWrapperFocus,
   onWrapperBlur,
@@ -71,7 +77,6 @@ function GridTableBody<T>({
   allowHorizontalOverflow,
   viewportWidth,
   loading,
-  focusedRowKey,
   hasActiveFilters,
   onClearFilters,
 }: GridTableBodyProps<T>) {
@@ -114,72 +119,63 @@ function GridTableBody<T>({
     };
   }, [wrapperRef]);
 
+  const virtualWidth = (() => {
+    if (!shouldVirtualize || !allowHorizontalOverflow || contentWidth <= 0) {
+      stretchDecisionRef.current = false;
+      return undefined;
+    }
+    const lastDecision = stretchDecisionRef.current;
+    const nextDecision =
+      lastDecision ?? (viewportWidth === 0 || contentWidth > viewportWidth + 0.5);
+    if (nextDecision) {
+      stretchDecisionRef.current = !(viewportWidth > 0 && contentWidth <= viewportWidth - 1);
+    } else if (viewportWidth === 0 || contentWidth > viewportWidth + 1) {
+      stretchDecisionRef.current = true;
+    }
+    return stretchDecisionRef.current ? `${contentWidth}px` : undefined;
+  })();
+
   const renderRows = () => {
     if (tableData.length === 0) {
       return (
-        <div className="gridtable-empty">
-          {hasActiveFilters ? 'No matching items' : emptyMessage}
-          {hasActiveFilters && (
-            <div className="gridtable-empty-filter-hint">
-              Filters are enabled that may be hiding objects.{' '}
-              <a
-                href="#"
-                className="gridtable-empty-filter-hint__link"
-                onClick={(e) => {
-                  e.preventDefault();
-                  onClearFilters();
-                }}
-              >
-                Clear filters
-              </a>
+        <AriaGridRow>
+          <AriaGridCell colSpan={1000}>
+            <div className="gridtable-empty">
+              {hasActiveFilters ? 'No matching items' : (emptyMessage ?? '')}
+              {!!hasActiveFilters && (
+                <div className="gridtable-empty-filter-hint">
+                  Filters are enabled that may be hiding objects.{' '}
+                  <button
+                    type="button"
+                    className="gridtable-empty-filter-hint__link"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      onClearFilters();
+                    }}
+                  >
+                    Clear filters
+                  </button>
+                </div>
+              )}
             </div>
-          )}
-        </div>
+          </AriaGridCell>
+        </AriaGridRow>
       );
     }
 
     if (shouldVirtualize) {
-      const shouldStretch = (() => {
-        if (!allowHorizontalOverflow || contentWidth <= 0) {
-          stretchDecisionRef.current = false;
-          return false;
-        }
-        const lastDecision = stretchDecisionRef.current;
-        const nextDecision =
-          lastDecision ?? (viewportWidth === 0 || contentWidth > viewportWidth + 0.5);
-        // Use a small hysteresis window so scrollbar jitter doesn't flip this every render.
-        if (nextDecision) {
-          if (viewportWidth > 0 && contentWidth <= viewportWidth - 1) {
-            stretchDecisionRef.current = false;
-          } else {
-            stretchDecisionRef.current = true;
-          }
-        } else if (viewportWidth === 0 || contentWidth > viewportWidth + 1) {
-          stretchDecisionRef.current = true;
-        }
-        return stretchDecisionRef.current ?? false;
-      })();
-      const resolvedWidth = shouldStretch ? `${contentWidth}px` : undefined;
-      return (
-        <div
-          className="gridtable-virtual-body"
-          style={{ height: `${totalVirtualHeight}px`, width: resolvedWidth }}
-        >
-          <div
-            className="gridtable-virtual-inner"
-            style={{
-              transform: `translateY(${virtualOffset}px)`,
-              width: resolvedWidth,
-            }}
-          >
-            {virtualRows.map((item, idx) => {
-              const absoluteIndex = virtualRangeStart + idx;
-              const rowKey = keyExtractor(item, absoluteIndex);
-              return renderRowContent(item, absoluteIndex, true, rowKey, `slot-${idx}`);
-            })}
-          </div>
-        </div>
-      );
+      return virtualRows.map((item, idx) => {
+        const absoluteIndex = virtualRangeStart + idx;
+        const rowKey = keyExtractor(item, absoluteIndex);
+        return renderRowContent(
+          item,
+          absoluteIndex,
+          true,
+          rowKey,
+          `slot-${idx}`,
+          getRowTop(absoluteIndex)
+        );
+      });
     }
 
     return tableData.map((item, index) =>
@@ -188,39 +184,49 @@ function GridTableBody<T>({
   };
 
   return (
-    <div
-      ref={wrapperRef}
-      className="gridtable-wrapper"
-      onContextMenu={onWrapperContextMenu}
-      onFocus={onWrapperFocus}
-      onBlur={onWrapperBlur}
-      tabIndex={0}
-      role="grid"
-      aria-busy={loading || undefined}
-      aria-activedescendant={focusedRowKey ? getStableRowId(focusedRowKey) : undefined}
-    >
-      <div
-        className={[
-          'gridtable-hover-overlay',
-          hoverState.visible ? 'is-visible' : '',
-          hoverState.selected ? 'is-selected' : '',
-          hoverState.focused ? 'is-focused' : '',
-        ]
-          .filter(Boolean)
-          .join(' ')}
-        style={{
-          transform: `translateY(${hoverState.top}px)`,
-          height: `${hoverState.height}px`,
-        }}
-      />
-
-      <div
-        ref={tableRef}
+    <div ref={wrapperRef} className="gridtable-wrapper">
+      <AriaGrid
+        ref={gridRef}
         className={`gridtable gridtable--body ${tableClassName} ${useShortNames ? 'short-names' : ''}`}
-        role="rowgroup"
+        onContextMenu={onWrapperContextMenu}
+        onFocus={onWrapperFocus}
+        onBlur={onWrapperBlur}
+        tabIndex={0}
+        aria-busy={loading || undefined}
+        aria-label="Data table"
       >
-        {renderRows()}
-      </div>
+        <caption
+          className={[
+            'gridtable-hover-overlay',
+            hoverState.visible ? 'is-visible' : '',
+            hoverState.selected ? 'is-selected' : '',
+            hoverState.focused ? 'is-focused' : '',
+          ]
+            .filter(Boolean)
+            .join(' ')}
+          style={{
+            transform: `translateY(${hoverState.top}px)`,
+            height: `${hoverState.height}px`,
+          }}
+        />
+
+        <AriaGridRowGroup
+          ref={tableRef}
+          className={[
+            shouldVirtualize ? 'gridtable-virtual-body' : '',
+            tableData.length === 0 ? 'gridtable-empty-body' : '',
+          ]
+            .filter(Boolean)
+            .join(' ')}
+          style={
+            shouldVirtualize
+              ? { height: `${totalVirtualHeight}px`, width: virtualWidth }
+              : undefined
+          }
+        >
+          {renderRows()}
+        </AriaGridRowGroup>
+      </AriaGrid>
     </div>
   );
 }

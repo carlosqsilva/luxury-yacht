@@ -7,10 +7,11 @@
  * (ResourceHeader / ResourceMetadata).
  */
 
-import React from 'react';
-import { hpa, limitrange, poddisruptionbudget, resourcequota } from '@wailsjs/go/models';
 import { ObjectPanelLink } from '@shared/components/ObjectPanelLink';
 import { buildRequiredRelatedObjectReference } from '@shared/utils/objectIdentity';
+import { withStableListKeys } from '@shared/utils/stableListKeys';
+import { hpa, limitrange, poddisruptionbudget, resourcequota } from '@wailsjs/go/models';
+import type React from 'react';
 import type { OverviewContext, OverviewDescriptor } from '../schema';
 import '../PolicyOverview.css';
 
@@ -73,8 +74,8 @@ const renderBehaviorRules = (
       {policies.length > 0 ? (
         <div className="policy-detail-row">
           <span className="policy-detail-label">Rules:</span>
-          {policies.map((p, i) => (
-            <span key={i}>
+          {withStableListKeys(policies, formatPolicy).map(({ key, value: p }, i) => (
+            <span key={key}>
               {i > 0 && ', '}
               {formatPolicy(p)}
             </span>
@@ -102,7 +103,9 @@ const renderReplicasSummary = (d: HorizontalPodAutoscalerDetails): React.ReactNo
   const hasData =
     d.currentReplicas !== undefined || d.minReplicas !== undefined || d.maxReplicas !== undefined;
 
-  if (!hasData) return undefined;
+  if (!hasData) {
+    return undefined;
+  }
 
   return (
     <div className="policy-detail-rows">
@@ -142,7 +145,9 @@ const findCurrentMetric = (
   const target = metric.target ?? {};
 
   return currentMetrics.find((candidate) => {
-    if (candidate.kind?.toLowerCase() !== kind) return false;
+    if (candidate.kind?.toLowerCase() !== kind) {
+      return false;
+    }
 
     const currentData = candidate.current ?? {};
     if (kind === 'resource') {
@@ -167,7 +172,6 @@ const findCurrentMetric = (
 // Render a single metric with detailed target information.
 const renderMetric = (
   metric: hpa.MetricSpec,
-  index: number,
   currentMetrics: hpa.MetricStatus[]
 ): React.ReactNode => {
   const kind = metric.kind?.toLowerCase();
@@ -226,10 +230,10 @@ const renderMetric = (
   }
 
   return (
-    <div key={`metric-${index}`} className="policy-metric-block">
+    <div key={`metric:${metricName}`} className="policy-metric-block">
       <div className="policy-metric-name">
         {metricName}
-        {containerName && (
+        {!!containerName && (
           <span className="policy-detail-muted"> (container: {containerName})</span>
         )}
         {kind && kind !== 'resource' && kind !== 'containerresource' && (
@@ -237,13 +241,13 @@ const renderMetric = (
         )}
       </div>
       <div className="policy-metric-details">
-        {targetType && targetValue && (
+        {!!(targetType && targetValue) && (
           <div className="policy-detail-row">
             <span className="policy-detail-label--medium">Target:</span>
             {targetValue} ({targetType.toLowerCase()})
           </div>
         )}
-        {currentValue && (
+        {!!currentValue && (
           <div className="policy-detail-row">
             <span className="policy-detail-label--medium">Current:</span>
             {currentValue}
@@ -264,7 +268,7 @@ const renderMetricsWidget = (d: HorizontalPodAutoscalerDetails): React.ReactNode
       <span className="overview-value">
         {d.metrics && d.metrics.length > 0 ? (
           <div className="policy-detail-rows">
-            {d.metrics.map((metric, index) => renderMetric(metric, index, currentMetrics))}
+            {d.metrics.map((metric) => renderMetric(metric, currentMetrics))}
           </div>
         ) : (
           <span className="policy-detail-muted">(none configured)</span>
@@ -277,7 +281,9 @@ const renderMetricsWidget = (d: HorizontalPodAutoscalerDetails): React.ReactNode
 // Build the scale-target link reference. Prefers the apiVersion the HPA explicitly references so
 // CRD scale targets keep their real GVK. Returns null when the reference can't be resolved.
 const scaleTargetReference = (d: HorizontalPodAutoscalerDetails, context: OverviewContext) => {
-  if (!d.scaleTargetRef) return null;
+  if (!d.scaleTargetRef) {
+    return null;
+  }
   try {
     return buildRequiredRelatedObjectReference({
       kind: d.scaleTargetRef.kind,
@@ -301,7 +307,9 @@ export const hpaDescriptor: OverviewDescriptor<HorizontalPodAutoscalerDetails> =
         field: 'scaleTargetRef',
         label: 'Target',
         render: (d, context) => {
-          if (!d.scaleTargetRef) return undefined;
+          if (!d.scaleTargetRef) {
+            return undefined;
+          }
           const ref = scaleTargetReference(d, context);
           const label = `${d.scaleTargetRef.kind}/${d.scaleTargetRef.name}`;
           return ref ? <ObjectPanelLink objectRef={ref}>{label}</ObjectPanelLink> : label;

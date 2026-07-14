@@ -5,10 +5,10 @@
  * falling back to the active detail DTO while those domains load.
  */
 
+import type { ObjectPanelRef } from '@modules/object-panel/objectPanelRef';
 import { useMemo } from 'react';
 import { useResourceMetrics } from '@/core/resource-metrics';
 import type { UtilizationData } from './detailsTabTypes';
-import type { KubernetesObjectReference } from '@/types/view-state';
 
 const UTILIZATION_KINDS = new Set([
   'pod',
@@ -54,18 +54,20 @@ interface UtilizationDetail {
 }
 
 interface UseUtilizationDataParams {
-  objectData: KubernetesObjectReference | null | undefined;
+  objectData: ObjectPanelRef | null | undefined;
   detail: unknown;
 }
 
 function deriveDetailUtilizationData(
-  objectData: KubernetesObjectReference | null | undefined,
+  objectData: ObjectPanelRef | null | undefined,
   detail: unknown
 ): UtilizationData | null {
   const objectKind = objectData?.kind?.toLowerCase();
   const hasUtilization = objectKind ? UTILIZATION_KINDS.has(objectKind) : false;
 
-  if (!objectData) return null;
+  if (!objectData) {
+    return null;
+  }
   const d = (detail ?? undefined) as UtilizationDetail | undefined;
 
   // Node utilization
@@ -75,7 +77,9 @@ function deriveDetailUtilizationData(
     const hasMemData =
       d.memoryCapacity || d.memoryAllocatable || d.memRequests || d.memLimits || d.memoryUsage;
 
-    if (!hasCpuData && !hasMemData) return null;
+    if (!hasCpuData && !hasMemData) {
+      return null;
+    }
 
     return {
       cpu: hasCpuData
@@ -105,13 +109,17 @@ function deriveDetailUtilizationData(
     };
   }
 
-  if (!hasUtilization) return null;
+  if (!hasUtilization) {
+    return null;
+  }
 
   // Pod utilization
   if (d && objectKind === 'pod') {
     const hasCpuData = d.cpuUsage || d.cpuRequest || d.cpuLimit;
     const hasMemData = d.memUsage || d.memRequest || d.memLimit;
-    if (!hasCpuData && !hasMemData) return null;
+    if (!hasCpuData && !hasMemData) {
+      return null;
+    }
     return {
       cpu: hasCpuData
         ? { usage: d.cpuUsage || '-', request: d.cpuRequest || '-', limit: d.cpuLimit || '-' }
@@ -140,7 +148,9 @@ function deriveDetailUtilizationData(
     const source = hasSummary ? summary : d;
     const hasCpuData = source.cpuUsage || source.cpuRequest || source.cpuLimit;
     const hasMemData = source.memUsage || source.memRequest || source.memLimit;
-    if (!hasCpuData && !hasMemData) return null;
+    if (!hasCpuData && !hasMemData) {
+      return null;
+    }
     return {
       cpu: hasCpuData
         ? {
@@ -165,7 +175,9 @@ function deriveDetailUtilizationData(
   const od = objectData as unknown as UtilizationDetail;
   const hasCpuData = od.cpuUsage || od.cpuRequest || od.cpuLimit;
   const hasMemData = od.memUsage || od.memRequest || od.memLimit;
-  if (!hasCpuData && !hasMemData) return null;
+  if (!hasCpuData && !hasMemData) {
+    return null;
+  }
   return {
     cpu: hasCpuData
       ? { usage: od.cpuUsage || '-', request: od.cpuRequest || '-', limit: od.cpuLimit || '-' }
@@ -193,9 +205,7 @@ export function useUtilizationData(params: UseUtilizationDataParams): Utilizatio
   }, [detailMetrics, liveMetrics.metrics, objectKind]);
 }
 
-export function useHasUtilization(
-  objectData: KubernetesObjectReference | null | undefined
-): boolean {
+export function useHasUtilization(objectData: ObjectPanelRef | null | undefined): boolean {
   return useMemo(() => {
     const kind = objectData?.kind?.toLowerCase();
     return kind ? UTILIZATION_KINDS.has(kind) : false;

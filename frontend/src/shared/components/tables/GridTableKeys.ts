@@ -5,10 +5,10 @@
  * Handles rendering and interactions for the shared components.
  */
 
-import { useCallback } from 'react';
-import type { RefObject } from 'react';
 import { useKeyboardSurface } from '@ui/shortcuts';
 import { KeyboardScopePriority } from '@ui/shortcuts/priorities';
+import type { RefObject } from 'react';
+import { useCallback } from 'react';
 
 interface GridTableKeyboardOptions {
   filteringEnabled: boolean;
@@ -17,6 +17,7 @@ interface GridTableKeyboardOptions {
   filtersContainerRef: RefObject<HTMLDivElement | null>;
   filterFocusIndexRef: RefObject<number | null>;
   wrapperRef: RefObject<HTMLDivElement | null>;
+  focusRef: RefObject<HTMLTableElement | null>;
   tableDataLength: number;
   focusedRowKey: string | null;
   suppressFocusedRowHighlight: () => void;
@@ -30,6 +31,7 @@ export const useGridTableKeyboardScopes = ({
   filtersContainerRef,
   filterFocusIndexRef,
   wrapperRef,
+  focusRef,
   tableDataLength,
   focusedRowKey,
   suppressFocusedRowHighlight,
@@ -65,7 +67,9 @@ export const useGridTableKeyboardScopes = ({
     addTarget(container.querySelector<HTMLElement>('[data-gridtable-filter-role="search"] input'));
     container
       .querySelectorAll<HTMLElement>('.gridtable-filter-actions .icon-bar-button')
-      .forEach((element) => addTarget(element));
+      .forEach((element) => {
+        addTarget(element);
+      });
     addTarget(
       container.querySelector<HTMLElement>(
         '[data-gridtable-filter-role="columns"] .dropdown-trigger'
@@ -139,7 +143,7 @@ export const useGridTableKeyboardScopes = ({
   const tableTabEnterHandler = useCallback(
     ({ direction }: { direction: 'forward' | 'backward' }) => {
       filterFocusIndexRef.current = null;
-      const element = wrapperRef.current;
+      const element = focusRef.current;
       if (element) {
         element.focus();
       }
@@ -148,7 +152,7 @@ export const useGridTableKeyboardScopes = ({
         jumpToIndex(targetIndex);
       }
     },
-    [filterFocusIndexRef, focusedRowKey, jumpToIndex, tableDataLength, wrapperRef]
+    [filterFocusIndexRef, focusRef, focusedRowKey, jumpToIndex, tableDataLength]
   );
 
   const handleTableKeyDown = useCallback(

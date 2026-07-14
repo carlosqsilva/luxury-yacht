@@ -4,11 +4,13 @@
  * Unified header status indicator for shell sessions and port forwards.
  */
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { StopPortForward } from '@wailsjs/go/backend/App';
-import { BrowserOpenURL } from '@wailsjs/runtime/runtime';
-import { errorHandler } from '@utils/errorHandler';
-import StatusIndicator, { type StatusState } from '@shared/components/status/StatusIndicator';
+import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
+import { objectPanelId } from '@modules/object-panel/contexts/ObjectPanelStateContext';
+import { useObjectPanel } from '@modules/object-panel/hooks/useObjectPanel';
+import {
+  getRequestedObjectPanelTab,
+  requestObjectPanelTab,
+} from '@modules/object-panel/objectPanelTabRequests';
 import {
   CloseIcon,
   OpenIcon,
@@ -16,15 +18,13 @@ import {
   StatusDotIcon,
   StopSquareIcon,
 } from '@shared/components/icons/SharedIcons';
-import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
-import { useObjectPanel } from '@modules/object-panel/hooks/useObjectPanel';
-import {
-  getRequestedObjectPanelTab,
-  requestObjectPanelTab,
-} from '@modules/object-panel/objectPanelTabRequests';
-import { objectPanelId } from '@modules/object-panel/contexts/ObjectPanelStateContext';
+import StatusIndicator, { type StatusState } from '@shared/components/status/StatusIndicator';
 import { buildRequiredObjectReference } from '@shared/utils/objectIdentity';
-import { useRuntimeOperationStatus, type ShellSessionInfo } from './runtimeOperationStatus';
+import { errorHandler } from '@utils/errorHandler';
+import { BrowserOpenURL } from '@wailsjs/runtime/runtime';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { StopPortForward } from '@/core/backend-api';
+import { type ShellSessionInfo, useRuntimeOperationStatus } from './runtimeOperationStatus';
 import '@modules/port-forward/PortForwardsPanel.css';
 import './SessionsStatus.css';
 
@@ -227,9 +227,15 @@ const SessionsStatus: React.FC = () => {
   const totalUnhealthy = Math.max(0, totalCount - totalHealthy);
 
   const status = useMemo<StatusState>(() => {
-    if (totalCount === 0) return 'inactive';
-    if (totalUnhealthy === 0) return 'healthy';
-    if (totalHealthy === 0) return 'unhealthy';
+    if (totalCount === 0) {
+      return 'inactive';
+    }
+    if (totalUnhealthy === 0) {
+      return 'healthy';
+    }
+    if (totalHealthy === 0) {
+      return 'unhealthy';
+    }
     return 'degraded';
   }, [totalCount, totalHealthy, totalUnhealthy]);
 
@@ -254,8 +260,8 @@ const SessionsStatus: React.FC = () => {
                     <div className="as-section-empty">No active shell sessions</div>
                   ) : (
                     filteredShellSessions.map((session) => {
-                      const status = session.status || 'active';
-                      const shellPath = (session.command && session.command[0]) || '/bin/sh';
+                      const sessionStatus = session.status || 'active';
+                      const shellPath = session.command?.[0] || '/bin/sh';
                       const fields = [
                         {
                           label: 'cluster',
@@ -281,7 +287,9 @@ const SessionsStatus: React.FC = () => {
                               {fields.map((field, index) => (
                                 <div key={field.label} className="ss-field-row as-pf-field-row">
                                   <span className="as-pf-status-slot" aria-hidden={index !== 0}>
-                                    {index === 0 ? renderPortForwardStatusIcon(status) : null}
+                                    {index === 0
+                                      ? renderPortForwardStatusIcon(sessionStatus)
+                                      : null}
                                   </span>
                                   <span className="ss-field-label">{field.label}:</span>
                                   <span className="ss-field-value">{field.value}</span>
@@ -363,7 +371,7 @@ const SessionsStatus: React.FC = () => {
                                 </span>
                               </div>
                             </div>
-                            {session.statusReason && (
+                            {!!session.statusReason && (
                               <div className="pf-session-reason as-pf-reason">
                                 {session.statusReason}
                               </div>

@@ -5,14 +5,11 @@
  * Covers key behaviors and edge cases for useGridTableHeaderSyncEffects.
  */
 
-import { forwardRef } from 'react';
-import ReactDOM from 'react-dom/client';
-import { act } from 'react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-
 import { useGridTableHeaderSyncEffects } from '@shared/components/tables/hooks/useGridTableHeaderSyncEffects';
-
-(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+import type React from 'react';
+import { act } from 'react';
+import * as ReactDOM from 'react-dom/client';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 afterEach(() => {
   document.body.innerHTML = '';
@@ -34,7 +31,13 @@ describe('useGridTableHeaderSyncEffects', () => {
 
     const addEventListenerSpy = vi.spyOn(wrapper, 'addEventListener');
 
-    const Harness = forwardRef<HTMLDivElement, { hideHeader: boolean }>((props, ref) => {
+    const Harness = ({
+      ref,
+      ...props
+    }: {
+      hideHeader: boolean;
+      ref?: React.Ref<HTMLDivElement>;
+    }) => {
       useGridTableHeaderSyncEffects({
         hideHeader: props.hideHeader,
         wrapperRef,
@@ -44,7 +47,7 @@ describe('useGridTableHeaderSyncEffects', () => {
         updateColumnWindowRange,
       });
       return <div ref={ref} />;
-    });
+    };
 
     const container = document.createElement('div');
     document.body.appendChild(container);
