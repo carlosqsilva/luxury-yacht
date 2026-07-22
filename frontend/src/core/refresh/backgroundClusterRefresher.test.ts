@@ -49,6 +49,26 @@ describe('BackgroundClusterRefresher', () => {
     expect(domains).toEqual(['namespaces']);
   });
 
+  it('keeps an inactive cluster parked on Browse passive when its catalog may be cooled', async () => {
+    const fetchForCluster = vi
+      .spyOn(refreshOrchestrator, 'fetchDomainForCluster')
+      .mockResolvedValue(undefined);
+    const refresher = new BackgroundClusterRefresher(
+      () => ({
+        viewType: 'cluster',
+        previousView: 'overview',
+        activeNamespaceView: 'workloads',
+        activeClusterView: 'browse',
+      }),
+      () => undefined
+    );
+    refresher.updateClusters('cluster-a', ['cluster-a', 'cluster-b']);
+
+    await (refresher as unknown as { tick: () => Promise<void> }).tick();
+
+    expect(fetchForCluster).not.toHaveBeenCalled();
+  });
+
   it('refreshes background clusters as separate single-cluster requests', async () => {
     const fetchForCluster = vi
       .spyOn(refreshOrchestrator, 'fetchDomainForCluster')
@@ -159,7 +179,7 @@ describe('BackgroundClusterRefresher', () => {
       () => ({
         viewType: 'namespace',
         previousView: 'overview',
-        activeNamespaceView: 'pods',
+        activeNamespaceView: 'workloads',
         activeClusterView: 'nodes',
       }),
       () => 'team-a'
@@ -169,6 +189,11 @@ describe('BackgroundClusterRefresher', () => {
     await (refresher as unknown as { tick: () => Promise<void> }).tick();
 
     expect(fetchForCluster).toHaveBeenCalledWith('namespaces', 'cluster-b');
+    expect(fetchForCluster).toHaveBeenCalledWith(
+      'namespace-workloads',
+      'cluster-b',
+      'namespace:team-a'
+    );
     expect(fetchForCluster).toHaveBeenCalledWith('pods', 'cluster-b', 'namespace:team-a');
   });
 

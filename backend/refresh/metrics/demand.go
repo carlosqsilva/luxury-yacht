@@ -23,6 +23,7 @@ type DemandPoller struct {
 	mu         sync.Mutex
 	active     bool
 	running    bool
+	stopped    bool
 	baseCtx    context.Context
 	runCancel  context.CancelFunc
 	idleTimer  *time.Timer
@@ -52,6 +53,9 @@ func (d *DemandPoller) Start(ctx context.Context) error {
 		ctx = context.Background()
 	}
 	d.mu.Lock()
+	if d.stopped {
+		d.stopped = false
+	}
 	if d.baseCtx == nil {
 		d.baseCtx = ctx
 	}
@@ -69,6 +73,7 @@ func (d *DemandPoller) Stop(ctx context.Context) error {
 		return nil
 	}
 	d.mu.Lock()
+	d.stopped = true
 	d.active = false
 	d.baseCtx = nil
 	cancel, stopped := d.stopLocked()
@@ -95,9 +100,9 @@ func (d *DemandPoller) SetInterval(interval time.Duration) {
 	}
 }
 
-// SetCollectionObserver passes the observer through to the wrapped poller (the
-// metric doorbell wiring holds this wrapper, not the inner Poller). A wrapped
-// poller without observer support is a no-op.
+// SetCollectionObserver passes the collection-attempt observer through to the
+// wrapped poller (the metric doorbell wiring holds this wrapper, not the inner
+// Poller). A wrapped poller without observer support is a no-op.
 func (d *DemandPoller) SetCollectionObserver(observer func(Metadata)) {
 	if d == nil {
 		return
@@ -113,6 +118,10 @@ func (d *DemandPoller) SetActive(active bool) {
 		return
 	}
 	d.mu.Lock()
+	if d.stopped {
+		d.mu.Unlock()
+		return
+	}
 	d.active = active
 	if active {
 		d.stopIdleTimerLocked()
@@ -164,6 +173,10 @@ func (d *DemandPoller) Sample() Sample {
 
 func (d *DemandPoller) touch() {
 	d.mu.Lock()
+	if d.stopped {
+		d.mu.Unlock()
+		return
+	}
 	d.lastDemand = d.now()
 	d.startLocked()
 	if !d.active {
@@ -173,7 +186,7 @@ func (d *DemandPoller) touch() {
 }
 
 func (d *DemandPoller) startLocked() {
-	if d.running || d.poller == nil {
+	if d.stopped || d.running || d.poller == nil {
 		return
 	}
 	baseCtx := d.baseCtx

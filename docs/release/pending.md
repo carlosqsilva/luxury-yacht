@@ -1,27 +1,39 @@
+### Added
+
+**Global views**
+
+- When more than one cluster is open, a new Global tab will be displayed with views that synthesize data from all open clusters.
+  - **Clusters** view shows status, summary info, and aggregated metrics for all open clusters.
+  - **Namespaces** view shows status, summary info, and metrics per-namespace in all open clusters.
+
+**Attention view**
+
+- Clusters now have an Attention view that shows items in that cluster that may require your attention.
+  - Attention findings can be ignored individually, per cluster, or globally (right-click on an item to ignore it).
+  - The sidebar shows summary badges for info/warning/error counts.
+
+**Combined Workloads and Pods into a single view**
+- The Workloads view now includes pods in a split-pane view. Selecting a workload in the top pane filters which pods are visible in the bottom pane.
+  - The Pods pane can be collapsed to allow more screen space for workloads.
+
+**Filter chips**
+
+- When filters are enabled in any table view, those filters are displayed as chips to easily see which filters are being applied to the view.
+  - This brings table filters to parity with the filter chips that already exist for container logs.
+
 ### Changed
 
-**User-facing changes**
-
-- The filtered data message now properly calculates "[count] of [total] items visible"
-- Previous/next pagination is now `ctrl+←/→` (`cmd+←/→` on macOS) to prevent conflicts when the arrow keys are used for horizontal scroll in wide tables.
-- YAML editor now has line wrap, enabled by default, can be toggled from the toolbar.
-- Confirmation dialogs initially focus the non-destructive Cancel action.
-
-**Developer-facing changes**
-
-- Backend/frontend refresh contract overhaul:
-  - Backend DTOs, enums, stream messages, snapshot envelopes, and refresh-domain payload mappings now generate the frontend TypeScript contracts and runtime validators from one source of truth.
-  - Stale generated output, missing domain registrations, invalid enum mappings, and backend/frontend domain drift now fail automated checks.
-  - Refresh HTTP, streaming, telemetry, diagnostics, and resource-query consumers now use the backend-owned contracts instead of parallel handwritten frontend definitions.
-- Frontend architecture and quality overhaul:
-  - Replaced ESLint and Prettier with Biome.
-  - Enabled stricter accessibility, React lifecycle, correctness, performance, import-cycle, type-safety, and CSS rules, then updated the frontend to satisfy them.
-  - Added enforced boundaries for data access, cluster lifecycle and permission reads, generated backend bindings, and refresh-orchestrator access.
-  - Added policy checks that prevent required rules and architectural plugins from being weakened and require narrowly scoped, documented suppressions.
+- Overhauled the Favorites system to properly support all views, including the new split-pane workloads view.
+  - **⚠️ The new Favorites system required a schema change.** The app will attempt to migrate your existing favorites automatically. If it cannot migrate them, it will delete them. If this happens, you'll have to manually recreate them. I tested the migration but it's possible that I missed something, so apologies in advance if this happens to you.
+- Improved container log scrolling. When you manually scroll in the logs, it will now properly retain your place in the viewport, continue to buffer new logs in the background, and present a button to resume scrolling.
+- Pagination controls do not appear unless there are more than 25 rows in the table (25 is the smallest pagination size).
+- Added Type, Reason, and Source filters to Events views.
+- Pod Status and Pod Signal in the Cluster Overview now link to the new Attention view, with the proper filters applied.
+- Standardized absent table values as a dimmed hyphen across all table views.
+- Every multi-select filter is now searchable and has Select All/Select None controls.
 
 ### Fixed
 
-- The Actions menu in the Details tab stays visible when screen space is limited (fixes https://github.com/luxury-yacht/app/issues/261).
-- The "Logs are hidden for [n] containers" warning in the logs view now clears once it no longer applies, instead of sticking around until the logs view was closed.
-- If the logs stream delivers malformed data, the logs view now shows an error instead of loading forever.
-- Select All/Select None buttons now work correctly in dropdowns.
+- Dropdowns are now viewport-aware and zoom-aware so should correctly render in all window sizes and zoom levels.
+- Fixed YAML editor and and object map data freshness. The app is now aware of when versionless snapshot payloads change, so deleted or updated objects no longer remain visible from a stale response from the backend.
+- Many improvements to the refresh system (https://github.com/luxury-yacht/app/pull/266) to improve the app's performance and stability.

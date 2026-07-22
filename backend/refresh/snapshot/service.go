@@ -258,7 +258,9 @@ func (s *Service) BuildRequest(req BuildRequest) (*refresh.Snapshot, error) {
 			snap.Stats.TimeToFirstRowMs,
 			syncWait.Milliseconds(),
 		)
-		s.storeCache(cacheKey, snap)
+		if !bypassSnapshotCache {
+			s.storeCache(cacheKey, snap)
+		}
 		return snap, nil
 	})
 	if err != nil {
@@ -466,10 +468,9 @@ func (s *Service) storeCache(key string, snap *refresh.Snapshot) {
 }
 
 // InvalidateDomainCache drops every cached snapshot for the domain. The
-// doorbell notifiers call this BEFORE broadcasting: the doorbell-triggered
-// refetch arrives well inside the cache TTL, and without invalidation it
-// would be served the PRE-change snapshot — permanently, because doorbells
-// fire once per change and polling skips while the stream is healthy.
+// resource-stream manager calls this before signal delivery: the triggered
+// refetch can arrive inside the cache TTL, and without invalidation it would
+// be served the pre-change snapshot.
 // Matching on the cached snapshot's Domain keeps this independent of the
 // cache-key format.
 func (s *Service) InvalidateDomainCache(domain string) {
@@ -516,7 +517,7 @@ func (s *Service) shouldBypassSingleflight(domainName string) bool {
 
 func (s *Service) shouldBypassSnapshotCache(domainName string) bool {
 	switch domainName {
-	case "pods", "namespace-workloads", "nodes":
+	case "pods", "namespace-workloads", "namespace-metrics", "nodes", "object-details":
 		return true
 	default:
 		return false
@@ -538,25 +539,39 @@ func (s *Service) finalizeSourceVersion(snap *refresh.Snapshot) {
 	if strings.TrimSpace(snap.SourceVersions["object"]) == "" {
 		snap.SourceVersions["object"] = strconv.FormatUint(snap.Version, 10)
 	}
-	snap.SourceVersion = s.sourceVersionToken(snap.Domain, snap.Scope, snap.SourceVersions)
+	// Source clocks describe producer progress, while the checksum guarantees the
+	// HTTP validator also changes for versionless domains when their payload does.
+	snap.SourceVersion = s.sourceVersionToken(
+		snap.Domain,
+		snap.Scope,
+		snap.SourceVersions,
+		snap.Checksum,
+	)
 }
 
-func (s *Service) sourceVersionToken(domainName, scope string, sourceVersions map[string]string) string {
+func (s *Service) sourceVersionToken(
+	domainName,
+	scope string,
+	sourceVersions map[string]string,
+	checksum string,
+) string {
 	type sourceClock struct {
 		Source  string `json:"source"`
 		Version string `json:"version"`
 	}
 	payload := struct {
-		Epoch   string        `json:"epoch"`
-		Cluster string        `json:"cluster"`
-		Domain  string        `json:"domain"`
-		Scope   string        `json:"scope"`
-		Sources []sourceClock `json:"sources"`
+		Epoch    string        `json:"epoch"`
+		Cluster  string        `json:"cluster"`
+		Domain   string        `json:"domain"`
+		Scope    string        `json:"scope"`
+		Checksum string        `json:"checksum"`
+		Sources  []sourceClock `json:"sources"`
 	}{
-		Epoch:   s.epoch,
-		Cluster: s.cluster.ClusterID,
-		Domain:  domainName,
-		Scope:   scope,
+		Epoch:    s.epoch,
+		Cluster:  s.cluster.ClusterID,
+		Domain:   domainName,
+		Scope:    scope,
+		Checksum: checksum,
 	}
 	keys := make([]string, 0, len(sourceVersions))
 	for key, version := range sourceVersions {

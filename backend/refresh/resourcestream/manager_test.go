@@ -1,11 +1,13 @@
 package resourcestream
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -24,6 +26,8 @@ import (
 
 	"github.com/luxury-yacht/app/backend/internal/applog"
 	"github.com/luxury-yacht/app/backend/internal/config"
+	"github.com/luxury-yacht/app/backend/refresh"
+	"github.com/luxury-yacht/app/backend/refresh/domain"
 	"github.com/luxury-yacht/app/backend/refresh/ingest"
 	"github.com/luxury-yacht/app/backend/refresh/snapshot"
 	"github.com/luxury-yacht/app/backend/resourcemodel"
@@ -195,6 +199,27 @@ func TestManagerBroadcastsNamespacesDoorbell(t *testing.T) {
 	require.Equal(t, SourceObject, update.Source)
 	require.Equal(t, SignalChanged, update.Signal)
 	require.Equal(t, "ns-7", update.Version)
+	require.Nil(t, update.Ref)
+}
+
+func TestManagerBroadcastsClusterAttentionDoorbell(t *testing.T) {
+	manager := &Manager{
+		clusterMeta: snapshot.ClusterMeta{ClusterID: "c1", ClusterName: "cluster"},
+		logger:      applog.Noop,
+		subscribers: make(map[string]map[string]map[uint64]*subscription),
+		buffers:     make(map[string]*updateBuffer),
+		sequences:   make(map[string]uint64),
+	}
+	sub, err := subscribeForTest(t, manager, domainClusterAttention, "")
+	require.NoError(t, err)
+
+	manager.BroadcastClusterAttentionRefresh("attention-7")
+
+	update := requireNextUpdate(t, sub)
+	require.Equal(t, domainClusterAttention, update.Domain)
+	require.Equal(t, SourceAttention, update.Source)
+	require.Equal(t, SignalChanged, update.Signal)
+	require.Equal(t, "attention-7", update.Version)
 	require.Nil(t, update.Ref)
 }
 
@@ -393,6 +418,51 @@ func TestManagerResumeReturnsBufferedUpdates(t *testing.T) {
 	require.Len(t, updates, 1)
 	require.Equal(t, "2", updates[0].Sequence)
 	require.Equal(t, "pod-2", updates[0].Ref.Name)
+}
+
+func TestManagerChangeSignalInvalidatesSnapshotCacheBeforeDelivery(t *testing.T) {
+	reg := domain.New()
+	builds := 0
+	require.NoError(t, reg.Register(refresh.DomainConfig{
+		Name: domainClusterRBAC,
+		BuildSnapshot: func(context.Context, string) (*refresh.Snapshot, error) {
+			builds++
+			return &refresh.Snapshot{Domain: domainClusterRBAC}, nil
+		},
+	}))
+	service := snapshot.NewService(reg, nil, snapshot.ClusterMeta{ClusterID: "c1"})
+	_, err := service.Build(context.Background(), domainClusterRBAC, "c1|")
+	require.NoError(t, err)
+	_, err = service.Build(context.Background(), domainClusterRBAC, "c1|")
+	require.NoError(t, err)
+	require.Equal(t, 1, builds, "pre-change snapshot must come from cache")
+
+	manager := &Manager{
+		clusterMeta: snapshot.ClusterMeta{ClusterID: "c1", ClusterName: "cluster"},
+		logger:      applog.Noop,
+		subscribers: make(map[string]map[string]map[uint64]*subscription),
+		buffers:     make(map[string]*updateBuffer),
+		sequences:   make(map[string]uint64),
+	}
+	manager.SetSnapshotDomainInvalidator(service.InvalidateDomainCache)
+	sub, err := subscribeForTest(t, manager, domainClusterRBAC, "")
+	require.NoError(t, err)
+	defer sub.Cancel()
+
+	update := Update{
+		Type:            MessageTypeModified,
+		Domain:          domainClusterRBAC,
+		ClusterID:       "c1",
+		ClusterName:     "cluster",
+		ResourceVersion: "2",
+		Ref:             refPtr(resourcemodel.NewResourceRef("c1", "rbac.authorization.k8s.io", "v1", "ClusterRole", "clusterroles", "", "admin", "uid-admin")),
+	}
+	manager.broadcast(domainClusterRBAC, []string{""}, update)
+	require.Equal(t, domainClusterRBAC, requireNextUpdate(t, sub).Domain)
+
+	_, err = service.Build(context.Background(), domainClusterRBAC, "c1|")
+	require.NoError(t, err)
+	require.Equal(t, 2, builds, "signal delivery must invalidate the pre-change snapshot")
 }
 
 func TestManagerEvictsResumeBufferWhenLastSubscriberCancels(t *testing.T) {
@@ -685,12 +755,10 @@ func TestManagerCustomUpdateInvalidatesCache(t *testing.T) {
 	require.NoError(t, err)
 
 	var called bool
-	var gotKind, gotNamespace, gotName string
-	manager.SetCustomResourceCacheInvalidator(func(kind, namespace, name string) {
+	var gotRef resourcemodel.ResourceRef
+	manager.SetCustomResourceCacheInvalidator(func(ref resourcemodel.ResourceRef) {
 		called = true
-		gotKind = kind
-		gotNamespace = namespace
-		gotName = name
+		gotRef = ref
 	})
 
 	resource := &unstructured.Unstructured{}
@@ -710,9 +778,9 @@ func TestManagerCustomUpdateInvalidatesCache(t *testing.T) {
 	manager.handleCustomResource(resource, MessageTypeModified, info)
 
 	require.True(t, called)
-	require.Equal(t, "Widget", gotKind)
-	require.Equal(t, "default", gotNamespace)
-	require.Equal(t, "widget-1", gotName)
+	require.Equal(t, resourcemodel.NewResourceRef(
+		"c1", "example.com", "v1", "Widget", "widgets", "default", "widget-1", "",
+	), gotRef)
 }
 
 func TestManagerSkipsCustomInformerForFirstClassGatewayCRD(t *testing.T) {
@@ -1308,7 +1376,7 @@ func newRacedPodIngestStore(t *testing.T, manager *Manager, pod *corev1.Pod) *in
 	t.Helper()
 	project := snapshot.NewPodIngestProjector(
 		snapshot.ClusterMeta{ClusterID: "c1", ClusterName: "cluster"},
-		testsupport.NewReplicaSetLister(t),
+		snapshot.PodOwnerSources{ReplicaSets: testsupport.NewReplicaSetLister(t)},
 	)
 	store := ingest.NewProjectingStore(project)
 	store.SetRetainTable(true)
@@ -1333,6 +1401,48 @@ func racedOwnerPod() *corev1.Pod {
 		},
 		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
+}
+
+func TestJobBundleArrivalHealsPreviouslyProjectedCronJobPod(t *testing.T) {
+	manager := &Manager{
+		clusterMeta: snapshot.ClusterMeta{ClusterID: "c1", ClusterName: "cluster"},
+		logger:      applog.Noop,
+		subscribers: make(map[string]map[string]map[uint64]*subscription),
+	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Namespace: "batch",
+		Name:      "nightly-29123456-abcde",
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: "batch/v1", Kind: "Job", Name: "nightly-29123456", Controller: ptrBool(true),
+		}},
+	}}
+	project := snapshot.NewPodIngestProjector(
+		snapshot.ClusterMeta{ClusterID: "c1", ClusterName: "cluster"},
+		snapshot.PodOwnerSources{},
+	)
+	store := ingest.NewProjectingStore(project)
+	store.SetRetainTable(true)
+	require.NoError(t, store.Add(pod))
+	manager.podIngest = podIngestStoreAdapter{store: store}
+
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Namespace: "batch",
+		Name:      "nightly-29123456",
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: "batch/v1", Kind: "CronJob", Name: "nightly", Controller: ptrBool(true),
+		}},
+	}}
+	raw, err := snapshot.NewJobIngestProjector(snapshot.ClusterMeta{ClusterID: "c1"})(job)
+	require.NoError(t, err)
+	jobPodOwnerHealBundleSink{manager: manager}.UpsertBundle(raw.(ingest.Bundle))
+
+	rows := store.List()
+	require.Len(t, rows, 1)
+	row := rows[0].(ingest.Bundle).Table.(snapshot.PodSummary)
+	require.Equal(t, "CronJob", row.OwnerKind)
+	require.Equal(t, "nightly", row.OwnerName)
+	require.Equal(t, "Job", row.DirectOwnerKind)
+	require.Equal(t, "nightly-29123456", row.DirectOwnerName)
 }
 
 // TestManagerReplicaSetAddHealsRacedPodOwnerRows is the regression test for the
@@ -1461,7 +1571,7 @@ func TestManagerPodSignalReachesDirectOwnerScope(t *testing.T) {
 	// production notify sink.
 	project := snapshot.NewPodIngestProjector(
 		snapshot.ClusterMeta{ClusterID: "c1", ClusterName: "cluster"},
-		testsupport.NewReplicaSetLister(t, rs),
+		snapshot.PodOwnerSources{ReplicaSets: testsupport.NewReplicaSetLister(t, rs)},
 	)
 	store := ingest.NewProjectingStore(project)
 	store.SetRetainTable(true)

@@ -61,6 +61,13 @@ type DomainFetchOptions = {
   streamSignal?: boolean;
 };
 
+type PendingClusterReadinessRequest = {
+  domain: RefreshDomain;
+  scope: string;
+  isManual: boolean;
+  streamSignal: boolean;
+};
+
 // Refreshers are disabled at registration by default. Most domains rely on
 // view hooks (e.g. ClusterResourcesContext, useBrowseCatalog) to enable
 // scopes on demand rather than polling from app startup. Changing this to
@@ -69,6 +76,8 @@ type DomainFetchOptions = {
 // Set autoStart: true on individual domain registrations when needed.
 const DEFAULT_AUTO_START = false;
 const noopStreamingCleanup = () => undefined;
+const METRICS_DEMAND_RETRY_INITIAL_MS = 1_000;
+const METRICS_DEMAND_RETRY_MAX_MS = 30_000;
 
 const logInfo = (message: string, cluster?: AppLogsClusterMeta): void => {
   logAppLogsInfo(message, APP_LOG_SOURCES.RefreshOrchestrator, cluster);
@@ -85,12 +94,16 @@ class RefreshOrchestrator {
   private coordinatorRuntime = new ClusterRefreshRuntime('__coordinator__');
   private clusterRuntimes = new Map<string, ClusterRefreshRuntime>();
   // Scoped fetches held because the scope's cluster backend is still
-  // initializing; keyed by clusterId, values are "<domain> <scope>" pairs
-  // re-dispatched on the lifecycle's became-serviceable edge.
-  private pendingClusterReadiness = new Map<string, Set<string>>();
+  // initializing; keyed by clusterId and then by domain + scope. Repeated
+  // demand coalesces without losing manual or stream-signal intent.
+  private pendingClusterReadiness = new Map<string, Map<string, PendingClusterReadinessRequest>>();
 
   private requestCounter = 0;
-  private metricsDemandActive = false;
+  private metricsDemandClusterKey = '';
+  private metricsDemandRequestKey: string | null = null;
+  private metricsDemandRetryKey: string | null = null;
+  private metricsDemandRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private metricsDemandRetryDelayMs = METRICS_DEMAND_RETRY_INITIAL_MS;
 
   private suspendedDomains = new Map<RefreshDomain, boolean>();
   private contextVersion = 0;
@@ -122,6 +135,9 @@ class RefreshOrchestrator {
     clusterReadiness.onBecameServiceable((clusterId) =>
       this.handleClusterBecameServiceable(clusterId)
     );
+    clusterReadiness.onForegroundActivationStarted((clusterId) =>
+      this.handleForegroundActivationStarted(clusterId)
+    );
     // Emit a single log so operators can confirm streaming config at runtime.
     logInfo('[refresh] resource streaming enabled (mode=active, domains=all)');
   }
@@ -134,48 +150,79 @@ class RefreshOrchestrator {
   }
 
   /** Hold a fetch for re-dispatch when the scope's cluster(s) become serviceable. */
-  private recordPendingClusterReadiness(domain: RefreshDomain, scope: string): void {
+  private recordPendingClusterReadiness(
+    domain: RefreshDomain,
+    scope: string,
+    options: Pick<DomainFetchOptions, 'isManual' | 'streamSignal'> = { isManual: false }
+  ): void {
     for (const clusterId of parseClusterScopeList(scope).clusterIds) {
       let pending = this.pendingClusterReadiness.get(clusterId);
       if (!pending) {
-        pending = new Set<string>();
+        pending = new Map<string, PendingClusterReadinessRequest>();
         this.pendingClusterReadiness.set(clusterId, pending);
       }
-      pending.add(`${domain}\u0000${scope}`);
+      const key = `${domain}\u0000${scope}`;
+      const existing = pending.get(key);
+      pending.set(key, {
+        domain,
+        scope,
+        isManual: Boolean(existing?.isManual || options.isManual),
+        streamSignal: Boolean(existing?.streamSignal || options.streamSignal),
+      });
     }
+  }
+
+  private handleForegroundActivationStarted(clusterId: string): void {
+    const runtime = this.clusterRuntimes.get(clusterId);
+    if (!runtime) {
+      return;
+    }
+    this.stopRuntimeStreaming(runtime, false);
+    runtime.forEachInFlight((details, key) => {
+      if (details.scope && this.isScopedDomainEnabledInternal(details.domain, details.scope)) {
+        this.recordPendingClusterReadiness(details.domain, details.scope, {
+          isManual: details.isManual,
+          streamSignal: Boolean(details.streamSignal || details.rerunStreamSignal),
+        });
+      }
+      this.teardownInFlight(runtime, key, details);
+    });
   }
 
   private handleClusterBecameServiceable(clusterId: string): void {
     const pending = this.pendingClusterReadiness.get(clusterId);
     this.pendingClusterReadiness.delete(clusterId);
-    if (!pending) {
-      return;
+    if (pending) {
+      for (const request of pending.values()) {
+        const { domain, scope } = request;
+        if (!this.configs.has(domain)) {
+          continue;
+        }
+        // The lease may have been released (view left, cluster pruned) while
+        // the cluster was warming up — held work dies with its demand.
+        if (!this.isScopedDomainEnabledInternal(domain, scope)) {
+          continue;
+        }
+        if (!this.isScopeClusterServiceable(scope)) {
+          // A multi-cluster scope with another cluster still warming.
+          this.recordPendingClusterReadiness(domain, scope, request);
+          continue;
+        }
+        void this.fetchScopedDomain(domain, scope, {
+          isManual: request.isManual,
+          streamSignal: request.streamSignal,
+        }).catch((error) => {
+          logWarning(
+            `[refresh] deferred ${domain} fetch after cluster ${clusterId} became serviceable failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`
+          );
+        });
+      }
     }
-    for (const key of pending) {
-      const separator = key.indexOf('\u0000');
-      const domain = key.slice(0, separator) as RefreshDomain;
-      const scope = key.slice(separator + 1);
-      if (!this.configs.has(domain)) {
-        continue;
-      }
-      // The lease may have been released (view left, cluster pruned) while
-      // the cluster was warming up — held work dies with its demand.
-      if (!this.isScopedDomainEnabledInternal(domain, scope)) {
-        continue;
-      }
-      if (!this.isScopeClusterServiceable(scope)) {
-        // A multi-cluster scope with another cluster still warming.
-        this.recordPendingClusterReadiness(domain, scope);
-        continue;
-      }
-      void this.fetchScopedDomain(domain, scope, { isManual: false }).catch((error) => {
-        logWarning(
-          `[refresh] deferred ${domain} fetch after cluster ${clusterId} became serviceable failed: ${
-            error instanceof Error ? error.message : String(error)
-          }`
-        );
-      });
-    }
+    // Snapshotless streams have no queued fetch to wake them. Re-evaluate all
+    // retained streaming leases whenever the activation hold is released.
+    this.handleStreamingScopeChanges();
   }
 
   private notifyRefreshError(
@@ -260,7 +307,7 @@ class RefreshOrchestrator {
     // Refresh namespaces across all enabled scopes.
     tasks.push(this.refreshEnabledScopes('namespaces', { isManual: true }));
 
-    const podsRefresh = this.triggerActiveNamespacePodsRefresh(targetContext);
+    const podsRefresh = this.triggerActiveWorkloadsPodsRefresh(targetContext);
     if (podsRefresh) {
       tasks.push(podsRefresh);
     }
@@ -723,6 +770,9 @@ class RefreshOrchestrator {
     scope: string,
     streaming: StreamingRegistration
   ): Promise<void> {
+    if (!this.isScopeClusterServiceable(scope)) {
+      return Promise.resolve();
+    }
     if (!this.isScopedDomainEnabledInternal(domain, scope)) {
       return Promise.resolve();
     }
@@ -883,8 +933,8 @@ class RefreshOrchestrator {
     });
   }
 
-  private triggerActiveNamespacePodsRefresh(context: RefreshContext): Promise<void> | null {
-    if (context.currentView !== 'namespace' || context.activeNamespaceView !== 'pods') {
+  private triggerActiveWorkloadsPodsRefresh(context: RefreshContext): Promise<void> | null {
+    if (context.currentView !== 'namespace' || context.activeNamespaceView !== 'workloads') {
       return null;
     }
 
@@ -980,6 +1030,11 @@ class RefreshOrchestrator {
     // cluster-events, polling disabled — are cleaned up too. forEachScopedDomain only sees
     // enabled leases, so it would leave those orphaned for a closed cluster.
     this.resetScopedStatesForRemovedClusters(connected);
+    Array.from(this.pendingClusterReadiness.keys()).forEach((clusterId) => {
+      if (!connected.has(clusterId)) {
+        this.pendingClusterReadiness.delete(clusterId);
+      }
+    });
 
     Array.from(this.clusterRuntimes.entries()).forEach(([clusterId, runtime]) => {
       if (connected.has(clusterId)) {
@@ -995,6 +1050,7 @@ class RefreshOrchestrator {
       // Let cluster-keyed caches outside the refresh store die with the runtime.
       eventBus.emit('refresh:cluster-pruned', { clusterId });
     });
+    this.updateMetricsDemand();
   }
 
   // resetScopedStatesForRemovedClusters clears the global scoped-domain state of every scope
@@ -1056,7 +1112,10 @@ class RefreshOrchestrator {
   }
 
   private shouldAllowRefresher(config: DomainRegistration<RefreshDomain>): boolean {
-    return !config.streaming || config.streaming.pauseRefresherWhenStreaming === true;
+    return (
+      config.scheduled !== false &&
+      (!config.streaming || config.streaming.pauseRefresherWhenStreaming === true)
+    );
   }
 
   async fetchScopedDomain<K extends RefreshDomain>(
@@ -1079,7 +1138,10 @@ class RefreshOrchestrator {
     // re-dispatch on the lifecycle's became-serviceable edge — warm-up is
     // loading, not failure.
     if (!this.isScopeClusterServiceable(normalizedScope)) {
-      this.recordPendingClusterReadiness(domain, normalizedScope);
+      this.recordPendingClusterReadiness(domain, normalizedScope, {
+        isManual: Boolean(options.isManual),
+        streamSignal: Boolean(options.streamSignal),
+      });
       return;
     }
 
@@ -1138,6 +1200,13 @@ class RefreshOrchestrator {
 
     if (!normalizedScope || normalizedScope.length === 0) {
       throw new Error(`Scoped domain "${domain}" requires a valid scope`);
+    }
+
+    if (!this.isScopeClusterServiceable(normalizedScope)) {
+      if (!options.allowDisabledRetainedScope) {
+        this.recordPendingClusterReadiness(domain, normalizedScope, options);
+      }
+      return;
     }
 
     if (
@@ -1211,6 +1280,7 @@ class RefreshOrchestrator {
     runtime.setInFlight({
       controller,
       isManual: options.isManual,
+      streamSignal: options.streamSignal,
       requestId,
       cleanup,
       contextVersion,
@@ -1225,6 +1295,7 @@ class RefreshOrchestrator {
         scope: normalizedScope,
         signal: controller.signal,
         ifNoneMatch: previousState.sourceVersion ?? previousState.etag,
+        manual: Boolean(options.isManual && !isResourceStreamDomain(domain)),
       });
 
       if (controller.signal.aborted) {
@@ -1364,34 +1435,81 @@ class RefreshOrchestrator {
     }
   }
 
-  private isMetricsDemandActive(): boolean {
-    // The metric-bearing domains join live usage at serve, so any active lease
-    // on them (a table or object panel) is metrics demand for the backend poller.
-    if (this.hasEnabledScopedSources('cluster-overview')) {
-      return true;
-    }
-    if (this.hasEnabledScopedSources('nodes')) {
-      return true;
-    }
-    if (this.hasEnabledScopedSources('pods')) {
-      return true;
-    }
-    if (this.hasEnabledScopedSources('namespace-workloads')) {
-      return true;
-    }
-    return false;
+  private metricsDemandClusterIds(): string[] {
+    const metricDomains: readonly RefreshDomain[] = [
+      'cluster-overview',
+      'nodes',
+      'pods',
+      'namespace-workloads',
+      'namespace-metrics',
+    ];
+    const demanded: string[] = [];
+    this.clusterRuntimes.forEach((runtime, clusterId) => {
+      if (metricDomains.some((domain) => runtime.hasEnabledScopedSources(domain))) {
+        demanded.push(clusterId);
+      }
+    });
+    return demanded.sort();
   }
 
   private updateMetricsDemand(): void {
-    const active = this.isMetricsDemandActive();
-    if (active === this.metricsDemandActive) {
+    const clusterIds = this.metricsDemandClusterIds();
+    const clusterKey = clusterIds.join('\0');
+    if (clusterKey === this.metricsDemandClusterKey) {
+      this.clearMetricsDemandRetry();
       return;
     }
-    this.metricsDemandActive = active;
-    void setMetricsActive(active).catch((error) => {
-      const message = error instanceof Error ? error.message : String(error);
-      logWarning(`[refresh] metrics demand update failed: ${message}`);
-    });
+    if (this.metricsDemandRequestKey !== null) {
+      return;
+    }
+    if (this.metricsDemandRetryTimer !== null) {
+      if (this.metricsDemandRetryKey === clusterKey) {
+        return;
+      }
+      this.clearMetricsDemandRetry();
+    }
+
+    this.metricsDemandRequestKey = clusterKey;
+    void setMetricsActive(clusterIds).then(
+      () => {
+        this.metricsDemandRequestKey = null;
+        this.metricsDemandClusterKey = clusterKey;
+        this.metricsDemandRetryDelayMs = METRICS_DEMAND_RETRY_INITIAL_MS;
+        this.updateMetricsDemand();
+      },
+      (error) => {
+        this.metricsDemandRequestKey = null;
+        const message = error instanceof Error ? error.message : String(error);
+        logWarning(`[refresh] metrics demand update failed: ${message}`);
+
+        const currentKey = this.metricsDemandClusterIds().join('\0');
+        if (currentKey !== clusterKey) {
+          this.metricsDemandRetryDelayMs = METRICS_DEMAND_RETRY_INITIAL_MS;
+          this.updateMetricsDemand();
+          return;
+        }
+
+        const delay = this.metricsDemandRetryDelayMs;
+        this.metricsDemandRetryDelayMs = Math.min(
+          this.metricsDemandRetryDelayMs * 2,
+          METRICS_DEMAND_RETRY_MAX_MS
+        );
+        this.metricsDemandRetryKey = clusterKey;
+        this.metricsDemandRetryTimer = setTimeout(() => {
+          this.metricsDemandRetryTimer = null;
+          this.metricsDemandRetryKey = null;
+          this.updateMetricsDemand();
+        }, delay);
+      }
+    );
+  }
+
+  private clearMetricsDemandRetry(): void {
+    if (this.metricsDemandRetryTimer !== null) {
+      clearTimeout(this.metricsDemandRetryTimer);
+      this.metricsDemandRetryTimer = null;
+    }
+    this.metricsDemandRetryKey = null;
   }
 
   private isScopedDomainEnabledInternal(domain: RefreshDomain, scope: string): boolean {

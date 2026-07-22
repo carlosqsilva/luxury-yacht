@@ -49,7 +49,32 @@ checker, so the SSAR cache resets with it
   from ingest; when NOTHING is tracked (pre-data or fully denied), rows
   report `workloadsUnknown` so the sidebar never dims them as
   authoritatively empty. Browse's namespace groups serve the same list
-  (`catalogNamespaceGroups`).
+  (`catalogNamespaceGroups`). Each row also carries `unhealthyWorkloads`:
+  controller health is counted from the retained object-map status projection,
+  while only non-terminal, ownerless pod aggregates count as standalone
+  workload rows. The namespaces source signature includes these counts so a
+  status-only transition invalidates the snapshot and rings the same debounced
+  doorbell without counting controller-owned pods twice. The same summary
+  counts current Warning Event objects by involved-object namespace.
+  `warningEventsState` distinguishes an authoritative `available` zero from an
+  allowed informer that is still `loading` and an `unavailable` list/watch
+  source. Event add/update/delete handlers feed the namespace notifier; its
+  warning-count signature suppresses Normal-event churn and changes the
+  snapshot's `warning-events` source clock when a visible count or source state
+  changes. Events remain cluster-wide under a configured namespace scope, so
+  this optional aggregate is enabled only when the identity can list and watch
+  that cluster-wide source. Namespace utilization is served independently by
+  the metric-only `namespace-metrics` domain and joined in visible namespace
+  consumers by full Namespace identity. Metric collections advance only that
+  domain's metric clock; they do not invalidate `namespaces` or ring its object
+  doorbell. ResourceQuota
+  ingest retains a compact aggregate half (namespace + highest used percentage)
+  rather than the typed object or table row. Namespace rows expose quota count,
+  the strongest percentage, explicit source state, and backend-owned pressure
+  presentation (`warning` at 80%, `critical` at 100%). The quota signature
+  suppresses object churn that does not change a namespace rollup and re-arms
+  while the ResourceQuota store is warming so an empty synced store becomes an
+  authoritative zero.
 - **Ingest**: one reflector per (kind, namespace) writing ONE shared store
   through partition views; `ReplacePartition` fully defines only its own
   namespace and fans per-row sink events (never the bulk kind-wide Replace,
@@ -70,8 +95,12 @@ checker, so the SSAR cache resets with it
 - **Metrics**: the pod-metrics poll runs per scope namespace and merges the
   successes (`backend/refresh/metrics/poller.go`); node metrics stay
   cluster-scoped and permission-degrade as before.
-- **Object map**: the live-LIST collectors (gateway kinds, HPA v2) list per
-  scope namespace; cluster-scoped kinds keep one cluster-wide list.
+- **Object map**: Gateway API and HPA collectors read synchronized cluster-wide
+  informer caches and filter namespaced objects to the configured scope; graph
+  builds do not issue Kubernetes LIST calls. Because those sources are
+  cluster-wide, a namespace-scoped identity without cluster-wide list+watch is
+  shown an insufficient-permissions warning for the affected kinds instead of
+  receiving a per-namespace live-LIST fallback.
 - **UI**: the sidebar namespaces section IS the editor — add affordance +
   per-row hover delete (`frontend/src/ui/layout/NamespaceScopeEditor.tsx`).
   The editing affordances are also the only "scope active" indicator by
@@ -112,7 +141,7 @@ namespace-scope change or auth recovery.
 ## Deliberately cluster-wide (follow-up: scope the factory-backed kinds)
 
 The typed shared-informer factory's namespaced informers (events,
-replicasets, HPA v1), the Gateway API informer factory, and the helm-storage
+replicasets, HPA v1/v2), the Gateway API informer factory, and the helm-storage
 factory still watch cluster-wide. Under a scope their domains stay
 permission-gated on the cluster-wide check (honest denial). Scoping them
 means N per-namespace client-go factories plus multiplexed listers/handlers

@@ -1010,6 +1010,105 @@ describe('LogViewer active pod synchronisation', () => {
     expect(container.textContent).not.toContain('log line 200');
   });
 
+  it('freezes visible log rows while paused and resumes from a bottom overlay', async () => {
+    const originalScrollHeight = Object.getOwnPropertyDescriptor(
+      HTMLElement.prototype,
+      'scrollHeight'
+    );
+    const originalClientHeight = Object.getOwnPropertyDescriptor(
+      HTMLElement.prototype,
+      'clientHeight'
+    );
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get() {
+        return this.classList.contains('logs-viewer-content') ? 400 : 0;
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      get() {
+        return this.classList.contains('logs-viewer-content') ? 100 : 0;
+      },
+    });
+
+    const entry = (sequence: number): ContainerLogsEntry => ({
+      _seq: sequence,
+      pod: 'web-1',
+      container: 'app',
+      line: `anchored line ${sequence}`,
+      timestamp: `2024-05-01T10:00:0${sequence}Z`,
+      isInit: false,
+    });
+
+    try {
+      seedLogSnapshot([entry(1), entry(2), entry(3)]);
+      await renderViewer({ activePodNames: ['web-1'] });
+      await flushAsync();
+
+      const content = await waitForElement(() =>
+        container.querySelector<HTMLDivElement>('.logs-viewer-content')
+      );
+      content.scrollTop = 100;
+
+      await act(async () => {
+        seedLogSnapshot([entry(2), entry(3), entry(4)]);
+        await Promise.resolve();
+      });
+
+      expect(container.textContent).toContain('anchored line 1');
+      expect(container.textContent).toContain('anchored line 4');
+      expect(content.scrollTop).toBe(100);
+
+      let resumeButton = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Resume scrolling"]'
+      );
+      expect(resumeButton).not.toBeNull();
+
+      await act(async () => {
+        content.scrollTop = 300;
+        content.dispatchEvent(new Event('scroll'));
+      });
+      expect(
+        container.querySelector<HTMLButtonElement>('button[aria-label="Resume scrolling"]')
+      ).toBeNull();
+      expect(container.textContent).not.toContain('anchored line 1');
+
+      await act(async () => {
+        content.scrollTop = 100;
+        content.dispatchEvent(new Event('scroll'));
+      });
+      resumeButton = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Resume scrolling"]'
+      );
+      expect(resumeButton).not.toBeNull();
+      const autoRefreshButton = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Toggle auto-refresh"]'
+      );
+      expect(autoRefreshButton?.getAttribute('aria-pressed')).toBe('true');
+      await act(async () => {
+        autoRefreshButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+      expect(autoRefreshButton?.getAttribute('aria-pressed')).toBe('false');
+      await act(async () => {
+        resumeButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        await Promise.resolve();
+      });
+
+      expect(autoRefreshButton?.getAttribute('aria-pressed')).toBe('true');
+      expect(container.textContent).not.toContain('anchored line 1');
+      expect(container.textContent).toContain('anchored line 4');
+      expect(content.scrollTop).toBe(400);
+    } finally {
+      if (originalScrollHeight) {
+        Object.defineProperty(HTMLElement.prototype, 'scrollHeight', originalScrollHeight);
+      }
+      if (originalClientHeight) {
+        Object.defineProperty(HTMLElement.prototype, 'clientHeight', originalClientHeight);
+      }
+    }
+  });
+
   it('colors API timestamps and container metadata only when showing all containers', async () => {
     (GetContainerLogsScopeContainers as unknown as ViMock).mockResolvedValue(['app', 'sidecar']);
     seedLogSnapshot(
@@ -1897,10 +1996,18 @@ describe('LogViewer active pod synchronisation', () => {
     expect(getContainerLogsStreamScopeParams(defaultScope)).toEqual({
       selectedFilters: ['pod:web-1', 'container:app'],
     });
-    expect(getLogViewerPrefs('obj:test:deployment:team-a:api')?.selectedFilters).toEqual([
-      'pod:web-1',
-      'container:app',
-    ]);
+    expect(getLogViewerPrefs('obj:test:deployment:team-a:api')?.selectedFilters).toEqual({
+      mode: 'some',
+      values: ['pod:web-1', 'container:app'],
+    });
+
+    await setMultiSelectValues(workloadFilter, []);
+    await flushAsync();
+
+    expect(container.querySelector('.log-viewer-line')?.textContent).toContain(
+      'No logs match the current filters'
+    );
+    expect(getContainerLogsStreamScopeParams(defaultScope)).toEqual({ matchNone: true });
   });
 
   it('filters workload logs when pod and container metadata are clicked', async () => {
@@ -1946,7 +2053,10 @@ describe('LogViewer active pod synchronisation', () => {
       await Promise.resolve();
     });
 
-    expect(getLogViewerPrefs(panelId)?.selectedFilters).toEqual(['pod:web-1']);
+    expect(getLogViewerPrefs(panelId)?.selectedFilters).toEqual({
+      mode: 'some',
+      values: ['pod:web-1'],
+    });
     expect(container.textContent).toContain('matched log');
     expect(container.textContent).toContain('wrong container');
     expect(container.textContent).not.toContain('wrong pod');
@@ -1962,7 +2072,10 @@ describe('LogViewer active pod synchronisation', () => {
       await Promise.resolve();
     });
 
-    expect(getLogViewerPrefs(panelId)?.selectedFilters).toEqual(['pod:web-1', 'container:app']);
+    expect(getLogViewerPrefs(panelId)?.selectedFilters).toEqual({
+      mode: 'some',
+      values: ['pod:web-1', 'container:app'],
+    });
     expect(container.textContent).toContain('matched log');
     expect(container.textContent).not.toContain('wrong container');
   });
@@ -2010,7 +2123,10 @@ describe('LogViewer active pod synchronisation', () => {
       await Promise.resolve();
     });
 
-    expect(getLogViewerPrefs(panelId)?.selectedFilters).toEqual(['container:sidecar']);
+    expect(getLogViewerPrefs(panelId)?.selectedFilters).toEqual({
+      mode: 'some',
+      values: ['container:sidecar'],
+    });
     expect(container.textContent).toContain('sidecar log line');
     expect(container.textContent).not.toContain('main log line');
   });
@@ -2552,7 +2668,10 @@ describe('LogViewer active pod synchronisation', () => {
       'button[aria-label="Highlight matching text - disabled when Invert is enabled"]'
     );
     expect(highlightButton?.getAttribute('aria-pressed')).toBe('true');
-    expect(getLogViewerPrefs(panelId)?.selectedFilters).toEqual(['pod:web-1']);
+    expect(getLogViewerPrefs(panelId)?.selectedFilters).toEqual({
+      mode: 'some',
+      values: ['pod:web-1'],
+    });
     expect(getContainerLogsStreamScopeParams(defaultScope)).toEqual({
       selectedFilters: ['pod:web-1'],
     });
@@ -2567,7 +2686,7 @@ describe('LogViewer active pod synchronisation', () => {
     const initial = getLogViewerPrefs(panelId);
     expect(initial).toBeDefined();
     expect(initial?.textFilter).toBe('');
-    expect(initial?.selectedFilters).toEqual([]);
+    expect(initial?.selectedFilters).toEqual({ mode: 'all' });
     expect(initial?.highlightMatches).toBe(false);
     expect(initial?.inverseMatches).toBe(false);
     expect(initial?.caseSensitiveMatches).toBe(false);
@@ -2656,7 +2775,10 @@ describe('LogViewer active pod synchronisation', () => {
       ['pod:web-1', 'container:app']
     );
 
-    expect(getLogViewerPrefs(panelId)?.selectedFilters).toEqual(['pod:web-1', 'container:app']);
+    expect(getLogViewerPrefs(panelId)?.selectedFilters).toEqual({
+      mode: 'some',
+      values: ['pod:web-1'],
+    });
   });
 
   it('preserves workload pod color metadata when using a custom timestamp format', async () => {

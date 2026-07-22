@@ -14,7 +14,7 @@ Architecture lives in the docs; read the one that owns your change first:
 | --- | --- |
 | Domain contract, scope rules, behavior classes, normalized query envelope | `docs/architecture/refresh-system.md` |
 | Store, ingest, governor/lifecycle, spill/Cold-serving, delivery | `docs/architecture/data-layer.md` |
-| Stream signal envelope, source clocks, signal-keying contract | `docs/architecture/resource-stream-signals.md` |
+| Retained-first activation, stream signals, source clocks, polling fallback | `docs/architecture/data-freshness.md` |
 | Serve-time metric join, metric doorbell, staleness/collecting states | `docs/architecture/resource-metrics.md` |
 | Multi-cluster identity and scope rules | `docs/architecture/multi-cluster.md` |
 
@@ -93,14 +93,16 @@ assertion. Typed table payloads must embed the normalized query envelope
 
 `backend/refresh/snapshot/service.go`: singleflight per cache key; truncated
 and partial-batch snapshots are never cached; only final batches are. Doorbell
-domains invalidate their cache before broadcasting (fragility point 9.1).
+and resource-stream domains invalidate their cache in
+`resourcestream.Manager.broadcast` before signal delivery (fragility point 9.1).
 
 ## Frontend scheduling in one paragraph
 
 `RefreshManager.ts` runs refreshers `idle → refreshing → cooldown` with
 exponential backoff (capped 60s); callbacks via `Promise.allSettled`; context
-changes abort then re-trigger; global pause blocks automatic but not manual
-refresh; streams suspend on hidden tabs. The orchestrator
+changes abort then issue a foreground (non-manual) reconciliation; global pause
+blocks passive automatic work but not foreground or manual refresh; streams
+suspend when the app document is hidden. The orchestrator
 (`orchestrator.ts`) owns per-cluster runtimes: enabled scopes, in-flight
 dedupe, stream health gating, metrics demand.
 
@@ -117,26 +119,32 @@ checklist when touching anything they name.
    path, never merge clusters into one result.
 4. **Single-cluster scopes** — refresh domains target exactly one cluster;
    fan out per-cluster, never pass multi-cluster scopes.
-5. **Stream resume overflow** — failed resume must fall back to full
-   re-snapshot or the UI silently shows stale rows.
+5. **Stream resume gaps** — failed resume must fall back to full re-snapshot or
+   the UI silently shows stale rows. A token-less subscription with retained
+   data has the same requirement: the server's RESET advances a declared
+   signal clock; it is not only an acknowledgement.
 6. **Rapid context changes** — abort→retrigger races when context updates beat
    abort completion.
 7. **Informer shutdown** — cancellation stops informers; `Shutdown()` only
    clears references. Cancel first or leak.
 8. **Metric doorbell chain** — poller collection observer
-   (`system/manager.go`) → `BroadcastMetricsRefresh` → metric-clock domains
-   (projection descriptors + explicit `cluster-overview` fan-out) → contract
-   `metric` source clock → `signalVersions` advance → refetch. Severing any
-   link silently freezes live usage between object events. The staleness
-   banner deliberately rides OUTSIDE this chain (client-side timer at
-   `collectedAt + staleAfterSeconds`) because the poller rings no doorbell on
-   failure. See `docs/architecture/resource-metrics.md`.
-9. **Doorbell-snapshot domains** (`namespaces` object clock, `object-events`
-   event clock, `cluster-overview` metric clock — poll-augmented):
-   1. **Invalidate before broadcast** (`wireNamespacesDoorbell`/
-      `wireObjectEventsDoorbell` → `InvalidateDomainCache`): the refetch lands
-      inside the 5s cache TTL; served from cache it applies the pre-change
-      snapshot forever. Tests wire through the same helpers.
+   (`system/manager.go`) → successful samples use `BroadcastMetricsRefresh` for
+   every metric-clock domain; failed attempts use the targeted
+   `BroadcastNamespaceMetricsRefresh` so namespace utilization leaves its
+   loading/previous-health state without refetching sample-bearing domains →
+   contract `metric` source clock → `signalVersions` advance → refetch.
+   Severing any link silently freezes live usage between object events.
+   Staleness for retained samples still rides OUTSIDE this chain (client-side
+   timer at `collectedAt + staleAfterSeconds`). See
+   `docs/architecture/resource-metrics.md`.
+9. **Doorbell-snapshot domains** (`namespaces` object clock,
+   `namespace-metrics` metric clock, `object-events` event clock,
+   `cluster-overview` metric clock — poll-augmented):
+   1. **Invalidate before broadcast** (`resourcestream.Manager.broadcast` →
+      the subsystem's `SnapshotService.InvalidateDomainCache` callback): the
+      refetch lands inside the 5s cache TTL; served from cache it applies the
+      pre-change snapshot forever. The manager test pins this ordering for all
+      resource-stream signal producers.
    2. **Doorbell refetches carry `reason: 'stream-signal'`** or the
       skip-while-stream-healthy gate swallows them.
    3. **Key refetch identity on `signalVersions` only** (never folded
@@ -174,13 +182,53 @@ checklist when touching anything they name.
        clusters through the build chokepoint on tab switch;
        `transitionClusterToLoading` keeps an already-ready cluster ready
        (re-warm serving is continuous).
+   12. **Governor tier application is serialized**: `reconcileGovernorWith`
+       may record newer visible-cluster intent while another call is cooling,
+       but executor actions cannot overlap. Otherwise `ensureRunning` can observe
+       the interval after feeds stop and before `Cooled` is published, accept it
+       as live, and leave every refresh domain without producers. Publish the desired
+       tier to the planned map before executor work, but update the applied map only
+       after the executor reaches that tier; the two maps encode different contracts.
+   13. **Cold clusters do not start object catalogs**:
+       `startObjectCatalogForTarget` gates on the serialized governor **planned** tier before
+       discovery or capability work. A Cold subsystem's ingest and informer feeds
+       are stopped, so starting its catalog creates API traffic and an endless
+       all-ingest-kinds-unsynced retry loop. Re-warm publishes a live plan before
+       rebuilding, and `ensureRunning` must not report the live tier reached until the
+       catalog exists; reading the last-applied tier reverses both ordering guarantees.
+   14. **Foreground activation replays lifecycle truth**: after serialized governor
+       reconciliation, `SetVisibleCluster` emits the cluster's current lifecycle
+       state even if it is unchanged. The Wails relay must reach both React state and
+       `eventBus` refresh-readiness consumers; otherwise a missed earlier edge leaves
+       the tab permanently behind its serving gate.
+   15. **Read scope is not refresh eligibility**: derive retained-data reads from the
+       selected cluster identity. Lifecycle may gate signals, leases, and requests,
+       but never the read key or rendered retained rows. When an open cluster becomes
+       temporarily ineligible, disable its scope with `preserveState: true`; clear the
+       scope only when the cluster is actually removed.
+   16. **Cold entry requires a retained baseline**: never stop a subsystem's producers
+       before server-owned `namespaces` readiness and the exact per-cluster
+       `cluster-overview` snapshot have built. A deferred transition must remain at its
+       actual live applied tier, then reconcile again when preparation succeeds. Use
+       both the aggregate service's server-owned Ready transition and the current
+       subsystem generation's `NamespaceNotifier.WorkloadsReady()` as proof of the
+       namespace baseline. The generation-local check is required because lifecycle
+       Ready may be retained across re-warm. Do not poll namespace snapshots from Cold
+       preparation (scoped builds may issue per-namespace API probes). The preparation
+       context belongs to the subsystem generation: replacement/teardown cancels it, and
+       the retry loop checks that its subsystem is still current before every attempt.
+       The sole exception is sustained memory pressure after the bounded preparation
+       grace: re-drive reconciliation on every over-budget sample, then use the normal
+       full teardown so available stores spill and heap is reclaimed. Do not mmap or
+       serve the unsettled baseline; backend data stays unavailable until re-warm.
 10. **Stream health = connected + server-confirmed synchronized**, not
     recently-delivered (`computeSubscriptionHealth`;
-    `markSubscriptionSynchronized` only on the mux subscribe ACK or an
-    absorbed RESET). Marking synchronized on merely SENDING a subscribe lets a
-    backend that rejects the domain freeze it with polls skipped. If health
-    regresses to delivery-only, every quiet domain reverts to timer polling.
-    Token-less subscriptions force-resync on (re)connect.
+    `markSubscriptionSynchronized` only after the mux confirms the subscribe).
+    A token-less RESET may confirm the tail only after it advances a declared
+    signal clock when retained data exists. Marking synchronized on merely
+    SENDING a subscribe lets a backend that rejects the domain freeze it with
+    polls skipped. If health regresses to delivery-only, every quiet domain
+    reverts to timer polling.
 
 **Consumer rule**: any reader of a stream-domain scope's `state.data` needs
 `useStreamSignalRefetch(domain, scopes)` or the query-table `liveDataVersion`

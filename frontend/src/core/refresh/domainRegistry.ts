@@ -63,6 +63,7 @@ export type RefreshCachePolicy =
   | 'snapshot-cache-with-merge'
   | 'snapshot-cache-bypass'
   | 'snapshot-cache-plus-provider-cache'
+  | 'provider-cache'
   | 'external-catalog-cache'
   | 'external-catalog-cache-with-merge'
   | 'stream-only';
@@ -137,7 +138,7 @@ export interface StreamResourceContractRecord {
 // RefreshSourceClock mirrors the backend streammux.Source taxonomy: the clocks
 // that can advance a domain's rows. This is the authored source of metric
 // dependency and doorbell source validation.
-export type RefreshSourceClock = 'object' | 'metric' | 'event' | 'catalog';
+export type RefreshSourceClock = 'object' | 'metric' | 'event' | 'catalog' | 'attention';
 
 export interface StreamDomainContractEntry {
   scopeKind: 'pod' | 'namespace' | 'cluster';

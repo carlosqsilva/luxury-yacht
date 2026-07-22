@@ -6,6 +6,7 @@
  */
 
 import { ALL_NAMESPACES_SCOPE } from '@modules/namespace/constants';
+import { DEFAULT_GRID_TABLE_FILTER_STATE } from '@shared/components/tables/gridTableFilterState';
 import { act, type ReactNode } from 'react';
 import * as ReactDOM from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -19,15 +20,17 @@ const {
   kubeconfigStateRef,
   setSelectedNamespaceMock,
   setActiveNamespaceTabMock,
+  setActiveClusterViewMock,
   setSidebarSelectionMock,
+  navigateToClusterViewMock,
   navigateToNamespaceMock,
-  emitPodsUnhealthySignalMock,
   getAppInfoMock,
   browserOpenURLMock,
   openWithObjectMock,
   setObjectPanelActiveTabMock,
   canResolveEventObjectReferenceMock,
   resolveEventObjectReferenceMock,
+  requestGridTableFiltersMock,
 } = vi.hoisted(() => {
   return {
     mockRefreshOrchestrator: {
@@ -55,15 +58,17 @@ const {
     },
     setSelectedNamespaceMock: vi.fn(),
     setActiveNamespaceTabMock: vi.fn(),
+    setActiveClusterViewMock: vi.fn(),
     setSidebarSelectionMock: vi.fn(),
+    navigateToClusterViewMock: vi.fn(),
     navigateToNamespaceMock: vi.fn(),
-    emitPodsUnhealthySignalMock: vi.fn(),
     getAppInfoMock: vi.fn(),
     browserOpenURLMock: vi.fn(),
     openWithObjectMock: vi.fn(),
     setObjectPanelActiveTabMock: vi.fn(),
     canResolveEventObjectReferenceMock: vi.fn(() => false),
     resolveEventObjectReferenceMock: vi.fn(),
+    requestGridTableFiltersMock: vi.fn(),
   };
 });
 let mockLifecycleState = 'ready';
@@ -87,6 +92,10 @@ vi.mock('@/core/refresh', () => ({
 vi.mock('@modules/kubernetes/config/KubeconfigContext', () => ({
   __esModule: true,
   useKubeconfig: () => kubeconfigStateRef.current,
+}));
+
+vi.mock('@shared/components/tables/hooks/useGridTableExternalFilters', () => ({
+  requestGridTableFilters: requestGridTableFiltersMock,
 }));
 
 vi.mock('@shared/components/ResourceBar', () => ({
@@ -158,7 +167,7 @@ vi.mock('@/core/contexts/ViewStateContext', () => ({
     setViewType: vi.fn(),
     setPreviousView: vi.fn(),
     setActiveNamespaceTab: setActiveNamespaceTabMock,
-    setActiveClusterView: vi.fn(),
+    setActiveClusterView: setActiveClusterViewMock,
     setIsSettingsOpen: vi.fn(),
     setIsAboutOpen: vi.fn(),
     toggleSidebar: vi.fn(),
@@ -170,15 +179,11 @@ vi.mock('@/core/contexts/ViewStateContext', () => ({
     onRowClick: vi.fn(),
     onCloseObjectPanel: vi.fn(),
     onNavigate: vi.fn(),
-    navigateToClusterView: vi.fn(),
+    navigateToClusterView: navigateToClusterViewMock,
     navigateToNamespace: navigateToNamespaceMock,
     onNamespaceSelect: vi.fn(),
     onClusterObjectsClick: vi.fn(),
   }),
-}));
-vi.mock('@modules/namespace/components/podsFilterSignals', () => ({
-  __esModule: true,
-  emitPodsUnhealthySignal: emitPodsUnhealthySignalMock,
 }));
 vi.mock('@wailsjs/go/backend/App', () => ({
   __esModule: true,
@@ -284,11 +289,6 @@ describe('ClusterOverview', () => {
     cleanupRoot = cleanup;
     await flushEffects();
 
-    expect(mockRefreshOrchestrator.fetchScopedDomain).toHaveBeenCalledWith(
-      'cluster-overview',
-      'cluster-1|',
-      expect.objectContaining({ isManual: false })
-    );
     expect(mockRefreshOrchestrator.setScopedDomainEnabled).toHaveBeenCalledWith(
       'cluster-overview',
       'cluster-1|',
@@ -297,6 +297,7 @@ describe('ClusterOverview', () => {
       // resets scoped state without it, blanking the overview per switch.
       { preserveState: true }
     );
+    expect(mockRefreshOrchestrator.fetchScopedDomain).not.toHaveBeenCalled();
     expect(container.querySelector('.cluster-overview')?.classList.contains('selectable')).toBe(
       true
     );
@@ -490,11 +491,43 @@ describe('ClusterOverview', () => {
       // resets scoped state without it, blanking the overview per switch.
       { preserveState: true }
     );
-    expect(mockRefreshOrchestrator.fetchScopedDomain).toHaveBeenCalledWith(
-      'cluster-overview',
-      'cluster-1|',
-      expect.objectContaining({ isManual: false })
-    );
+    expect(mockRefreshOrchestrator.fetchScopedDomain).not.toHaveBeenCalled();
+  });
+
+  it('repaints cached overview data on a cluster-tab switch without requesting a reload', async () => {
+    domainStateRef.current = createDomainState('ready', {
+      clusterId: 'cluster-1',
+      overview: {
+        ...EMPTY_OVERVIEW_DATA,
+        totalNodes: 3,
+      },
+    });
+    const { container, rerender, cleanup } = renderClusterOverview();
+    cleanupRoot = cleanup;
+    await flushEffects();
+    mockRefreshOrchestrator.fetchScopedDomain.mockClear();
+
+    kubeconfigStateRef.current = {
+      ...kubeconfigStateRef.current,
+      selectedKubeconfigs: ['cluster-1', 'cluster-2'],
+      selectedKubeconfig: 'cluster-2',
+      selectedClusterId: 'cluster-2',
+      selectedClusterName: 'cluster-2',
+      selectedClusterIds: ['cluster-1', 'cluster-2'],
+    };
+    domainStateRef.current = createDomainState('ready', {
+      clusterId: 'cluster-2',
+      overview: {
+        ...EMPTY_OVERVIEW_DATA,
+        totalNodes: 9,
+      },
+    });
+
+    rerender();
+    await flushEffects();
+
+    expect(statValueFor(container, 'total')).toBe('9');
+    expect(mockRefreshOrchestrator.fetchScopedDomain).not.toHaveBeenCalled();
   });
 
   it('stays empty and paused on a new cluster tab even if overview data exists for another cluster', async () => {
@@ -681,12 +714,14 @@ describe('ClusterOverview', () => {
     expect(container.textContent).not.toContain('Loading cluster overview...');
   });
 
-  it('navigates to the pods view with unhealthy filter when clicking a non-ready status card', async () => {
+  it('opens Cluster Attention with the matching Pod finding filters from each non-ready status', async () => {
     mockLifecycleState = 'loading';
     domainStateRef.current = createDomainState('ready', {
       overview: {
         ...EMPTY_OVERVIEW_DATA,
         startingPods: 3,
+        failingPods: 2,
+        terminatingPods: 1,
       },
     });
 
@@ -694,28 +729,38 @@ describe('ClusterOverview', () => {
     cleanupRoot = cleanup;
     await flushEffects();
 
-    const startingCard = container.querySelector('[data-testid="cluster-pod-status-starting"]');
-    expect(startingCard).not.toBeNull();
+    for (const [status, findings] of [
+      ['starting', ['pod-unhealthy']],
+      ['failing', ['error-presentation']],
+      ['terminating', ['pod-unhealthy']],
+    ] as const) {
+      const card = container.querySelector(`[data-testid="cluster-pod-status-${status}"]`);
+      expect(card).not.toBeNull();
 
-    act(() => {
-      startingCard?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    });
+      act(() => {
+        card?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
 
-    expect(setSelectedNamespaceMock).toHaveBeenCalledWith(ALL_NAMESPACES_SCOPE);
-    expect(setActiveNamespaceTabMock).toHaveBeenCalledWith('pods');
+      expect(requestGridTableFiltersMock).toHaveBeenLastCalledWith({
+        clusterId: 'cluster-1',
+        destinationViewId: 'cluster-attention',
+        filters: {
+          ...DEFAULT_GRID_TABLE_FILTER_STATE,
+          kinds: { mode: 'some', values: ['Pod'] },
+          queryFacets: { findings: { mode: 'some', values: [...findings] } },
+        },
+      });
+    }
+
+    expect(setActiveClusterViewMock).toHaveBeenCalledWith('attention');
     expect(setSidebarSelectionMock).toHaveBeenCalledWith({
-      type: 'namespace',
-      value: ALL_NAMESPACES_SCOPE,
+      type: 'cluster',
+      value: 'cluster',
     });
-    expect(navigateToNamespaceMock).toHaveBeenCalled();
-    expect(emitPodsUnhealthySignalMock).toHaveBeenCalledWith(
-      'cluster-1',
-      ALL_NAMESPACES_SCOPE,
-      'unhealthy'
-    );
+    expect(navigateToClusterViewMock).toHaveBeenCalledWith('cluster');
   });
 
-  it('navigates to the filtered pods view from signal cards', async () => {
+  it('navigates to Cluster Attention from restart and not-ready pod cards', async () => {
     mockLifecycleState = 'loading';
     domainStateRef.current = createDomainState('ready', {
       overview: {
@@ -737,23 +782,36 @@ describe('ClusterOverview', () => {
     act(() => {
       restartedCard?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
-    expect(emitPodsUnhealthySignalMock).toHaveBeenLastCalledWith(
-      'cluster-1',
-      ALL_NAMESPACES_SCOPE,
-      'restarts'
-    );
+    expect(setActiveClusterViewMock).toHaveBeenLastCalledWith('attention');
+    expect(requestGridTableFiltersMock).toHaveBeenLastCalledWith({
+      clusterId: 'cluster-1',
+      destinationViewId: 'cluster-attention',
+      filters: {
+        ...DEFAULT_GRID_TABLE_FILTER_STATE,
+        kinds: { mode: 'some', values: ['Pod'] },
+        queryFacets: { findings: { mode: 'some', values: ['restarts'] } },
+      },
+    });
 
     act(() => {
       notReadyCard?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
-    expect(emitPodsUnhealthySignalMock).toHaveBeenLastCalledWith(
-      'cluster-1',
-      ALL_NAMESPACES_SCOPE,
-      'not-ready'
-    );
+    expect(setActiveClusterViewMock).toHaveBeenLastCalledWith('attention');
+    expect(requestGridTableFiltersMock).toHaveBeenLastCalledWith({
+      clusterId: 'cluster-1',
+      destinationViewId: 'cluster-attention',
+      filters: {
+        ...DEFAULT_GRID_TABLE_FILTER_STATE,
+        kinds: { mode: 'some', values: ['Pod'] },
+        queryFacets: {
+          findings: { mode: 'some', values: ['pod-not-ready'] },
+        },
+      },
+    });
+    expect(navigateToClusterViewMock).toHaveBeenCalledWith('cluster');
   });
 
-  it('navigates to the pods view without unhealthy filter when clicking the ready item', async () => {
+  it('navigates to the Workloads Pods table without an unhealthy filter from the ready item', async () => {
     mockLifecycleState = 'loading';
     domainStateRef.current = createDomainState('ready', {
       overview: {
@@ -775,13 +833,51 @@ describe('ClusterOverview', () => {
     });
 
     expect(setSelectedNamespaceMock).toHaveBeenCalledWith(ALL_NAMESPACES_SCOPE);
-    expect(setActiveNamespaceTabMock).toHaveBeenCalledWith('pods');
+    expect(setActiveNamespaceTabMock).toHaveBeenCalledWith('workloads');
     expect(setSidebarSelectionMock).toHaveBeenCalledWith({
       type: 'namespace',
       value: ALL_NAMESPACES_SCOPE,
     });
     expect(navigateToNamespaceMock).toHaveBeenCalled();
-    expect(emitPodsUnhealthySignalMock).not.toHaveBeenCalled();
+    expect(requestGridTableFiltersMock).not.toHaveBeenCalled();
+  });
+
+  it('navigates from non-ready and cordoned node signals to Cluster Nodes', async () => {
+    mockLifecycleState = 'loading';
+    domainStateRef.current = createDomainState('ready', {
+      overview: {
+        ...EMPTY_OVERVIEW_DATA,
+        totalNodes: 5,
+        readyNodes: 3,
+        notReadyNodes: 2,
+        cordonedNodes: 1,
+      },
+    });
+
+    const { container, cleanup } = renderClusterOverview();
+    cleanupRoot = cleanup;
+    await flushEffects();
+
+    const readyItem = container.querySelector('[data-testid="cluster-node-health-ready"]');
+    const notReadyItem = container.querySelector('[data-testid="cluster-node-health-notReady"]');
+    const cordonedItem = container.querySelector('[data-testid="cluster-node-health-cordoned"]');
+    expect(readyItem?.tagName).toBe('DIV');
+    expect(notReadyItem?.tagName).toBe('BUTTON');
+    expect(cordonedItem?.tagName).toBe('BUTTON');
+
+    act(() => {
+      notReadyItem?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(setActiveClusterViewMock).toHaveBeenCalledWith('nodes');
+    expect(navigateToClusterViewMock).toHaveBeenCalledWith('cluster');
+    expect(setSidebarSelectionMock).toHaveBeenCalledWith({ type: 'cluster', value: 'cluster' });
+
+    act(() => {
+      cordonedItem?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(setActiveClusterViewMock).toHaveBeenCalledTimes(2);
+    expect(setActiveClusterViewMock).toHaveBeenLastCalledWith('nodes');
   });
 
   it('opens the recent event target via the UID-aware resolver and selects the events tab', async () => {
@@ -1189,7 +1285,7 @@ function statValueFor(container: HTMLElement, label: string): string {
 
 function createDomainState(
   status: 'loading' | 'idle' | 'ready' | 'updating' | 'error',
-  overrides: Partial<{ overview: ClusterOverviewPayload; error: string }> = {}
+  overrides: Partial<{ clusterId: string; overview: ClusterOverviewPayload; error: string }> = {}
 ): {
   status: 'loading' | 'idle' | 'ready' | 'updating' | 'error';
   data:
@@ -1203,7 +1299,7 @@ function createDomainState(
     }
     return {
       status,
-      data: { overview: overrides.overview },
+      data: { clusterId: overrides.clusterId, overview: overrides.overview },
       error: null,
     };
   }

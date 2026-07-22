@@ -16,6 +16,7 @@ import (
 	"github.com/luxury-yacht/app/backend/refresh/domain"
 	"github.com/luxury-yacht/app/backend/refresh/system"
 	"github.com/luxury-yacht/app/backend/refresh/telemetry"
+	"github.com/luxury-yacht/app/backend/resourcemodel"
 )
 
 func (a *App) resolveMetricsInterval() time.Duration {
@@ -69,10 +70,11 @@ func (a *App) setupRefreshSubsystem() error {
 		return err
 	}
 
-	// The subsystems above are all started Foreground. Settle them to the
-	// governor's tiers (visible Foreground, warm set Background with metrics
-	// paused, the rest Cold) and start the memory-pressure loop, which stops
-	// when the refresh context is cancelled.
+	// The subsystems above all have live manager starts in flight. Begin settling
+	// them to the governor's tiers (visible Foreground, warm set Background, the
+	// rest Cold). A Cold assignment keeps its producers live until the server has
+	// built the retained namespace/overview baseline. The memory-pressure loop
+	// stops when the refresh context is cancelled.
 	a.seedGovernorFromOpenClusters()
 	go a.startGovernorPressureLoop(ctx)
 
@@ -227,6 +229,12 @@ func (a *App) buildRefreshSubsystemForSelection(
 		ClusterID:                  clusterMeta.ID,
 		ClusterName:                clusterMeta.Name,
 		AllowedNamespaces:          a.allowedNamespacesForCluster(clusterMeta.ID),
+		AttentionIgnoreRules:       a.attentionIgnoreRulesForCluster(clusterMeta.ID),
+		AttentionIgnoredObjectPruner: func(ref resourcemodel.ResourceRef) {
+			if err := a.pruneClusterAttentionIgnoredObject(clusterMeta.ID, ref); err != nil {
+				a.logger.Warn(fmt.Sprintf("Could not prune obsolete Attention ignore for cluster %s: %v", clusterMeta.ID, err), logsources.Settings, clusterMeta.ID, clusterMeta.ID)
+			}
+		},
 	}
 
 	cfg.ObjectCatalogService = func() *objectcatalog.Service {
@@ -374,12 +382,13 @@ func (a *App) buildRefreshMux(
 	// cluster's recorder (each stamps its own clusterId) instead of reporting one
 	// picked cluster's counters. Re-scoped on cluster open/close via Update below.
 	aggregateTelemetryHandler := newAggregateTelemetry(clusterOrder, subsystems)
+	aggregateMetrics := newAggregateMetricsController(subsystems)
 
 	mux := system.BuildRefreshMux(system.MuxConfig{
 		SnapshotService: aggregateService,
 		ManualQueue:     aggregateQueue,
 		Telemetry:       aggregateTelemetryHandler,
-		Metrics:         nil, // Don't tie metrics to a single cluster.
+		Metrics:         aggregateMetrics,
 		HealthHub:       nil, // Health is per-cluster, not global.
 	})
 	// withStreamCORS guarantees CORS headers on every stream response,
@@ -395,6 +404,7 @@ func (a *App) buildRefreshMux(
 		containerLogs: aggregateContainerLogs,
 		resources:     aggregateResources,
 		telemetry:     aggregateTelemetryHandler,
+		metrics:       aggregateMetrics,
 	}
 	return mux, aggregates, nil
 }
@@ -406,6 +416,7 @@ type refreshAggregateHandlers struct {
 	containerLogs *aggregateContainerLogsStreamHandler
 	resources     *aggregateResourceStreamHandler
 	telemetry     *aggregateTelemetry
+	metrics       *aggregateMetricsController
 }
 
 // Update refreshes aggregate endpoint wiring without rebuilding the HTTP server.
@@ -417,6 +428,9 @@ func (h *refreshAggregateHandlers) Update(clusterOrder []string, subsystems map[
 		// Re-scope diagnostics telemetry to the new active cluster set so a
 		// closed cluster's counters stop being reported.
 		h.telemetry.Update(clusterOrder, subsystems)
+	}
+	if h.metrics != nil {
+		h.metrics.Update(subsystems)
 	}
 	if h.resources != nil {
 		if err := h.resources.Update(subsystems); err != nil {

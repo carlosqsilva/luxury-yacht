@@ -31,10 +31,15 @@ import {
   useRef,
   useState,
 } from 'react';
-import { requestContextRefresh } from '@/core/data-access';
 import { eventBus } from '@/core/events';
+import { shouldSyncClusterNavigationTarget } from '@/core/navigation/workspace';
 import { refreshOrchestrator } from '@/core/refresh';
-import type { ClusterViewType, NamespaceViewType, ViewType } from '@/types/navigation/views';
+import type {
+  ClusterViewType,
+  GlobalViewType,
+  NamespaceViewType,
+  ViewType,
+} from '@/types/navigation/views';
 import { ModalStateProvider, useModalState } from './ModalStateContext';
 // Import specialized contexts
 import { SidebarStateProvider, useSidebarState } from './SidebarStateContext';
@@ -52,11 +57,15 @@ interface NavigationStateContextType {
   previousView: ViewType;
   activeNamespaceTab: NamespaceViewType;
   activeClusterTab: ClusterViewType | null;
+  activeGlobalTab: GlobalViewType;
 
   setViewType: (view: ViewType) => void;
   setPreviousView: (view: ViewType) => void;
   setActiveNamespaceTab: (tab: NamespaceViewType) => void;
   setActiveClusterView: (tab: ClusterViewType | null) => void;
+  setClusterNavigationTarget: (clusterId: string, target: ClusterNavigationTarget) => void;
+  navigateToGlobal: (view?: GlobalViewType) => void;
+  activateClusterWorkspace: (clusterId?: string) => void;
 
   // Complex navigation actions
   navigateToClusterView: (viewType: ViewType) => void;
@@ -71,17 +80,59 @@ interface NavigationStateContextType {
 const NavigationStateContext = createContext<NavigationStateContextType | undefined>(undefined);
 
 export interface NavigationTabState {
-  viewType: ViewType;
-  previousView: ViewType;
+  viewType: Exclude<ViewType, 'global'>;
+  previousView: Exclude<ViewType, 'global'>;
   activeNamespaceView: NamespaceViewType;
   activeClusterView: ClusterViewType | null;
 }
+
+export type ClusterNavigationTarget =
+  | {
+      viewType: 'overview' | 'cluster';
+      activeClusterView: ClusterViewType | null;
+    }
+  | {
+      viewType: 'namespace';
+      activeNamespaceView: NamespaceViewType;
+    };
 
 const DEFAULT_NAVIGATION_STATE: NavigationTabState = {
   viewType: 'overview',
   previousView: 'overview',
   activeNamespaceView: 'workloads',
   activeClusterView: null,
+};
+
+export type NavigationWorkspace = 'cluster' | 'global';
+
+export const resolveNavigationWorkspace = (
+  workspace: NavigationWorkspace,
+  openClusterCount: number
+): NavigationWorkspace => (workspace === 'global' && openClusterCount > 1 ? 'global' : 'cluster');
+
+export const applyClusterNavigationTarget = (
+  states: Record<string, NavigationTabState>,
+  clusterId: string,
+  target: ClusterNavigationTarget
+): Record<string, NavigationTabState> => {
+  const targetClusterId = clusterId.trim();
+  if (!targetClusterId) {
+    return states;
+  }
+  const current = states[targetClusterId] ?? DEFAULT_NAVIGATION_STATE;
+  const destination =
+    target.viewType === 'namespace'
+      ? { activeNamespaceView: target.activeNamespaceView }
+      : { activeClusterView: target.activeClusterView };
+  return {
+    ...states,
+    [targetClusterId]: {
+      ...current,
+      previousView: current.viewType,
+      viewType: target.viewType,
+      ...destination,
+    },
+  };
 };
 
 const useNavigationState = () => {
@@ -102,9 +153,18 @@ const NavigationStateProvider: React.FC<NavigationStateProviderProps> = ({ child
   const [navigationStateByCluster, setNavigationStateByCluster] = useState<
     Record<string, NavigationTabState>
   >({});
+  const [workspace, setWorkspace] = useState<NavigationWorkspace>('cluster');
+  const [activeGlobalView, setActiveGlobalViewState] = useState<GlobalViewType>('fleet');
   const clusterKey = selectedClusterId || '__default__';
   const activeState = navigationStateByCluster[clusterKey] ?? DEFAULT_NAVIGATION_STATE;
-  const { viewType, previousView, activeNamespaceView, activeClusterView } = activeState;
+  const {
+    viewType: activeClusterViewType,
+    previousView,
+    activeNamespaceView,
+    activeClusterView,
+  } = activeState;
+  const resolvedWorkspace = resolveNavigationWorkspace(workspace, selectedClusterIds.length);
+  const viewType: ViewType = resolvedWorkspace === 'global' ? 'global' : activeClusterViewType;
 
   // Keep a ref to the latest navigation state map for stable callback access.
   const navigationStateByClusterRef = useRef(navigationStateByCluster);
@@ -148,19 +208,70 @@ const NavigationStateProvider: React.FC<NavigationStateProviderProps> = ({ child
     });
   }, [selectedClusterIds]);
 
+  useEffect(() => {
+    if (workspace === resolvedWorkspace) {
+      return;
+    }
+    setWorkspace(resolvedWorkspace);
+  }, [resolvedWorkspace, workspace]);
+
   // Enhanced setViewType that notifies RefreshManager
   const setViewType = useCallback(
     (view: ViewType) => {
-      const viewIsChanging = view !== viewType;
+      if (view === 'global') {
+        if (selectedClusterIds.length > 1) {
+          setWorkspace('global');
+          refreshOrchestrator.updateContext({
+            currentView: 'global',
+            activeClusterView: undefined,
+          });
+        }
+        return;
+      }
+      setWorkspace('cluster');
       updateActiveState((prev) => ({ ...prev, viewType: view }));
 
       refreshOrchestrator.updateContext({ currentView: view });
+    },
+    [selectedClusterIds.length, updateActiveState]
+  );
 
-      if (viewIsChanging) {
-        void requestContextRefresh({ reason: 'startup' });
+  const navigateToGlobal = useCallback(
+    (view?: GlobalViewType) => {
+      if (selectedClusterIds.length < 2) {
+        return;
+      }
+      if (view) {
+        setActiveGlobalViewState(view);
+      }
+      setWorkspace('global');
+      refreshOrchestrator.updateContext({
+        currentView: 'global',
+        activeClusterView: undefined,
+      });
+    },
+    [selectedClusterIds.length]
+  );
+
+  const activateClusterWorkspace = useCallback(
+    (clusterId?: string) => {
+      const targetClusterId = clusterId?.trim() || selectedClusterId || clusterKey;
+      const targetState =
+        navigationStateByClusterRef.current[targetClusterId] ?? DEFAULT_NAVIGATION_STATE;
+      setWorkspace('cluster');
+      // When activating a different cluster, KubeconfigContext owns the
+      // subsequent selectedClusterId transition and refresh. Writing the
+      // target route into the still-current cluster context would briefly
+      // pair one cluster's identity with another cluster's navigation.
+      if (targetClusterId === selectedClusterId) {
+        refreshOrchestrator.updateContext({
+          currentView: targetState.viewType,
+          activeNamespaceView: targetState.activeNamespaceView,
+          activeClusterView: targetState.activeClusterView ?? undefined,
+        });
       }
     },
-    [updateActiveState, viewType]
+    [clusterKey, selectedClusterId]
   );
 
   const setActiveClusterView = useCallback(
@@ -173,9 +284,40 @@ const NavigationStateProvider: React.FC<NavigationStateProviderProps> = ({ child
     [updateActiveState]
   );
 
+  const setClusterNavigationTarget = useCallback(
+    (clusterId: string, target: ClusterNavigationTarget) => {
+      const targetClusterId = clusterId.trim();
+      if (!targetClusterId) {
+        return;
+      }
+      setNavigationStateByCluster((previous) =>
+        applyClusterNavigationTarget(previous, targetClusterId, target)
+      );
+      if (
+        shouldSyncClusterNavigationTarget(targetClusterId, selectedClusterId, resolvedWorkspace)
+      ) {
+        refreshOrchestrator.updateContext(
+          target.viewType === 'namespace'
+            ? {
+                currentView: target.viewType,
+                activeNamespaceView: target.activeNamespaceView,
+              }
+            : {
+                currentView: target.viewType,
+                activeClusterView: target.activeClusterView ?? undefined,
+              }
+        );
+      }
+    },
+    [resolvedWorkspace, selectedClusterId]
+  );
+
   const setPreviousView = useCallback(
     (view: ViewType) => {
-      updateActiveState((prev) => ({ ...prev, previousView: view }));
+      updateActiveState((prev) => ({
+        ...prev,
+        previousView: view === 'global' ? prev.viewType : view,
+      }));
     },
     [updateActiveState]
   );
@@ -226,6 +368,8 @@ const NavigationStateProvider: React.FC<NavigationStateProviderProps> = ({ child
   useEffect(() => {
     const handleResetViews = () => {
       updateActiveState(() => DEFAULT_NAVIGATION_STATE);
+      setWorkspace('cluster');
+      setActiveGlobalViewState('fleet');
       setSidebarSelection({ type: 'overview', value: 'overview' });
     };
 
@@ -238,10 +382,14 @@ const NavigationStateProvider: React.FC<NavigationStateProviderProps> = ({ child
       previousView,
       activeNamespaceTab: activeNamespaceView,
       activeClusterTab: activeClusterView,
+      activeGlobalTab: activeGlobalView,
       setViewType,
       setPreviousView,
       setActiveNamespaceTab: setActiveNamespaceView,
       setActiveClusterView,
+      setClusterNavigationTarget,
+      navigateToGlobal,
+      activateClusterWorkspace,
       navigateToClusterView,
       navigateToNamespace,
       onNamespaceSelect,
@@ -253,10 +401,14 @@ const NavigationStateProvider: React.FC<NavigationStateProviderProps> = ({ child
       previousView,
       activeNamespaceView,
       activeClusterView,
+      activeGlobalView,
       setViewType,
       setPreviousView,
       setActiveNamespaceView,
       setActiveClusterView,
+      setClusterNavigationTarget,
+      navigateToGlobal,
+      activateClusterWorkspace,
       navigateToClusterView,
       navigateToNamespace,
       onNamespaceSelect,
@@ -283,7 +435,7 @@ const RefreshSyncProvider: React.FC<{ children: React.ReactNode }> = ({ children
     refreshOrchestrator.updateContext({
       currentView: viewType,
       activeNamespaceView: activeNamespaceTab,
-      activeClusterView: activeClusterTab ?? undefined,
+      activeClusterView: viewType === 'cluster' ? (activeClusterTab ?? undefined) : undefined,
       objectPanel: {
         isOpen: showObjectPanel,
       },

@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -42,6 +43,7 @@ import (
 	"github.com/luxury-yacht/app/backend/refresh/resourcestream"
 	"github.com/luxury-yacht/app/backend/refresh/snapshot"
 	"github.com/luxury-yacht/app/backend/refresh/telemetry"
+	"github.com/luxury-yacht/app/backend/resourcemodel"
 	"github.com/luxury-yacht/app/backend/resources/common"
 )
 
@@ -54,24 +56,26 @@ type PermissionIssue struct {
 
 // Config contains the dependencies required to initialise the refresh manager.
 type Config struct {
-	KubernetesClient           kubernetes.Interface                     // Kubernetes client for API interactions.
-	MetricsClient              *metricsclient.Clientset                 // Metrics client for collecting cluster metrics.
-	RestConfig                 *rest.Config                             // REST configuration for Kubernetes client.
-	ResyncInterval             time.Duration                            // Interval for resyncing informers.
-	MetricsInterval            time.Duration                            // Interval for collecting metrics.
-	APIExtensionsClient        apiextensionsclientset.Interface         // Client for API extensions.
-	GatewayClient              gatewayversioned.Interface               // Gateway API client for direct Gateway API resource access.
-	GatewayInformerFactory     gatewayinformers.SharedInformerFactory   // Informers for Gateway API resources.
-	GatewayAPIPresence         common.GatewayAPIPresence                // Installed Gateway API kind set.
-	DynamicClient              dynamic.Interface                        // Dynamic client for interacting with Kubernetes resources.
-	ObjectDetailsProvider      snapshot.ObjectDetailProvider            // Provider for detailed object information.
-	Logger                     containerlogsstream.Logger               // Logger for recording refresh operations.
-	ObjectCatalogEnabled       func() bool                              // Function to check if the object catalog is enabled.
-	ObjectCatalogService       func() *objectcatalog.Service            // Function to get the object catalog service.
-	ObjectCatalogNamespaces    func() []snapshot.CatalogNamespaceGroup  // Function to get the object catalog namespaces.
-	ContainerLogsTargetLimiter *containerlogsstream.GlobalTargetLimiter // Shared global limiter for container logs stream targets.
-	ClusterID                  string                                   // stable identifier for cluster-scoped keys
-	ClusterName                string                                   // display name for cluster in payloads
+	KubernetesClient             kubernetes.Interface                     // Kubernetes client for API interactions.
+	MetricsClient                *metricsclient.Clientset                 // Metrics client for collecting cluster metrics.
+	RestConfig                   *rest.Config                             // REST configuration for Kubernetes client.
+	ResyncInterval               time.Duration                            // Interval for resyncing informers.
+	MetricsInterval              time.Duration                            // Interval for collecting metrics.
+	APIExtensionsClient          apiextensionsclientset.Interface         // Client for API extensions.
+	GatewayClient                gatewayversioned.Interface               // Gateway API client for direct Gateway API resource access.
+	GatewayInformerFactory       gatewayinformers.SharedInformerFactory   // Informers for Gateway API resources.
+	GatewayAPIPresence           common.GatewayAPIPresence                // Installed Gateway API kind set.
+	DynamicClient                dynamic.Interface                        // Dynamic client for interacting with Kubernetes resources.
+	ObjectDetailsProvider        snapshot.ObjectDetailProvider            // Provider for detailed object information.
+	Logger                       containerlogsstream.Logger               // Logger for recording refresh operations.
+	ObjectCatalogEnabled         func() bool                              // Function to check if the object catalog is enabled.
+	ObjectCatalogService         func() *objectcatalog.Service            // Function to get the object catalog service.
+	ObjectCatalogNamespaces      func() []snapshot.CatalogNamespaceGroup  // Function to get the object catalog namespaces.
+	ContainerLogsTargetLimiter   *containerlogsstream.GlobalTargetLimiter // Shared global limiter for container logs stream targets.
+	ClusterID                    string                                   // stable identifier for cluster-scoped keys
+	ClusterName                  string                                   // display name for cluster in payloads
+	AttentionIgnoreRules         snapshot.AttentionIgnoreRules
+	AttentionIgnoredObjectPruner func(resourcemodel.ResourceRef)
 	// AllowedNamespaces is the cluster's namespace scope
 	// (docs/plans/namespace-scope.md). Empty means cluster-wide. Enforced by
 	// the permission checker's scope fan-out, the scoped namespaces domain,
@@ -100,6 +104,7 @@ type Subsystem struct {
 	// into the torn-down stream manager.
 	NamespaceNotifier    *snapshot.NamespaceChangeNotifier
 	ObjectEventsNotifier *snapshot.ObjectEventsChangeNotifier
+	AttentionIndex       *snapshot.ClusterAttentionIndex
 	// NamespacesDoorbell is the post-broadcast observer slot on the namespaces
 	// doorbell; the app attaches the cluster-Ready self-build hook here (see
 	// app_refresh_setup) once the aggregate service exists.
@@ -112,6 +117,103 @@ type Subsystem struct {
 	// cooled, always-settled informer hub). A cooled subsystem is non-nil but NOT live:
 	// the governor re-warm path detects this and rebuilds a fresh, live subsystem.
 	Cooled bool
+
+	// coldPreparation is the server-owned gate in front of Cooled. Its context is
+	// owned by this subsystem generation so replacement/teardown can stop both an
+	// in-flight build and its retry loop.
+	coldPreparationMu      sync.Mutex
+	coldPreparationState   coldPreparationState
+	coldPreparationStarted time.Time
+	coldPreparationCancel  context.CancelFunc
+}
+
+type coldPreparationState uint8
+
+const (
+	coldPreparationNotStarted coldPreparationState = iota
+	coldPreparationRunning
+	coldPreparationReady
+)
+
+// BeginColdPreparation elects one goroutine to prepare the retained snapshots
+// required before this subsystem may stop its live producers. The returned
+// context is canceled when this subsystem generation stops.
+func (s *Subsystem) BeginColdPreparation(parent context.Context, startedAt time.Time) (context.Context, bool) {
+	if s == nil || parent == nil {
+		return nil, false
+	}
+	s.coldPreparationMu.Lock()
+	defer s.coldPreparationMu.Unlock()
+	if s.coldPreparationState != coldPreparationNotStarted {
+		return nil, false
+	}
+	ctx, cancel := context.WithCancel(parent)
+	s.coldPreparationState = coldPreparationRunning
+	s.coldPreparationStarted = startedAt
+	s.coldPreparationCancel = cancel
+	return ctx, true
+}
+
+// MarkColdServingReady records that the retained baseline has been built from
+// settled sources and this subsystem is eligible for the Cold serving tier.
+func (s *Subsystem) MarkColdServingReady() {
+	if s == nil {
+		return
+	}
+	s.coldPreparationMu.Lock()
+	if s.coldPreparationState == coldPreparationRunning {
+		s.coldPreparationState = coldPreparationReady
+	}
+	cancel := s.coldPreparationCancel
+	s.coldPreparationCancel = nil
+	s.coldPreparationMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// CancelColdPreparation stops work owned by this subsystem generation.
+func (s *Subsystem) CancelColdPreparation() {
+	if s == nil {
+		return
+	}
+	s.coldPreparationMu.Lock()
+	cancel := s.coldPreparationCancel
+	s.coldPreparationCancel = nil
+	s.coldPreparationState = coldPreparationNotStarted
+	s.coldPreparationStarted = time.Time{}
+	s.coldPreparationMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// ColdServingReady reports whether the server-owned retained baseline exists.
+func (s *Subsystem) ColdServingReady() bool {
+	if s == nil {
+		return false
+	}
+	s.coldPreparationMu.Lock()
+	defer s.coldPreparationMu.Unlock()
+	return s.coldPreparationState == coldPreparationReady
+}
+
+// ColdPreparationAge reports how long this generation has been preparing its
+// retained baseline. Ready and not-started generations are not pending.
+func (s *Subsystem) ColdPreparationAge(now time.Time) (time.Duration, bool) {
+	if s == nil {
+		return 0, false
+	}
+	s.coldPreparationMu.Lock()
+	defer s.coldPreparationMu.Unlock()
+	if s.coldPreparationState != coldPreparationRunning || s.coldPreparationStarted.IsZero() {
+		return 0, false
+	}
+	age := now.Sub(s.coldPreparationStarted)
+	if age < 0 {
+		age = 0
+	}
+	return age, true
 }
 
 // NewSubsystem prepares the refresh manager, HTTP handler, and supporting services.
@@ -188,11 +290,22 @@ func NewSubsystemWithServices(cfg Config) (*Subsystem, error) {
 	// the shared factory's RS lister — the RS informer stays registered (only pods is
 	// cut). Registered BEFORE the hub starts so the pod reflector launches with the
 	// rest and the initial relist is sync-gated.
-	registerPodReflector(ingestManager, informerFactory, snapshot.ClusterMeta{ClusterID: cfg.ClusterID, ClusterName: cfg.ClusterName})
+	jobControllerOwners := snapshot.NewJobControllerOwnerIndex()
+	registerPodReflector(
+		ingestManager,
+		informerFactory,
+		snapshot.ClusterMeta{ClusterID: cfg.ClusterID, ClusterName: cfg.ClusterName},
+		jobControllerOwners.Lookup,
+	)
 	// The five workload kinds (Deployment/StatefulSet/DaemonSet/Job/CronJob) have no Stream
 	// descriptor either (their table is the bespoke cross-kind WorkloadSummary), so they too
 	// are wired with explicit bespoke projectors. ReplicaSet stays on its typed informer.
-	registerWorkloadReflectors(ingestManager, snapshot.ClusterMeta{ClusterID: cfg.ClusterID, ClusterName: cfg.ClusterName})
+	if err := registerWorkloadReflectors(ingestManager, snapshot.ClusterMeta{ClusterID: cfg.ClusterID, ClusterName: cfg.ClusterName}); err != nil {
+		return nil, err
+	}
+	if !ingestManager.AddBundleSink(snapshot.JobGVR, jobControllerOwners) {
+		return nil, fmt.Errorf("register Job owner sink: Job ingest store is unavailable")
+	}
 	// Service and EndpointSlice have no Stream descriptor either (a Service row is the bespoke
 	// Service↔EndpointSlice join), so they are wired with explicit bespoke projectors. Ingress
 	// and NetworkPolicy ARE Stream-backed and handled by the generic loop above.
@@ -299,6 +412,7 @@ func NewSubsystemWithServices(cfg Config) (*Subsystem, error) {
 
 	var namespaceNotifier *snapshot.NamespaceChangeNotifier
 	var objectEventsNotifier *snapshot.ObjectEventsChangeNotifier
+	var attentionIndex *snapshot.ClusterAttentionIndex
 	deps := registrationDeps{
 		registry:        registry,
 		informerFactory: informerFactory,
@@ -312,6 +426,9 @@ func NewSubsystemWithServices(cfg Config) (*Subsystem, error) {
 		},
 		noteObjectEventsNotifier: func(notifier *snapshot.ObjectEventsChangeNotifier) {
 			objectEventsNotifier = notifier
+		},
+		noteAttentionIndex: func(index *snapshot.ClusterAttentionIndex) {
+			attentionIndex = index
 		},
 	}
 
@@ -348,8 +465,11 @@ func NewSubsystemWithServices(cfg Config) (*Subsystem, error) {
 		SnapshotService: snapshotService,
 		ManualQueue:     queue,
 		Telemetry:       telemetryRecorder,
-		Metrics:         manager,
-		HealthHub:       informerHub,
+		Metrics: singleClusterMetricsDemandController{
+			clusterID: clusterMeta.ClusterID,
+			manager:   manager,
+		},
+		HealthHub: informerHub,
 	})
 
 	eventManager, resourceManager, err := registerStreamHandlers(mux, streamDeps{
@@ -363,6 +483,9 @@ func NewSubsystemWithServices(cfg Config) (*Subsystem, error) {
 	})
 	if err != nil {
 		return nil, err
+	}
+	if resourceManager != nil {
+		resourceManager.SetSnapshotDomainInvalidator(snapshotService.InvalidateDomainCache)
 	}
 	if eventManager != nil && resourceManager != nil {
 		eventManager.SetSignalObserver(eventSignalObserver(resourceManager))
@@ -384,13 +507,16 @@ func NewSubsystemWithServices(cfg Config) (*Subsystem, error) {
 	// slot lets the app attach the cluster-Ready self-build hook post-construction.
 	namespacesDoorbellObserver := &NamespacesDoorbellObserver{}
 	if resourceManager != nil && namespaceNotifier != nil {
-		wireNamespacesDoorbell(snapshotService, namespaceNotifier, resourceManager, namespacesDoorbellObserver)
+		wireNamespacesDoorbell(namespaceNotifier, resourceManager, namespacesDoorbellObserver)
 	}
 	// Object-events doorbell: an event for a panel's object broadcasts to that
 	// object's subscribed events scope, replacing the Events tab's 10s poll
 	// (the poll remains only as the stream-down fallback).
 	if resourceManager != nil && objectEventsNotifier != nil {
-		wireObjectEventsDoorbell(snapshotService, objectEventsNotifier, resourceManager)
+		wireObjectEventsDoorbell(objectEventsNotifier, resourceManager)
+	}
+	if resourceManager != nil && attentionIndex != nil {
+		wireClusterAttentionDoorbell(attentionIndex, resourceManager)
 	}
 
 	return &Subsystem{
@@ -409,12 +535,13 @@ func NewSubsystemWithServices(cfg Config) (*Subsystem, error) {
 		ClusterMeta:          clusterMeta,
 		NamespaceNotifier:    namespaceNotifier,
 		ObjectEventsNotifier: objectEventsNotifier,
+		AttentionIndex:       attentionIndex,
 		NamespacesDoorbell:   namespacesDoorbellObserver,
 	}, nil
 }
 
 // StopDoorbellNotifiers silences every doorbell notifier (namespaces,
-// object-events); nil-safe for subsystems built without them (tests, failed
+// object-events, cluster-attention); nil-safe for subsystems built without them (tests, failed
 // registration). Every teardown/cool path must call this or the notifiers'
 // debounce/rearm timers keep broadcasting into the dead stream manager.
 func (s *Subsystem) StopDoorbellNotifiers() {
@@ -427,16 +554,19 @@ func (s *Subsystem) StopDoorbellNotifiers() {
 	if s.ObjectEventsNotifier != nil {
 		s.ObjectEventsNotifier.Stop()
 	}
+	if s.AttentionIndex != nil {
+		s.AttentionIndex.Stop()
+	}
 }
 
-// metricsSignalObserver maps a successful poller collection to a SourceMetric
-// doorbell on the resource stream. The version is the collection revision
-// (CollectedAt nanos) — identical to the snapshot builders' metric source clock
-// (metricRevisionFromMetadata), so the doorbell and the snapshot ETag advance
-// together. A zero CollectedAt means no sample exists yet; nothing to announce.
-// wireNamespacesDoorbell and wireObjectEventsDoorbell attach a notifier's
-// broadcast with the ORDERING CONTRACT every doorbell must honor: invalidate
-// the domain's snapshot cache FIRST, then broadcast. The doorbell-triggered
+// metricsSignalObserver sends every completed attempt to the namespace health
+// notifier, while only successful samples ring the shared SourceMetric
+// doorbell. This preserves polling for poll-augmented domains while allowing a
+// first failure to move Namespaces out of loading. An empty revision means no
+// attempt has completed yet.
+// Resource-stream Manager.broadcast owns the ordering contract every doorbell
+// must honor: invalidate the domain's snapshot cache first, then deliver the
+// signal. The doorbell-triggered
 // refetch arrives ~500ms after the change — inside the snapshot cache TTL —
 // and served from cache it would apply the PRE-change snapshot permanently,
 // because doorbells fire once per change and polling skips while the stream
@@ -469,13 +599,11 @@ func (o *NamespacesDoorbellObserver) Invoke(version, reason string) {
 }
 
 func wireNamespacesDoorbell(
-	service *snapshot.Service,
 	notifier *snapshot.NamespaceChangeNotifier,
 	resourceManager *resourcestream.Manager,
 	observer *NamespacesDoorbellObserver,
 ) {
 	notifier.SetBroadcast(func(version, reason string) {
-		service.InvalidateDomainCache("namespaces")
 		resourceManager.BroadcastNamespacesRefresh(version, reason)
 		// After invalidate+broadcast: a self-build triggered here always sees
 		// post-change data (the cluster-Ready hook rides this).
@@ -484,22 +612,38 @@ func wireNamespacesDoorbell(
 }
 
 func wireObjectEventsDoorbell(
-	service *snapshot.Service,
 	notifier *snapshot.ObjectEventsChangeNotifier,
 	resourceManager *resourcestream.Manager,
 ) {
 	notifier.SetBroadcast(func(version string, matches func(scope string) bool) {
-		service.InvalidateDomainCache("object-events")
 		resourceManager.BroadcastObjectEventsRefresh(version, matches)
+	})
+}
+
+type attentionDoorbellNotifier interface {
+	SetBroadcast(func(version string))
+}
+
+func wireClusterAttentionDoorbell(
+	notifier attentionDoorbellNotifier,
+	resourceManager *resourcestream.Manager,
+) {
+	notifier.SetBroadcast(func(version string) {
+		resourceManager.BroadcastClusterAttentionRefresh(version)
 	})
 }
 
 func metricsSignalObserver(resourceManager *resourcestream.Manager) func(metrics.Metadata) {
 	return func(metadata metrics.Metadata) {
-		if resourceManager == nil || metadata.CollectedAt.IsZero() {
+		revision := metrics.Revision(metadata)
+		if revision == "" || resourceManager == nil {
 			return
 		}
-		resourceManager.BroadcastMetricsRefresh(strconv.FormatInt(metadata.CollectedAt.UnixNano(), 10))
+		if metadata.CollectedAt.IsZero() || metadata.ConsecutiveFailures > 0 || metadata.LastError != "" {
+			resourceManager.BroadcastNamespaceMetricsRefresh(revision)
+			return
+		}
+		resourceManager.BroadcastMetricsRefresh(revision)
 	}
 }
 

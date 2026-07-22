@@ -207,6 +207,13 @@ const doorbellDomainDescriptors = [
     scopeKind: 'cluster',
     isClusterScoped: true,
   },
+  // Signal-only metric doorbell for the separate namespace utilization
+  // payload. It never advances the namespaces object clock.
+  {
+    domain: 'namespace-metrics',
+    scopeKind: 'cluster',
+    isClusterScoped: true,
+  },
   // Signal-only per-object doorbell for the object-events snapshot domain: an
   // event for a panel's object replaces the Events tab's poll. The scope is
   // the snapshot domain's object-scope tail, passed through verbatim.
@@ -227,6 +234,11 @@ const doorbellDomainDescriptors = [
     scopeKind: 'cluster',
     isClusterScoped: true,
     pollingContinuesWhileStreaming: true,
+  },
+  {
+    domain: 'cluster-attention',
+    scopeKind: 'cluster',
+    isClusterScoped: true,
   },
 ] satisfies ResourceStreamDomainDescriptor[];
 
@@ -253,7 +265,11 @@ export const isSupportedDomain = (value: string | undefined): value is DoorbellD
   Boolean(value && doorbellDescriptorByDomain.has(value as DoorbellDomain));
 
 export const isResourceStreamSourceClock = (value: unknown): value is ResourceStreamSourceClock =>
-  value === 'object' || value === 'metric' || value === 'event' || value === 'catalog';
+  value === 'object' ||
+  value === 'metric' ||
+  value === 'event' ||
+  value === 'catalog' ||
+  value === 'attention';
 
 // The doorbell clocks a domain declares in the contract. Signal-driven refetch
 // hooks key on THESE clock values (never the folded sourceVersion): payload

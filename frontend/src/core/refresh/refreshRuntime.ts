@@ -4,6 +4,9 @@ import type { RefreshDomain } from './types';
 export type InFlightRequest = {
   controller: AbortController;
   isManual: boolean;
+  // Preserve the originating request intent if foreground activation aborts
+  // this fetch and replays it after the cluster becomes serviceable.
+  streamSignal?: boolean;
   requestId: number;
   cleanup?: () => void;
   contextVersion: number;
@@ -56,6 +59,7 @@ export type RuntimeScopeEnableResult = RuntimeScopeStateChange & {
 const MULTI_ACTIVE_SCOPE_DOMAINS = new Set<RefreshDomain>([
   'catalog',
   'catalog-diff',
+  'cluster-attention',
   'cluster-config',
   'cluster-crds',
   'cluster-events',

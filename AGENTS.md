@@ -116,6 +116,59 @@ You MUST follow these at all times.
 - Aim for at least 80% test coverage. Note gaps and ask for guidance if that is
   not feasible.
 
+## Codex CLI Browser Automation
+
+This repository is commonly worked on through Codex CLI, which does not have
+the desktop app's in-app browser. Do not ask the user to repeatedly provide
+screenshots when the local Wails development UI is reachable. Use the
+machine-wide Playwright MCP server instead.
+
+- **FOR RENDERED WAILS UI PASSES, CALL THE STANDALONE PLAYWRIGHT MCP TOOLS
+  DIRECTLY.** Start with `mcp__playwright__browser_navigate`, then use
+  `mcp__playwright__browser_snapshot`, `mcp__playwright__browser_click`,
+  `mcp__playwright__browser_find`, and
+  `mcp__playwright__browser_take_screenshot` as needed. These are the intended
+  Codex CLI browser-control tools for this repository.
+- **DO NOT ROUTE WAILS UI PASSES THROUGH THE BROWSER PLUGIN OR
+  `agent.browsers`.** The Browser plugin's backend discovery is a separate
+  integration and does not discover the registered standalone `playwright` MCP
+  server. An empty `agent.browsers.list()` result says nothing about whether
+  the standalone Playwright tools are available.
+- Before reporting that browser control is unavailable, check the active tool
+  list for `mcp__playwright__browser_navigate` and run `codex mcp list`. If the
+  direct tool is exposed and the `playwright` row is enabled, use it; do not
+  initialize `node_repl`, call `agent.browsers.getForUrl`, or ask the user for
+  screenshots.
+- The global MCP server is named `playwright`. Use the executable path reported
+  by `codex mcp list`; do not assume a user-specific installation directory.
+- At the start of a future CLI session that needs rendered UI inspection, use
+  the Playwright MCP browser tools directly. The tools are loaded when Codex
+  starts, so do not reinstall anything merely because they are absent from an
+  already-running session.
+- If the tools are absent in a fresh session, run `codex mcp list`. When the
+  `playwright` row is enabled, restart Codex CLI once so it can load the tools.
+  Only repair the installation when the row is missing or its command path no
+  longer exists.
+- Use the active Wails development-server URL supplied for the run. Confirm it
+  responds before browser work because Wails may choose a different port on a
+  later run. If it is not reachable, check whether the development process is
+  running. Start it with `mage dev` when needed, wait for the command to report
+  the active URL, and use that URL. Ask the user for the current URL only when
+  an existing development process is running but its URL cannot be determined;
+  do not ask for screenshots.
+- Use browser snapshots/DOM inspection for structure and interaction, and take
+  screenshots yourself for layout or visual checks. Exercise relevant clicks,
+  filters, navigation, loading, empty, error, and populated states in proportion
+  to the change.
+- Do not confuse the presence of the `node_repl` tool or Browser plugin
+  instructions with an available in-app browser. In Codex CLI, an empty browser
+  backend list means to use the registered Playwright MCP server.
+
+Its exact arguments and executable path are visible with `codex mcp list`. If
+repair is required, use the latest stable `playwright` and `@playwright/mcp`
+packages and register the resulting absolute command with
+`codex mcp add playwright -- ...`.
+
 ## Claude Code Setup
 
 Add this to `.claude/settings.local.json` so memories are stored in the project
@@ -131,6 +184,9 @@ Add this to `.claude/settings.local.json` so memories are stored in the project
   reading this file. It routes common tasks to the right skills, docs, code
   paths, and validation checks.
 - Start with `docs/README.md` when you are unsure which contract applies.
+- For refresh timing, retained-first rendering, foreground/background work,
+  streams, polling fallback, or metrics demand, start with
+  `docs/architecture/data-freshness.md`.
 - Durable architecture docs go in `docs/architecture`; frontend infrastructure
   docs go in `docs/frontend`; workflow-specific docs go in `docs/workflows`.
 - Phased implementation plans go in `docs/plans`; mark items ✅ as completed.

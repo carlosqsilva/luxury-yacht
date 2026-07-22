@@ -22,12 +22,16 @@ import { useGridTableController } from '@shared/components/tables/hooks/useGridT
 export type {
   ColumnWidthInput,
   ColumnWidthState,
+  GridColumnAlignment,
+  GridColumnAlignmentOptions,
   GridColumnDefinition,
   GridTableDiagnosticsMode,
   GridTableFilterAccessors,
   GridTableFilterConfig,
+  GridTableFilteredEmptyState,
   GridTableFilterOptions,
   GridTableFilterState,
+  GridTableLocalPaginationConfig,
   GridTableProps,
   GridTableVirtualizationOptions,
   InternalFilterOptions,
@@ -44,7 +48,7 @@ const GridTable = memo(function GridTableComponent<T>(props: GridTableProps<T>) 
     hideHeader = false,
     useShortNames = false,
     emptyMessage = 'No data available',
-    paginationControls,
+    filteredEmptyState,
     allowHorizontalOverflow = true,
     showTrailingColumnBoundary = true,
     keyExtractor,
@@ -77,6 +81,7 @@ const GridTable = memo(function GridTableComponent<T>(props: GridTableProps<T>) 
     loadingOverlayMessage,
     hasActiveFilters,
     onClearFilters,
+    paginationControls,
     wrapWithProfiler,
   } = useGridTableController<T>(props);
 
@@ -112,6 +117,7 @@ const GridTable = memo(function GridTableComponent<T>(props: GridTableProps<T>) 
       tableData={tableData}
       keyExtractor={keyExtractor}
       emptyMessage={emptyMessage}
+      filteredEmptyState={filteredEmptyState}
       shouldVirtualize={shouldVirtualize}
       virtualRows={virtualRows}
       virtualRangeStart={virtualRange.start}
