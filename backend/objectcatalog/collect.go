@@ -51,46 +51,68 @@ func (s *Service) collectViaSharedInformer(index int, desc resourceDescriptor, n
 	case collectionSourceSkip:
 		return nil, true, nil
 	case collectionSourceAPIExtensionsInformer:
-		if s.deps.APIExtensionsInformerFactory == nil {
-			return emitSummaries(index, agg, nil, nil, false)
-		}
-		lister := s.deps.APIExtensionsInformerFactory.Apiextensions().V1().CustomResourceDefinitions().Lister()
-		items, err := lister.List(labels.Everything())
-		if err != nil {
-			return emitSummaries(index, agg, nil, err, true)
-		}
-		return emitSummaries(index, agg, s.summariesFromObjects(desc, toMetaObjects(items)), nil, true)
+		return s.collectViaAPIExtensionsInformer(index, desc, agg)
 	case collectionSourceSharedInformer:
-		factory := s.deps.InformerFactory
-		if factory == nil {
-			return emitSummaries(index, agg, nil, nil, false)
-		}
-		gr := plan.groupResource
-		// Check permissions before accessing shared informer listers to avoid triggering
-		// lazy informer creation for resources the user cannot list/watch.
-		if s.deps.PermissionChecker != nil && !s.deps.PermissionChecker.CanListWatch(gr.Group, gr.Resource) {
-			// No permission - fall back to listResource which handles 403 gracefully
-			return emitSummaries(index, agg, nil, nil, false)
-		}
-		listFn := sharedInformerLister(factory, sharedInformerGroupResources[gr])
-		if listFn == nil {
-			return emitSummaries(index, agg, nil, nil, false)
-		}
-		summaries, err := s.collectFromNamespacedLister(desc, namespaces, listFn)
-		return emitSummaries(index, agg, summaries, err, true)
+		return s.collectViaCoreSharedInformer(index, desc, namespaces, plan.groupResource, agg)
 	case collectionSourceGatewayInformer:
-		if s.deps.GatewayInformerFactory == nil {
-			return emitSummaries(index, agg, nil, nil, false)
-		}
-		listFn := gatewayInformerLister(s.deps.GatewayInformerFactory, gatewayInformerGroupResources[plan.groupResource])
-		if listFn == nil {
-			return emitSummaries(index, agg, nil, nil, false)
-		}
-		summaries, err := s.collectFromNamespacedLister(desc, namespaces, listFn)
-		return emitSummaries(index, agg, summaries, err, true)
+		return s.collectViaGatewayInformer(index, desc, namespaces, plan.groupResource, agg)
 	default:
 		return emitSummaries(index, agg, nil, nil, false)
 	}
+}
+
+func (s *Service) collectViaAPIExtensionsInformer(index int, desc resourceDescriptor, agg *streamingAggregator) ([]Summary, bool, error) {
+	if s.deps.APIExtensionsInformerFactory == nil {
+		return emitSummaries(index, agg, nil, nil, false)
+	}
+	lister := s.deps.APIExtensionsInformerFactory.Apiextensions().V1().CustomResourceDefinitions().Lister()
+	items, err := lister.List(labels.Everything())
+	if err != nil {
+		return emitSummaries(index, agg, nil, err, true)
+	}
+	return emitSummaries(index, agg, s.summariesFromObjects(desc, toMetaObjects(items)), nil, true)
+}
+
+func (s *Service) collectViaCoreSharedInformer(
+	index int,
+	desc resourceDescriptor,
+	namespaces []string,
+	gr schema.GroupResource,
+	agg *streamingAggregator,
+) ([]Summary, bool, error) {
+	if s.deps.InformerFactory == nil {
+		return emitSummaries(index, agg, nil, nil, false)
+	}
+	// Check permissions before accessing shared informer listers to avoid triggering
+	// lazy informer creation for resources the user cannot list/watch.
+	if s.deps.PermissionChecker != nil && !s.deps.PermissionChecker.CanListWatch(gr.Group, gr.Resource) {
+		// No permission - fall back to listResource which handles 403 gracefully.
+		return emitSummaries(index, agg, nil, nil, false)
+	}
+	listFn := sharedInformerLister(s.deps.InformerFactory, sharedInformerGroupResources[gr])
+	if listFn == nil {
+		return emitSummaries(index, agg, nil, nil, false)
+	}
+	summaries, err := s.collectFromNamespacedLister(desc, namespaces, listFn)
+	return emitSummaries(index, agg, summaries, err, true)
+}
+
+func (s *Service) collectViaGatewayInformer(
+	index int,
+	desc resourceDescriptor,
+	namespaces []string,
+	gr schema.GroupResource,
+	agg *streamingAggregator,
+) ([]Summary, bool, error) {
+	if s.deps.GatewayInformerFactory == nil {
+		return emitSummaries(index, agg, nil, nil, false)
+	}
+	listFn := gatewayInformerLister(s.deps.GatewayInformerFactory, gatewayInformerGroupResources[gr])
+	if listFn == nil {
+		return emitSummaries(index, agg, nil, nil, false)
+	}
+	summaries, err := s.collectFromNamespacedLister(desc, namespaces, listFn)
+	return emitSummaries(index, agg, summaries, err, true)
 }
 
 func (s *Service) collectFromNamespacedLister(desc resourceDescriptor, namespaces []string, list func(namespace string) ([]metav1.Object, error)) ([]Summary, error) {
@@ -227,59 +249,82 @@ func (s *Service) listNamespaceItems(ctx context.Context, index int, desc resour
 	options := metav1.ListOptions{Limit: int64(batchSize)}
 	results := make([]Summary, 0)
 	for {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
+		list, denied, err := s.listCatalogPageWithRetry(ctx, desc, resourceInterface, options)
+		if err != nil {
+			return nil, err
 		}
-
-		var list *unstructuredv1.UnstructuredList
-		var err error
-		for attempt := range config.ObjectCatalogListRetryMaxAttempts {
-			list, err = resourceInterface.List(ctx, options)
-			if err == nil {
-				break
-			}
-			if apierrors.IsForbidden(err) {
-				// Record the denial so the catalog can report WHY the type is
-				// missing — an RBAC-blocked catalog must not look like an
-				// empty cluster.
-				s.recordDeniedResource(deniedResourceName(desc))
-				s.logDebug(fmt.Sprintf("permission denied listing %s, skipping", desc.GVR.String()))
-				return results, nil
-			}
-			if !shouldRetryList(err) || attempt == config.ObjectCatalogListRetryMaxAttempts-1 {
-				return nil, err
-			}
-			delay := listRetryBackoff(attempt)
-			s.logDebug(fmt.Sprintf("retrying list for %s after error: %v (backoff=%s)", desc.GVR.String(), err, delay))
-			if err := timeutil.SleepWithContext(ctx, delay); err != nil {
-				return nil, err
-			}
+		if denied {
+			return results, nil
 		}
 		if list == nil {
 			return results, nil
 		}
 
-		page := make([]Summary, 0, len(list.Items))
-		for i := range list.Items {
-			item := &list.Items[i]
-			page = append(page, s.buildSummary(desc, item))
-		}
-		if len(page) > 0 {
-			results = append(results, page...)
-			if agg != nil {
-				agg.emit(index, page)
-			}
-		}
-
-		cont := list.GetContinue()
-		if cont == "" {
+		results = appendCatalogSummaryPage(results, s.catalogSummaryPage(desc, list), index, agg)
+		if !advanceCatalogList(&options, list) {
 			break
 		}
-		options.Continue = cont
 	}
 	return results, nil
+}
+
+func (s *Service) listCatalogPageWithRetry(
+	ctx context.Context,
+	desc resourceDescriptor,
+	resourceInterface dynamic.ResourceInterface,
+	options metav1.ListOptions,
+) (*unstructuredv1.UnstructuredList, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	for attempt := range config.ObjectCatalogListRetryMaxAttempts {
+		list, err := resourceInterface.List(ctx, options)
+		if err == nil {
+			return list, false, nil
+		}
+		if apierrors.IsForbidden(err) {
+			s.recordDeniedResource(deniedResourceName(desc))
+			s.logDebug(fmt.Sprintf("permission denied listing %s, skipping", desc.GVR.String()))
+			return nil, true, nil
+		}
+		if !shouldRetryList(err) || attempt == config.ObjectCatalogListRetryMaxAttempts-1 {
+			return nil, false, err
+		}
+		delay := listRetryBackoff(attempt)
+		s.logDebug(fmt.Sprintf("retrying list for %s after error: %v (backoff=%s)", desc.GVR.String(), err, delay))
+		if err := timeutil.SleepWithContext(ctx, delay); err != nil {
+			return nil, false, err
+		}
+	}
+	return nil, false, nil
+}
+
+func appendCatalogSummaryPage(results, page []Summary, index int, agg *streamingAggregator) []Summary {
+	if len(page) == 0 {
+		return results
+	}
+	results = append(results, page...)
+	if agg != nil {
+		agg.emit(index, page)
+	}
+	return results
+}
+
+func advanceCatalogList(options *metav1.ListOptions, list *unstructuredv1.UnstructuredList) bool {
+	continuation := list.GetContinue()
+	if continuation == "" {
+		return false
+	}
+	options.Continue = continuation
+	return true
+}
+
+func (s *Service) catalogSummaryPage(desc resourceDescriptor, list *unstructuredv1.UnstructuredList) []Summary {
+	page := make([]Summary, 0, len(list.Items))
+	for index := range list.Items {
+		page = append(page, s.buildSummary(desc, &list.Items[index]))
+	}
+	return page
 }
 
 // deniedResourceName renders a kubectl-style resource name (`resource[.group]`)

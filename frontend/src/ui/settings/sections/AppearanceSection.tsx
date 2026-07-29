@@ -630,8 +630,16 @@ function AppearanceSection() {
   const handleLinkHexCancel = () => setIsEditingLinkHex(false);
 
   const handlePaletteValueClick = (field: 'hue' | 'saturation' | 'brightness') => {
-    const current =
-      field === 'hue' ? paletteHue : field === 'saturation' ? paletteSaturation : paletteBrightness;
+    let current: number;
+
+    if (field === 'hue') {
+      current = paletteHue;
+    } else if (field === 'saturation') {
+      current = paletteSaturation;
+    } else {
+      current = paletteBrightness;
+    }
+
     setPaletteDraft(String(current));
     setEditingPaletteField(field);
   };
@@ -640,7 +648,7 @@ function AppearanceSection() {
     if (!editingPaletteField) {
       return;
     }
-    const parsed = parseInt(paletteDraft, 10);
+    const parsed = Number.parseInt(paletteDraft, 10);
     if (Number.isNaN(parsed)) {
       setEditingPaletteField(null);
       return;

@@ -124,31 +124,39 @@ func computeRunMarkers(cronJob *batchv1.CronJob, jobs *batchv1.JobList) (*metav1
 			continue
 		}
 
-		// Manually-triggered jobs are tagged by the CronJob controller
-		// with `cronjob.kubernetes.io/instantiate: manual`.
-		if job.Annotations["cronjob.kubernetes.io/instantiate"] == "manual" {
-			start := job.Status.StartTime
-			if start == nil {
-				t := job.CreationTimestamp
-				start = &t
-			}
-			if lastManual == nil || start.After(lastManual.Time) {
-				lastManual = start
-			}
-		}
+		lastManual = latestMarker(lastManual, manualRunMarker(job))
 
 		// A Job is "failed" when its backoffLimit is exhausted. Use
 		// CompletionTime when present, otherwise the failure-condition
 		// timestamp via Conditions, otherwise the Job's StartTime as
 		// a coarse fallback.
 		if isFailedJob(job) {
-			marker := failureTimestamp(job)
-			if marker != nil && (lastFailure == nil || marker.After(lastFailure.Time)) {
-				lastFailure = marker
-			}
+			lastFailure = latestMarker(lastFailure, failureTimestamp(job))
 		}
 	}
 	return lastManual, lastFailure
+}
+
+func manualRunMarker(job *batchv1.Job) *metav1.Time {
+	// Manually-triggered jobs are tagged by the CronJob controller.
+	if job.Annotations["cronjob.kubernetes.io/instantiate"] != "manual" {
+		return nil
+	}
+	if job.Status.StartTime != nil {
+		return job.Status.StartTime
+	}
+	created := job.CreationTimestamp
+	return &created
+}
+
+func latestMarker(current, candidate *metav1.Time) *metav1.Time {
+	if candidate == nil {
+		return current
+	}
+	if current == nil || candidate.After(current.Time) {
+		return candidate
+	}
+	return current
 }
 
 func isFailedJob(job *batchv1.Job) bool {
@@ -210,43 +218,7 @@ func (s *Service) collectCronJobPods(namespace string, cronJob *batchv1.CronJob,
 
 	podService := pods.NewService(s.deps)
 	rsMap := podService.BuildReplicaSetToDeploymentMap(namespace)
-
-	var collected []corev1.Pod
-	seen := make(map[string]struct{})
-
-	for i := range jobs.Items {
-		job := &jobs.Items[i]
-		if !ownedByCronJob(job.OwnerReferences, cronJob.UID) {
-			continue
-		}
-
-		options := metav1.ListOptions{}
-		if job.Spec.Selector != nil {
-			if selector := labels.Set(job.Spec.Selector.MatchLabels).String(); selector != "" {
-				options.LabelSelector = selector
-			}
-		}
-
-		podList, err := client.CoreV1().Pods(namespace).List(s.deps.Context, options)
-		if err != nil {
-			s.deps.Logger.Debug(fmt.Sprintf("Failed to list pods for job %s/%s: %v", namespace, job.Name, err), logsources.ResourceLoader)
-			continue
-		}
-
-		for j := range podList.Items {
-			pod := podList.Items[j]
-			if !ownedByJob(pod, job.UID) {
-				continue
-			}
-
-			key := pod.Namespace + "/" + pod.Name
-			if _, exists := seen[key]; exists {
-				continue
-			}
-			seen[key] = struct{}{}
-			collected = append(collected, pod)
-		}
-	}
+	collected := s.podsOwnedByCronJob(namespace, cronJob, jobs)
 
 	if len(collected) == 0 {
 		return nil, nil
@@ -261,6 +233,48 @@ func (s *Service) collectCronJobPods(namespace string, cronJob *batchv1.CronJob,
 
 	podSummary, _ := workloads.SummarizePodMetrics(collected, metrics)
 	return podInfos, podSummary
+}
+
+func (s *Service) podsOwnedByCronJob(namespace string, cronJob *batchv1.CronJob, jobs *batchv1.JobList) []corev1.Pod {
+	client := s.deps.KubernetesClient
+	collected := make([]corev1.Pod, 0)
+	seen := make(map[string]struct{})
+	for index := range jobs.Items {
+		job := &jobs.Items[index]
+		if !ownedByCronJob(job.OwnerReferences, cronJob.UID) {
+			continue
+		}
+		podList, err := client.CoreV1().Pods(namespace).List(s.deps.Context, cronJobPodListOptions(job))
+		if err != nil {
+			s.deps.Logger.Debug(fmt.Sprintf("Failed to list pods for job %s/%s: %v", namespace, job.Name, err), logsources.ResourceLoader)
+			continue
+		}
+		appendUniqueJobPods(&collected, seen, podList.Items, job.UID)
+	}
+	return collected
+}
+
+func cronJobPodListOptions(job *batchv1.Job) metav1.ListOptions {
+	options := metav1.ListOptions{}
+	if job.Spec.Selector == nil {
+		return options
+	}
+	options.LabelSelector = labels.Set(job.Spec.Selector.MatchLabels).String()
+	return options
+}
+
+func appendUniqueJobPods(collected *[]corev1.Pod, seen map[string]struct{}, candidates []corev1.Pod, jobUID k8stypes.UID) {
+	for _, pod := range candidates {
+		if !ownedByJob(pod, jobUID) {
+			continue
+		}
+		key := pod.Namespace + "/" + pod.Name
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		*collected = append(*collected, pod)
+	}
 }
 
 // collectCronJobJobs returns summary info for all Jobs owned by the given CronJob.

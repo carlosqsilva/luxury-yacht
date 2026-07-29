@@ -169,8 +169,9 @@ export function Tabs({
       return;
     }
     const indicatorSize =
-      parseFloat(getComputedStyle(bar).getPropertyValue('--tab-strip-overflow-indicator-size')) ||
-      32;
+      Number.parseFloat(
+        getComputedStyle(bar).getPropertyValue('--tab-strip-overflow-indicator-size')
+      ) || 32;
 
     // If a smooth scroll is already in flight, compute the next target
     // from its destination instead of the intermediate scrollLeft. That
@@ -489,7 +490,7 @@ export function Tabs({
               aria-controls={tab.ariaControls}
               aria-disabled={tab.disabled || undefined}
               aria-label={tab.ariaLabel}
-              tabIndex={disableRovingTabIndex ? -1 : isFocusStop ? 0 : -1}
+              tabIndex={disableRovingTabIndex || !isFocusStop ? -1 : 0}
               className={`tab-item${isActive ? ' tab-item--active' : ''}${isCloseable ? ' tab-item--closeable' : ''}`}
               onClick={() => {
                 if (!tab.disabled) {

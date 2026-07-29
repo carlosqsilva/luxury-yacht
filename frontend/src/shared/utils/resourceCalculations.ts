@@ -36,10 +36,10 @@ const parseCpuValue = (value: string | undefined): number => {
 
   try {
     if (value.endsWith('m')) {
-      const parsed = parseFloat(value.slice(0, -1));
+      const parsed = Number.parseFloat(value.slice(0, -1));
       return Number.isNaN(parsed) ? 0 : parsed;
     } else {
-      const parsed = parseFloat(value) * 1000; // Convert cores to millicores
+      const parsed = Number.parseFloat(value) * 1000; // Convert cores to millicores
       return Number.isNaN(parsed) ? 0 : parsed;
     }
   } catch {
@@ -54,7 +54,7 @@ const parseMemoryValue = (value: string | undefined): number => {
   }
 
   try {
-    const num = parseFloat(value);
+    const num = Number.parseFloat(value);
     if (Number.isNaN(num)) {
       return 0;
     }
@@ -123,7 +123,15 @@ export const calculateResourceMetrics = (
   const allocatable = parseValue(data.allocatable);
 
   // Determine scale based on context
-  const scale = allocatable > 0 ? allocatable : limit > 0 ? limit : Math.max(usage, request * 1.2);
+  let scale: number;
+
+  if (allocatable > 0) {
+    scale = allocatable;
+  } else if (limit > 0) {
+    scale = limit;
+  } else {
+    scale = Math.max(usage, request * 1.2);
+  }
 
   // Calculate true percentages. Rendering code clamps these only when using
   // them as CSS widths or marker positions.

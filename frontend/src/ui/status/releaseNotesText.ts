@@ -16,9 +16,9 @@ export const toPlainReleaseNotes = (markdown: string): string => {
   const transformed = lines.map((line) => {
     let text = line;
     // Images have no place in a text preview — drop them entirely.
-    text = text.replace(/!\[[^\]]*\]\([^)]*\)/g, '');
+    text = replaceMarkdownMedia(text, '![', false);
     // Links [text](url) -> text.
-    text = text.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1');
+    text = replaceMarkdownMedia(text, '[', true);
     // Horizontal rules (---, ***, ___) become a blank line.
     if (/^\s*([-*_])\1{2,}\s*$/.test(text)) {
       return '';
@@ -30,14 +30,57 @@ export const toPlainReleaseNotes = (markdown: string): string => {
     text = text.replace(/^\s*>\s?/, '');
     // Inline emphasis / code / strikethrough markers.
     text = text.replace(/\*\*|__|~~|`/g, '');
-    return text.replace(/\s+$/, '');
+    return text.trimEnd();
   });
 
   // Collapse runs of blank lines so stripped headings/rules don't leave gaps,
   // then drop leading/trailing blank lines (but keep the first line's indentation
   // so a leading nested bullet stays nested).
-  return transformed
-    .join('\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .replace(/^\n+|\n+$/g, '');
+  const collapsed = transformed.join('\n').replace(/\n{3,}/g, '\n\n');
+  // Scan rather than match: `/^\n+|\n+$/` backtracks quadratically on a long
+  // newline run, and only newlines may go — the first line's indentation is
+  // load-bearing, so trimStart() would flatten a leading nested bullet.
+  let start = 0;
+  while (start < collapsed.length && collapsed[start] === '\n') {
+    start += 1;
+  }
+  let end = collapsed.length;
+  while (end > start && collapsed[end - 1] === '\n') {
+    end -= 1;
+  }
+  return collapsed.slice(start, end);
+};
+const replaceMarkdownMedia = (input: string, marker: '![' | '[', keepLabel: boolean): string => {
+  let output = '';
+  let cursor = 0;
+  while (cursor < input.length) {
+    const markerStart = input.indexOf(marker, cursor);
+    if (markerStart === -1) {
+      output += input.slice(cursor);
+      break;
+    }
+    const labelStart = markerStart + marker.length;
+    const labelEnd = input.indexOf(']', labelStart);
+    if (labelEnd === -1) {
+      output += input.slice(cursor);
+      break;
+    }
+    if (input[labelEnd + 1] !== '(') {
+      output += input.slice(cursor, labelStart);
+      cursor = labelStart;
+      continue;
+    }
+    const targetEnd = input.indexOf(')', labelEnd + 2);
+    if (targetEnd === -1) {
+      output += input.slice(cursor);
+      break;
+    }
+
+    output += input.slice(cursor, markerStart);
+    if (keepLabel) {
+      output += input.slice(labelStart, labelEnd);
+    }
+    cursor = targetEnd + 1;
+  }
+  return output;
 };

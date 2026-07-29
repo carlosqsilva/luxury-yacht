@@ -9,6 +9,7 @@
 import ActiveFilterChips, { type ActiveFilterChip } from '@shared/components/ActiveFilterChips';
 import ClusterDataPausedState from '@shared/components/ClusterDataPausedState';
 import { Dropdown, type DropdownOption } from '@shared/components/dropdowns/Dropdown';
+import { normalizeDropdownValue } from '@shared/components/dropdowns/dropdownValue';
 import {
   ALL_MULTISELECT_FILTER,
   filterSelectionValues,
@@ -83,6 +84,7 @@ import {
   logFilterSelectionToDropdownValues,
   pruneLogFilterSelectionToOptions,
 } from './logFilterSelection';
+import { parseBracketedLogPrefix } from './logLineMetadata';
 import { buildLogSearchRegex, isValidRegexPattern } from './logSearch';
 import {
   getLogViewerPrefs,
@@ -201,28 +203,46 @@ const formatTimestampForMode = (
   }
 };
 
-// Build a display label for a container, appending :init for init containers
-const formatContainerLabel = (container: string, isInit: boolean, isEphemeral: boolean): string =>
-  isInit ? `${container}:init` : isEphemeral ? `${container} (debug)` : container;
+type LogContainerKind = 'regular' | 'init' | 'ephemeral';
 
-const parseContainerLabel = (
-  label: string
-): { name: string; isInit: boolean; isEphemeral: boolean } => {
+interface LogContainerTraits {
+  isInit?: boolean;
+  isEphemeral?: boolean;
+}
+
+const logContainerKind = (traits: LogContainerTraits): LogContainerKind => {
+  if (traits.isInit) {
+    return 'init';
+  }
+  if (traits.isEphemeral) {
+    return 'ephemeral';
+  }
+  return 'regular';
+};
+
+const CONTAINER_LABEL_SUFFIX: Record<LogContainerKind, string> = {
+  regular: '',
+  init: ':init',
+  ephemeral: ' (debug)',
+};
+
+const formatContainerLabel = (container: string, kind: LogContainerKind): string =>
+  `${container}${CONTAINER_LABEL_SUFFIX[kind]}`;
+
+const parseContainerLabel = (label: string): { name: string; kind: LogContainerKind } => {
   if (label.endsWith(':init')) {
     return {
       name: label.slice(0, -':init'.length),
-      isInit: true,
-      isEphemeral: false,
+      kind: 'init',
     };
   }
   if (label.endsWith(' (debug)')) {
     return {
       name: label.slice(0, -' (debug)'.length),
-      isInit: false,
-      isEphemeral: true,
+      kind: 'ephemeral',
     };
   }
-  return { name: label, isInit: false, isEphemeral: false };
+  return { name: label, kind: 'regular' };
 };
 
 const POD_FILTER_PREFIX = 'pod:';
@@ -290,16 +310,15 @@ const toContainerFilterValue = (container: string): string =>
   `${CONTAINER_FILTER_PREFIX}${container}`;
 const toDebugContainerFilterValue = (container: string): string =>
   `${DEBUG_FILTER_PREFIX}${container}`;
-const toContainerFilterValueForKind = (
-  container: string,
-  isInit: boolean,
-  isEphemeral: boolean
-): string =>
-  isInit
-    ? toInitContainerFilterValue(container)
-    : isEphemeral
-      ? toDebugContainerFilterValue(container)
-      : toContainerFilterValue(container);
+
+const CONTAINER_FILTER_VALUE: Record<LogContainerKind, (container: string) => string> = {
+  regular: toContainerFilterValue,
+  init: toInitContainerFilterValue,
+  ephemeral: toDebugContainerFilterValue,
+};
+
+const toContainerFilterValueForKind = (container: string, kind: LogContainerKind): string =>
+  CONTAINER_FILTER_VALUE[kind](container);
 
 const summarizeWorkloadSelection = (
   selectedValues: string[],
@@ -504,12 +523,12 @@ const LogViewerInner: React.FC<LogViewerProps> = ({
     [selectedFilters]
   );
   const handleSelectContainerFilter = useCallback(
-    (container: string, isInit: boolean, isEphemeral: boolean) => {
+    (container: string, kind: LogContainerKind) => {
       dispatch({
         type: 'SET_SELECTED_FILTERS',
         payload: logFilterSelectionForOnlyContainer(
           selectedFilters,
-          toContainerFilterValueForKind(container, isInit, isEphemeral)
+          toContainerFilterValueForKind(container, kind)
         ),
       });
     },
@@ -1117,14 +1136,15 @@ const LogViewerInner: React.FC<LogViewerProps> = ({
 
     const trimmedTextFilter = textFilter.trim();
     if (trimmedTextFilter) {
+      let label = `Text: ${trimmedTextFilter}`;
+      if (regexMatches) {
+        label = hasInvalidRegex
+          ? `Regex: ${trimmedTextFilter} (invalid expression)`
+          : `Regex: ${trimmedTextFilter}`;
+      }
       chips.push({
         key: 'text-filter',
-        label:
-          regexMatches && hasInvalidRegex
-            ? `Regex: ${trimmedTextFilter} (invalid expression)`
-            : regexMatches
-              ? `Regex: ${trimmedTextFilter}`
-              : `Text: ${trimmedTextFilter}`,
+        label,
         removeLabel: 'Clear text filter',
         onRemove: () => dispatch({ type: 'SET_TEXT_FILTER', payload: '' }),
       });
@@ -1336,11 +1356,7 @@ const LogViewerInner: React.FC<LogViewerProps> = ({
       const timestampPrefix = timestamp ? `[${timestamp}] ` : '';
 
       if (isWorkload) {
-        const containerLabel = formatContainerLabel(
-          entry.container,
-          entry.isInit,
-          Boolean(entry.isEphemeral)
-        );
+        const containerLabel = formatContainerLabel(entry.container, logContainerKind(entry));
         const formatted = `[${entry.pod}/${containerLabel}] ${displayContent}`;
         return timestampPrefix + formatted;
       }
@@ -1349,11 +1365,7 @@ const LogViewerInner: React.FC<LogViewerProps> = ({
         selectedContainerFilterCount !== 1 &&
         !(selectedContainerFilterCount === 0 && singlePodSelectableContainerCount === 1)
       ) {
-        const containerLabel = formatContainerLabel(
-          entry.container,
-          entry.isInit,
-          Boolean(entry.isEphemeral)
-        );
+        const containerLabel = formatContainerLabel(entry.container, logContainerKind(entry));
         const formatted = `[${containerLabel}] ${displayContent}`;
         return timestampPrefix + formatted;
       }
@@ -1462,7 +1474,7 @@ const LogViewerInner: React.FC<LogViewerProps> = ({
                 className="log-viewer-metadata log-viewer-metadata--bold"
                 style={{ '--pod-color': podColor } as React.CSSProperties}
               >
-                [
+                {'['}
                 <button
                   type="button"
                   className="log-viewer-metadata-button pod-color-text"
@@ -1473,7 +1485,7 @@ const LogViewerInner: React.FC<LogViewerProps> = ({
                 >
                   {pod}
                 </button>
-                /
+                {'/'}
                 <button
                   type="button"
                   className="log-viewer-metadata-button pod-color-text"
@@ -1483,8 +1495,7 @@ const LogViewerInner: React.FC<LogViewerProps> = ({
                       const parsedContainerLabel = parseContainerLabel(container);
                       handleSelectContainerFilter(
                         parsedContainerLabel.name,
-                        parsedContainerLabel.isInit,
-                        parsedContainerLabel.isEphemeral
+                        parsedContainerLabel.kind
                       );
                     })()
                   }
@@ -1493,7 +1504,7 @@ const LogViewerInner: React.FC<LogViewerProps> = ({
                 >
                   {container}
                 </button>
-                ]
+                {']'}
               </span>
               <span> {renderMessageContent(logLine, `workload-${row.key}`)}</span>
             </div>
@@ -1505,27 +1516,30 @@ const LogViewerInner: React.FC<LogViewerProps> = ({
         let workingLine = line;
         let timestampPrefix = '';
         if (showTimestamps) {
-          const podTimestampMatch = line.match(/^(\[[^\]]+\]\s*)(.*)$/);
-          if (podTimestampMatch) {
-            timestampPrefix = podTimestampMatch[1] ?? '';
-            workingLine = podTimestampMatch[2] ?? '';
+          const timestampMetadata = parseBracketedLogPrefix(line);
+          if (timestampMetadata) {
+            timestampPrefix = timestampMetadata.prefix;
+            workingLine = timestampMetadata.remainder;
           }
         }
 
-        const containerMatch = workingLine.match(/^\[([^\]]+)\]\s*(.*)$/);
-        const showContainerMeta =
-          containerMatch &&
-          selectedContainerFilterCount !== 1 &&
-          !(selectedContainerFilterCount === 0 && singlePodSelectableContainerCount === 1);
+        const containerMetadata = parseBracketedLogPrefix(workingLine);
+        const showContainerMeta = Boolean(
+          containerMetadata &&
+            selectedContainerFilterCount !== 1 &&
+            !(selectedContainerFilterCount === 0 && singlePodSelectableContainerCount === 1)
+        );
         if (timestampPrefix || showContainerMeta) {
-          const containerLabel = showContainerMeta && containerMatch ? containerMatch[1] : '';
-          const remainder = showContainerMeta && containerMatch ? containerMatch[2] : workingLine;
+          const containerLabel =
+            showContainerMeta && containerMetadata ? containerMetadata.label : '';
+          const remainder =
+            showContainerMeta && containerMetadata ? containerMetadata.remainder : workingLine;
           return (
             <div className="log-viewer-line">
               {!!timestampPrefix && <span className="log-viewer-metadata">{timestampPrefix}</span>}
               {!!showContainerMeta && (
                 <span className="log-viewer-metadata">
-                  [
+                  {'['}
                   <button
                     type="button"
                     className="log-viewer-metadata-button"
@@ -1534,8 +1548,7 @@ const LogViewerInner: React.FC<LogViewerProps> = ({
                         const parsedContainerLabel = parseContainerLabel(containerLabel);
                         handleSelectContainerFilter(
                           parsedContainerLabel.name,
-                          parsedContainerLabel.isInit,
-                          parsedContainerLabel.isEphemeral
+                          parsedContainerLabel.kind
                         );
                       })()
                     }
@@ -1544,7 +1557,7 @@ const LogViewerInner: React.FC<LogViewerProps> = ({
                   >
                     {containerLabel}
                   </button>
-                  ]
+                  {']'}
                 </span>
               )}
               <span> {renderMessageContent(remainder, `pod-${row.key}`)}</span>
@@ -1750,6 +1763,8 @@ const LogViewerInner: React.FC<LogViewerProps> = ({
       autoSizeMaxWidth: PARSED_METADATA_AUTOSIZE_MAX_WIDTH,
       render: (item: ParsedLogEntry) => {
         const container = item.container;
+        const containerKind = logContainerKind(item);
+        const containerLabel = container ? formatContainerLabel(container, containerKind) : '';
         return container ? (
           <button
             type="button"
@@ -1761,14 +1776,10 @@ const LogViewerInner: React.FC<LogViewerProps> = ({
             }
             onClick={(event) => {
               event.stopPropagation();
-              handleSelectContainerFilter(
-                container,
-                Boolean(item.isInit),
-                Boolean(item.isEphemeral)
-              );
+              handleSelectContainerFilter(container, containerKind);
             }}
-            title={`Show only logs from container ${formatContainerLabel(container, Boolean(item.isInit), Boolean(item.isEphemeral))}`}
-            aria-label={`Show only logs from container ${formatContainerLabel(container, Boolean(item.isInit), Boolean(item.isEphemeral))}`}
+            title={`Show only logs from container ${containerLabel}`}
+            aria-label={`Show only logs from container ${containerLabel}`}
           >
             {container}
           </button>
@@ -1931,6 +1942,38 @@ const LogViewerInner: React.FC<LogViewerProps> = ({
     );
   }
 
+  let copyIconFeedback: 'success' | 'error' | null = null;
+  if (copyFeedback === 'copied') {
+    copyIconFeedback = 'success';
+  } else if (copyFeedback === 'error') {
+    copyIconFeedback = 'error';
+  }
+
+  let renderedLogContent: React.ReactNode = emptyStateMessage;
+  if (isParsedView) {
+    renderedLogContent = (
+      <ParsedLogTable
+        rows={parsedContainerLogs}
+        columns={tableColumns}
+        expandedRows={expandedRows}
+        onToggleRow={handleToggleParsedRow}
+      />
+    );
+  } else if (displayLogs) {
+    renderedLogContent = (
+      <RawLogViewer
+        rows={renderedDisplayRows}
+        scrollContainerRef={logsContentRef}
+        wrapText={wrapText}
+        renderRow={renderRawLogRow}
+        virtualizationThreshold={RAW_LOG_VIRTUALIZATION_THRESHOLD}
+        virtualizationOverscan={RAW_LOG_VIRTUALIZATION_OVERSCAN}
+        estimateRowHeight={RAW_LOG_ESTIMATE_ROW_HEIGHT}
+        verticalPaddingPx={RAW_LOG_VERTICAL_PADDING_PX}
+      />
+    );
+  }
+
   return (
     <>
       <div className="object-panel-tab-content">
@@ -1949,7 +1992,7 @@ const LogViewerInner: React.FC<LogViewerProps> = ({
                       dispatch({
                         type: 'SET_SELECTED_FILTERS',
                         payload: logFilterSelectionFromDropdownValues(
-                          Array.isArray(value) ? value : value ? [value] : [],
+                          normalizeDropdownValue(value),
                           selectorOptions
                         ),
                       })
@@ -1958,10 +2001,7 @@ const LogViewerInner: React.FC<LogViewerProps> = ({
                     showBulkActions
                     placeholder={isPendingLogs ? 'Loading logs…' : 'All Logs'}
                     renderValue={(value, options) =>
-                      summarizeWorkloadSelection(
-                        Array.isArray(value) ? value : value ? [value] : [],
-                        options
-                      )
+                      summarizeWorkloadSelection(normalizeDropdownValue(value), options)
                     }
                     size="compact"
                     className="logs-viewer-selector-dropdown"
@@ -2143,12 +2183,7 @@ const LogViewerInner: React.FC<LogViewerProps> = ({
                       title: 'Copy current log buffer to clipboard (Shift+C)',
                       ariaLabel: 'Copy to clipboard',
                       disabled: !hasCopyableContent,
-                      feedback:
-                        copyFeedback === 'copied'
-                          ? 'success'
-                          : copyFeedback === 'error'
-                            ? 'error'
-                            : null,
+                      feedback: copyIconFeedback,
                     },
                   ] satisfies IconBarItem[]
                 }
@@ -2177,27 +2212,7 @@ const LogViewerInner: React.FC<LogViewerProps> = ({
 
           <div className="logs-viewer-content-frame">
             <div className="logs-viewer-content selectable" ref={logsContentRef} tabIndex={-1}>
-              {isParsedView ? (
-                <ParsedLogTable
-                  rows={parsedContainerLogs}
-                  columns={tableColumns}
-                  expandedRows={expandedRows}
-                  onToggleRow={handleToggleParsedRow}
-                />
-              ) : displayLogs ? (
-                <RawLogViewer
-                  rows={renderedDisplayRows}
-                  scrollContainerRef={logsContentRef}
-                  wrapText={wrapText}
-                  renderRow={renderRawLogRow}
-                  virtualizationThreshold={RAW_LOG_VIRTUALIZATION_THRESHOLD}
-                  virtualizationOverscan={RAW_LOG_VIRTUALIZATION_OVERSCAN}
-                  estimateRowHeight={RAW_LOG_ESTIMATE_ROW_HEIGHT}
-                  verticalPaddingPx={RAW_LOG_VERTICAL_PADDING_PX}
-                />
-              ) : (
-                emptyStateMessage
-              )}
+              {renderedLogContent}
             </div>
             {!isTailFollowing && (
               <button

@@ -211,11 +211,15 @@ const resolvePodStateCounts = (
       desiredCount = Math.max(desiredCount, normalizedPodCount);
     }
   }
-  const availableCount = usePodSummary
-    ? normalizedReadyPodCount
-    : typeof available === 'number'
-      ? available
-      : null;
+  let availableCount: number | null;
+
+  if (usePodSummary) {
+    availableCount = normalizedReadyPodCount;
+  } else if (typeof available === 'number') {
+    availableCount = available;
+  } else {
+    availableCount = null;
+  }
 
   if (
     desiredCount === null ||
@@ -278,17 +282,71 @@ interface ParsedCondition {
   reason?: string;
   message?: string;
 }
-const parseCondition = (raw: string): ParsedCondition | null => {
-  // Type: Status [(Reason)] [- Message]
-  const m = raw.match(/^([A-Za-z]+):\s*([A-Za-z]+)\s*(?:\(([^)]+)\))?(?:\s*-\s*(.+))?$/);
-  if (!m) {
+
+const isAsciiLetter = (character: string | undefined): boolean =>
+  character !== undefined &&
+  ((character >= 'A' && character <= 'Z') || (character >= 'a' && character <= 'z'));
+
+const skipWhitespace = (value: string, start: number): number => {
+  let cursor = start;
+  while (cursor < value.length && value[cursor]?.trim() === '') {
+    cursor += 1;
+  }
+  return cursor;
+};
+
+const readAsciiWord = (value: string, start: number): { word: string; next: number } | null => {
+  let cursor = start;
+  while (isAsciiLetter(value[cursor])) {
+    cursor += 1;
+  }
+  if (cursor === start) {
     return null;
   }
+  return { word: value.slice(start, cursor), next: cursor };
+};
+
+const parseCondition = (raw: string): ParsedCondition | null => {
+  const type = readAsciiWord(raw, 0);
+  if (!type || raw[type.next] !== ':') {
+    return null;
+  }
+
+  let cursor = skipWhitespace(raw, type.next + 1);
+  const status = readAsciiWord(raw, cursor);
+  if (!status) {
+    return null;
+  }
+  cursor = skipWhitespace(raw, status.next);
+
+  let reason: string | undefined;
+  if (raw[cursor] === '(') {
+    const closingParenthesis = raw.indexOf(')', cursor + 1);
+    if (closingParenthesis === -1 || closingParenthesis === cursor + 1) {
+      return null;
+    }
+    reason = raw.slice(cursor + 1, closingParenthesis);
+    cursor = skipWhitespace(raw, closingParenthesis + 1);
+  }
+
+  let message: string | undefined;
+  if (raw[cursor] === '-') {
+    const rawMessage = raw.slice(cursor + 1);
+    if (rawMessage.length === 0) {
+      return null;
+    }
+    message = rawMessage.trim();
+    cursor = raw.length;
+  }
+  if (cursor !== raw.length) {
+    return null;
+  }
+
   return {
-    type: m[1],
-    status: m[2],
-    reason: m[3],
-    message: m[4]?.trim(),
+    type: type.word,
+    status: status.word,
+    reason,
+    message,
   };
 };
 
@@ -962,19 +1020,25 @@ const statefulSetItems: OverviewItemSpec<StatefulSetDetails>[] = [
               fullWidth
               value={
                 <div className="overview-condition-list">
-                  {Object.entries(retention).map(([phase, policy]) => (
-                    <StatusChip
-                      key={phase}
-                      variant={policy === 'Delete' ? 'warning' : 'info'}
-                      tooltip={
-                        policy === 'Delete'
-                          ? `PVCs are deleted when ${phase === 'whenScaled' ? 'pods are scaled down' : 'the StatefulSet is deleted'}. Data is lost.`
-                          : `PVCs are kept when ${phase === 'whenScaled' ? 'pods are scaled down' : 'the StatefulSet is deleted'}.`
-                      }
-                    >
-                      {phase}: {policy}
-                    </StatusChip>
-                  ))}
+                  {Object.entries(retention).map(([phase, policy]) => {
+                    const phaseDescription =
+                      phase === 'whenScaled'
+                        ? 'pods are scaled down'
+                        : 'the StatefulSet is deleted';
+                    const tooltip =
+                      policy === 'Delete'
+                        ? `PVCs are deleted when ${phaseDescription}. Data is lost.`
+                        : `PVCs are kept when ${phaseDescription}.`;
+                    return (
+                      <StatusChip
+                        key={phase}
+                        variant={policy === 'Delete' ? 'warning' : 'info'}
+                        tooltip={tooltip}
+                      >
+                        {phase}: {policy}
+                      </StatusChip>
+                    );
+                  })}
                 </div>
               }
             />

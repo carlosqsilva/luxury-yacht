@@ -20,6 +20,7 @@ import (
 	replicasetpkg "github.com/luxury-yacht/app/backend/resources/replicaset"
 	statefulsetpkg "github.com/luxury-yacht/app/backend/resources/statefulset"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	appslisters "k8s.io/client-go/listers/apps/v1"
 )
@@ -47,24 +48,7 @@ func projectPodAggregate(pod *corev1.Pod, sources PodOwnerSources) streamrows.Po
 }
 
 func projectPodAggregateFromSummary(pod *corev1.Pod, sources PodOwnerSources, ownerSummary streamrows.PodSummary) streamrows.PodAggregate {
-	ownerKey := ""
-	if ownerSummary.OwnerKind != "" && ownerSummary.OwnerKind != "None" && ownerSummary.OwnerName != "" && ownerSummary.OwnerName != "None" {
-		ownerKey = workloadOwnerKey(ownerSummary.OwnerKind, pod.Namespace, ownerSummary.OwnerName)
-	}
-	// Jobs are visible workload rows, so their Pods remain attributed to the
-	// direct Job for metrics. The resolved CronJob identity on PodSummary is
-	// separately available for descendant filtering. ReplicaSets are not visible
-	// workload rows and continue to collapse into their Deployment owner.
-	if ownerSummary.DirectOwnerKind == "Job" && ownerSummary.DirectOwnerName != "" {
-		ownerKey = workloadOwnerKey(ownerSummary.DirectOwnerKind, pod.Namespace, ownerSummary.DirectOwnerName)
-	}
-	// Legacy typed snapshot helpers have no ReplicaSet source at all. Preserve
-	// their established Deployment aggregation fallback; the production ingest
-	// projector always supplies a (possibly not-yet-synced) lister and therefore
-	// keeps the unresolved ReplicaSet identity until the relationship heal runs.
-	if sources.ReplicaSets == nil && ownerSummary.OwnerKind == replicasetpkg.Identity.Kind {
-		ownerKey = ownerKeyForPod(pod)
-	}
+	ownerKey := podAggregateOwnerKey(pod, sources, ownerSummary)
 	agg := streamrows.PodAggregate{
 		Namespace:          pod.Namespace,
 		Name:               pod.Name,
@@ -82,37 +66,8 @@ func projectPodAggregateFromSummary(pod *corev1.Pod, sources PodOwnerSources, ow
 		// exactly this string via BuildResourceModel(...).Status.Presentation).
 		StatusPresentation: podres.BuildResourceModel("", pod).Status.Presentation,
 	}
-	// Regular-container resource sums (overview/nodes/workloads).
-	for _, container := range pod.Spec.Containers {
-		if cpu := container.Resources.Requests.Cpu(); cpu != nil {
-			agg.CPURequestMilli += cpu.MilliValue()
-		}
-		if cpu := container.Resources.Limits.Cpu(); cpu != nil {
-			agg.CPULimitMilli += cpu.MilliValue()
-		}
-		if mem := container.Resources.Requests.Memory(); mem != nil {
-			agg.MemRequestBytes += mem.Value()
-		}
-		if mem := container.Resources.Limits.Memory(); mem != nil {
-			agg.MemLimitBytes += mem.Value()
-		}
-	}
-	// Init-container resource sums, kept separate: overview/nodes add them to the
-	// regular sums, while workloads sums regular containers only.
-	for _, container := range pod.Spec.InitContainers {
-		if cpu := container.Resources.Requests.Cpu(); cpu != nil {
-			agg.InitCPURequestMilli += cpu.MilliValue()
-		}
-		if cpu := container.Resources.Limits.Cpu(); cpu != nil {
-			agg.InitCPULimitMilli += cpu.MilliValue()
-		}
-		if mem := container.Resources.Requests.Memory(); mem != nil {
-			agg.InitMemRequestBytes += mem.Value()
-		}
-		if mem := container.Resources.Limits.Memory(); mem != nil {
-			agg.InitMemLimitBytes += mem.Value()
-		}
-	}
+	agg.CPURequestMilli, agg.CPULimitMilli, agg.MemRequestBytes, agg.MemLimitBytes = sumContainerResources(pod.Spec.Containers)
+	agg.InitCPURequestMilli, agg.InitCPULimitMilli, agg.InitMemRequestBytes, agg.InitMemLimitBytes = sumContainerResources(pod.Spec.InitContainers)
 
 	// Readiness + the BuildFacts restart total (container + init + ephemeral).
 	facts := podres.BuildFacts(pod)
@@ -122,14 +77,51 @@ func projectPodAggregateFromSummary(pod *corev1.Pod, sources PodOwnerSources, ow
 
 	// Container + init restart statuses only (the node/overview-hasRestarts sum,
 	// which excludes ephemeral containers).
-	for _, status := range pod.Status.ContainerStatuses {
-		agg.RestartCountContainersInit += status.RestartCount
-	}
-	for _, status := range pod.Status.InitContainerStatuses {
-		agg.RestartCountContainersInit += status.RestartCount
-	}
+	agg.RestartCountContainersInit = sumContainerRestarts(pod.Status.ContainerStatuses) + sumContainerRestarts(pod.Status.InitContainerStatuses)
 
 	return agg
+}
+
+func podAggregateOwnerKey(pod *corev1.Pod, sources PodOwnerSources, summary streamrows.PodSummary) string {
+	ownerKey := ""
+	if summary.OwnerKind != "" && summary.OwnerKind != "None" && summary.OwnerName != "" && summary.OwnerName != "None" {
+		ownerKey = workloadOwnerKey(summary.OwnerKind, pod.Namespace, summary.OwnerName)
+	}
+	// Jobs are visible workload rows, so their Pods remain attributed to the direct Job.
+	if summary.DirectOwnerKind == "Job" && summary.DirectOwnerName != "" {
+		ownerKey = workloadOwnerKey(summary.DirectOwnerKind, pod.Namespace, summary.DirectOwnerName)
+	}
+	// Legacy typed helpers have no ReplicaSet source and retain their owner-ref fallback.
+	if sources.ReplicaSets == nil && summary.OwnerKind == replicasetpkg.Identity.Kind {
+		ownerKey = ownerKeyForPod(pod)
+	}
+	return ownerKey
+}
+
+func sumContainerResources(containers []corev1.Container) (cpuRequests, cpuLimits, memoryRequests, memoryLimits int64) {
+	for _, container := range containers {
+		if cpu := container.Resources.Requests.Cpu(); cpu != nil {
+			cpuRequests += cpu.MilliValue()
+		}
+		if cpu := container.Resources.Limits.Cpu(); cpu != nil {
+			cpuLimits += cpu.MilliValue()
+		}
+		if memory := container.Resources.Requests.Memory(); memory != nil {
+			memoryRequests += memory.Value()
+		}
+		if memory := container.Resources.Limits.Memory(); memory != nil {
+			memoryLimits += memory.Value()
+		}
+	}
+	return cpuRequests, cpuLimits, memoryRequests, memoryLimits
+}
+
+func sumContainerRestarts(statuses []corev1.ContainerStatus) int32 {
+	var total int32
+	for _, status := range statuses {
+		total += status.RestartCount
+	}
+	return total
 }
 
 func jobOwnerLookupAdapter(lookup func(namespace, jobName string) (JobControllerOwner, bool)) podres.JobControllerOwnerLookup {
@@ -158,24 +150,34 @@ func workloadKindForPod(pod *corev1.Pod, rsLister appslisters.ReplicaSetLister) 
 		if owner.Controller == nil || !*owner.Controller {
 			continue
 		}
-		switch owner.Kind {
-		case deploymentpkg.Identity.Kind, daemonsetpkg.Identity.Kind, statefulsetpkg.Identity.Kind, jobpkg.Identity.Kind:
-			return owner.Kind
-		case replicasetpkg.Identity.Kind:
-			if rsLister == nil {
-				return ""
-			}
-			rs, err := rsLister.ReplicaSets(pod.Namespace).Get(owner.Name)
-			if err != nil {
-				return ""
-			}
-			for _, rsOwner := range rs.OwnerReferences {
-				if rsOwner.Controller != nil && *rsOwner.Controller && rsOwner.Kind == deploymentpkg.Identity.Kind {
-					return deploymentpkg.Identity.Kind
-				}
-			}
-		}
+		return workloadKindForControllerOwner(pod.Namespace, owner, rsLister)
+	}
+	return ""
+}
+
+func workloadKindForControllerOwner(namespace string, owner metav1.OwnerReference, rsLister appslisters.ReplicaSetLister) string {
+	switch owner.Kind {
+	case deploymentpkg.Identity.Kind, daemonsetpkg.Identity.Kind, statefulsetpkg.Identity.Kind, jobpkg.Identity.Kind:
+		return owner.Kind
+	case replicasetpkg.Identity.Kind:
+		return deploymentKindForReplicaSet(namespace, owner.Name, rsLister)
+	default:
 		return ""
+	}
+}
+
+func deploymentKindForReplicaSet(namespace, replicaSetName string, rsLister appslisters.ReplicaSetLister) string {
+	if rsLister == nil {
+		return ""
+	}
+	replicaSet, err := rsLister.ReplicaSets(namespace).Get(replicaSetName)
+	if err != nil {
+		return ""
+	}
+	for _, owner := range replicaSet.OwnerReferences {
+		if owner.Controller != nil && *owner.Controller && owner.Kind == deploymentpkg.Identity.Kind {
+			return deploymentpkg.Identity.Kind
+		}
 	}
 	return ""
 }

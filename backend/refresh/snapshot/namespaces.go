@@ -349,90 +349,122 @@ func (s namespaceQuotaNotifierSink) UpsertBundle(ingest.Bundle)     { s.notifier
 func (s namespaceQuotaNotifierSink) DeleteBundle(ingest.Bundle)     { s.notifier.QuotaChanged() }
 func (s namespaceQuotaNotifierSink) ReplaceBundles([]ingest.Bundle) { s.notifier.QuotaChanged() }
 
+type namespaceBuildInputs struct {
+	meta               ClusterMeta
+	namespaces         []*corev1.Namespace
+	scopeStatuses      map[string]NamespaceScopeStatus
+	trackerReady       bool
+	workloadRollups    namespaceWorkloadRollups
+	warningEvents      map[string]int
+	warningEventsState NamespaceSignalState
+	quotaRollups       map[string]namespaceQuotaRollup
+	quotaState         NamespaceSignalState
+}
+
 // Build returns the namespace snapshot payload.
 func (b *NamespaceBuilder) Build(ctx context.Context, scope string) (*refresh.Snapshot, error) {
 	meta := ClusterMetaFromContext(ctx)
 	_, scopeValue := refresh.SplitClusterScope(scope)
-	var (
-		namespaces []*corev1.Namespace
-		err        error
-	)
+	namespaces, scopeStatuses, err := b.collectNamespaces(ctx, scopeValue)
+	if err != nil {
+		return nil, err
+	}
+	sortNamespaces(namespaces)
+	trackerReady := b.workloadTrackerReady()
+	workloadRollups := namespaceWorkloadRollupsFromIngest(b.ingest)
+	warningEvents, warningEventsState := b.warningEventRollups()
+	quotaRollups, quotaState := namespaceQuotaRollupsFromIngest(b.ingest)
+	inputs := namespaceBuildInputs{
+		meta:               meta,
+		namespaces:         namespaces,
+		scopeStatuses:      scopeStatuses,
+		trackerReady:       trackerReady,
+		workloadRollups:    workloadRollups,
+		warningEvents:      warningEvents,
+		warningEventsState: warningEventsState,
+		quotaRollups:       quotaRollups,
+		quotaState:         quotaState,
+	}
+	items, version := b.buildNamespaceSummaries(inputs)
+	return b.namespaceSnapshot(scope, inputs, items, version), nil
+}
 
-	scopeStatuses := make(map[string]NamespaceScopeStatus)
+func (b *NamespaceBuilder) collectNamespaces(ctx context.Context, scopeValue string) ([]*corev1.Namespace, map[string]NamespaceScopeStatus, error) {
 	switch {
 	case len(b.scope) > 0:
-		// Scoped cluster: rows come from the configured scope. A
-		// per-namespace GET probe enriches each row from the real object
-		// where permitted and flags names the identity cannot reach
-		// (not-found / no-access); without a probe result the row stays
-		// name-only.
-		for _, name := range b.scope {
-			if strings.TrimSpace(scopeValue) != "" && name != scopeValue {
-				continue
-			}
-			probed, status := b.probeScopedNamespace(ctx, name)
-			scopeStatuses[name] = status
-			if probed != nil {
-				namespaces = append(namespaces, probed)
-				continue
-			}
-			namespaces = append(namespaces, &corev1.Namespace{
-				ObjectMeta: metav1.ObjectMeta{Name: name},
-			})
-		}
+		return b.collectScopedNamespaces(ctx, scopeValue)
 	case strings.TrimSpace(scopeValue) != "":
-		var ns *corev1.Namespace
-		ns, err = b.namespaces.Get(scopeValue)
-		if err != nil {
-			if apimachineryerrors.IsNotFound(err) {
-				namespaces = []*corev1.Namespace{}
-				err = nil
-			} else {
-				return nil, err
-			}
-		} else {
-			namespaces = []*corev1.Namespace{ns}
-		}
+		return b.collectNamedNamespace(scopeValue)
 	default:
-		namespaces, err = b.namespaces.List(labels.Everything())
-		if err != nil {
-			return nil, err
-		}
+		namespaces, err := b.namespaces.List(labels.Everything())
+		return namespaces, map[string]NamespaceScopeStatus{}, err
 	}
+}
 
+func (b *NamespaceBuilder) collectScopedNamespaces(ctx context.Context, scopeValue string) ([]*corev1.Namespace, map[string]NamespaceScopeStatus, error) {
+	var namespaces []*corev1.Namespace
+	statuses := make(map[string]NamespaceScopeStatus)
+	requested := strings.TrimSpace(scopeValue)
+	for _, name := range b.scope {
+		if requested != "" && name != requested {
+			continue
+		}
+		probed, status := b.probeScopedNamespace(ctx, name)
+		statuses[name] = status
+		if probed == nil {
+			probed = &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
+		}
+		namespaces = append(namespaces, probed)
+	}
+	return namespaces, statuses, nil
+}
+
+func (b *NamespaceBuilder) collectNamedNamespace(name string) ([]*corev1.Namespace, map[string]NamespaceScopeStatus, error) {
+	namespace, err := b.namespaces.Get(name)
+	if apimachineryerrors.IsNotFound(err) {
+		return []*corev1.Namespace{}, map[string]NamespaceScopeStatus{}, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	return []*corev1.Namespace{namespace}, map[string]NamespaceScopeStatus{}, nil
+}
+
+func sortNamespaces(namespaces []*corev1.Namespace) {
 	if len(namespaces) > 1 {
 		sort.Slice(namespaces, func(i, j int) bool {
 			return namespaces[i].Name < namespaces[j].Name
 		})
 	}
+}
 
-	trackerReady := true
+func (b *NamespaceBuilder) workloadTrackerReady() bool {
+	if b.tracker == nil {
+		return true
+	}
 	// Non-blocking: read whether the cut workload + pod ingest stores have synced rather than
 	// waiting on them. The namespace list must paint without blocking on the pod/workload initial
 	// LIST. Positive workload rows are usable immediately; a namespace's absence of workloads is
 	// authoritative only once the tracked stores settle, so before then it is reported as
 	// not-yet-known and the workload-presence source clock re-delivers the corrected snapshot.
-	if b.tracker != nil {
-		trackerReady = b.tracker.Synced()
-	}
-	workloadRollups := namespaceWorkloadRollupsFromIngest(b.ingest)
-	workloadNamespaces := workloadRollups.namespaces
-	warningEvents, warningEventsState := b.warningEventRollups()
-	quotaRollups, quotaState := namespaceQuotaRollupsFromIngest(b.ingest)
+	return b.tracker.Synced()
+}
 
-	items := make([]NamespaceSummary, 0, len(namespaces))
+func (b *NamespaceBuilder) buildNamespaceSummaries(inputs namespaceBuildInputs) ([]NamespaceSummary, uint64) {
+	workloadNamespaces := inputs.workloadRollups.namespaces
+	items := make([]NamespaceSummary, 0, len(inputs.namespaces))
 	var version uint64
-	for _, ns := range namespaces {
+	for _, ns := range inputs.namespaces {
 		_, hasWorkloads := workloadNamespaces[ns.Name]
-		reservations := workloadRollups.reservations[ns.Name]
-		quota := quotaRollups[ns.Name]
+		reservations := inputs.workloadRollups.reservations[ns.Name]
+		quota := inputs.quotaRollups[ns.Name]
 		// In scoped mode a tracker that latched synced because NOTHING is
 		// tracked (every workload kind permission-skipped) means presence is
 		// genuinely unknown — reporting it as authoritative would dim every
 		// configured namespace. Unscoped behavior is unchanged.
-		workloadsKnown := hasWorkloads || (trackerReady && (len(b.scope) == 0 || b.tracksAnyWorkloadKind()))
-		model := namespacepkg.BuildResourceModel(meta.ClusterID, ns, hasWorkloads, workloadsKnown, nil, nil)
-		facts := namespacepkg.BuildFacts(meta.ClusterID, ns, hasWorkloads, workloadsKnown, nil, nil, resourcemodel.ResourceModelBuildOptions{})
+		workloadsKnown := hasWorkloads || (inputs.trackerReady && (len(b.scope) == 0 || b.tracksAnyWorkloadKind()))
+		model := namespacepkg.BuildResourceModel(inputs.meta.ClusterID, ns, hasWorkloads, workloadsKnown, nil, nil)
+		facts := namespacepkg.BuildFacts(inputs.meta.ClusterID, ns, hasWorkloads, workloadsKnown, nil, nil, resourcemodel.ResourceModelBuildOptions{})
 		items = append(items, NamespaceSummary{
 			Ref:                        model.Ref,
 			Phase:                      model.Status.State,
@@ -444,9 +476,9 @@ func (b *NamespaceBuilder) Build(ctx context.Context, scope string) (*refresh.Sn
 			CreationUnix:               model.Metadata.CreationTimestamp.Unix(),
 			HasWorkloads:               facts.HasWorkloads,
 			WorkloadsUnknown:           !facts.WorkloadsKnown,
-			UnhealthyWorkloads:         workloadRollups.unhealthy[ns.Name],
-			WarningEvents:              warningEvents[ns.Name],
-			WarningEventsState:         warningEventsState,
+			UnhealthyWorkloads:         inputs.workloadRollups.unhealthy[ns.Name],
+			WarningEvents:              inputs.warningEvents[ns.Name],
+			WarningEventsState:         inputs.warningEventsState,
 			CPURequestsMilli:           reservations.cpuRequestsMilli,
 			CPULimitsMilli:             reservations.cpuLimitsMilli,
 			MemoryRequestsBytes:        reservations.memoryRequestsBytes,
@@ -454,19 +486,27 @@ func (b *NamespaceBuilder) Build(ctx context.Context, scope string) (*refresh.Sn
 			QuotaCount:                 quota.count,
 			QuotaHighestUsedPercentage: quota.highestUsedPercentage,
 			QuotaPressure:              namespaceQuotaPressure(quota.highestUsedPercentage),
-			QuotaPressureState:         quotaState,
-			ScopeStatus:                scopeStatuses[ns.Name],
+			QuotaPressureState:         inputs.quotaState,
+			ScopeStatus:                inputs.scopeStatuses[ns.Name],
 		})
 		if v := parseResourceVersion(ns); v > version {
 			version = v
 		}
 	}
+	return items, version
+}
 
-	snap := &refresh.Snapshot{
+func (b *NamespaceBuilder) namespaceSnapshot(
+	scope string,
+	inputs namespaceBuildInputs,
+	items []NamespaceSummary,
+	version uint64,
+) *refresh.Snapshot {
+	snapshot := &refresh.Snapshot{
 		Domain:  "namespaces",
 		Scope:   scope,
 		Version: version,
-		Payload: NamespaceSnapshot{ClusterMeta: meta, Namespaces: items, WorkloadsReady: trackerReady},
+		Payload: NamespaceSnapshot{ClusterMeta: inputs.meta, Namespaces: items, WorkloadsReady: inputs.trackerReady},
 		Stats: refresh.SnapshotStats{
 			ItemCount: len(items),
 		},
@@ -478,18 +518,18 @@ func (b *NamespaceBuilder) Build(ctx context.Context, scope string) (*refresh.Sn
 		// readiness changes; otherwise an unchanged validator makes the delivery layer return
 		// 304 Not Modified and the client keeps a stale (e.g. the first, pre-sync) snapshot.
 		SourceVersions: map[string]string{
-			"workloads":      workloadRollupSignature(workloadRollups, trackerReady),
-			"warning-events": warningEventRollupSignature(warningEvents, warningEventsState),
-			"quota-pressure": namespaceQuotaRollupSignature(quotaRollups, quotaState),
+			"workloads":      workloadRollupSignature(inputs.workloadRollups, inputs.trackerReady),
+			"warning-events": warningEventRollupSignature(inputs.warningEvents, inputs.warningEventsState),
+			"quota-pressure": namespaceQuotaRollupSignature(inputs.quotaRollups, inputs.quotaState),
 		},
 	}
 	if len(b.scope) > 0 {
 		// Probe flags are content the namespace RV clock cannot carry (a
 		// flagged row has no RV at all) — publish them as their own source
 		// clock so transitions are delivered instead of 304'd.
-		snap.SourceVersions["scope-probe"] = scopeProbeSignature(scopeStatuses)
+		snapshot.SourceVersions["scope-probe"] = scopeProbeSignature(inputs.scopeStatuses)
 	}
-	return snap, nil
+	return snapshot
 }
 
 func (b *NamespaceBuilder) warningEventRollups() (map[string]int, NamespaceSignalState) {
@@ -551,21 +591,9 @@ type namespaceQuotaIngestState interface {
 
 func namespaceQuotaRollupsFromIngest(source namespacePodIngestSource) (map[string]namespaceQuotaRollup, NamespaceSignalState) {
 	rollups := make(map[string]namespaceQuotaRollup)
-	if source == nil || !source.Tracks(ResourceQuotaGVR) {
-		return rollups, NamespaceSignalUnavailable
-	}
-	if stateSource, ok := source.(namespaceQuotaIngestState); ok {
-		if stateSource.PermissionSkippedFor(ResourceQuotaGVR) {
-			return rollups, NamespaceSignalUnavailable
-		}
-		if !stateSource.RawHasSyncedFor(ResourceQuotaGVR) {
-			if source.HasSyncedFor(ResourceQuotaGVR) {
-				return rollups, NamespaceSignalUnavailable
-			}
-			return rollups, NamespaceSignalLoading
-		}
-	} else if !source.HasSyncedFor(ResourceQuotaGVR) {
-		return rollups, NamespaceSignalLoading
+	state := namespaceQuotaIngestSignalState(source)
+	if state != NamespaceSignalAvailable {
+		return rollups, state
 	}
 	for _, row := range source.AggregateRows(ResourceQuotaGVR) {
 		aggregate, ok := row.(streamrows.ResourceQuotaAggregate)
@@ -580,6 +608,29 @@ func namespaceQuotaRollupsFromIngest(source namespacePodIngestSource) (map[strin
 		rollups[aggregate.Namespace] = rollup
 	}
 	return rollups, NamespaceSignalAvailable
+}
+
+func namespaceQuotaIngestSignalState(source namespacePodIngestSource) NamespaceSignalState {
+	if source == nil || !source.Tracks(ResourceQuotaGVR) {
+		return NamespaceSignalUnavailable
+	}
+	stateSource, exposesRawState := source.(namespaceQuotaIngestState)
+	if !exposesRawState {
+		if !source.HasSyncedFor(ResourceQuotaGVR) {
+			return NamespaceSignalLoading
+		}
+		return NamespaceSignalAvailable
+	}
+	if stateSource.PermissionSkippedFor(ResourceQuotaGVR) {
+		return NamespaceSignalUnavailable
+	}
+	if stateSource.RawHasSyncedFor(ResourceQuotaGVR) {
+		return NamespaceSignalAvailable
+	}
+	if source.HasSyncedFor(ResourceQuotaGVR) {
+		return NamespaceSignalUnavailable
+	}
+	return NamespaceSignalLoading
 }
 
 func namespaceQuotaPressure(highestUsedPercentage int) NamespaceQuotaPressure {
@@ -710,39 +761,53 @@ func namespaceWorkloadRollupsFromIngest(ingest namespacePodIngestSource) namespa
 	for _, gvr := range []schema.GroupVersionResource{
 		DeploymentGVR, StatefulSetGVR, DaemonSetGVR, JobGVR, CronJobGVR,
 	} {
-		for _, row := range ingest.CatalogRows(gvr) {
-			if summary, ok := row.(objectcatalog.Summary); ok && summary.Ref.Namespace != "" {
-				rollups.namespaces[summary.Ref.Namespace] = struct{}{}
-			}
-		}
-		for _, row := range ingest.ObjectMapRows(gvr) {
-			node, ok := row.(objectmapnode.Node)
-			if !ok || node.Namespace == "" || node.Status == nil {
-				continue
-			}
-			if isUnhealthyStatusPresentation(node.Status.Presentation) {
-				rollups.unhealthy[node.Namespace]++
-			}
-		}
+		addNamespaceWorkloadObjectRollups(&rollups, ingest, gvr)
 	}
-	for _, row := range ingest.AggregateRows(PodGVR) {
-		if agg, ok := row.(streamrows.PodAggregate); ok && agg.Namespace != "" {
-			rollups.namespaces[agg.Namespace] = struct{}{}
-			active := agg.Phase != string(corev1.PodSucceeded) && agg.Phase != string(corev1.PodFailed)
-			if active {
-				reservations := rollups.reservations[agg.Namespace]
-				reservations.cpuRequestsMilli += agg.CPURequestMilli
-				reservations.cpuLimitsMilli += agg.CPULimitMilli
-				reservations.memoryRequestsBytes += agg.MemRequestBytes
-				reservations.memoryLimitsBytes += agg.MemLimitBytes
-				rollups.reservations[agg.Namespace] = reservations
-			}
-			if agg.OwnerKey == "" && active && isUnhealthyStatusPresentation(agg.StatusPresentation) {
-				rollups.unhealthy[agg.Namespace]++
-			}
-		}
-	}
+	addNamespacePodRollups(&rollups, ingest.AggregateRows(PodGVR))
 	return rollups
+}
+
+func addNamespaceWorkloadObjectRollups(rollups *namespaceWorkloadRollups, ingest namespacePodIngestSource, gvr schema.GroupVersionResource) {
+	for _, row := range ingest.CatalogRows(gvr) {
+		if summary, ok := row.(objectcatalog.Summary); ok && summary.Ref.Namespace != "" {
+			rollups.namespaces[summary.Ref.Namespace] = struct{}{}
+		}
+	}
+	for _, row := range ingest.ObjectMapRows(gvr) {
+		node, ok := row.(objectmapnode.Node)
+		if !ok || node.Namespace == "" || node.Status == nil {
+			continue
+		}
+		if isUnhealthyStatusPresentation(node.Status.Presentation) {
+			rollups.unhealthy[node.Namespace]++
+		}
+	}
+}
+
+func addNamespacePodRollups(rollups *namespaceWorkloadRollups, rows []interface{}) {
+	for _, row := range rows {
+		agg, ok := row.(streamrows.PodAggregate)
+		if !ok || agg.Namespace == "" {
+			continue
+		}
+		rollups.namespaces[agg.Namespace] = struct{}{}
+		active := agg.Phase != string(corev1.PodSucceeded) && agg.Phase != string(corev1.PodFailed)
+		if active {
+			addNamespaceReservations(rollups, agg)
+		}
+		if agg.OwnerKey == "" && active && isUnhealthyStatusPresentation(agg.StatusPresentation) {
+			rollups.unhealthy[agg.Namespace]++
+		}
+	}
+}
+
+func addNamespaceReservations(rollups *namespaceWorkloadRollups, aggregate streamrows.PodAggregate) {
+	reservations := rollups.reservations[aggregate.Namespace]
+	reservations.cpuRequestsMilli += aggregate.CPURequestMilli
+	reservations.cpuLimitsMilli += aggregate.CPULimitMilli
+	reservations.memoryRequestsBytes += aggregate.MemRequestBytes
+	reservations.memoryLimitsBytes += aggregate.MemLimitBytes
+	rollups.reservations[aggregate.Namespace] = reservations
 }
 
 func parseResourceVersion(obj *corev1.Namespace) uint64 {

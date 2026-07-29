@@ -24,6 +24,7 @@ import React, {
   useRef,
   useState,
 } from 'react';
+import { getClusterSelectionPhase } from './clusterSelectionPhase';
 import './ClusterTabs.css';
 
 const ordersMatch = (left: string[], right: string[]) =>
@@ -48,23 +49,35 @@ const ClusterTabs: React.FC<ClusterTabsProps> = ({ onOpenCluster }) => {
   const {
     selectedKubeconfigs,
     selectedKubeconfig,
+    kubeconfigsLoading,
     setActiveKubeconfig,
     getClusterMeta,
     closeKubeconfig,
   } = useKubeconfig();
   const [tabOrder, setTabOrder] = useState<string[]>(() => getClusterTabOrder());
+  const [tabOrderHydrated, setTabOrderHydrated] = useState(false);
   const tabsRef = useRef<HTMLDivElement | null>(null);
   const addBtnRef = useRef<HTMLButtonElement | null>(null);
   const fullAddWidthRef = useRef(140);
   const showAddLabelRef = useRef(true);
   const [showAddLabel, setShowAddLabel] = useState(true);
+  const clusterSelectionPhase = getClusterSelectionPhase({
+    hasSelectedClusters: selectedKubeconfigs.length > 0,
+    kubeconfigsLoading,
+  });
 
   useEffect(() => {
     let active = true;
     const hydrate = async () => {
-      const order = await hydrateClusterTabOrder();
-      if (active) {
-        setTabOrder(order);
+      try {
+        const order = await hydrateClusterTabOrder();
+        if (active) {
+          setTabOrder(order);
+        }
+      } finally {
+        if (active) {
+          setTabOrderHydrated(true);
+        }
       }
     };
     void hydrate();
@@ -103,11 +116,14 @@ const ClusterTabs: React.FC<ClusterTabsProps> = ({ onOpenCluster }) => {
   }, [selectionOrderIds, tabOrder]);
 
   useEffect(() => {
+    if (kubeconfigsLoading || !tabOrderHydrated) {
+      return;
+    }
     if (ordersMatch(mergedOrder, tabOrder)) {
       return;
     }
     setClusterTabOrder(mergedOrder);
-  }, [mergedOrder, tabOrder]);
+  }, [kubeconfigsLoading, mergedOrder, tabOrder, tabOrderHydrated]);
 
   const tabsById = useMemo(() => {
     const map = new Map<string, ClusterTab>();
@@ -312,17 +328,19 @@ const ClusterTabs: React.FC<ClusterTabsProps> = ({ onOpenCluster }) => {
       )}
       {/* Pinned to the right, outside the scrolling <Tabs> strip, so it can never
           scroll off. It is also the sole affordance when no clusters are open. */}
-      <button
-        ref={addBtnRef}
-        type="button"
-        className="cluster-tabs-add"
-        title="Open Cluster"
-        aria-label="Open Cluster"
-        onClick={() => onOpenCluster?.()}
-      >
-        {!!showAddLabel && <span className="cluster-tabs-add__label">Open Cluster</span>}
-        <PlusIcon width={14} height={14} />
-      </button>
+      {clusterSelectionPhase !== 'pending' && (
+        <button
+          ref={addBtnRef}
+          type="button"
+          className="cluster-tabs-add"
+          title="Open Cluster"
+          aria-label="Open Cluster"
+          onClick={() => onOpenCluster?.()}
+        >
+          {!!showAddLabel && <span className="cluster-tabs-add__label">Open Cluster</span>}
+          <PlusIcon width={14} height={14} />
+        </button>
+      )}
     </div>
   );
 };

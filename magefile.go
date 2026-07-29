@@ -17,6 +17,8 @@ import (
 
 var cfg = mage.NewBuildConfig()
 
+const npmPrefixArg = "--prefix"
+
 // ===============================
 // Debugging Stuff
 // ===============================
@@ -124,7 +126,7 @@ func (Deps) Npm() error {
 		return err
 	}
 	fmt.Println("Installing npm dependencies...")
-	return sh.RunV("npm", "install", "--prefix", cfg.FrontendDir)
+	return sh.RunV("npm", "install", npmPrefixArg, cfg.FrontendDir)
 }
 
 // ===============================
@@ -147,9 +149,25 @@ func (Clean) Build() error {
 
 // Cleans the Go cache
 func (Clean) GoCache() error {
-	goCacheDir, _ := exec.Command("go", "env", "GOCACHE").Output()
+	cmd, err := mage.ToolCommand("go", "env", "GOCACHE")
+	if err != nil {
+		return err
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("resolve GOCACHE: %w", err)
+	}
+	// `go env` terminates its value with a newline; passing that through would
+	// hand RemoveAll a path that cannot exist, which reports success while
+	// deleting nothing.
+	goCacheDir := strings.TrimSpace(string(out))
+	if goCacheDir == "" {
+		return fmt.Errorf("resolve GOCACHE: empty path")
+	}
 	fmt.Println("\n🧹 Cleaning Go cache...")
-	os.RemoveAll(string(goCacheDir))
+	if err := os.RemoveAll(goCacheDir); err != nil {
+		return fmt.Errorf("clean Go cache: %w", err)
+	}
 	return nil
 }
 
@@ -190,7 +208,7 @@ func Storybook() error {
 		return err
 	}
 	fmt.Println("Starting Storybook...")
-	return sh.Run("npm", "run", "storybook", "--prefix", cfg.FrontendDir)
+	return sh.Run("npm", "run", "storybook", npmPrefixArg, cfg.FrontendDir)
 }
 
 // ===============================
@@ -247,7 +265,7 @@ func (QC) Lint() error {
 		return err
 	}
 	fmt.Println("\n🔎 Running npm linter...")
-	return sh.RunV("npm", "run", "check", "--prefix", cfg.FrontendDir)
+	return sh.RunV("npm", "run", "check", npmPrefixArg, cfg.FrontendDir)
 }
 
 // Runs the npm linter with fix
@@ -259,7 +277,7 @@ func (QC) LintFix() error {
 		return err
 	}
 	fmt.Println("\n🔧 Running npm linter with fix...")
-	return sh.RunV("npm", "run", "check:fix", "--prefix", cfg.FrontendDir)
+	return sh.RunV("npm", "run", "check:fix", npmPrefixArg, cfg.FrontendDir)
 }
 
 // Runs the npm typechecker
@@ -271,7 +289,7 @@ func (QC) Typecheck() error {
 		return err
 	}
 	fmt.Println("\n🔎 Running npm typecheck...")
-	return sh.RunV("npm", "run", "typecheck", "--prefix", cfg.FrontendDir)
+	return sh.RunV("npm", "run", "typecheck", npmPrefixArg, cfg.FrontendDir)
 }
 
 // Checks npm package updates
@@ -328,11 +346,14 @@ func (QC) Trivy() error {
 	return sh.RunV("trivy", "fs", "--exit-code", "1", "--severity", "CRITICAL,HIGH", ".")
 }
 
-// Resets application settings
+// Resets application settings and cached data
 func (QC) Reset() error {
 	fmt.Println("\n🔄 Resetting application settings...")
-	os.RemoveAll(os.Getenv("HOME") + "/.config/luxury-yacht")
-	return nil
+	dirs, err := mage.ResetAppState(cfg.AppShortName)
+	for _, dir := range dirs {
+		fmt.Printf("   %s\n", dir)
+	}
+	return err
 }
 
 // Runs all checks that could cause a release to fail.
@@ -378,7 +399,7 @@ func (Test) Frontend() error {
 		return err
 	}
 	fmt.Println("\n🔎 Running frontend tests...")
-	return sh.RunV("npm", "run", "test", "--prefix", cfg.FrontendDir)
+	return sh.RunV("npm", "run", "test", npmPrefixArg, cfg.FrontendDir)
 }
 
 // Runs frontend tests with coverage
@@ -390,7 +411,7 @@ func (Test) FrontendCoverage() error {
 		return err
 	}
 	fmt.Println("\n🔎 Running frontend tests with coverage report...")
-	return sh.RunV("npm", "run", "test", "--prefix", cfg.FrontendDir, "--", "--coverage")
+	return sh.RunV("npm", "run", "test", npmPrefixArg, cfg.FrontendDir, "--", "--coverage")
 }
 
 // Runs all tests

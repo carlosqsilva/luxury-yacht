@@ -37,8 +37,9 @@ import {
   useState,
 } from 'react';
 import { resolveFavoriteRoute } from '@/core/navigation/favoriteRoute';
-import { getViewDescriptor } from '@/core/navigation/viewRegistry';
+import { getViewDescriptor, type ViewScope } from '@/core/navigation/viewRegistry';
 import type { Favorite, FavoritePaneState } from '@/core/persistence/favorites';
+import { compareUtf16Strings } from '@/shared/utils/sort';
 import FavSaveModal from './FavSaveModal';
 
 /** Current view state that the FavToggle needs to snapshot when saving a favorite.
@@ -157,8 +158,16 @@ const favoritePaneMatches = (left: FavoritePaneState, right: FavoritePaneState):
   areGridTableFilterStatesEqual(left.filters, right.filters) &&
   left.tableState.sortColumn === right.tableState.sortColumn &&
   left.tableState.sortDirection === right.tableState.sortDirection &&
-  JSON.stringify(Object.entries(left.tableState.columnVisibility).sort()) ===
-    JSON.stringify(Object.entries(right.tableState.columnVisibility).sort());
+  JSON.stringify(
+    Object.entries(left.tableState.columnVisibility).sort(([leftKey], [rightKey]) =>
+      compareUtf16Strings(leftKey, rightKey)
+    )
+  ) ===
+    JSON.stringify(
+      Object.entries(right.tableState.columnVisibility).sort(([leftKey], [rightKey]) =>
+        compareUtf16Strings(leftKey, rightKey)
+      )
+    );
 
 const favoriteFilterOptionsSignature = (options: GridTableFilterOptions): string =>
   JSON.stringify({
@@ -246,12 +255,15 @@ export function useFavToggle(state: FavToggleState): {
   const isPrimaryPane = !paneGroup || paneId === paneGroup.primaryPaneId;
 
   // Derive the active view tab.
-  const activeViewTab =
-    viewType === 'global'
-      ? activeGlobalTab
-      : viewType === 'namespace'
-        ? activeNamespaceTab
-        : activeClusterTab;
+  let activeViewTab: string | null;
+
+  if (viewType === 'global') {
+    activeViewTab = activeGlobalTab;
+  } else if (viewType === 'namespace') {
+    activeViewTab = activeNamespaceTab;
+  } else {
+    activeViewTab = activeClusterTab;
+  }
 
   // Match the current view + filter state against saved favorites.
   // Includes filter comparison so multiple favorites on the same view
@@ -330,12 +342,16 @@ export function useFavToggle(state: FavToggleState): {
     if (pendingRoute.scope !== viewType) {
       return;
     }
-    const expectedTab =
-      viewType === 'global'
-        ? activeGlobalTab
-        : viewType === 'namespace'
-          ? activeNamespaceTab
-          : activeClusterTab;
+    let expectedTab: string | null;
+
+    if (viewType === 'global') {
+      expectedTab = activeGlobalTab;
+    } else if (viewType === 'namespace') {
+      expectedTab = activeNamespaceTab;
+    } else {
+      expectedTab = activeClusterTab;
+    }
+
     if (pendingFavorite.view !== expectedTab) {
       return;
     }
@@ -395,8 +411,16 @@ export function useFavToggle(state: FavToggleState): {
   // Build a human-readable display label for the view tab.
   const viewLabel = useMemo(() => {
     const tab = activeViewTab ?? '';
-    const scope =
-      viewType === 'global' ? 'global' : viewType === 'namespace' ? 'namespace' : 'cluster';
+    let scope: ViewScope;
+
+    if (viewType === 'global') {
+      scope = 'global';
+    } else if (viewType === 'namespace') {
+      scope = 'namespace';
+    } else {
+      scope = 'cluster';
+    }
+
     return getViewDescriptor(scope, tab)?.label ?? tab;
   }, [viewType, activeViewTab]);
 

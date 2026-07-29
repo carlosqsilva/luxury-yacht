@@ -217,25 +217,63 @@ func (r *Recorder) RecordSnapshot(
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	entry, ok := r.snapshots[domain]
-	if !ok {
-		entry = &SnapshotStatus{Domain: domain}
-		r.snapshots[domain] = entry
-	}
+	entry := r.snapshotStatus(domain)
+	updateSnapshotBatch(entry, snapshotBatchUpdate{
+		scope:        scope,
+		clusterID:    clusterID,
+		clusterName:  clusterName,
+		duration:     duration,
+		truncated:    truncated,
+		totalItems:   totalItems,
+		batchIndex:   batchIndex,
+		totalBatches: totalBatches,
+		batchSize:    batchSize,
+		isFinal:      isFinal,
+	})
+	updateSnapshotTiming(entry, batchIndex, timeToFirstBatchMs, informerSyncWaitMs)
+	updateSnapshotWarnings(entry, warnings)
+	updateSnapshotResult(entry, err)
+}
 
-	entry.Scope = scope
+func (r *Recorder) snapshotStatus(domain string) *SnapshotStatus {
+	if entry, ok := r.snapshots[domain]; ok {
+		return entry
+	}
+	entry := &SnapshotStatus{Domain: domain}
+	r.snapshots[domain] = entry
+	return entry
+}
+
+type snapshotBatchUpdate struct {
+	scope        string
+	clusterID    string
+	clusterName  string
+	duration     time.Duration
+	truncated    bool
+	totalItems   int
+	batchIndex   int
+	totalBatches int
+	batchSize    int
+	isFinal      bool
+}
+
+func updateSnapshotBatch(entry *SnapshotStatus, update snapshotBatchUpdate) {
+	entry.Scope = update.scope
 	// Use the provided cluster identifiers instead of instance fields to ensure
 	// correct attribution when the recorder is shared across clusters.
-	entry.ClusterID = clusterID
-	entry.ClusterName = clusterName
-	entry.LastDurationMs = duration.Milliseconds()
+	entry.ClusterID = update.clusterID
+	entry.ClusterName = update.clusterName
+	entry.LastDurationMs = update.duration.Milliseconds()
 	entry.LastUpdated = time.Now().UnixMilli()
-	entry.Truncated = truncated
-	entry.TotalItems = totalItems
-	entry.LastBatchIndex = batchIndex
-	entry.TotalBatches = totalBatches
-	entry.LastBatchSize = batchSize
-	entry.IsFinalBatch = isFinal
+	entry.Truncated = update.truncated
+	entry.TotalItems = update.totalItems
+	entry.LastBatchIndex = update.batchIndex
+	entry.TotalBatches = update.totalBatches
+	entry.LastBatchSize = update.batchSize
+	entry.IsFinalBatch = update.isFinal
+}
+
+func updateSnapshotTiming(entry *SnapshotStatus, batchIndex int, timeToFirstBatchMs, informerSyncWaitMs int64) {
 	if batchIndex == 0 && timeToFirstBatchMs > 0 {
 		entry.TimeToFirstBatchMs = timeToFirstBatchMs
 	}
@@ -244,6 +282,9 @@ func (r *Recorder) RecordSnapshot(
 	if informerSyncWaitMs > entry.MaxInformerSyncWaitMs {
 		entry.MaxInformerSyncWaitMs = informerSyncWaitMs
 	}
+}
+
+func updateSnapshotWarnings(entry *SnapshotStatus, warnings []string) {
 	if len(warnings) > 0 {
 		copyWarnings := make([]string, 0, len(warnings))
 		for _, warning := range warnings {
@@ -264,6 +305,9 @@ func (r *Recorder) RecordSnapshot(
 		entry.Warnings = nil
 		entry.LastWarning = ""
 	}
+}
+
+func updateSnapshotResult(entry *SnapshotStatus, err error) {
 	if err != nil {
 		entry.LastStatus = SnapshotLastStatusError
 		entry.LastError = err.Error()

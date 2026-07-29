@@ -595,6 +595,15 @@ var writeSettingsFileAtomic = writeFileAtomic
 
 // writeFileAtomic persists data with a temp file + rename sequence.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	return writeFileAtomicWithReplace(path, data, perm, os.Rename)
+}
+
+func writeFileAtomicWithReplace(
+	path string,
+	data []byte,
+	perm os.FileMode,
+	replaceFile func(string, string) error,
+) error {
 	dir := filepath.Dir(path)
 	tempFile, err := os.CreateTemp(dir, ".tmp-*")
 	if err != nil {
@@ -617,11 +626,10 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		return err
 	}
 
-	// Windows cannot rename over an existing file, so remove it first.
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return os.Rename(tempFile.Name(), path)
+	// Replace the destination without unlinking it first. Readers must observe
+	// either the previous state or the new state, including when replacement
+	// fails or another app process is starting concurrently.
+	return replaceFile(tempFile.Name(), path)
 }
 
 func (a *App) SaveWindowSettings() error {
@@ -699,66 +707,26 @@ func (a *App) loadAppSettings() error {
 		return err
 	}
 
-	objPanelLogsBufferMaxSize := defaultObjPanelLogsBufferMaxSize
-	objPanelLogsTargetPerScopeLimit := defaultObjPanelLogsTargetPerScopeLimit
-	objPanelLogsTargetGlobalLimit := defaultObjPanelLogsTargetGlobalLimit
-	logAPITimestampFormat := defaultObjPanelLogsAPITimestampFormat
-	logAPITimestampUseLocalTimeZone := false
-	dimInactiveNamespaces := true
-	if settings.Preferences.DimInactiveNamespaces != nil {
-		dimInactiveNamespaces = *settings.Preferences.DimInactiveNamespaces
-	}
-	exclusiveNamespaces := true
-	if settings.Preferences.ExclusiveNamespaces != nil {
-		exclusiveNamespaces = *settings.Preferences.ExclusiveNamespaces
-	}
-	if settings.Preferences.ObjPanelLogs != nil && settings.Preferences.ObjPanelLogs.BufferMaxSize > 0 {
-		objPanelLogsBufferMaxSize = clampObjPanelLogsBufferMaxSize(settings.Preferences.ObjPanelLogs.BufferMaxSize)
-	}
-	if settings.Preferences.ObjPanelLogs != nil && settings.Preferences.ObjPanelLogs.TargetPerScopeLimit > 0 {
-		objPanelLogsTargetPerScopeLimit = clampObjPanelLogsTargetPerScopeLimit(settings.Preferences.ObjPanelLogs.TargetPerScopeLimit)
-	}
-	if settings.Preferences.ObjPanelLogs != nil && settings.Preferences.ObjPanelLogs.TargetGlobalLimit > 0 {
-		objPanelLogsTargetGlobalLimit = clampObjPanelLogsTargetGlobalLimit(settings.Preferences.ObjPanelLogs.TargetGlobalLimit)
-	}
-	if settings.Preferences.ObjPanelLogs != nil && settings.Preferences.ObjPanelLogs.APITimestampFormat != "" {
-		logAPITimestampFormat = settings.Preferences.ObjPanelLogs.APITimestampFormat
-	}
-	if settings.Preferences.ObjPanelLogs != nil {
-		logAPITimestampUseLocalTimeZone = settings.Preferences.ObjPanelLogs.UseLocalTimeZone
-	}
-	kubernetesClientQPS := defaultKubernetesClientQPS
-	kubernetesClientBurst := defaultKubernetesClientBurst
-	permissionSSRRFetchConcurrency := defaultPermissionSSRRFetchConcurrency
-	if settings.Preferences.KubernetesAPI != nil {
-		if settings.Preferences.KubernetesAPI.ClientQPS > 0 {
-			kubernetesClientQPS = clampKubernetesClientQPS(settings.Preferences.KubernetesAPI.ClientQPS)
-		}
-		if settings.Preferences.KubernetesAPI.ClientBurst > 0 {
-			kubernetesClientBurst = clampKubernetesClientBurst(settings.Preferences.KubernetesAPI.ClientBurst)
-		}
-		if settings.Preferences.KubernetesAPI.PermissionSSRRFetchConcurrency > 0 {
-			permissionSSRRFetchConcurrency = clampPermissionSSRRFetchConcurrency(settings.Preferences.KubernetesAPI.PermissionSSRRFetchConcurrency)
-		}
-	}
+	logSettings := resolveObjPanelLogSettings(settings.Preferences.ObjPanelLogs)
+	kubernetesAPISettings := resolveKubernetesAPISettings(settings.Preferences.KubernetesAPI)
 
 	a.appSettings = &AppSettings{
 		AppearanceMode:                           settings.Preferences.AppearanceMode,
 		SelectedKubeconfigs:                      append([]string(nil), settings.Kubeconfig.Selected...),
 		UseShortResourceNames:                    settings.Preferences.UseShortResourceNames,
-		DimInactiveNamespaces:                    dimInactiveNamespaces,
-		ExclusiveNamespaces:                      exclusiveNamespaces,
+		DimInactiveNamespaces:                    boolPreferenceOrDefault(settings.Preferences.DimInactiveNamespaces, true),
+		ExclusiveNamespaces:                      boolPreferenceOrDefault(settings.Preferences.ExclusiveNamespaces, true),
 		AutoRefreshEnabled:                       settings.Preferences.Refresh.Auto,
 		RefreshBackgroundClustersEnabled:         settings.Preferences.Refresh.Background,
 		MetricsRefreshIntervalMs:                 settings.Preferences.Refresh.MetricsIntervalMs,
-		KubernetesClientQPS:                      kubernetesClientQPS,
-		KubernetesClientBurst:                    kubernetesClientBurst,
-		PermissionSSRRFetchConcurrency:           permissionSSRRFetchConcurrency,
-		ObjPanelLogsBufferMaxSize:                objPanelLogsBufferMaxSize,
-		ObjPanelLogsTargetPerScopeLimit:          objPanelLogsTargetPerScopeLimit,
-		ObjPanelLogsTargetGlobalLimit:            objPanelLogsTargetGlobalLimit,
-		ObjPanelLogsAPITimestampFormat:           logAPITimestampFormat,
-		ObjPanelLogsAPITimestampUseLocalTimeZone: logAPITimestampUseLocalTimeZone,
+		KubernetesClientQPS:                      kubernetesAPISettings.clientQPS,
+		KubernetesClientBurst:                    kubernetesAPISettings.clientBurst,
+		PermissionSSRRFetchConcurrency:           kubernetesAPISettings.permissionSSRRFetchConcurrency,
+		ObjPanelLogsBufferMaxSize:                logSettings.bufferMaxSize,
+		ObjPanelLogsTargetPerScopeLimit:          logSettings.targetPerScopeLimit,
+		ObjPanelLogsTargetGlobalLimit:            logSettings.targetGlobalLimit,
+		ObjPanelLogsAPITimestampFormat:           logSettings.apiTimestampFormat,
+		ObjPanelLogsAPITimestampUseLocalTimeZone: logSettings.useLocalTimeZone,
 		GridTablePersistenceMode:                 settings.Preferences.GridTablePersistenceMode,
 		DefaultTablePageSize:                     settings.Preferences.DefaultTablePageSize,
 		DefaultObjectPanelPosition:               settings.Preferences.DefaultObjectPanelPosition,
@@ -781,14 +749,82 @@ func (a *App) loadAppSettings() error {
 		Themes:                                   settings.Preferences.Themes,
 		SuppressNetworkErrorNotifications:        settings.Preferences.SuppressNetworkErrorNotifications,
 	}
-	containerlogs.SetPerScopeTargetLimit(objPanelLogsTargetPerScopeLimit)
+	containerlogs.SetPerScopeTargetLimit(logSettings.targetPerScopeLimit)
 	// The accessor guards the lazy init (subsystem builds run concurrently); creating
 	// on demand here is correct — the limit then applies to the limiter every
 	// subsystem receives.
 	if limiter := a.sharedContainerLogsTargetLimiter(); limiter != nil {
-		limiter.SetLimit(objPanelLogsTargetGlobalLimit)
+		limiter.SetLimit(logSettings.targetGlobalLimit)
 	}
 	return nil
+}
+
+type resolvedObjPanelLogSettings struct {
+	bufferMaxSize       int
+	targetPerScopeLimit int
+	targetGlobalLimit   int
+	apiTimestampFormat  string
+	useLocalTimeZone    bool
+}
+
+func resolveObjPanelLogSettings(settings *settingsObjPanelLogs) resolvedObjPanelLogSettings {
+	resolved := resolvedObjPanelLogSettings{
+		bufferMaxSize:       defaultObjPanelLogsBufferMaxSize,
+		targetPerScopeLimit: defaultObjPanelLogsTargetPerScopeLimit,
+		targetGlobalLimit:   defaultObjPanelLogsTargetGlobalLimit,
+		apiTimestampFormat:  defaultObjPanelLogsAPITimestampFormat,
+	}
+	if settings == nil {
+		return resolved
+	}
+	if settings.BufferMaxSize > 0 {
+		resolved.bufferMaxSize = clampObjPanelLogsBufferMaxSize(settings.BufferMaxSize)
+	}
+	if settings.TargetPerScopeLimit > 0 {
+		resolved.targetPerScopeLimit = clampObjPanelLogsTargetPerScopeLimit(settings.TargetPerScopeLimit)
+	}
+	if settings.TargetGlobalLimit > 0 {
+		resolved.targetGlobalLimit = clampObjPanelLogsTargetGlobalLimit(settings.TargetGlobalLimit)
+	}
+	if settings.APITimestampFormat != "" {
+		resolved.apiTimestampFormat = settings.APITimestampFormat
+	}
+	resolved.useLocalTimeZone = settings.UseLocalTimeZone
+	return resolved
+}
+
+type resolvedKubernetesAPISettings struct {
+	clientQPS                      int
+	clientBurst                    int
+	permissionSSRRFetchConcurrency int
+}
+
+func resolveKubernetesAPISettings(settings *settingsKubernetesAPI) resolvedKubernetesAPISettings {
+	resolved := resolvedKubernetesAPISettings{
+		clientQPS:                      defaultKubernetesClientQPS,
+		clientBurst:                    defaultKubernetesClientBurst,
+		permissionSSRRFetchConcurrency: defaultPermissionSSRRFetchConcurrency,
+	}
+	if settings == nil {
+		return resolved
+	}
+	if settings.ClientQPS > 0 {
+		resolved.clientQPS = clampKubernetesClientQPS(settings.ClientQPS)
+	}
+	if settings.ClientBurst > 0 {
+		resolved.clientBurst = clampKubernetesClientBurst(settings.ClientBurst)
+	}
+	if settings.PermissionSSRRFetchConcurrency > 0 {
+		resolved.permissionSSRRFetchConcurrency = clampPermissionSSRRFetchConcurrency(settings.PermissionSSRRFetchConcurrency)
+	}
+	return resolved
+}
+
+func boolPreferenceOrDefault(value *bool, fallback bool) bool {
+	if value == nil {
+		return fallback
+	}
+	return *value
 }
 
 func (a *App) saveAppSettings() error {
@@ -863,52 +899,40 @@ func (a *App) ClearAppState() error {
 		if err := a.clearKubeconfigSelection(); err != nil {
 			return err
 		}
-
-		var errs []error
-
-		settingsFile, err := a.getSettingsFilePath()
-		if err == nil {
-			if err := removeFileIfExists(settingsFile); err != nil {
-				errs = append(errs, err)
-			}
-		} else {
-			errs = append(errs, err)
-		}
-
-		persistenceFile, err := a.getPersistenceFilePath()
-		if err == nil {
-			if err := removeFileIfExists(persistenceFile); err != nil {
-				errs = append(errs, err)
-			}
-		} else {
-			errs = append(errs, err)
-		}
-
-		// Clear the transient cache subtree (discovery, spill, diagnostics) so a
-		// Factory Reset restores true fresh-install state, not just deleted config
-		// files. clearKubeconfigSelection above already tore down the refresh
-		// subsystem and disconnected every cluster, so no cache writer is active
-		// here; RemoveAll is a no-op when the tree is already absent.
-		cacheDir, err := a.cacheDirPath()
-		if err == nil {
-			if err := os.RemoveAll(cacheDir); err != nil {
-				errs = append(errs, err)
-			}
-		} else {
-			errs = append(errs, err)
-		}
-
-		a.settingsMu.Lock()
-		a.appSettings = nil
-		a.settingsMu.Unlock()
-		a.windowSettings = nil
-
+		errs := a.clearPersistedAppState()
+		a.resetInMemoryAppState()
 		if len(errs) > 0 {
 			return fmt.Errorf("clear app state: %w", errs[0])
 		}
-
 		return nil
 	})
+}
+
+func (a *App) clearPersistedAppState() []error {
+	var errs []error
+	errs = appendPathRemovalError(errs, a.getSettingsFilePath, removeFileIfExists)
+	errs = appendPathRemovalError(errs, a.getPersistenceFilePath, removeFileIfExists)
+	// clearKubeconfigSelection has already stopped cache writers before this removal.
+	errs = appendPathRemovalError(errs, a.cacheDirPath, os.RemoveAll)
+	return errs
+}
+
+func appendPathRemovalError(errs []error, resolve func() (string, error), remove func(string) error) []error {
+	path, err := resolve()
+	if err == nil {
+		err = remove(path)
+	}
+	if err != nil {
+		return append(errs, err)
+	}
+	return errs
+}
+
+func (a *App) resetInMemoryAppState() {
+	a.settingsMu.Lock()
+	a.appSettings = nil
+	a.settingsMu.Unlock()
+	a.windowSettings = nil
 }
 
 // removeFileIfExists ignores missing files so reset can be re-run safely.
@@ -1004,6 +1028,12 @@ type settingsSideEffects struct {
 	metricsInterval            bool
 }
 
+type preparedPreferenceUpdate struct {
+	settings    *AppSettings
+	changedKeys []string
+	effects     settingsSideEffects
+}
+
 func clampInt(value, minValue, maxValue int) int {
 	if value < minValue {
 		return minValue
@@ -1015,11 +1045,20 @@ func clampInt(value, minValue, maxValue int) int {
 }
 
 func (a *App) UpdateAppPreferences(request UpdateAppPreferencesRequest) (*UpdateAppPreferencesResponse, error) {
+	update, err := a.prepareAppPreferenceUpdate(request)
+	if err != nil {
+		return nil, err
+	}
+	a.applySettingsSideEffects(update)
+	return &UpdateAppPreferencesResponse{Settings: update.settings, ChangedKeys: update.changedKeys}, nil
+}
+
+func (a *App) prepareAppPreferenceUpdate(request UpdateAppPreferencesRequest) (*preparedPreferenceUpdate, error) {
 	a.settingsMu.Lock()
+	defer a.settingsMu.Unlock()
 
 	if a.appSettings == nil {
 		if err := a.loadAppSettings(); err != nil {
-			a.settingsMu.Unlock()
 			return nil, err
 		}
 	}
@@ -1032,7 +1071,6 @@ func (a *App) UpdateAppPreferences(request UpdateAppPreferencesRequest) (*Update
 
 	for _, change := range request.Changes {
 		if err := applyAppPreferenceChange(next, change, &effects); err != nil {
-			a.settingsMu.Unlock()
 			return nil, err
 		}
 		if _, ok := seen[change.Key]; !ok {
@@ -1044,7 +1082,6 @@ func (a *App) UpdateAppPreferences(request UpdateAppPreferencesRequest) (*Update
 	a.appSettings = next
 	if err := a.saveAppSettings(); err != nil {
 		a.appSettings = previous
-		a.settingsMu.Unlock()
 		return nil, err
 	}
 
@@ -1052,41 +1089,33 @@ func (a *App) UpdateAppPreferences(request UpdateAppPreferencesRequest) (*Update
 		logPreferenceChange(a.logger, key, preferenceValueForLog(next, key))
 	}
 
-	effectiveQPS := next.KubernetesClientQPS
-	effectiveBurst := next.KubernetesClientBurst
-	perScopeLimit := next.ObjPanelLogsTargetPerScopeLimit
-	globalLimit := next.ObjPanelLogsTargetGlobalLimit
-	metricsIntervalMs := next.MetricsRefreshIntervalMs
-	responseSettings := copyAppSettings(next)
-	a.settingsMu.Unlock()
+	return &preparedPreferenceUpdate{settings: copyAppSettings(next), changedKeys: changedKeys, effects: effects}, nil
+}
 
-	if effects.kubernetesClientRateLimits {
-		a.applyKubernetesClientRateLimits(effectiveQPS, effectiveBurst)
+func (a *App) applySettingsSideEffects(update *preparedPreferenceUpdate) {
+	settings := update.settings
+	if update.effects.kubernetesClientRateLimits {
+		a.applyKubernetesClientRateLimits(settings.KubernetesClientQPS, settings.KubernetesClientBurst)
 	}
-	if effects.containerLogsPerScopeLimit {
-		containerlogs.SetPerScopeTargetLimit(perScopeLimit)
+	if update.effects.containerLogsPerScopeLimit {
+		containerlogs.SetPerScopeTargetLimit(settings.ObjPanelLogsTargetPerScopeLimit)
 	}
-	if effects.containerLogsGlobalLimit {
+	if update.effects.containerLogsGlobalLimit {
 		if limiter := a.sharedContainerLogsTargetLimiter(); limiter != nil {
-			limiter.SetLimit(globalLimit)
+			limiter.SetLimit(settings.ObjPanelLogsTargetGlobalLimit)
 		}
 	}
-	if effects.metricsInterval {
+	if update.effects.metricsInterval {
 		// The metric cadence is server-owned (the doorbell rides collections):
 		// retime every connected cluster's running poller live. Clusters that
 		// connect later read the same setting at subsystem build.
-		interval := time.Duration(metricsIntervalMs) * time.Millisecond
+		interval := time.Duration(settings.MetricsRefreshIntervalMs) * time.Millisecond
 		for _, subsystem := range a.snapshotRefreshSubsystems() {
 			if subsystem != nil && subsystem.Manager != nil {
 				subsystem.Manager.SetMetricsInterval(interval)
 			}
 		}
 	}
-
-	return &UpdateAppPreferencesResponse{
-		Settings:    responseSettings,
-		ChangedKeys: changedKeys,
-	}, nil
 }
 
 func (a *App) kubernetesClientRateLimits() (qps int, burst int) {

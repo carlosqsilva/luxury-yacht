@@ -91,13 +91,17 @@ export const buildBrowseCatalogPlan = ({
   const sortScope = catalogSortScope(sort);
   const selectedNamespaces = filters.namespaces ?? [];
   const hasUserNamespaceScope = isNamespaceScoped || selectedNamespaces.length > 0;
-  const namespacesToQuery = clusterScopedOnly
-    ? ['cluster']
-    : isNamespaceScoped
-      ? pinnedNamespaces
-      : selectedNamespaces.length > 0
-        ? selectedNamespaces
-        : availableNamespaces;
+  let namespacesToQuery: string[];
+
+  if (clusterScopedOnly) {
+    namespacesToQuery = ['cluster'];
+  } else if (isNamespaceScoped) {
+    namespacesToQuery = pinnedNamespaces;
+  } else if (selectedNamespaces.length > 0) {
+    namespacesToQuery = selectedNamespaces;
+  } else {
+    namespacesToQuery = availableNamespaces;
+  }
 
   const baseScope = buildCatalogScope({
     limit: pageLimit,
@@ -116,11 +120,16 @@ export const buildBrowseCatalogPlan = ({
     normalizeCatalogScope(baseScope, pageLimit, pinnedNamespaces, clusterId) ??
     buildClusterScope(clusterId ?? undefined, baseScope);
 
-  const metadataNamespaces = clusterScopedOnly
-    ? ['cluster']
-    : isNamespaceScoped
-      ? pinnedNamespaces
-      : [];
+  let metadataNamespaces: string[];
+
+  if (clusterScopedOnly) {
+    metadataNamespaces = ['cluster'];
+  } else if (isNamespaceScoped) {
+    metadataNamespaces = pinnedNamespaces;
+  } else {
+    metadataNamespaces = [];
+  }
+
   const metadataBaseScope = buildCatalogScope({
     limit: 1,
     resourceScope,
@@ -206,8 +215,8 @@ export const acceptsCatalogSnapshotScope = (
   const incomingScopeParams = new URLSearchParams(
     splitClusterScope(scope ?? fallbackScope).scope.replace(/^\?/, '')
   );
-  const incomingNamespaces = incomingScopeParams.getAll('namespace').sort();
-  const expectedNamespaces = pinnedNamespaces.slice().sort();
+  const incomingNamespaces = incomingScopeParams.getAll('namespace').sort(compareUtf16Strings);
+  const expectedNamespaces = pinnedNamespaces.slice().sort(compareUtf16Strings);
   return (
     incomingNamespaces.length === expectedNamespaces.length &&
     incomingNamespaces.every((ns, index) => ns === expectedNamespaces[index])
@@ -281,11 +290,13 @@ export const deriveBrowseFilterOptions = ({
       : undefined;
 
   return {
-    kinds: filteredKinds.map((kind) => kind.kind).sort(),
-    namespaces: isNamespaceScoped ? [] : (payload?.namespaces ?? []).slice().sort(),
+    kinds: filteredKinds.map((kind) => kind.kind).sort(compareUtf16Strings),
+    namespaces: isNamespaceScoped
+      ? []
+      : (payload?.namespaces ?? []).slice().sort(compareUtf16Strings),
     apiGroups: (payload?.groups ?? [])
       .slice()
-      .sort()
+      .sort(compareUtf16Strings)
       .map((value) => ({ value, label: value === '(core)' ? 'core' : value })),
     isNamespaceScoped,
     partialDataLabel: [issueLabel, facetsLabel, totalLabel].filter(Boolean).join('\n') || undefined,

@@ -49,11 +49,15 @@ const ResourceBar: React.FC<ResourceBarProps> = ({
   const [transitionsEnabled, setTransitionsEnabled] = useState(true);
   const lastScopeKeyRef = useRef<string | undefined>(undefined);
 
-  const metricsState: 'error' | 'stale' | null = metricsError
-    ? 'error'
-    : metricsStale
-      ? 'stale'
-      : null;
+  let metricsState: 'error' | 'stale' | null;
+
+  if (metricsError) {
+    metricsState = 'error';
+  } else if (metricsStale) {
+    metricsState = 'stale';
+  } else {
+    metricsState = null;
+  }
 
   useEffect(() => {
     if (!animationScopeKey) {
@@ -98,15 +102,15 @@ const ResourceBar: React.FC<ResourceBarProps> = ({
       if (type === 'cpu') {
         // Handle CPU (millicores or cores)
         if (value.endsWith('m')) {
-          const parsed = parseFloat(value.slice(0, -1));
+          const parsed = Number.parseFloat(value.slice(0, -1));
           return Number.isNaN(parsed) ? 0 : parsed;
         } else {
-          const parsed = parseFloat(value) * 1000; // Convert cores to millicores
+          const parsed = Number.parseFloat(value) * 1000; // Convert cores to millicores
           return Number.isNaN(parsed) ? 0 : parsed;
         }
       } else {
         // Handle Memory - match DetailsTabUtilization's parseMemToMB exactly
-        const num = parseFloat(value);
+        const num = Number.parseFloat(value);
         if (Number.isNaN(num)) {
           return 0;
         }
@@ -185,32 +189,28 @@ const ResourceBar: React.FC<ResourceBarProps> = ({
     } else {
       statusClass = 'normal';
     }
-  } else {
-    // For pods: use existing logic with limits and requests
-    // First check for over-consumption (usage > request)
-    if (currentRequest > 0 && currentUsage > currentRequest) {
-      // Over-consuming resources - always show warning
-      if (currentLimit > 0 && usageVsLimit > 95) {
-        statusClass = 'critical'; // Near or exceeding limit
-      } else {
-        statusClass = 'warning'; // Over request but not critical on limit
-      }
-    } else if (currentLimit > 0) {
-      // Not over-consuming, check against limit
-      if (usageVsLimit > 95) {
-        statusClass = 'critical';
-      } else if (usageVsLimit > 80) {
-        statusClass = 'warning';
-      } else {
-        statusClass = 'normal';
-      }
-    } else if (currentRequest > 0) {
-      // Have request but no limit, and not over-consuming
-      statusClass = 'normal';
+  } else if (currentRequest > 0 && currentUsage > currentRequest) {
+    // Over-consuming resources - always show warning
+    if (currentLimit > 0 && usageVsLimit > 95) {
+      statusClass = 'critical'; // Near or exceeding limit
     } else {
-      // No request or limit
-      statusClass = 'unbounded';
+      statusClass = 'warning'; // Over request but not critical on limit
     }
+  } else if (currentLimit > 0) {
+    // Not over-consuming, check against limit
+    if (usageVsLimit > 95) {
+      statusClass = 'critical';
+    } else if (usageVsLimit > 80) {
+      statusClass = 'warning';
+    } else {
+      statusClass = 'normal';
+    }
+  } else if (currentRequest > 0) {
+    // Have request but no limit, and not over-consuming
+    statusClass = 'normal';
+  } else {
+    // No request or limit
+    statusClass = 'unbounded';
   }
 
   const containerClasses = [

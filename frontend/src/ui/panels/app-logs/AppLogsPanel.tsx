@@ -6,6 +6,7 @@
  */
 
 import { Dropdown } from '@shared/components/dropdowns/Dropdown';
+import { normalizeDropdownValue } from '@shared/components/dropdowns/dropdownValue';
 import {
   ALL_MULTISELECT_FILTER,
   filterSelectionFromDropdownValues,
@@ -30,6 +31,7 @@ import {
   type CSSProperties,
   type KeyboardEvent,
   type PointerEvent,
+  type ReactNode,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -41,6 +43,7 @@ import { readAppLogs, readAppLogsSince } from '@/core/app-state-access';
 import { ClearAppLogs, SetAppLogsPanelVisible } from '@/core/backend-api';
 import { type AppLogsAddedEvent, subscribeAppLogsAdded } from '@/core/logging/appLogsClient';
 import './AppLogsPanel.css';
+import { compareUtf16Strings } from '@/shared/utils/sort';
 
 interface LogEntry {
   sequence?: number;
@@ -452,8 +455,9 @@ function AppLogsPanel({ isOpen, onClose }: AppLogsPanelProps) {
   }, []);
 
   const handleLogLevelDropdownChange = useCallback((value: string | string[]) => {
-    const values = Array.isArray(value) ? value : value ? [value] : [];
-    setLogLevelFilter(filterSelectionFromDropdownValues(values, LOG_LEVEL_BASE_OPTIONS));
+    setLogLevelFilter(
+      filterSelectionFromDropdownValues(normalizeDropdownValue(value), LOG_LEVEL_BASE_OPTIONS)
+    );
   }, []);
 
   const renderLogLevelOption = useCallback(
@@ -472,7 +476,7 @@ function AppLogsPanel({ isOpen, onClose }: AppLogsPanelProps) {
     () =>
       Array.from(
         new Set(logs.map((log) => log.source).filter((source): source is string => Boolean(source)))
-      ).sort(),
+      ).sort(compareUtf16Strings),
     [logs]
   );
 
@@ -510,8 +514,9 @@ function AppLogsPanel({ isOpen, onClose }: AppLogsPanelProps) {
 
   const handleComponentDropdownChange = useCallback(
     (value: string | string[]) => {
-      const values = Array.isArray(value) ? value : value ? [value] : [];
-      setComponentFilter(filterSelectionFromDropdownValues(values, componentOptions));
+      setComponentFilter(
+        filterSelectionFromDropdownValues(normalizeDropdownValue(value), componentOptions)
+      );
     },
     [componentOptions]
   );
@@ -524,8 +529,9 @@ function AppLogsPanel({ isOpen, onClose }: AppLogsPanelProps) {
 
   const handleClusterDropdownChange = useCallback(
     (value: string | string[]) => {
-      const values = Array.isArray(value) ? value : value ? [value] : [];
-      setClusterFilter(filterSelectionFromDropdownValues(values, clusterOptions));
+      setClusterFilter(
+        filterSelectionFromDropdownValues(normalizeDropdownValue(value), clusterOptions)
+      );
     },
     [clusterOptions]
   );
@@ -757,8 +763,14 @@ function AppLogsPanel({ isOpen, onClose }: AppLogsPanelProps) {
     resetCopyFeedback();
   }, [filteredLogs, formatTimestamp, resetCopyFeedback]);
 
-  const appLogsIconBarItems = useMemo<IconBarItem[]>(
-    () => [
+  const appLogsIconBarItems = useMemo<IconBarItem[]>(() => {
+    let copyIconFeedback: 'success' | 'error' | null = null;
+    if (copyFeedback === 'copied') {
+      copyIconFeedback = 'success';
+    } else if (copyFeedback === 'error') {
+      copyIconFeedback = 'error';
+    }
+    return [
       {
         type: 'toggle',
         id: 'appLogsAutoScroll',
@@ -777,7 +789,7 @@ function AppLogsPanel({ isOpen, onClose }: AppLogsPanelProps) {
         title: 'Copy logs to clipboard',
         ariaLabel: 'Copy logs to clipboard',
         disabled: filteredLogs.length === 0,
-        feedback: copyFeedback === 'copied' ? 'success' : copyFeedback === 'error' ? 'error' : null,
+        feedback: copyIconFeedback,
       },
       {
         type: 'action',
@@ -788,17 +800,16 @@ function AppLogsPanel({ isOpen, onClose }: AppLogsPanelProps) {
         ariaLabel: 'Clear logs',
         disabled: logs.length === 0,
       },
-    ],
-    [
-      copyFeedback,
-      filteredLogs.length,
-      handleClearAppLogs,
-      handleCopyToClipboard,
-      handleToggleAutoScroll,
-      isAutoScroll,
-      logs.length,
-    ]
-  );
+    ];
+  }, [
+    copyFeedback,
+    filteredLogs.length,
+    handleClearAppLogs,
+    handleCopyToClipboard,
+    handleToggleAutoScroll,
+    isAutoScroll,
+    logs.length,
+  ]);
 
   const focusFirstControl = useCallback(() => {
     if (textFilterInputRef.current) {
@@ -851,6 +862,27 @@ function AppLogsPanel({ isOpen, onClose }: AppLogsPanelProps) {
       return focusLastControl();
     },
   });
+
+  let renderedLogs: ReactNode;
+  if (isLoading) {
+    renderedLogs = <LoadingSpinner message="Loading logs..." />;
+  } else if (logs.length === 0) {
+    renderedLogs = <div className="app-logs-empty">No logs available</div>;
+  } else if (filteredLogs.length === 0) {
+    renderedLogs = <div className="app-logs-empty">No logs match the selected filter</div>;
+  } else {
+    renderedLogs = withStableListKeys(filteredLogs, (log) =>
+      String(log.sequence ?? `${log.timestamp}:${log.source ?? ''}:${log.message}`)
+    ).map(({ key, value: log }) => (
+      <div key={key} className={`log-entry ${getLevelClass(log.level)}`}>
+        <span className="log-timestamp">{formatTimestamp(log.timestamp)}</span>
+        <span className={`log-level ${log.level.toUpperCase()}`}>{log.level}</span>
+        <span className="log-source">{log.source ? `[${log.source}]` : ''}</span>
+        <span className="log-cluster">[{getLogScopeLabel(log)}]</span>
+        <span className="log-message">{log.message}</span>
+      </div>
+    ));
+  }
 
   return (
     <DockablePanel
@@ -960,25 +992,7 @@ function AppLogsPanel({ isOpen, onClose }: AppLogsPanelProps) {
         style={columnWidthStyle}
         tabIndex={-1}
       >
-        {isLoading ? (
-          <LoadingSpinner message="Loading logs..." />
-        ) : logs.length === 0 ? (
-          <div className="app-logs-empty">No logs available</div>
-        ) : filteredLogs.length === 0 ? (
-          <div className="app-logs-empty">No logs match the selected filter</div>
-        ) : (
-          withStableListKeys(filteredLogs, (log) =>
-            String(log.sequence ?? `${log.timestamp}:${log.source ?? ''}:${log.message}`)
-          ).map(({ key, value: log }) => (
-            <div key={key} className={`log-entry ${getLevelClass(log.level)}`}>
-              <span className="log-timestamp">{formatTimestamp(log.timestamp)}</span>
-              <span className={`log-level ${log.level.toUpperCase()}`}>{log.level}</span>
-              <span className="log-source">{log.source ? `[${log.source}]` : ''}</span>
-              <span className="log-cluster">[{getLogScopeLabel(log)}]</span>
-              <span className="log-message">{log.message}</span>
-            </div>
-          ))
-        )}
+        {renderedLogs}
       </div>
     </DockablePanel>
   );

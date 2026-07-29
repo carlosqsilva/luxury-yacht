@@ -45,6 +45,7 @@ interface GridTableBodyProps<T> {
   renderRowContent: RenderRowContentFn<T>;
   onWrapperFocus: (event: React.FocusEvent<HTMLElement>) => void;
   onWrapperBlur: (event: React.FocusEvent<HTMLElement>) => void;
+  onWrapperBackgroundClick: () => void;
   contentWidth: number;
   allowHorizontalOverflow: boolean;
   viewportWidth: number;
@@ -76,6 +77,7 @@ function GridTableBody<T>({
   renderRowContent,
   onWrapperFocus,
   onWrapperBlur,
+  onWrapperBackgroundClick,
   contentWidth,
   allowHorizontalOverflow,
   viewportWidth,
@@ -113,14 +115,23 @@ function GridTableBody<T>({
       window.getSelection()?.removeAllRanges();
     };
 
+    const handleClick = (event: MouseEvent) => {
+      if (event.button !== 0 || event.target !== wrapper) {
+        return;
+      }
+      onWrapperBackgroundClick();
+    };
+
     wrapper.addEventListener('mousedown', handleMouseDownCapture, true);
     wrapper.addEventListener('contextmenu', handleContextMenuCapture, true);
+    wrapper.addEventListener('click', handleClick);
 
     return () => {
       wrapper.removeEventListener('mousedown', handleMouseDownCapture, true);
       wrapper.removeEventListener('contextmenu', handleContextMenuCapture, true);
+      wrapper.removeEventListener('click', handleClick);
     };
-  }, [wrapperRef]);
+  }, [onWrapperBackgroundClick, wrapperRef]);
 
   const virtualWidth = (() => {
     if (!shouldVirtualize || !allowHorizontalOverflow || contentWidth <= 0) {
@@ -140,56 +151,60 @@ function GridTableBody<T>({
 
   const renderRows = () => {
     if (tableData.length === 0) {
+      let filterGuidance: React.ReactNode = null;
+      if (hasActiveFilters && filteredEmptyState) {
+        filterGuidance = (
+          <>
+            <div className="gridtable-empty-filter-hint">{filteredEmptyState.description}</div>
+            <div className="gridtable-empty-filter-actions">
+              <button
+                type="button"
+                className="gridtable-empty-filter-hint__link"
+                onClick={(e) => {
+                  e.preventDefault();
+                  onClearFilters();
+                }}
+              >
+                {filteredEmptyState.clearFiltersLabel ?? 'Clear filters'}
+              </button>
+              {!!filteredEmptyState.secondaryAction && (
+                <>
+                  <span aria-hidden="true">•</span>
+                  <button
+                    type="button"
+                    className="gridtable-empty-filter-hint__link"
+                    onClick={filteredEmptyState.secondaryAction.onClick}
+                  >
+                    {filteredEmptyState.secondaryAction.label}
+                  </button>
+                </>
+              )}
+            </div>
+          </>
+        );
+      } else if (hasActiveFilters) {
+        filterGuidance = (
+          <div className="gridtable-empty-filter-hint">
+            Filters are enabled that may be hiding objects.{' '}
+            <button
+              type="button"
+              className="gridtable-empty-filter-hint__link"
+              onClick={(e) => {
+                e.preventDefault();
+                onClearFilters();
+              }}
+            >
+              Clear filters
+            </button>
+          </div>
+        );
+      }
       return (
         <AriaGridRow>
           <AriaGridCell colSpan={1000}>
             <div className="gridtable-empty">
               {hasActiveFilters ? 'No matching items' : (emptyMessage ?? '')}
-              {hasActiveFilters && filteredEmptyState ? (
-                <>
-                  <div className="gridtable-empty-filter-hint">
-                    {filteredEmptyState.description}
-                  </div>
-                  <div className="gridtable-empty-filter-actions">
-                    <button
-                      type="button"
-                      className="gridtable-empty-filter-hint__link"
-                      onClick={(e) => {
-                        e.preventDefault();
-                        onClearFilters();
-                      }}
-                    >
-                      {filteredEmptyState.clearFiltersLabel ?? 'Clear filters'}
-                    </button>
-                    {!!filteredEmptyState.secondaryAction && (
-                      <>
-                        <span aria-hidden="true">•</span>
-                        <button
-                          type="button"
-                          className="gridtable-empty-filter-hint__link"
-                          onClick={filteredEmptyState.secondaryAction.onClick}
-                        >
-                          {filteredEmptyState.secondaryAction.label}
-                        </button>
-                      </>
-                    )}
-                  </div>
-                </>
-              ) : hasActiveFilters ? (
-                <div className="gridtable-empty-filter-hint">
-                  Filters are enabled that may be hiding objects.{' '}
-                  <button
-                    type="button"
-                    className="gridtable-empty-filter-hint__link"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      onClearFilters();
-                    }}
-                  >
-                    Clear filters
-                  </button>
-                </div>
-              ) : null}
+              {filterGuidance}
             </div>
           </AriaGridCell>
         </AriaGridRow>

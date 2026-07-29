@@ -17,7 +17,9 @@ import (
 
 const (
 	// CorrelationIDHeader is the HTTP header used for request correlation.
-	CorrelationIDHeader = "X-Correlation-ID"
+	CorrelationIDHeader   = "X-Correlation-ID"
+	jsonContentTypeHeader = "Content-Type"
+	jsonContentType       = "application/json"
 )
 
 var (
@@ -84,18 +86,7 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 
 	snapshot, err := s.snapshots.Build(ctx, domainName, scope)
 	if err != nil {
-		if status, ok := refresh.PermissionDeniedStatusFromError(err); ok {
-			writePermissionDenied(w, status, correlationID)
-			return
-		}
-		if apierrors.IsForbidden(err) {
-			wrapped := refresh.WrapPermissionDenied(err, domainName, "")
-			if status, ok := refresh.PermissionDeniedStatusFromError(wrapped); ok {
-				writePermissionDenied(w, status, correlationID)
-				return
-			}
-		}
-		writeError(w, http.StatusInternalServerError, err, correlationID)
+		writeSnapshotBuildError(w, err, domainName, correlationID)
 		return
 	}
 
@@ -111,13 +102,28 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 	}
 
 	setCorrelationID(w, correlationID)
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(jsonContentTypeHeader, jsonContentType)
 	if validator != "" {
 		w.Header().Set("ETag", validator)
 	}
 	if err := json.NewEncoder(w).Encode(snapshot); err != nil {
 		writeError(w, http.StatusInternalServerError, err, correlationID)
 	}
+}
+
+func writeSnapshotBuildError(w http.ResponseWriter, err error, domainName, correlationID string) {
+	if status, ok := refresh.PermissionDeniedStatusFromError(err); ok {
+		writePermissionDenied(w, status, correlationID)
+		return
+	}
+	if apierrors.IsForbidden(err) {
+		wrapped := refresh.WrapPermissionDenied(err, domainName, "")
+		if status, ok := refresh.PermissionDeniedStatusFromError(wrapped); ok {
+			writePermissionDenied(w, status, correlationID)
+			return
+		}
+	}
+	writeError(w, http.StatusInternalServerError, err, correlationID)
 }
 
 func (s *Server) handleManualRefresh(w http.ResponseWriter, r *http.Request) {
@@ -162,7 +168,7 @@ func (s *Server) handleManualRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 
 	setCorrelationID(w, correlationID)
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(jsonContentTypeHeader, jsonContentType)
 	w.WriteHeader(http.StatusAccepted)
 	_ = json.NewEncoder(w).Encode(job)
 }
@@ -198,7 +204,7 @@ func (s *Server) handleJobStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setCorrelationID(w, correlationID)
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(jsonContentTypeHeader, jsonContentType)
 	_ = json.NewEncoder(w).Encode(job)
 }
 
@@ -211,13 +217,13 @@ func (s *Server) handleTelemetrySummary(w http.ResponseWriter, r *http.Request) 
 	setCorrelationID(w, correlationID)
 
 	if s.telemetry == nil {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(jsonContentTypeHeader, jsonContentType)
 		_ = json.NewEncoder(w).Encode(telemetry.EmptySummary())
 		return
 	}
 
 	summary := s.telemetry.SnapshotSummary()
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(jsonContentTypeHeader, jsonContentType)
 	_ = json.NewEncoder(w).Encode(summary)
 }
 
@@ -276,7 +282,7 @@ func setCorrelationID(w http.ResponseWriter, correlationID string) {
 }
 
 func writeError(w http.ResponseWriter, status int, err error, correlationID string) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(jsonContentTypeHeader, jsonContentType)
 	setCorrelationID(w, correlationID)
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(struct {
@@ -293,7 +299,7 @@ func writeError(w http.ResponseWriter, status int, err error, correlationID stri
 
 // writePermissionDenied emits a Status-like payload for RBAC denials.
 func writePermissionDenied(w http.ResponseWriter, status *refresh.PermissionDeniedStatus, correlationID string) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(jsonContentTypeHeader, jsonContentType)
 	setCorrelationID(w, correlationID)
 	w.WriteHeader(http.StatusForbidden)
 	_ = json.NewEncoder(w).Encode(status)

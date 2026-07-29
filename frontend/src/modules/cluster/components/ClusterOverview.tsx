@@ -658,7 +658,10 @@ const ClusterOverview: React.FC<ClusterOverviewProps> = ({ clusterContext }) => 
     if (cores === 0) {
       return '0';
     }
-    return cores.toFixed(2).replace(/\.?0+$/, '');
+    // Number() re-canonicalises the fixed 2-decimal string, dropping trailing
+    // zeros ("1.50"→"1.5", "2.00"→"2") without the trailing-zero-run regex,
+    // whose unanchored `0+$` retries from every position.
+    return String(Number(cores.toFixed(2)));
   };
   const formatResourceTooltipValue = (value: number, type: 'cpu' | 'memory') =>
     type === 'cpu' ? formatCpuTooltipValue(value) : formatMemoryValue(value);
@@ -1052,7 +1055,7 @@ const ClusterOverview: React.FC<ClusterOverviewProps> = ({ clusterContext }) => 
                 }`}
                 aria-hidden="true"
               />
-              Legend
+              {'Legend'}
             </button>
             {!!legendExpanded && (
               <div className="utilization-legend__items" data-testid="utilization-legend">

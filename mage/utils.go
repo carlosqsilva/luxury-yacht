@@ -10,45 +10,39 @@ import (
 	"time"
 )
 
-// CheckNodeVersion reads .nvmrc and ensures the correct Node version is active.
-// Since nvm is a shell function (not a binary), we can't call "nvm use" from Go.
-// Instead, if the current node version doesn't match, we look for the correct
-// version in the nvm install directory and prepend its bin/ to PATH so all
-// subsequent npm/npx/node calls in this process use the right version.
-func CheckNodeVersion() error {
-	data, err := os.ReadFile(".nvmrc")
+// ToolCommand builds an exec.Cmd for a build tool, resolving it to an absolute
+// path first. Passing a bare name would leave the binary chosen by whatever
+// PATH happens to be set when the build runs; resolving up front pins the
+// choice and turns a missing tool into a named error instead of an opaque
+// "executable file not found" from the eventual Run.
+func ToolCommand(name string, args ...string) (*exec.Cmd, error) {
+	resolved, err := exec.LookPath(name)
 	if err != nil {
-		return fmt.Errorf("failed to read .nvmrc: %w", err)
+		return nil, fmt.Errorf("%s not found in PATH: %w", name, err)
 	}
-	expected := strings.TrimSpace(string(data))
-	expected = strings.TrimPrefix(expected, "v")
+	return exec.Command(resolved, args...), nil
+}
 
-	// Check if the current node already matches.
-	nodeCmd := exec.Command("node", "--version")
+// CheckNodeVersion reads mise.toml and ensures the canonical Node version is active.
+func CheckNodeVersion() error {
+	versions, err := readToolVersions("mise.toml")
+	if err != nil {
+		return err
+	}
+	expected := versions.Node
+
+	nodeCmd, err := ToolCommand("node", "--version")
+	if err != nil {
+		return fmt.Errorf("node v%s is not active: %v; activate Mise in your shell or prefix the command with 'mise exec --'", expected, err)
+	}
 	out, err := nodeCmd.Output()
-	if err == nil {
-		actual := strings.TrimPrefix(strings.TrimSpace(string(out)), "v")
-		if actual == expected {
-			return nil
-		}
+	if err != nil {
+		return fmt.Errorf("check active Node version: %w; activate Mise in your shell or prefix the command with 'mise exec --'", err)
 	}
-
-	// Current node doesn't match (or isn't found). Try to find the right
-	// version in the nvm directory and prepend it to PATH.
-	nvmDir := os.Getenv("NVM_DIR")
-	if nvmDir == "" {
-		home, _ := os.UserHomeDir()
-		nvmDir = home + "/.nvm"
+	actual := strings.TrimPrefix(strings.TrimSpace(string(out)), "v")
+	if actual != expected {
+		return fmt.Errorf("node v%s is active, but mise.toml requires v%s; activate Mise in your shell or prefix the command with 'mise exec --'", actual, expected)
 	}
-
-	nodeBinDir := fmt.Sprintf("%s/versions/node/v%s/bin", nvmDir, expected)
-	if _, err := os.Stat(nodeBinDir + "/node"); err != nil {
-		return fmt.Errorf("node v%s is not installed via nvm (looked in %s). Run 'nvm install %s'", expected, nodeBinDir, expected)
-	}
-
-	// Prepend the correct node bin directory to PATH for this process.
-	os.Setenv("PATH", nodeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	fmt.Printf("Using node v%s from %s\n", expected, nodeBinDir)
 	return nil
 }
 
@@ -92,7 +86,10 @@ func getBetaExpiryDays() (int, error) {
 
 // GitRevParse returns the short git commit hash of the current HEAD.
 func gitRevParse() string {
-	cmd := exec.Command("git", "rev-parse", "--short=9", "HEAD")
+	cmd, err := ToolCommand("git", "rev-parse", "--short=9", "HEAD")
+	if err != nil {
+		return ""
+	}
 	out, err := cmd.Output()
 	if err != nil {
 		return ""

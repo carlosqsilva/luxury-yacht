@@ -18,6 +18,8 @@ import (
 	"github.com/luxury-yacht/app/backend/refresh/snapshot"
 )
 
+const coreNamespacesPermissionResource = "core/namespaces"
+
 // registrationDeps bundles dependencies needed to register refresh domains.
 type registrationDeps struct {
 	registry        *domain.Registry      // Domain registry for managing domain lifecycles
@@ -139,53 +141,64 @@ func runDomainRegistrations(ctx context.Context, gate *permissionGate, checker *
 // It merges requirements from the registration table, the shared domain access
 // contract, and any extra requests such as metrics.
 func preflightRequests(registrations []domainRegistration, extra []informer.PermissionRequest) []informer.PermissionRequest {
-	requests := make([]informer.PermissionRequest, 0, len(extra))
-	seen := make(map[string]struct{})
-
-	add := func(group, resource, verb string) {
-		key := fmt.Sprintf("%s/%s/%s", group, resource, verb)
-		if _, ok := seen[key]; ok {
-			return
-		}
-		seen[key] = struct{}{}
-		requests = append(requests, informer.PermissionRequest{
-			Group:    group,
-			Resource: resource,
-			Verb:     verb,
-		})
+	collector := permissionRequestCollector{
+		requests: make([]informer.PermissionRequest, 0, len(extra)),
+		seen:     make(map[string]struct{}),
 	}
-
-	for _, req := range extra {
-		add(req.Group, req.Resource, req.Verb)
-	}
-
+	collector.addAll(extra)
 	// Add the shared domain permission contract so runtime and stream checks are pre-warmed.
-	for _, req := range domainpermissions.PreflightRequirements() {
-		add(req.Group, req.Resource, req.Verb)
-	}
-
+	collector.addRequirements(domainpermissions.PreflightRequirements())
 	for _, registration := range registrations {
-		if registration.list != nil {
-			for _, check := range registration.list.checks {
-				add(check.group, check.resource, "list")
-			}
-		}
-		if registration.listWatch != nil {
-			for _, check := range registration.listWatch.checks {
-				add(check.group, check.resource, "list")
-				add(check.group, check.resource, "watch")
-			}
-		}
-		for _, check := range registration.preflightList {
-			add(check.group, check.resource, "list")
-		}
-		for _, check := range registration.preflightListWatch {
-			add(check.group, check.resource, "list")
-			add(check.group, check.resource, "watch")
+		collector.addRegistration(registration)
+	}
+	return collector.requests
+}
+
+type permissionRequestCollector struct {
+	requests []informer.PermissionRequest
+	seen     map[string]struct{}
+}
+
+func (c *permissionRequestCollector) add(group, resource, verb string) {
+	key := fmt.Sprintf("%s/%s/%s", group, resource, verb)
+	if _, ok := c.seen[key]; ok {
+		return
+	}
+	c.seen[key] = struct{}{}
+	c.requests = append(c.requests, informer.PermissionRequest{Group: group, Resource: resource, Verb: verb})
+}
+
+func (c *permissionRequestCollector) addAll(requests []informer.PermissionRequest) {
+	for _, request := range requests {
+		c.add(request.Group, request.Resource, request.Verb)
+	}
+}
+
+func (c *permissionRequestCollector) addRequirements(requirements []permissions.ResourceRequirement) {
+	for _, requirement := range requirements {
+		c.add(requirement.Group, requirement.Resource, requirement.Verb)
+	}
+}
+
+func (c *permissionRequestCollector) addRegistration(registration domainRegistration) {
+	if registration.list != nil {
+		for _, check := range registration.list.checks {
+			c.add(check.group, check.resource, "list")
 		}
 	}
-
-	return requests
+	if registration.listWatch != nil {
+		for _, check := range registration.listWatch.checks {
+			c.add(check.group, check.resource, "list")
+			c.add(check.group, check.resource, "watch")
+		}
+	}
+	for _, check := range registration.preflightList {
+		c.add(check.group, check.resource, "list")
+	}
+	for _, check := range registration.preflightListWatch {
+		c.add(check.group, check.resource, "list")
+		c.add(check.group, check.resource, "watch")
+	}
 }
 
 // domainReadinessResources returns, per registered domain, the canonical
@@ -199,45 +212,62 @@ func domainReadinessResources(registrations []domainRegistration) map[string][]s
 	compositions := domainpermissions.CompositionByDomain()
 	result := make(map[string][]string, len(registrations))
 	for _, registration := range registrations {
-		seen := make(map[string]struct{})
-		add := func(group, resource string) {
-			seen[permissions.ResourceKey(group, resource)] = struct{}{}
-		}
+		resources := make(readinessResourceSet)
 		if composition, ok := compositions[registration.name]; ok {
-			for _, resource := range composition.Runtime {
-				add(resource.Group, resource.Resource)
-			}
-			for _, resource := range composition.Stream {
-				add(resource.Group, resource.Resource)
-			}
+			resources.addComposition(composition.Runtime)
+			resources.addComposition(composition.Stream)
 		}
-		if registration.list != nil {
-			for _, check := range registration.list.checks {
-				add(check.group, check.resource)
-			}
-		}
-		if registration.listWatch != nil {
-			for _, check := range registration.listWatch.checks {
-				add(check.group, check.resource)
-			}
-		}
-		for _, check := range registration.preflightList {
-			add(check.group, check.resource)
-		}
-		for _, check := range registration.preflightListWatch {
-			add(check.group, check.resource)
-		}
-		if len(seen) == 0 {
+		resources.addRegistration(registration)
+		if len(resources) == 0 {
 			continue
 		}
-		keys := make([]string, 0, len(seen))
-		for key := range seen {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		result[registration.name] = keys
+		result[registration.name] = resources.sorted()
 	}
 	return result
+}
+
+type readinessResourceSet map[string]struct{}
+
+func (s readinessResourceSet) add(group, resource string) {
+	s[permissions.ResourceKey(group, resource)] = struct{}{}
+}
+
+func (s readinessResourceSet) addComposition(resources []domainpermissions.Resource) {
+	for _, resource := range resources {
+		s.add(resource.Group, resource.Resource)
+	}
+}
+
+func (s readinessResourceSet) addRegistration(registration domainRegistration) {
+	if registration.list != nil {
+		s.addListChecks(registration.list.checks)
+	}
+	if registration.listWatch != nil {
+		s.addListWatchChecks(registration.listWatch.checks)
+	}
+	s.addListChecks(registration.preflightList)
+	s.addListWatchChecks(registration.preflightListWatch)
+}
+
+func (s readinessResourceSet) addListChecks(checks []listCheck) {
+	for _, check := range checks {
+		s.add(check.group, check.resource)
+	}
+}
+
+func (s readinessResourceSet) addListWatchChecks(checks []listWatchCheck) {
+	for _, check := range checks {
+		s.add(check.group, check.resource)
+	}
+}
+
+func (s readinessResourceSet) sorted() []string {
+	keys := make([]string, 0, len(s))
+	for key := range s {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // domainRegistrations returns the ordered domain registration table.
@@ -286,7 +316,7 @@ func domainRegistrations(deps registrationDeps) []domainRegistration {
 		// overview instead of a permission-denied placeholder.
 		listWatchRegistration(listWatchDomainConfig{
 			name:          "cluster-overview",
-			issueResource: "core/namespaces",
+			issueResource: coreNamespacesPermissionResource,
 			logGroup:      "",
 			logResource:   "nodes/namespaces",
 			checks: []listWatchCheck{
@@ -740,14 +770,14 @@ func namespacesRegistration(deps registrationDeps) domainRegistration {
 	}
 	return listWatchRegistration(listWatchDomainConfig{
 		name:          "namespaces",
-		issueResource: "core/namespaces",
+		issueResource: coreNamespacesPermissionResource,
 		logGroup:      "",
 		logResource:   "namespaces",
 		checks: []listWatchCheck{
 			{group: "", resource: "namespaces"},
 		},
 		registerInformer: registerScopedOrUnscoped,
-		deniedReason:     "core/namespaces",
+		deniedReason:     coreNamespacesPermissionResource,
 	})
 }
 
