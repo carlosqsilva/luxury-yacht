@@ -33,6 +33,7 @@ const (
 	appPreferenceUseShortResourceNames                    = "useShortResourceNames"
 	appPreferenceDimInactiveNamespaces                    = "dimInactiveNamespaces"
 	appPreferenceExclusiveNamespaces                      = "exclusiveNamespaces"
+	appPreferenceErrorReportingEnabled                    = "errorReportingEnabled"
 	appPreferenceAutoRefreshEnabled                       = "autoRefreshEnabled"
 	appPreferenceRefreshBackgroundClustersEnabled         = "refreshBackgroundClustersEnabled"
 	appPreferenceMetricsRefreshIntervalMs                 = "metricsRefreshIntervalMs"
@@ -103,6 +104,7 @@ type settingsPreferences struct {
 	UseShortResourceNames         bool                   `json:"useShortResourceNames"`
 	DimInactiveNamespaces         *bool                  `json:"dimInactiveNamespaces,omitempty"`
 	ExclusiveNamespaces           *bool                  `json:"exclusiveNamespaces,omitempty"`
+	ErrorReportingEnabled         *bool                  `json:"errorReportingEnabled,omitempty"`
 	Refresh                       *settingsRefresh       `json:"refresh"`
 	KubernetesAPI                 *settingsKubernetesAPI `json:"kubernetesAPI,omitempty"`
 	ObjPanelLogs                  *settingsObjPanelLogs  `json:"objPanelLogs,omitempty"`
@@ -285,6 +287,7 @@ func defaultSettingsFile() *settingsFile {
 			AppearanceMode:        "system",
 			DimInactiveNamespaces: boolPtr(true),
 			ExclusiveNamespaces:   boolPtr(true),
+			ErrorReportingEnabled: boolPtr(true),
 			Refresh:               &settingsRefresh{Auto: true, Background: true, MetricsIntervalMs: defaultMetricsIntervalMs()},
 			KubernetesAPI: &settingsKubernetesAPI{
 				ClientQPS:                      defaultKubernetesClientQPS,
@@ -331,6 +334,9 @@ func normalizeSettingsFile(settings *settingsFile) *settingsFile {
 	}
 	if settings.Preferences.ExclusiveNamespaces == nil {
 		settings.Preferences.ExclusiveNamespaces = boolPtr(true)
+	}
+	if settings.Preferences.ErrorReportingEnabled == nil {
+		settings.Preferences.ErrorReportingEnabled = boolPtr(true)
 	}
 	if settings.Preferences.Refresh == nil {
 		settings.Preferences.Refresh = &settingsRefresh{Auto: true, Background: true, MetricsIntervalMs: defaultMetricsIntervalMs()}
@@ -677,6 +683,7 @@ func getDefaultAppSettings() *AppSettings {
 		UseShortResourceNames:                    false,
 		DimInactiveNamespaces:                    true,
 		ExclusiveNamespaces:                      true,
+		ErrorReportingEnabled:                    true,
 		AutoRefreshEnabled:                       true,
 		RefreshBackgroundClustersEnabled:         true,
 		MetricsRefreshIntervalMs:                 defaultMetricsIntervalMs(),
@@ -706,16 +713,31 @@ func (a *App) loadAppSettings() error {
 	if err != nil {
 		return err
 	}
+	a.appSettings = appSettingsFromFile(settings)
 
+	logSettings := resolveObjPanelLogSettings(settings.Preferences.ObjPanelLogs)
+	containerlogs.SetPerScopeTargetLimit(logSettings.targetPerScopeLimit)
+	// The accessor guards the lazy init (subsystem builds run concurrently); creating
+	// on demand here is correct — the limit then applies to the limiter every
+	// subsystem receives.
+	if limiter := a.sharedContainerLogsTargetLimiter(); limiter != nil {
+		limiter.SetLimit(logSettings.targetGlobalLimit)
+	}
+	return nil
+}
+
+func appSettingsFromFile(settings *settingsFile) *AppSettings {
+	settings = normalizeSettingsFile(settings)
 	logSettings := resolveObjPanelLogSettings(settings.Preferences.ObjPanelLogs)
 	kubernetesAPISettings := resolveKubernetesAPISettings(settings.Preferences.KubernetesAPI)
 
-	a.appSettings = &AppSettings{
+	return &AppSettings{
 		AppearanceMode:                           settings.Preferences.AppearanceMode,
 		SelectedKubeconfigs:                      append([]string(nil), settings.Kubeconfig.Selected...),
 		UseShortResourceNames:                    settings.Preferences.UseShortResourceNames,
 		DimInactiveNamespaces:                    boolPreferenceOrDefault(settings.Preferences.DimInactiveNamespaces, true),
 		ExclusiveNamespaces:                      boolPreferenceOrDefault(settings.Preferences.ExclusiveNamespaces, true),
+		ErrorReportingEnabled:                    boolPreferenceOrDefault(settings.Preferences.ErrorReportingEnabled, true),
 		AutoRefreshEnabled:                       settings.Preferences.Refresh.Auto,
 		RefreshBackgroundClustersEnabled:         settings.Preferences.Refresh.Background,
 		MetricsRefreshIntervalMs:                 settings.Preferences.Refresh.MetricsIntervalMs,
@@ -749,14 +771,6 @@ func (a *App) loadAppSettings() error {
 		Themes:                                   settings.Preferences.Themes,
 		SuppressNetworkErrorNotifications:        settings.Preferences.SuppressNetworkErrorNotifications,
 	}
-	containerlogs.SetPerScopeTargetLimit(logSettings.targetPerScopeLimit)
-	// The accessor guards the lazy init (subsystem builds run concurrently); creating
-	// on demand here is correct — the limit then applies to the limiter every
-	// subsystem receives.
-	if limiter := a.sharedContainerLogsTargetLimiter(); limiter != nil {
-		limiter.SetLimit(logSettings.targetGlobalLimit)
-	}
-	return nil
 }
 
 type resolvedObjPanelLogSettings struct {
@@ -841,6 +855,7 @@ func (a *App) saveAppSettings() error {
 	settings.Preferences.UseShortResourceNames = a.appSettings.UseShortResourceNames
 	settings.Preferences.DimInactiveNamespaces = boolPtr(a.appSettings.DimInactiveNamespaces)
 	settings.Preferences.ExclusiveNamespaces = boolPtr(a.appSettings.ExclusiveNamespaces)
+	settings.Preferences.ErrorReportingEnabled = boolPtr(a.appSettings.ErrorReportingEnabled)
 	if settings.Preferences.Refresh == nil {
 		settings.Preferences.Refresh = &settingsRefresh{}
 	}
@@ -959,6 +974,28 @@ func (a *App) GetAppSettings() (*AppSettings, error) {
 	return &cp, nil
 }
 
+// InitializeErrorReporting applies the persisted preference before application
+// startup can produce reportable errors. A settings read failure keeps the
+// reporter disabled. This is a package-level startup function so Wails does not
+// expose it as a frontend-callable App method.
+func InitializeErrorReporting(a *App) error {
+	if a == nil || a.errorReporter == nil {
+		return nil
+	}
+
+	a.settingsMu.Lock()
+	if a.appSettings == nil {
+		if err := a.loadAppSettings(); err != nil {
+			a.settingsMu.Unlock()
+			_ = a.errorReporter.SetEnabled(false)
+			return err
+		}
+	}
+	enabled := a.appSettings.ErrorReportingEnabled
+	a.settingsMu.Unlock()
+	return a.errorReporter.SetEnabled(enabled)
+}
+
 func intPtr(v int) *int {
 	return &v
 }
@@ -1022,6 +1059,7 @@ func intPreferenceValue(value any) (int, error) {
 }
 
 type settingsSideEffects struct {
+	errorReporting             bool
 	kubernetesClientRateLimits bool
 	containerLogsPerScopeLimit bool
 	containerLogsGlobalLimit   bool
@@ -1094,6 +1132,11 @@ func (a *App) prepareAppPreferenceUpdate(request UpdateAppPreferencesRequest) (*
 
 func (a *App) applySettingsSideEffects(update *preparedPreferenceUpdate) {
 	settings := update.settings
+	if update.effects.errorReporting && a.errorReporter != nil {
+		if err := a.errorReporter.SetEnabled(settings.ErrorReportingEnabled); err != nil {
+			a.logger.Warn(fmt.Sprintf("Could not update error reporting: %v", err), logsources.Settings)
+		}
+	}
 	if update.effects.kubernetesClientRateLimits {
 		a.applyKubernetesClientRateLimits(settings.KubernetesClientQPS, settings.KubernetesClientBurst)
 	}

@@ -46,6 +46,7 @@ export interface AppPreferences {
   useShortResourceNames: boolean;
   dimInactiveNamespaces: boolean;
   exclusiveNamespaces: boolean;
+  errorReportingEnabled: boolean;
   autoRefreshEnabled: boolean;
   refreshBackgroundClustersEnabled: boolean;
   metricsRefreshIntervalMs: number;
@@ -138,6 +139,7 @@ interface AppSettingsPayload {
   useShortResourceNames?: boolean;
   dimInactiveNamespaces?: boolean;
   exclusiveNamespaces?: boolean;
+  errorReportingEnabled?: boolean;
   autoRefreshEnabled?: boolean;
   refreshBackgroundClustersEnabled?: boolean;
   metricsRefreshIntervalMs?: number;
@@ -214,6 +216,7 @@ const DEFAULT_PREFERENCES: AppPreferences = {
   useShortResourceNames: false,
   dimInactiveNamespaces: true,
   exclusiveNamespaces: true,
+  errorReportingEnabled: true,
   autoRefreshEnabled: true,
   refreshBackgroundClustersEnabled: true,
   metricsRefreshIntervalMs: DEFAULT_METRICS_REFRESH_INTERVAL_MS,
@@ -286,6 +289,9 @@ const FALLBACK_PREFERENCE_METADATA: {
   }),
   exclusiveNamespaces: createPreferenceMetadata('exclusiveNamespaces', 'boolean', {
     runtimeSideEffect: false,
+  }),
+  errorReportingEnabled: createPreferenceMetadata('errorReportingEnabled', 'boolean', {
+    runtimeSideEffect: true,
   }),
   autoRefreshEnabled: createPreferenceMetadata('autoRefreshEnabled', 'boolean', {
     runtimeSideEffect: true,
@@ -656,6 +662,9 @@ const emitPreferenceChanges = (previous: AppPreferences, next: AppPreferences): 
   if (previous.exclusiveNamespaces !== next.exclusiveNamespaces) {
     eventBus.emit('settings:exclusive-namespaces', next.exclusiveNamespaces);
   }
+  if (previous.errorReportingEnabled !== next.errorReportingEnabled) {
+    eventBus.emit('settings:error-reporting', next.errorReportingEnabled);
+  }
   if (previous.autoRefreshEnabled !== next.autoRefreshEnabled) {
     eventBus.emit('settings:auto-refresh', next.autoRefreshEnabled);
   }
@@ -952,6 +961,10 @@ export const hydrateAppPreferences = async (options?: {
       'exclusiveNamespaces',
       backendSettings?.exclusiveNamespaces
     ),
+    errorReportingEnabled: normalizeBooleanPreferenceValue(
+      'errorReportingEnabled',
+      backendSettings?.errorReportingEnabled
+    ),
     autoRefreshEnabled: normalizeBooleanPreferenceValue(
       'autoRefreshEnabled',
       backendSettings?.autoRefreshEnabled
@@ -1082,6 +1095,10 @@ export const getDimInactiveNamespaces = (): boolean => {
 
 export const getExclusiveNamespaces = (): boolean => {
   return preferenceCache.exclusiveNamespaces;
+};
+
+export const getErrorReportingEnabled = (): boolean => {
+  return preferenceCache.errorReportingEnabled;
 };
 
 export const getAutoRefreshEnabled = (): boolean => {
@@ -1257,6 +1274,11 @@ export const setDimInactiveNamespaces = async (enabled: boolean): Promise<void> 
 
 export const setExclusiveNamespaces = async (enabled: boolean): Promise<void> => {
   const mutation = singlePreferenceMutation('exclusiveNamespaces', enabled);
+  await optimisticPreferenceUpdate(mutation.updates, mutation.changes, mutation.options);
+};
+
+export const setErrorReportingEnabled = async (enabled: boolean): Promise<void> => {
+  const mutation = singlePreferenceMutation('errorReportingEnabled', enabled);
   await optimisticPreferenceUpdate(mutation.updates, mutation.changes, mutation.options);
 };
 

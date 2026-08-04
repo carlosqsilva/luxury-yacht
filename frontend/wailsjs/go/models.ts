@@ -762,6 +762,22 @@ export namespace backend {
 	        this.protocol = source["protocol"];
 	    }
 	}
+	export class DataManagementResult {
+	    path: string;
+	    canceled: boolean;
+	    imported?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new DataManagementResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.canceled = source["canceled"];
+	        this.imported = source["imported"];
+	    }
+	}
 	export class FavoriteTableState {
 	    sortColumn: string;
 	    sortDirection: string;
@@ -4962,6 +4978,7 @@ export namespace types {
 	    useShortResourceNames: boolean;
 	    dimInactiveNamespaces: boolean;
 	    exclusiveNamespaces: boolean;
+	    errorReportingEnabled: boolean;
 	    autoRefreshEnabled: boolean;
 	    refreshBackgroundClustersEnabled: boolean;
 	    metricsRefreshIntervalMs: number;
@@ -5006,6 +5023,7 @@ export namespace types {
 	        this.useShortResourceNames = source["useShortResourceNames"];
 	        this.dimInactiveNamespaces = source["dimInactiveNamespaces"];
 	        this.exclusiveNamespaces = source["exclusiveNamespaces"];
+	        this.errorReportingEnabled = source["errorReportingEnabled"];
 	        this.autoRefreshEnabled = source["autoRefreshEnabled"];
 	        this.refreshBackgroundClustersEnabled = source["refreshBackgroundClustersEnabled"];
 	        this.metricsRefreshIntervalMs = source["metricsRefreshIntervalMs"];
