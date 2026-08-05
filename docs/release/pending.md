@@ -1,4 +1,9 @@
-### Added
+### Changed
 
-- Settings and favorites export/import controls under Settings -> Data Management.
-- Fully anonymized error reporting. Reports retain code stack and bounded error-class diagnostics while excluding user, cluster, request, device, and other identifiable data. You can opt out in Settings -> Data Management.
+- Removed unused `Status` column from Browse views.
+- Updated error reporting to be more actionable while maintaining privacy guarantees.
+
+### Fixed
+
+- `API` column is now sortable in Browse views.
+- Favorites was not restoring filter text data in some cases.

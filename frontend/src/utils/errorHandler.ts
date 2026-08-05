@@ -6,6 +6,10 @@
  */
 
 import { getSuppressNetworkErrorNotifications } from '@/core/settings/appPreferences';
+import {
+  captureUserVisibleError,
+  recordExpectedCondition as recordExpectedTelemetryCondition,
+} from '@/core/telemetry/sentry';
 
 export const ErrorCategory = {
   NETWORK: 'NETWORK',
@@ -279,10 +283,7 @@ class ErrorHandler {
     }
   }
 
-  /**
-   * Main error handling method
-   */
-  public handle(
+  public describe(
     error: unknown,
     context?: Record<string, unknown>,
     customMessage?: string
@@ -291,18 +292,13 @@ class ErrorHandler {
     const errorString = this.getErrorString(error);
     const category = this.categorizeError(error);
     const severity = this.getSeverity(category);
-
-    // Check if the error contains STDERR information
     let userMsg = customMessage || this.getUserMessage(category, errorString);
     let technicalMsg = errorString;
 
-    // Parse STDERR from the error message if present
     if (errorString.includes('STDERR:')) {
       const parts = errorString.split('STDERR:');
       userMsg = customMessage || this.getUserMessage(category, parts[0].trim());
       technicalMsg = parts[1]?.trim() || errorString;
-
-      // Add the original error to context for debugging
       errorContext = {
         ...errorContext,
         originalError: parts[0].trim(),
@@ -310,7 +306,7 @@ class ErrorHandler {
       };
     }
 
-    const errorDetails: ErrorDetails = {
+    return {
       message: errorString,
       category,
       severity,
@@ -322,9 +318,45 @@ class ErrorHandler {
       technicalMessage: technicalMsg,
       suggestions: this.getSuggestions(category),
     };
+  }
 
-    // Log the error
-    this.logError(errorDetails);
+  private reportError(
+    error: unknown,
+    details: ErrorDetails,
+    surface: 'operational' | 'user-visible' = 'user-visible'
+  ): void {
+    const reactRootAlreadyCaptured =
+      details.context?.source === 'ErrorBoundary' || details.context?.action === 'componentError';
+    if (!reactRootAlreadyCaptured) {
+      captureUserVisibleError(error, {
+        category: details.category,
+        severity: details.severity,
+        surface,
+        context: details.context,
+      });
+    }
+    this.logError(details);
+  }
+
+  private recordExpectedCondition(error: unknown, details: ErrorDetails): void {
+    recordExpectedTelemetryCondition(error, {
+      category: details.category,
+      severity: details.severity,
+      context: details.context,
+    });
+    this.logError(details);
+  }
+
+  /**
+   * Main error handling method
+   */
+  public handle(
+    error: unknown,
+    context?: Record<string, unknown>,
+    customMessage?: string
+  ): ErrorDetails {
+    const errorDetails = this.describe(error, context, customMessage);
+    const { category, message: errorString } = errorDetails;
 
     // Suppress notifications for auth-related errors that are handled by the AuthFailureOverlay.
     // All AUTHENTICATION-category errors (token expired, SSO failures, 401s, etc.) are
@@ -343,7 +375,10 @@ class ErrorHandler {
       isAuthOverlayError ||
       (category === ErrorCategory.NETWORK && getSuppressNetworkErrorNotifications());
 
-    if (!suppressNotification) {
+    if (suppressNotification) {
+      this.recordExpectedCondition(error, errorDetails);
+    } else {
+      this.reportError(error, errorDetails);
       // Store in history
       this.addToHistory(errorDetails);
 
@@ -357,6 +392,34 @@ class ErrorHandler {
       customHandler(errorDetails);
     }
 
+    return errorDetails;
+  }
+
+  /**
+   * Reports an operational failure rendered by an inline UI without also
+   * publishing it to the global toast listeners.
+   */
+  public handleInline(
+    error: unknown,
+    context?: Record<string, unknown>,
+    customMessage?: string
+  ): ErrorDetails {
+    const errorDetails = this.describe(error, context, customMessage);
+    this.reportError(error, errorDetails);
+    return errorDetails;
+  }
+
+  /**
+   * Reports a handled operational failure that is not itself rendered as an
+   * error surface. This replaces console-only catch paths.
+   */
+  public handleOperational(
+    error: unknown,
+    context?: Record<string, unknown>,
+    customMessage?: string
+  ): ErrorDetails {
+    const errorDetails = this.describe(error, context, customMessage);
+    this.reportError(error, errorDetails, 'operational');
     return errorDetails;
   }
 
@@ -528,6 +591,12 @@ class ScopedErrorHandler {
 
 // Create and export singleton instance
 export const errorHandler = new ErrorHandler();
+
+export const reportOperationalError = (
+  error: unknown,
+  context?: Record<string, unknown>,
+  customMessage?: string
+): ErrorDetails => errorHandler.handleOperational(error, context, customMessage);
 
 // Export convenience functions
 export const subscribeToErrors = errorHandler.subscribe.bind(errorHandler);
