@@ -6,24 +6,10 @@
  */
 
 import { getSuppressNetworkErrorNotifications } from '@/core/settings/appPreferences';
-import {
-  captureUserVisibleError,
-  recordExpectedCondition as recordExpectedTelemetryCondition,
-} from '@/core/telemetry/sentry';
+import { captureUserVisibleError } from '@/core/telemetry/sentry';
+import { ErrorCategory, isExpectedClusterErrorCategory } from '@/shared/constants/errorCategories';
 
-export const ErrorCategory = {
-  NETWORK: 'NETWORK',
-  AUTHENTICATION: 'AUTHENTICATION',
-  PERMISSION: 'PERMISSION',
-  NOT_FOUND: 'NOT_FOUND',
-  VALIDATION: 'VALIDATION',
-  TIMEOUT: 'TIMEOUT',
-  RATE_LIMIT: 'RATE_LIMIT',
-  SERVER_ERROR: 'SERVER_ERROR',
-  UNKNOWN: 'UNKNOWN',
-} as const;
-
-export type ErrorCategory = (typeof ErrorCategory)[keyof typeof ErrorCategory];
+export { ErrorCategory };
 
 export const ErrorSeverity = {
   INFO: 'info',
@@ -38,6 +24,11 @@ export type ErrorSeverity = (typeof ErrorSeverity)[keyof typeof ErrorSeverity];
 // (e.g. "authorization" in "rbac.authorization.k8s.io" is not an auth error).
 const authWordPattern = /\bauth\b/;
 const authTokenPattern = /\btokens?\b/;
+const forbiddenStatusPattern =
+  /\b(?:http(?:\/\d(?:\.\d)?)?\s+403|status(?:\s+(?:code|of))?(?:\s*[:=]\s*|\s+)403)\b/;
+const connectivityPattern =
+  /\b(?:network|[a-z0-9_-]*fetch[a-z0-9_-]*|cors|connections?|disconnected|dial tcp|no such host|tls handshake|x509|offline|econnrefused)\b/;
+const timeoutPattern = /\b(?:timeout|timed out)\b/;
 
 export interface ErrorDetails {
   message: string;
@@ -71,7 +62,7 @@ export interface ErrorHandlerOptions {
 
 class ErrorHandler {
   private options: ErrorHandlerOptions;
-  private errorListeners: Set<(error: ErrorDetails) => void> = new Set();
+  private readonly errorListeners: Set<(error: ErrorDetails) => void> = new Set();
   private errorHistory: ErrorDetails[] = [];
   private readonly maxHistorySize = 100;
 
@@ -91,17 +82,17 @@ class ErrorHandler {
   private categorizeError(error: unknown): ErrorCategory {
     const errorString = this.getErrorString(error);
     const lowerError = errorString.toLowerCase();
+    const isTimeout = timeoutPattern.test(lowerError);
 
-    // Network errors
+    // Permission and authentication markers are more specific than API group
+    // or resource names containing broad words such as "network".
     if (
-      lowerError.includes('network') ||
-      lowerError.includes('fetch') ||
-      lowerError.includes('cors') ||
-      lowerError.includes('connection') ||
-      lowerError.includes('offline') ||
-      lowerError.includes('econnrefused')
+      lowerError.includes('forbidden') ||
+      lowerError.includes('permission') ||
+      lowerError.includes('access denied') ||
+      forbiddenStatusPattern.test(lowerError)
     ) {
-      return ErrorCategory.NETWORK;
+      return ErrorCategory.PERMISSION;
     }
 
     // Authentication errors
@@ -116,14 +107,9 @@ class ErrorHandler {
       return ErrorCategory.AUTHENTICATION;
     }
 
-    // Permission errors
-    if (
-      lowerError.includes('forbidden') ||
-      lowerError.includes('permission') ||
-      lowerError.includes('access denied') ||
-      lowerError.includes('403')
-    ) {
-      return ErrorCategory.PERMISSION;
+    // Network errors
+    if (!isTimeout && connectivityPattern.test(lowerError)) {
+      return ErrorCategory.NETWORK;
     }
 
     // Not found errors
@@ -158,7 +144,7 @@ class ErrorHandler {
     }
 
     // Timeout errors
-    if (lowerError.includes('timeout') || lowerError.includes('timed out')) {
+    if (isTimeout) {
       return ErrorCategory.TIMEOUT;
     }
 
@@ -323,7 +309,8 @@ class ErrorHandler {
   private reportError(
     error: unknown,
     details: ErrorDetails,
-    surface: 'operational' | 'user-visible' = 'user-visible'
+    surface: 'operational' | 'user-visible' = 'user-visible',
+    expectedCondition = false
   ): void {
     const reactRootAlreadyCaptured =
       details.context?.source === 'ErrorBoundary' || details.context?.action === 'componentError';
@@ -332,19 +319,18 @@ class ErrorHandler {
         category: details.category,
         severity: details.severity,
         surface,
+        expectedCondition,
         context: details.context,
       });
     }
     this.logError(details);
   }
 
-  private recordExpectedCondition(error: unknown, details: ErrorDetails): void {
-    recordExpectedTelemetryCondition(error, {
-      category: details.category,
-      severity: details.severity,
-      context: details.context,
-    });
-    this.logError(details);
+  private logExpectedCondition(details: ErrorDetails): void {
+    if (!this.options.enableLogging || !this.options.logToConsole) {
+      return;
+    }
+    console.info(`[EXPECTED] ${details.category}:`, details.technicalMessage, details.context);
   }
 
   /**
@@ -376,9 +362,14 @@ class ErrorHandler {
       (category === ErrorCategory.NETWORK && getSuppressNetworkErrorNotifications());
 
     if (suppressNotification) {
-      this.recordExpectedCondition(error, errorDetails);
+      this.logExpectedCondition(errorDetails);
     } else {
-      this.reportError(error, errorDetails);
+      this.reportError(
+        error,
+        errorDetails,
+        'user-visible',
+        isExpectedClusterErrorCategory(category)
+      );
       // Store in history
       this.addToHistory(errorDetails);
 
@@ -569,8 +560,8 @@ class ErrorHandler {
  * Scoped error handler for specific contexts
  */
 class ScopedErrorHandler {
-  private parent: ErrorHandler;
-  private contextName: string;
+  private readonly parent: ErrorHandler;
+  private readonly contextName: string;
 
   constructor(parent: ErrorHandler, contextName: string) {
     this.parent = parent;

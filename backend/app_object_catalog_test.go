@@ -11,6 +11,7 @@ import (
 	"github.com/luxury-yacht/app/backend/internal/config"
 	"github.com/luxury-yacht/app/backend/kind/streamrows"
 	"github.com/luxury-yacht/app/backend/objectcatalog"
+	"github.com/luxury-yacht/app/backend/refresh/domain"
 	refreshinformer "github.com/luxury-yacht/app/backend/refresh/informer"
 	"github.com/luxury-yacht/app/backend/refresh/ingest"
 	refreshpermissions "github.com/luxury-yacht/app/backend/refresh/permissions"
@@ -28,17 +29,78 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	fakediscovery "k8s.io/client-go/discovery/fake"
 	"k8s.io/client-go/dynamic/fake"
 	informers "k8s.io/client-go/informers"
 	cgofake "k8s.io/client-go/kubernetes/fake"
 	cgotesting "k8s.io/client-go/testing"
 )
 
+func TestCatalogFinalizerBridgeProjectsArbitraryKindsIntoAttention(t *testing.T) {
+	registry := domain.New()
+	index, err := snapshot.RegisterClusterAttentionDomain(
+		registry, nil, snapshot.ClusterAttentionPermissions{},
+		snapshot.ClusterMeta{ClusterID: "cluster-a", ClusterName: "A"}, nil,
+		snapshot.ClusterAttentionOptions{},
+	)
+	require.NoError(t, err)
+	t.Cleanup(index.Stop)
+
+	updates := make(chan objectcatalog.FinalizerBlockerUpdate, 1)
+	blockers := []objectcatalog.FinalizerBlocker{{
+		Ref: resourcemodel.ResourceRef{
+			ClusterID: "cluster-a", Group: "example.com", Version: "v1", Kind: "Widget", Resource: "widgets",
+			Namespace: "default", Name: "sample", UID: "widget-uid",
+		},
+		DeletionTimestamp: time.Now().Add(-time.Minute).UnixMilli(),
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runCatalogFinalizerBridge(ctx, updates, func() []objectcatalog.FinalizerBlocker { return blockers }, index)
+	}()
+
+	updates <- objectcatalog.FinalizerBlockerUpdate{Revision: 1}
+	require.Eventually(t, func() bool { return len(index.Snapshot()) == 1 }, time.Second, time.Millisecond)
+	require.Equal(t, "Widget", index.Snapshot()[0].Ref.Kind)
+
+	cancel()
+	require.Eventually(t, func() bool {
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, time.Millisecond)
+}
+
+func TestCatalogFinalizerBridgeStopsForUnavailableInputs(t *testing.T) {
+	registry := domain.New()
+	index, err := snapshot.RegisterClusterAttentionDomain(
+		registry, nil, snapshot.ClusterAttentionPermissions{},
+		snapshot.ClusterMeta{ClusterID: "cluster-a"}, nil,
+		snapshot.ClusterAttentionOptions{},
+	)
+	require.NoError(t, err)
+	t.Cleanup(index.Stop)
+
+	closedUpdates := make(chan objectcatalog.FinalizerBlockerUpdate)
+	close(closedUpdates)
+
+	runCatalogFinalizerBridge(context.Background(), closedUpdates, func() []objectcatalog.FinalizerBlocker {
+		t.Fatal("a closed update channel must not read blocker state")
+		return nil
+	}, index)
+	runCatalogFinalizerBridge(context.Background(), nil, nil, nil)
+}
+
 func catalogLifecycleTestApp(t *testing.T, tier system.ResourceTier, cooled bool) (*App, catalogTarget) {
 	t.Helper()
 	const clusterID = "cluster-a:context-a"
 	app := newTestAppWithDefaults(t)
-	app.Ctx = context.Background()
+	app.setRuntimeContext(context.Background())
 	app.governorPlanned = map[string]system.ResourceTier{clusterID: tier}
 	app.governorApplied = map[string]system.ResourceTier{clusterID: tier}
 
@@ -94,6 +156,38 @@ func TestStartObjectCatalogForTargetStartsForForegroundSubsystem(t *testing.T) {
 
 	require.NoError(t, err)
 	require.NotNil(t, app.objectCatalogServiceForCluster(target.meta.ID), "a live cluster must start its catalog")
+}
+
+func TestCatalogWaitsForRebuiltIngestStoreBeforeFirstCollection(t *testing.T) {
+	app, target := catalogLifecycleTestApp(t, system.TierForeground, false)
+	clients := app.clusterClientsForID(target.meta.ID)
+	kubeClient, ok := clients.client.(*cgofake.Clientset)
+	require.True(t, ok)
+	allowSelfSubjectAccessReviews(kubeClient)
+	kubeClient.Discovery().(*fakediscovery.FakeDiscovery).Resources = []*metav1.APIResourceList{{
+		GroupVersion: "v1",
+		APIResources: []metav1.APIResource{{
+			Name: "configmaps", Kind: "ConfigMap", Namespaced: true, Verbs: []string{"list", "watch"},
+		}},
+	}}
+
+	require.NoError(t, app.startObjectCatalogForTarget(target))
+	service := app.objectCatalogServiceForCluster(target.meta.ID)
+	require.NotNil(t, service)
+	require.Never(t, func() bool {
+		return service.Health().Status != objectcatalog.HealthStateUnknown
+	}, 300*time.Millisecond, 10*time.Millisecond,
+		"catalog collection must wait for rebuilt ingest stores instead of publishing a partial sync")
+
+	subsystem := app.getRefreshSubsystem(target.meta.ID)
+	require.NotNil(t, subsystem)
+	configMapStore := subsystem.IngestManager.StoreFor(schema.GroupVersionResource{Version: "v1", Resource: "configmaps"})
+	require.NotNil(t, configMapStore)
+	require.NoError(t, configMapStore.Replace(nil, "1"))
+	require.Eventually(t, func() bool {
+		return service.Health().Status == objectcatalog.HealthStateOK
+	}, 3*time.Second, 10*time.Millisecond,
+		"catalog should complete its first collection after the ingest store syncs")
 }
 
 type catalogStartingGovernorExecutor struct {
@@ -278,6 +372,35 @@ func TestGetCatalogDiagnosticsCombinesTelemetryAndServiceState(t *testing.T) {
 	}
 }
 
+func TestMergeCatalogHealthFillsOnlyMissingTelemetry(t *testing.T) {
+	health := &CatalogHealth{
+		Status: "degraded", ConsecutiveFailures: 3, LastSyncMs: 20, LastSuccessMs: 10,
+		LastError: "partial collection", Stale: true, FailedResources: 2,
+	}
+	diag := &CatalogDiagnostics{Status: "disabled"}
+	mergeCatalogHealth(diag, health)
+	require.Same(t, health, diag.Health)
+	require.Equal(t, "degraded", diag.Status)
+	require.Equal(t, 3, diag.ConsecutiveFailures)
+	require.Equal(t, int64(20), diag.LastSyncMs)
+	require.Equal(t, int64(10), diag.LastSuccessMs)
+	require.Equal(t, "partial collection", diag.LastError)
+	require.True(t, diag.Stale)
+	require.Equal(t, 2, diag.FailedResources)
+
+	diag = &CatalogDiagnostics{
+		Status: "success", ConsecutiveFailures: 1, LastSyncMs: 40, LastSuccessMs: 30,
+		LastError: "telemetry error", Stale: true, FailedResources: 4,
+	}
+	mergeCatalogHealth(diag, health)
+	require.Equal(t, "success", diag.Status)
+	require.Equal(t, 1, diag.ConsecutiveFailures)
+	require.Equal(t, int64(40), diag.LastSyncMs)
+	require.Equal(t, int64(30), diag.LastSuccessMs)
+	require.Equal(t, "telemetry error", diag.LastError)
+	require.Equal(t, 4, diag.FailedResources)
+}
+
 func TestSnapshotObjectCatalogEntriesSortsByClusterID(t *testing.T) {
 	app := NewApp()
 	entryA := &objectCatalogEntry{meta: ClusterMeta{ID: "cluster-a"}}
@@ -359,7 +482,10 @@ func setCatalogServiceNamespaces(t *testing.T, svc *objectcatalog.Service, names
 func TestGetCatalogDiagnosticsFromTelemetryRecorder(t *testing.T) {
 	recorder := telemetry.NewRecorder()
 	recorder.RecordCatalog(true, 5, 2, 1500*time.Millisecond, errors.New("collect failed"))
-	recorder.RecordSnapshot("pods", "default", "test-cluster", "test", 50*time.Millisecond, nil, false, 3, nil, 1, 0, 0, true, 25, 0)
+	recorder.RecordSnapshot(telemetry.SnapshotRecord{
+		Domain: "pods", Scope: "default", ClusterID: "test-cluster", ClusterName: "test",
+		Duration: 50 * time.Millisecond, TotalItems: 3, BatchIndex: 1, IsFinal: true, TimeToFirstBatchMs: 25,
+	})
 
 	app := &App{telemetryRecorder: recorder}
 
@@ -491,7 +617,7 @@ func TestHydrateCatalogCustomRowsReportsCanceledContext(t *testing.T) {
 	}
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
-	app.Ctx = canceled
+	app.setRuntimeContext(canceled)
 
 	_, err := app.HydrateCatalogCustomRows(clusterID, []snapshot.ResourceQueryRow{
 		{
@@ -537,7 +663,7 @@ func TestHydrateCatalogCustomRowsKeepsPageOnRowFailure(t *testing.T) {
 	})
 
 	app := NewApp()
-	app.Ctx = context.Background()
+	app.setRuntimeContext(context.Background())
 	app.clusterClients[clusterID] = &clusterClients{
 		meta:          ClusterMeta{ID: clusterID, Name: "Cluster B"},
 		dynamicClient: dynamicClient,

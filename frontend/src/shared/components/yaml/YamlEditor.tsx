@@ -232,7 +232,7 @@ const YamlEditor = ({
     items: ContextMenuItem[];
   } | null>(null);
   const [isDarkMode, setIsDarkMode] = useState(
-    () => document.documentElement.getAttribute('data-appearance-mode') === 'dark'
+    () => document.documentElement.dataset.appearanceMode === 'dark'
   );
 
   const editorRef = useRef<ReactCodeMirrorRef>(null);
@@ -243,7 +243,7 @@ const YamlEditor = ({
 
   useEffect(() => {
     const checkAppearanceMode = () => {
-      setIsDarkMode(document.documentElement.getAttribute('data-appearance-mode') === 'dark');
+      setIsDarkMode(document.documentElement.dataset.appearanceMode === 'dark');
     };
 
     const observer = new MutationObserver(checkAppearanceMode);
@@ -419,9 +419,7 @@ const YamlEditor = ({
       );
       let touchedRange: ProtectedYamlRange | null = null;
       transaction.changes.iterChanges((fromA, toA) => {
-        if (!touchedRange) {
-          touchedRange = changeTouchesRange(fromA, toA, ranges);
-        }
+        touchedRange ??= changeTouchesRange(fromA, toA, ranges);
       });
       const blockedRange = touchedRange as ProtectedYamlRange | null;
       if (!blockedRange) {
@@ -508,11 +506,13 @@ const YamlEditor = ({
             });
           }
 
-          items.push({ divider: true });
-          items.push({
-            label: 'Select All',
-            onClick: () => selectCodeMirrorContent(view),
-          });
+          items.push(
+            { divider: true },
+            {
+              label: 'Select All',
+              onClick: () => selectCodeMirrorContent(view),
+            }
+          );
 
           setContextMenu({
             position: { x: event.clientX, y: event.clientY },

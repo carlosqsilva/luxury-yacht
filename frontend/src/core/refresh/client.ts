@@ -17,12 +17,11 @@ import {
   assertTelemetrySummary,
   type RefreshDomain,
   type RefreshSnapshot,
-  type SnapshotStats,
   type TelemetrySummary,
 } from './types';
 
 export type Snapshot<TPayload> = RefreshSnapshot<TPayload>;
-export type { SnapshotStats };
+export type { SnapshotStats } from './types';
 export type NormalizedTelemetrySummary = Omit<TelemetrySummary, 'snapshots' | 'streams'> & {
   snapshots: NonNullable<TelemetrySummary['snapshots']>;
   streams: NonNullable<TelemetrySummary['streams']>;
@@ -185,17 +184,15 @@ async function resolveRefreshBaseURL(): Promise<string> {
     return cachedRefreshBaseURL;
   }
 
-  if (!refreshBaseURLPromise) {
-    refreshBaseURLPromise = attemptResolveRefreshBaseURL()
-      .then((url) => {
-        cachedRefreshBaseURL = url;
-        return url;
-      })
-      .catch((error) => {
-        refreshBaseURLPromise = null;
-        throw error;
-      });
-  }
+  refreshBaseURLPromise ??= attemptResolveRefreshBaseURL()
+    .then((url) => {
+      cachedRefreshBaseURL = url;
+      return url;
+    })
+    .catch((error) => {
+      refreshBaseURLPromise = null;
+      throw error;
+    });
 
   return refreshBaseURLPromise;
 }
@@ -205,12 +202,10 @@ export async function ensureRefreshBaseURL(): Promise<string> {
     return cachedRefreshBaseURL;
   }
 
-  if (!refreshReadyPromise) {
-    refreshReadyPromise = resolveRefreshBaseURL().catch((error) => {
-      refreshReadyPromise = null;
-      throw error;
-    });
-  }
+  refreshReadyPromise ??= resolveRefreshBaseURL().catch((error) => {
+    refreshReadyPromise = null;
+    throw error;
+  });
 
   return refreshReadyPromise;
 }

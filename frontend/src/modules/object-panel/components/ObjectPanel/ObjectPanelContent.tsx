@@ -110,7 +110,7 @@ export function ObjectPanelContent({
   deletedResourceName,
   onClosePanel,
   panelId,
-}: ObjectPanelContentProps) {
+}: Readonly<ObjectPanelContentProps>) {
   const showDetails = activeTab === 'details' && detailTabProps;
   const showLogs = activeTab === 'logs' && capabilities.hasObjPanelLogs && objectData;
   const showShell = activeTab === 'shell' && capabilities.hasShell && objectData;
@@ -183,9 +183,7 @@ export function ObjectPanelContent({
           fallback={(_, reset) => <TabErrorFallback tabName="Logs" reset={reset} />}
         >
           <LogViewer
-            namespace={objectData?.namespace || ''}
             isActive={isPanelOpen && activeTab === 'logs'}
-            resourceName={objectData?.name || ''}
             resourceKind={objectKind || 'pod'}
             containerLogsScope={containerLogsScope}
             activePodNames={activePodNames}

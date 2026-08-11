@@ -10,12 +10,16 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/luxury-yacht/app/backend/capabilities"
+	"github.com/luxury-yacht/app/backend/internal/applog"
 	"github.com/luxury-yacht/app/backend/refresh/ingest"
+	"github.com/luxury-yacht/app/backend/resourcemodel"
 	"github.com/luxury-yacht/app/backend/resources/common"
+	"github.com/stretchr/testify/require"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -99,6 +103,76 @@ func TestEnsureDependenciesFailures(t *testing.T) {
 	if err := svc.ensureDependencies(); err == nil {
 		t.Fatalf("expected ensureClient error to propagate")
 	}
+}
+
+func TestSyncEmptyDiscoveryPublishesAnEmptyHealthyCatalog(t *testing.T) {
+	client := kubernetesfake.NewClientset()
+	baseDiscovery := client.Discovery().(*fakediscovery.FakeDiscovery)
+	clientWithDiscovery := &discoveryOverrideClient{
+		Clientset: client,
+		discovery: &preferredDiscovery{FakeDiscovery: baseDiscovery, resources: nil},
+	}
+	recorder := &recordingTelemetry{}
+	svc := NewService(Dependencies{
+		Common: common.Dependencies{
+			KubernetesClient: clientWithDiscovery,
+			DynamicClient:    dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()),
+		},
+		Logger:    applog.Noop,
+		Telemetry: recorder,
+	}, nil)
+
+	require.NoError(t, svc.sync(context.Background()))
+	require.Zero(t, svc.Count())
+	require.Empty(t, svc.Snapshot())
+	require.Empty(t, svc.Descriptors())
+	require.Equal(t, HealthStateOK, svc.Health().Status)
+	entry := recorder.last()
+	require.Zero(t, entry.itemCount)
+	require.Zero(t, entry.resourceCount)
+	require.NoError(t, entry.err)
+}
+
+func TestSyncCancellationDoesNotPublishSuccess(t *testing.T) {
+	widgetGVR := schema.GroupVersionResource{Group: "example.com", Version: "v1", Resource: "widgets"}
+	widgetGVK := schema.GroupVersionKind{Group: "example.com", Version: "v1", Kind: "Widget"}
+	scheme := runtime.NewScheme()
+	scheme.AddKnownTypeWithName(widgetGVK, &unstructured.Unstructured{})
+	scheme.AddKnownTypeWithName(widgetGVK.GroupVersion().WithKind("WidgetList"), &unstructured.UnstructuredList{})
+	dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+		scheme,
+		map[schema.GroupVersionResource]string{widgetGVR: "WidgetList"},
+	)
+	client := kubernetesfake.NewClientset()
+	baseDiscovery := client.Discovery().(*fakediscovery.FakeDiscovery)
+	clientWithDiscovery := &discoveryOverrideClient{
+		Clientset: client,
+		discovery: &preferredDiscovery{FakeDiscovery: baseDiscovery, resources: []*metav1.APIResourceList{{
+			GroupVersion: "example.com/v1",
+			APIResources: []metav1.APIResource{{
+				Name: "widgets", Kind: "Widget", Namespaced: true, Verbs: metav1.Verbs{"list"},
+			}},
+		}}},
+	}
+	recorder := &recordingTelemetry{}
+	ctx, cancel := context.WithCancel(context.Background())
+	dynamicClient.PrependReactor("list", "widgets", func(k8stesting.Action) (bool, runtime.Object, error) {
+		cancel()
+		return true, nil, context.Canceled
+	})
+	svc := NewService(Dependencies{
+		Common: common.Dependencies{
+			KubernetesClient: clientWithDiscovery,
+			DynamicClient:    dynamicClient,
+		},
+		Logger:    applog.Noop,
+		Telemetry: recorder,
+	}, nil)
+
+	err := svc.sync(ctx)
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, recorder.last().err, context.Canceled)
+	require.NotEqual(t, HealthStateOK, svc.Health().Status)
 }
 
 func TestEvaluateDescriptorNilService(t *testing.T) {
@@ -222,6 +296,252 @@ func TestEvaluateDescriptorPropagatesErrors(t *testing.T) {
 	if len(batchErrors) != 0 {
 		t.Fatalf("expected no partial error map when batch evaluation fails, got %+v", batchErrors)
 	}
+}
+
+func TestEvaluateDescriptorsBatchEmptyAndNilServiceContracts(t *testing.T) {
+	svc := NewService(Dependencies{}, nil)
+
+	allowed, batchErrors, err := svc.evaluateDescriptorsBatch(context.Background(), nil, nil)
+	require.NoError(t, err)
+	require.Empty(t, allowed)
+	require.Nil(t, batchErrors)
+
+	descriptors := []resourceDescriptor{
+		{Resource: "deployments"},
+		{Resource: "nodes"},
+	}
+	allowed, batchErrors, err = svc.evaluateDescriptorsBatch(context.Background(), nil, descriptors)
+	require.NoError(t, err)
+	require.Nil(t, batchErrors)
+	require.Equal(t, map[int]bool{0: true, 1: true}, allowed)
+}
+
+func TestEvaluateDescriptorsBatchKeepsStableDescriptorIndexesAcrossNamespaceFanout(t *testing.T) {
+	client := kubernetesfake.NewClientset()
+	client.PrependReactor("create", "selfsubjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		review := action.(k8stesting.CreateAction).GetObject().(*authorizationv1.SelfSubjectAccessReview)
+		result := review.DeepCopy()
+		attrs := review.Spec.ResourceAttributes
+		switch attrs.Resource + "/" + attrs.Namespace {
+		case "deployments/prod":
+			result.Status.EvaluationError = "prod authorizer unavailable"
+		case "deployments/dev":
+			result.Status.Allowed = true
+		case "statefulsets/prod":
+			result.Status.Allowed = false
+		case "statefulsets/dev":
+			result.Status.EvaluationError = "dev authorizer unavailable"
+		case "nodes/":
+			result.Status.Allowed = true
+		default:
+			t.Fatalf("unexpected review for %s/%s", attrs.Resource, attrs.Namespace)
+		}
+		return true, result, nil
+	})
+
+	capSvc := capabilities.NewService(capabilities.Dependencies{
+		Common: common.Dependencies{
+			KubernetesClient: client,
+			EnsureClient:     func(string) error { return nil },
+		},
+		WorkerCount: 3,
+	})
+	svc := NewService(Dependencies{
+		Logger:            applog.Noop,
+		AllowedNamespaces: []string{"prod", "dev"},
+	}, nil)
+	descriptors := []resourceDescriptor{
+		{Resource: "deployments", Group: "apps", Version: "v1", Namespaced: true, GVR: schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}},
+		{Resource: "statefulsets", Group: "apps", Version: "v1", Namespaced: true, GVR: schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "statefulsets"}},
+		{Resource: "nodes", Version: "v1", GVR: schema.GroupVersionResource{Version: "v1", Resource: "nodes"}},
+	}
+
+	allowed, batchErrors, err := svc.evaluateDescriptorsBatch(context.Background(), capSvc, descriptors)
+	require.NoError(t, err)
+	require.Empty(t, batchErrors)
+	require.True(t, allowed[0], "a later namespace answer must stay associated with deployments")
+	require.False(t, allowed[1], "a definitive denial must stay associated with statefulsets")
+	require.True(t, allowed[2], "the cluster-scoped answer must stay associated with nodes")
+}
+
+func TestEvaluateDescriptorsBatchReturnsAllowedPartialResultsWithWorkerFailure(t *testing.T) {
+	client := kubernetesfake.NewClientset()
+	client.PrependReactor("create", "selfsubjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		review := action.(k8stesting.CreateAction).GetObject().(*authorizationv1.SelfSubjectAccessReview)
+		if review.Spec.ResourceAttributes.Resource == "secrets" {
+			return true, nil, errors.New("permission worker failed")
+		}
+		result := review.DeepCopy()
+		result.Status.Allowed = true
+		return true, result, nil
+	})
+	capSvc := capabilities.NewService(capabilities.Dependencies{
+		Common:      common.Dependencies{KubernetesClient: client},
+		WorkerCount: 2,
+	})
+	svc := NewService(Dependencies{
+		Logger:            applog.Noop,
+		AllowedNamespaces: []string{"prod", "dev"},
+	}, nil)
+	descriptors := []resourceDescriptor{
+		{Resource: "deployments", Group: "apps", Version: "v1", Namespaced: true, GVR: schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}},
+		{Resource: "secrets", Version: "v1", Namespaced: true, GVR: schema.GroupVersionResource{Version: "v1", Resource: "secrets"}},
+	}
+
+	allowed, batchErrors, err := svc.evaluateDescriptorsBatch(context.Background(), capSvc, descriptors)
+	require.ErrorContains(t, err, "secrets")
+	require.Nil(t, batchErrors)
+	require.True(t, allowed[0], "successful descriptor results must survive a sibling failure")
+	require.False(t, allowed[1])
+}
+
+func TestEvaluateDescriptorsBatchCancellationAndPermissionClientRecovery(t *testing.T) {
+	desc := resourceDescriptor{
+		Resource: "deployments", Group: "apps", Version: "v1",
+		GVR: schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"},
+	}
+
+	t.Run("cancellation", func(t *testing.T) {
+		client := kubernetesfake.NewClientset()
+		client.PrependReactor("create", "selfsubjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+			review := action.(k8stesting.CreateAction).GetObject().(*authorizationv1.SelfSubjectAccessReview)
+			result := review.DeepCopy()
+			result.Status.Allowed = true
+			return true, result, nil
+		})
+		capSvc := capabilities.NewService(capabilities.Dependencies{Common: common.Dependencies{KubernetesClient: client}})
+		svc := NewService(Dependencies{}, nil)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		_, _, err := svc.evaluateDescriptorsBatch(ctx, capSvc, []resourceDescriptor{desc})
+		require.ErrorIs(t, err, context.Canceled)
+	})
+
+	t.Run("permission client recovers on next batch", func(t *testing.T) {
+		client := kubernetesfake.NewClientset()
+		client.PrependReactor("create", "selfsubjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+			review := action.(k8stesting.CreateAction).GetObject().(*authorizationv1.SelfSubjectAccessReview)
+			result := review.DeepCopy()
+			result.Status.Allowed = true
+			return true, result, nil
+		})
+		ensureCalls := 0
+		capSvc := capabilities.NewService(capabilities.Dependencies{Common: common.Dependencies{
+			KubernetesClient: client,
+			EnsureClient: func(string) error {
+				ensureCalls++
+				if ensureCalls == 1 {
+					return errors.New("permission client unavailable")
+				}
+				return nil
+			},
+		}})
+		svc := NewService(Dependencies{}, nil)
+
+		_, _, err := svc.evaluateDescriptorsBatch(context.Background(), capSvc, []resourceDescriptor{desc})
+		require.ErrorContains(t, err, "permission client unavailable")
+
+		allowed, batchErrors, err := svc.evaluateDescriptorsBatch(context.Background(), capSvc, []resourceDescriptor{desc})
+		require.NoError(t, err)
+		require.Empty(t, batchErrors)
+		require.True(t, allowed[0])
+		require.Equal(t, 2, ensureCalls)
+	})
+}
+
+func TestCatalogSyncCapabilityAndBatchDeniedSeams(t *testing.T) {
+	client := kubernetesfake.NewClientset()
+	client.PrependReactor("create", "selfsubjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		review := action.(k8stesting.CreateAction).GetObject().(*authorizationv1.SelfSubjectAccessReview)
+		result := review.DeepCopy()
+		result.Status.Allowed = true
+		return true, result, nil
+	})
+	desc := resourceDescriptor{
+		Group: "apps", Version: "v1", Kind: "Deployment", Resource: "deployments",
+		GVR: schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"},
+	}
+	svc := NewService(Dependencies{Logger: applog.Noop}, nil)
+	run := &catalogSync{
+		service: svc, descriptors: []resourceDescriptor{desc},
+		capabilityService: capabilities.NewService(capabilities.Dependencies{
+			Common: common.Dependencies{KubernetesClient: client},
+		}),
+		allowedIndices: make(map[int]resourceDescriptor), allowedSet: make(map[string]resourceDescriptor),
+		failed: make(map[string]error), succeeded: make(map[string][]Summary),
+	}
+	run.evaluateCapabilities(context.Background())
+	require.True(t, run.batchEvaluated)
+	require.True(t, run.isAllowed(desc))
+
+	run.batchEvaluated = false
+	run.capabilityService = capabilities.NewService(capabilities.Dependencies{})
+	run.evaluateCapabilities(context.Background())
+	require.False(t, run.batchEvaluated)
+
+	run.batchEvaluated = true
+	run.allowedSet = make(map[string]resourceDescriptor)
+	require.NoError(t, run.collectDescriptor(context.Background(), 0, desc))
+	require.Empty(t, run.succeeded)
+}
+
+func TestSortResourceDescriptorsUsesEveryStableTieBreaker(t *testing.T) {
+	tests := []struct {
+		name  string
+		input []resourceDescriptor
+		want  string
+	}{
+		{"priority", []resourceDescriptor{{Resource: "widgets"}, {Resource: "pods"}}, "pods"},
+		{"kind", []resourceDescriptor{{Resource: "widgets", Kind: "Zulu"}, {Resource: "widgets", Kind: "Alpha"}}, "Alpha"},
+		{"group", []resourceDescriptor{{Resource: "widgets", Kind: "Widget", Group: "z.io"}, {Resource: "widgets", Kind: "Widget", Group: "a.io"}}, "a.io"},
+		{"version", []resourceDescriptor{{Resource: "widgets", Kind: "Widget", Group: "a.io", Version: "v2"}, {Resource: "widgets", Kind: "Widget", Group: "a.io", Version: "v1"}}, "v1"},
+		{"resource", []resourceDescriptor{{Resource: "zz", Kind: "Widget", Group: "a.io", Version: "v1"}, {Resource: "aa", Kind: "Widget", Group: "a.io", Version: "v1"}}, "aa"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			sortResourceDescriptors(test.input)
+			first := test.input[0]
+			got := first.Resource
+			switch test.name {
+			case "kind":
+				got = first.Kind
+			case "group":
+				got = first.Group
+			case "version":
+				got = first.Version
+			}
+			require.Equal(t, test.want, got)
+		})
+	}
+}
+
+func TestCatalogSyncRestoreFailedDescriptorsPreservesPriorTimestamps(t *testing.T) {
+	failedDesc := resourceDescriptor{GVR: schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}}
+	otherDesc := resourceDescriptor{GVR: schema.GroupVersionResource{Version: "v1", Resource: "nodes"}}
+	failedKey := catalogKey(failedDesc, "default", "api")
+	otherKey := catalogKey(otherDesc, "", "node-a")
+	untimedKey := catalogKey(otherDesc, "", "node-b")
+	timestamp := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
+	run := &catalogSync{
+		failed:      map[string]error{failedDesc.GVR.String(): errors.New("list failed")},
+		newItems:    map[string]Summary{otherKey: {Ref: resourcemodel.ResourceRef{Name: "current"}}},
+		newLastSeen: map[string]time.Time{},
+		previousItems: map[string]Summary{
+			failedKey:  {Ref: resourcemodel.ResourceRef{Name: "api"}},
+			otherKey:   {Ref: resourcemodel.ResourceRef{Name: "previous"}},
+			untimedKey: {Ref: resourcemodel.ResourceRef{Name: "node-b"}},
+		},
+		previousLastSeen: map[string]time.Time{failedKey: timestamp, otherKey: timestamp},
+	}
+
+	run.restoreFailedDescriptors()
+	require.Equal(t, "api", run.newItems[failedKey].Ref.Name)
+	require.Equal(t, timestamp, run.newLastSeen[failedKey])
+	require.Equal(t, "current", run.newItems[otherKey].Ref.Name)
+	require.Equal(t, "node-b", run.newItems[untimedKey].Ref.Name)
+	_, hasUntimedTimestamp := run.newLastSeen[untimedKey]
+	require.False(t, hasUntimedTimestamp)
 }
 
 func TestSyncRetainsDataOnPartialFailure(t *testing.T) {
@@ -450,6 +770,55 @@ func (b *blockingIngestSource) RegisterDynamicCatalogReflector(schema.GroupVersi
 }
 func (b *blockingIngestSource) StopReflectorFor(schema.GroupVersionResource)  {}
 func (b *blockingIngestSource) HasSyncedFor(schema.GroupVersionResource) bool { return false }
+func (b *blockingIngestSource) Tracks(schema.GroupVersionResource) bool       { return false }
+
+type controlledIngestSource struct {
+	checked chan struct{}
+	once    sync.Once
+	synced  atomic.Bool
+}
+
+func (*controlledIngestSource) CatalogRows(schema.GroupVersionResource) []interface{} { return nil }
+func (*controlledIngestSource) AddCatalogSink(schema.GroupVersionResource, ingest.Sink) bool {
+	return true
+}
+func (*controlledIngestSource) RegisterDynamicCatalogReflector(schema.GroupVersionResource, schema.GroupVersionKind, ingest.CatalogProjector, bool) bool {
+	return false
+}
+func (*controlledIngestSource) StopReflectorFor(schema.GroupVersionResource) {}
+func (s *controlledIngestSource) HasSyncedFor(schema.GroupVersionResource) bool {
+	return s.synced.Load()
+}
+func (s *controlledIngestSource) Tracks(schema.GroupVersionResource) bool {
+	s.once.Do(func() { close(s.checked) })
+	return true
+}
+
+func newControlledIngestCatalogService(source IngestSource, waitTimeout time.Duration) (*Service, *recordingTelemetry) {
+	client := kubernetesfake.NewClientset()
+	baseDiscovery := client.Discovery().(*fakediscovery.FakeDiscovery)
+	discoveryClient := &preferredDiscovery{
+		FakeDiscovery: baseDiscovery,
+		resources: []*metav1.APIResourceList{{
+			GroupVersion: "v1",
+			APIResources: []metav1.APIResource{{
+				Name: "configmaps", Kind: "ConfigMap", Namespaced: true, Verbs: []string{"list", "watch"},
+			}},
+		}},
+	}
+	recorder := &recordingTelemetry{}
+	return NewService(Dependencies{
+		Common: common.Dependencies{
+			KubernetesClient: &discoveryOverrideClient{Clientset: client, discovery: discoveryClient},
+			DynamicClient:    dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()),
+		},
+		Telemetry:    recorder,
+		IngestSource: source,
+	}, &Options{
+		IngestSyncWaitTimeout: waitTimeout,
+		ResyncInterval:        time.Hour,
+	}), recorder
+}
 
 func (r *recordingTelemetry) count() int {
 	r.mu.Lock()
@@ -561,6 +930,86 @@ func TestSyncWaitsForCachesBetweenPreflightAndCollect(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestCatalogContinuesWithPartialSyncWhenTrackedIngestNeverStarts(t *testing.T) {
+	source := &controlledIngestSource{checked: make(chan struct{})}
+	svc, recorder := newControlledIngestCatalogService(source, 25*time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- svc.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	require.Eventually(t, func() bool {
+		return svc.Health().Status == HealthStateDegraded
+	}, time.Second, 10*time.Millisecond,
+		"an unstarted ingest manager must degrade to partial catalog data instead of wedging initial sync")
+	require.Error(t, recorder.last().err)
+}
+
+func TestCatalogIngestTimeoutWarningEmittedOncePerService(t *testing.T) {
+	source := &controlledIngestSource{checked: make(chan struct{})}
+	svc, _ := newControlledIngestCatalogService(source, 5*time.Millisecond)
+	logger := &recordingWatchLogger{}
+	svc.deps.Logger = logger
+	descriptors := []resourceDescriptor{{
+		GVR: schema.GroupVersionResource{Version: "v1", Resource: "configmaps"},
+	}}
+
+	for range 2 {
+		run := &catalogSync{service: svc, descriptors: descriptors}
+		require.NoError(t, run.waitForIngest(context.Background()))
+	}
+
+	require.Len(t, logger.warnings, 1,
+		"a permanently unstarted ingest manager must not repeat the startup warning on every resync")
+}
+
+func TestCatalogIngestWaitStopsOnParentCancellation(t *testing.T) {
+	source := &controlledIngestSource{checked: make(chan struct{})}
+	svc, _ := newControlledIngestCatalogService(source, time.Hour)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- svc.Run(ctx) }()
+
+	select {
+	case <-source.checked:
+	case <-time.After(time.Second):
+		t.Fatal("catalog never reached the ingest readiness gate")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(time.Second):
+		t.Fatal("catalog did not stop after parent cancellation")
+	}
+}
+
+func TestCatalogIngestWaitCompletesWhenTrackedStoreSyncs(t *testing.T) {
+	source := &controlledIngestSource{checked: make(chan struct{})}
+	svc, _ := newControlledIngestCatalogService(source, time.Hour)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- svc.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	select {
+	case <-source.checked:
+	case <-time.After(time.Second):
+		t.Fatal("catalog never reached the ingest readiness gate")
+	}
+	source.synced.Store(true)
+	require.Eventually(t, func() bool {
+		return svc.Health().Status == HealthStateOK
+	}, time.Second, 10*time.Millisecond)
 }
 
 // TestFailedInitialSyncRetriesWhileReactiveRegistrationBlocks pins that the

@@ -112,6 +112,10 @@ describe('ObjectPanelContent', () => {
       isActive: true,
       detailsLoading: false,
       detailsError: null,
+      finalizerRemovalCapabilities: {
+        metadata: { allowed: true, pending: false },
+        namespaceSpec: { allowed: false, pending: false },
+      },
       resourceDeleted: false,
       deletedResourceName: '',
       onAfterDelete: vi.fn(),
@@ -183,8 +187,6 @@ describe('ObjectPanelContent', () => {
   it('renders logs viewer when logs tab is active and capability present', () => {
     renderContent({ activeTab: 'logs' });
     expect(hoistedRefs.logViewerProps.current).toMatchObject({
-      namespace: 'team-a',
-      resourceName: 'api',
       resourceKind: 'deployment',
       isActive: true,
     });

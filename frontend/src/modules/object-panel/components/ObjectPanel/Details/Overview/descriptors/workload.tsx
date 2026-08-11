@@ -54,7 +54,7 @@ const parseLeadingCount = (value: string | number | undefined): number | null =>
   if (typeof value === 'number') {
     return Number.isFinite(value) ? value : null;
   }
-  const match = value.trim().match(/^(\d+)/);
+  const match = /^(\d+)/.exec(value.trim());
   return match ? Number(match[1]) : null;
 };
 
@@ -356,7 +356,7 @@ const findCondition = (conditions: string[] | undefined, type: string): ParsedCo
   }
   for (const raw of conditions) {
     const parsed = parseCondition(raw);
-    if (parsed && parsed.type === type) {
+    if (parsed?.type === type) {
       return parsed;
     }
   }

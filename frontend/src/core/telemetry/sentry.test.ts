@@ -30,7 +30,6 @@ import {
   initializeErrorReporting,
   recordBrokerRequestCompleted,
   recordBrokerRequestStarted,
-  recordExpectedCondition,
   resetErrorReportingForTesting,
   runUserAction,
   setActiveNamespaceContext,
@@ -548,32 +547,47 @@ describe('Sentry error reporting', () => {
     expect(sentryMocks.captureException).toHaveBeenCalledWith(error);
   });
 
-  it('records an expected UI condition as a correlated breadcrumb without an exception', () => {
-    initializeErrorReporting({
-      enabled: true,
-      dsn: 'https://public@example.com/1',
-      environment: 'production',
-    });
+  it.each(['AUTHENTICATION', 'NETWORK', 'NOT_FOUND', 'TIMEOUT'] as const)(
+    'captures %s errors at an operational exception boundary',
+    (category) => {
+      initializeErrorReporting({
+        enabled: true,
+        dsn: 'https://public@example.com/1',
+        environment: 'production',
+        release: 'luxury-yacht@v1.2.3',
+      });
 
-    recordExpectedCondition(new Error('403 forbidden'), {
-      category: 'PERMISSION',
-      severity: 'error',
-      context: { action: 'loadPods', clusterId: 'cluster-a' },
-    });
+      captureUserVisibleError(new Error('expected cluster failure'), {
+        category,
+        severity: 'error',
+        surface: 'operational',
+      });
 
-    expect(sentryMocks.addBreadcrumb).toHaveBeenCalledWith({
-      type: 'default',
-      category: 'ui.error.expected',
-      level: 'warning',
-      message: 'Expected PERMISSION condition',
-      data: {
-        operationId: 'ui-expected-1',
-        action: 'loadPods',
-        'cluster.alias': 'cluster-1',
-      },
-    });
-    expect(sentryMocks.captureException).not.toHaveBeenCalled();
-  });
+      expect(sentryMocks.withScope).toHaveBeenCalledOnce();
+      expect(sentryMocks.captureException).toHaveBeenCalledOnce();
+    }
+  );
+
+  it.each(['NETWORK', 'NOT_FOUND', 'TIMEOUT'] as const)(
+    'does not capture an explicitly expected %s condition',
+    (category) => {
+      initializeErrorReporting({
+        enabled: true,
+        dsn: 'https://public@example.com/1',
+        environment: 'production',
+        release: 'luxury-yacht@v1.2.3',
+      });
+
+      captureUserVisibleError(new Error('expected cluster failure'), {
+        category,
+        severity: 'error',
+        expectedCondition: true,
+      });
+
+      expect(sentryMocks.withScope).not.toHaveBeenCalled();
+      expect(sentryMocks.captureException).not.toHaveBeenCalled();
+    }
+  );
 
   it('captures event-handler exceptions through the centralized operational boundary', () => {
     configureErrorReporting(
@@ -696,7 +710,7 @@ describe('Sentry error reporting', () => {
       error,
     });
     captureUserVisibleError(error, {
-      category: 'NETWORK',
+      category: 'SERVER_ERROR',
       severity: 'error',
       context: { action: 'manualRefresh' },
     });
@@ -761,7 +775,7 @@ describe('Sentry error reporting', () => {
 
     recordBrokerRequestStarted(request);
     captureUserVisibleError(new Error('refresh failed before broker completion'), {
-      category: 'NETWORK',
+      category: 'SERVER_ERROR',
       severity: 'error',
       context: {
         source: 'refresh-orchestrator',

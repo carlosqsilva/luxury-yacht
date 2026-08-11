@@ -18,6 +18,7 @@ import (
 	"github.com/luxury-yacht/app/backend/internal/applog"
 	"github.com/luxury-yacht/app/backend/internal/config"
 	"github.com/luxury-yacht/app/backend/nodemaintenance"
+	"github.com/luxury-yacht/app/backend/resourcemodel"
 	"github.com/luxury-yacht/app/backend/resources/common"
 	podres "github.com/luxury-yacht/app/backend/resources/pods"
 	restypes "github.com/luxury-yacht/app/backend/resources/types"
@@ -41,48 +42,40 @@ func NewService(deps common.Dependencies) *Service {
 	return &Service{deps: deps}
 }
 
-func (s *Service) requestContext() context.Context {
-	if s.deps.Context != nil {
-		return s.deps.Context
-	}
-	return context.Background()
-}
-
 // Node returns detailed information about a single node.
-func (s *Service) Node(name string) (*NodeDetails, error) {
+func (s *Service) Node(ctx context.Context, name string) (*NodeDetails, error) {
 	if err := s.ensureClient("Nodes"); err != nil {
 		return nil, err
 	}
 
 	client := s.deps.KubernetesClient
-	node, err := client.CoreV1().Nodes().Get(s.deps.Context, name, metav1.GetOptions{})
+	node, err := client.CoreV1().Nodes().Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		err = s.logError(err, fmt.Sprintf("Failed to get node %s", name), "get")
 		return nil, fmt.Errorf("failed to get node: %w", err)
 	}
 
-	pods := s.listPodsForNode(name)
-	nodeMetrics := s.getNodeMetrics(name)
+	pods := s.listPodsForNode(ctx, name)
+	nodeMetrics := s.getNodeMetrics(ctx, name)
 
 	return s.buildNodeDetails(node, pods, nodeMetrics), nil
 }
 
 // Cordon marks a node as unschedulable.
-func (s *Service) Cordon(nodeName string) error {
-	return s.setUnschedulable(nodeName, true)
+func (s *Service) Cordon(ctx context.Context, nodeName string) error {
+	return s.setUnschedulable(ctx, nodeName, true)
 }
 
 // Uncordon marks a node as schedulable.
-func (s *Service) Uncordon(nodeName string) error {
-	return s.setUnschedulable(nodeName, false)
+func (s *Service) Uncordon(ctx context.Context, nodeName string) error {
+	return s.setUnschedulable(ctx, nodeName, false)
 }
 
-func (s *Service) setUnschedulable(nodeName string, unschedulable bool) error {
+func (s *Service) setUnschedulable(ctx context.Context, nodeName string, unschedulable bool) error {
 	if err := s.ensureClient("Nodes"); err != nil {
 		return err
 	}
 
-	ctx := s.requestContext()
 	node, err := s.deps.KubernetesClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to get node %s: %w", nodeName, err)
@@ -102,7 +95,7 @@ func (s *Service) setUnschedulable(nodeName string, unschedulable bool) error {
 }
 
 // Drain evicts or deletes pods on the node according to the provided options.
-func (s *Service) Drain(nodeName string, options restypes.DrainNodeOptions) (err error) {
+func (s *Service) Drain(ctx context.Context, nodeName string, options restypes.DrainNodeOptions) (err error) {
 	if err := ValidateDrainOptions(options); err != nil {
 		return err
 	}
@@ -112,11 +105,11 @@ func (s *Service) Drain(nodeName string, options restypes.DrainNodeOptions) (err
 		return err
 	}
 
-	return s.runDrainJob(job, nodeName, options)
+	return s.runDrainJob(ctx, job, nodeName, options)
 }
 
 // StartDrainWithCompletion starts a drain job and invokes onComplete after the job exits.
-func (s *Service) StartDrainWithCompletion(nodeName string, options restypes.DrainNodeOptions, onComplete func(string)) (*nodemaintenance.DrainJob, error) {
+func (s *Service) StartDrainWithCompletion(ctx context.Context, nodeName string, options restypes.DrainNodeOptions, onComplete func(string)) (*nodemaintenance.DrainJob, error) {
 	if err := ValidateDrainOptions(options); err != nil {
 		return nil, err
 	}
@@ -126,35 +119,34 @@ func (s *Service) StartDrainWithCompletion(nodeName string, options restypes.Dra
 		return nil, err
 	}
 
-	baseCtx := s.requestContext()
-	ctx, cancel := context.WithCancel(baseCtx)
+	ctx, cancel := context.WithCancel(ctx)
 	store.RegisterCancel(job.ID, cancel)
-	deps := s.deps.CloneWithContext(ctx)
+	deps := s.deps.WithOperationContext(ctx)
 	go func() {
 		defer store.ClearCancel(job.ID)
 		defer cancel()
 		if onComplete != nil {
 			defer onComplete(job.ID)
 		}
-		_ = NewService(deps).runDrainJob(job, nodeName, options)
+		_ = NewService(deps).runDrainJob(ctx, job, nodeName, options)
 	}()
 
 	return job, nil
 }
 
-func (s *Service) runDrainJob(job *nodemaintenance.DrainJob, nodeName string, options restypes.DrainNodeOptions) (err error) {
+func (s *Service) runDrainJob(ctx context.Context, job *nodemaintenance.DrainJob, nodeName string, options restypes.DrainNodeOptions) (err error) {
 	cordoned := false
 
 	defer func() {
 		s.finalizeDrain(job, cordoned, err)
 	}()
 
-	if err = s.cordonForDrain(job, nodeName); err != nil {
+	if err = s.cordonForDrain(ctx, job, nodeName); err != nil {
 		return err
 	}
 	cordoned = true
 
-	return s.runKubectlDrain(nodeName, options, job)
+	return s.runKubectlDrain(ctx, nodeName, options, job)
 }
 
 // finalizeDrain updates drain status when the drain operation finishes.
@@ -177,9 +169,9 @@ func (s *Service) finalizeDrain(job *nodemaintenance.DrainJob, cordoned bool, er
 }
 
 // cordonForDrain marks the node unschedulable and records drain events.
-func (s *Service) cordonForDrain(job *nodemaintenance.DrainJob, nodeName string) error {
+func (s *Service) cordonForDrain(ctx context.Context, job *nodemaintenance.DrainJob, nodeName string) error {
 	job.AddInfo(nodemaintenance.DrainPhaseCordon, "Cordoning node")
-	if cordonErr := s.Cordon(nodeName); cordonErr != nil {
+	if cordonErr := s.Cordon(ctx, nodeName); cordonErr != nil {
 		job.AddInfo(nodemaintenance.DrainPhaseError, fmt.Sprintf("Failed to cordon node: %v", cordonErr))
 		return fmt.Errorf("failed to cordon node before draining: %w", cordonErr)
 	}
@@ -217,8 +209,8 @@ func drainHelperTimeout(options restypes.DrainNodeOptions) time.Duration {
 	return time.Duration(*options.TimeoutSeconds) * time.Second
 }
 
-func (s *Service) runKubectlDrain(nodeName string, options restypes.DrainNodeOptions, job *nodemaintenance.DrainJob) error {
-	drainer := s.newDrainHelper(options, job)
+func (s *Service) runKubectlDrain(ctx context.Context, nodeName string, options restypes.DrainNodeOptions, job *nodemaintenance.DrainJob) error {
+	drainer := s.newDrainHelper(ctx, options, job)
 	list, errs := drainer.GetPodsForDeletion(nodeName)
 	if len(errs) > 0 {
 		err := utilerrors.NewAggregate(errs)
@@ -248,9 +240,9 @@ func (s *Service) runKubectlDrain(nodeName string, options restypes.DrainNodeOpt
 	return nil
 }
 
-func (s *Service) newDrainHelper(options restypes.DrainNodeOptions, job *nodemaintenance.DrainJob) *kubectldrain.Helper {
+func (s *Service) newDrainHelper(ctx context.Context, options restypes.DrainNodeOptions, job *nodemaintenance.DrainJob) *kubectldrain.Helper {
 	return &kubectldrain.Helper{
-		Ctx:                  s.requestContext(),
+		Ctx:                  ctx,
 		Client:               s.deps.KubernetesClient,
 		Force:                options.Force,
 		GracePeriodSeconds:   drainHelperGracePeriod(options),
@@ -402,7 +394,7 @@ func drainPodErrorPhase(usingEviction bool) nodemaintenance.DrainEventPhase {
 }
 
 // Delete removes a node from the cluster.
-func (s *Service) Delete(nodeName string, force bool) error {
+func (s *Service) Delete(ctx context.Context, nodeName string, force bool) error {
 	if err := s.ensureClient("Nodes"); err != nil {
 		return err
 	}
@@ -413,7 +405,7 @@ func (s *Service) Delete(nodeName string, force bool) error {
 		deleteOptions.GracePeriodSeconds = &zero
 	}
 
-	if err := s.deps.KubernetesClient.CoreV1().Nodes().Delete(s.deps.Context, nodeName, deleteOptions); err != nil {
+	if err := s.deps.KubernetesClient.CoreV1().Nodes().Delete(ctx, nodeName, deleteOptions); err != nil {
 		err = s.logError(err, fmt.Sprintf("Failed to delete node %s", nodeName), "delete")
 		return fmt.Errorf("failed to delete node: %w", err)
 	}
@@ -427,51 +419,79 @@ func nodePodFieldSelector(nodeName string) string {
 }
 
 func (s *Service) buildNodeDetails(node *corev1.Node, pods []corev1.Pod, nodeMetrics corev1.ResourceList) *NodeDetails {
-	var cpuRequests, cpuLimits, memRequests, memLimits int64
-	var podsList []restypes.PodSimpleInfo
-	var nodeRestarts int32
 	model := BuildResourceModel(s.deps.ClusterID, node)
 	nodeFacts := BuildFacts(node)
-
+	podProjection := nodePodProjection{}
 	for _, pod := range pods {
-		podModel := podres.BuildResourceModel(s.deps.ClusterID, &pod)
-		podFacts := podres.BuildFacts(&pod)
-		podRestarts := podFacts.RestartCount
-		nodeRestarts += podRestarts
-
-		podsList = append(podsList, restypes.PodSimpleInfo{
-			Kind:             "Pod",
-			Name:             pod.Name,
-			Namespace:        pod.Namespace,
-			StatusProjection: restypes.NewStatusProjection(podModel.Status),
-			Ready:            fmt.Sprintf("%d/%d", podFacts.ReadyContainers, podFacts.TotalContainers),
-			Restarts:         podRestarts,
-			Age:              common.FormatAge(pod.CreationTimestamp.Time),
-		})
-
-		if pod.Status.Phase == corev1.PodRunning || pod.Status.Phase == corev1.PodPending {
-			for _, container := range pod.Spec.Containers {
-				if req := container.Resources.Requests; req != nil {
-					if cpu, ok := req[corev1.ResourceCPU]; ok {
-						cpuRequests += cpu.MilliValue()
-					}
-					if mem, ok := req[corev1.ResourceMemory]; ok {
-						memRequests += mem.Value()
-					}
-				}
-				if lim := container.Resources.Limits; lim != nil {
-					if cpu, ok := lim[corev1.ResourceCPU]; ok {
-						cpuLimits += cpu.MilliValue()
-					}
-					if mem, ok := lim[corev1.ResourceMemory]; ok {
-						memLimits += mem.Value()
-					}
-				}
-			}
-		}
+		podProjection.add(s.deps.ClusterID, pod)
 	}
+	details := newNodeDetails(node, model, nodeFacts, podProjection)
+	details.Conditions = projectNodeConditions(node.Status.Conditions)
+	details.Taints = projectNodeTaints(node.Spec.Taints)
+	details.Roles = deriveNodeRoles(node.Labels)
+	setNodeAddresses(details, node.Status.Addresses)
+	setNodeCapacity(details, node.Status.Capacity, node.Status.Allocatable)
+	setNodeRequests(details, podProjection.cpuRequests, podProjection.cpuLimits, podProjection.memRequests, podProjection.memLimits)
+	setNodeUsage(details, nodeMetrics)
+	details.Kind = "node"
+	setLegacySummaries(details)
+	return details
+}
 
-	details := &NodeDetails{
+type nodePodProjection struct {
+	podsList    []restypes.PodSimpleInfo
+	restarts    int32
+	cpuRequests int64
+	cpuLimits   int64
+	memRequests int64
+	memLimits   int64
+}
+
+func (projection *nodePodProjection) add(clusterID string, pod corev1.Pod) {
+	podModel := podres.BuildResourceModel(clusterID, &pod)
+	podFacts := podres.BuildFacts(&pod)
+	projection.restarts += podFacts.RestartCount
+	projection.podsList = append(projection.podsList, restypes.PodSimpleInfo{
+		Kind:             "Pod",
+		Name:             pod.Name,
+		Namespace:        pod.Namespace,
+		StatusProjection: restypes.NewStatusProjection(podModel.Status),
+		Ready:            fmt.Sprintf("%d/%d", podFacts.ReadyContainers, podFacts.TotalContainers),
+		Restarts:         podFacts.RestartCount,
+		Age:              common.FormatAge(pod.CreationTimestamp.Time),
+	})
+	if podConsumesNodeResources(pod.Status.Phase) {
+		projection.addContainers(pod.Spec.Containers)
+	}
+}
+
+func podConsumesNodeResources(phase corev1.PodPhase) bool {
+	switch phase {
+	case corev1.PodRunning, corev1.PodPending:
+		return true
+	default:
+		return false
+	}
+}
+
+func (projection *nodePodProjection) addContainers(containers []corev1.Container) {
+	for _, container := range containers {
+		addCPUAndMemory(container.Resources.Requests, &projection.cpuRequests, &projection.memRequests)
+		addCPUAndMemory(container.Resources.Limits, &projection.cpuLimits, &projection.memLimits)
+	}
+}
+
+func addCPUAndMemory(resources corev1.ResourceList, cpuTotal, memoryTotal *int64) {
+	if cpu, ok := resources[corev1.ResourceCPU]; ok {
+		*cpuTotal += cpu.MilliValue()
+	}
+	if memory, ok := resources[corev1.ResourceMemory]; ok {
+		*memoryTotal += memory.Value()
+	}
+}
+
+func newNodeDetails(node *corev1.Node, model resourcemodel.ResourceModel, nodeFacts Facts, pods nodePodProjection) *NodeDetails {
+	return &NodeDetails{
 		Name:             node.Name,
 		StatusProjection: restypes.NewStatusProjection(model.Status),
 		Unschedulable:    nodeFacts.Unschedulable,
@@ -483,46 +503,44 @@ func (s *Service) buildNodeDetails(node *corev1.Node, pods []corev1.Pod, nodeMet
 		KubeletVersion:   node.Status.NodeInfo.KubeletVersion,
 		Labels:           node.Labels,
 		Annotations:      node.Annotations,
-		PodsList:         podsList,
-		PodsCount:        len(podsList),
-		Restarts:         nodeRestarts,
+		PodsList:         pods.podsList,
+		PodsCount:        len(pods.podsList),
+		Restarts:         pods.restarts,
 	}
+}
 
-	for _, condition := range node.Status.Conditions {
-		details.Conditions = append(details.Conditions, NodeCondition{
+func projectNodeConditions(conditions []corev1.NodeCondition) []NodeCondition {
+	var projected []NodeCondition
+	for _, condition := range conditions {
+		projected = append(projected, NodeCondition{
 			Kind:    string(condition.Type),
 			Status:  string(condition.Status),
 			Reason:  condition.Reason,
 			Message: condition.Message,
 		})
 	}
+	return projected
+}
 
-	for _, taint := range node.Spec.Taints {
-		details.Taints = append(details.Taints, NodeTaint{
+func projectNodeTaints(taints []corev1.Taint) []NodeTaint {
+	var projected []NodeTaint
+	for _, taint := range taints {
+		projected = append(projected, NodeTaint{
 			Key:    taint.Key,
 			Value:  taint.Value,
 			Effect: string(taint.Effect),
 		})
 	}
-
-	details.Roles = deriveNodeRoles(node.Labels)
-	setNodeAddresses(details, node.Status.Addresses)
-	setNodeCapacity(details, node.Status.Capacity, node.Status.Allocatable)
-	setNodeRequests(details, cpuRequests, cpuLimits, memRequests, memLimits)
-	setNodeUsage(details, nodeMetrics)
-	details.Kind = "node"
-	setLegacySummaries(details)
-
-	return details
+	return projected
 }
 
-func (s *Service) listPodsForNode(name string) []corev1.Pod {
+func (s *Service) listPodsForNode(ctx context.Context, name string) []corev1.Pod {
 	client := s.deps.KubernetesClient
 	if client == nil {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(s.deps.Context, config.NamespaceOperationTimeout)
+	ctx, cancel := context.WithTimeout(ctx, config.NamespaceOperationTimeout)
 	defer cancel()
 
 	podList, err := client.CoreV1().Pods("").List(ctx, metav1.ListOptions{
@@ -535,13 +553,13 @@ func (s *Service) listPodsForNode(name string) []corev1.Pod {
 	return podList.Items
 }
 
-func (s *Service) getNodeMetrics(name string) corev1.ResourceList {
+func (s *Service) getNodeMetrics(ctx context.Context, name string) corev1.ResourceList {
 	s.ensureMetricsClient()
 	if s.deps.MetricsClient == nil {
 		return nil
 	}
 
-	metric, err := s.deps.MetricsClient.MetricsV1beta1().NodeMetricses().Get(s.deps.Context, name, metav1.GetOptions{})
+	metric, err := s.deps.MetricsClient.MetricsV1beta1().NodeMetricses().Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		s.logInfo(fmt.Sprintf("Failed to fetch metrics for node %s: %v", name, err))
 		return nil

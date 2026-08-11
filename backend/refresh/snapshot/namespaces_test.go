@@ -13,14 +13,17 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/informers"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
+	"k8s.io/client-go/tools/cache"
 
 	"github.com/luxury-yacht/app/backend/kind/objectmap"
 	"github.com/luxury-yacht/app/backend/kind/objectmapnode"
 	"github.com/luxury-yacht/app/backend/kind/streamrows"
 	"github.com/luxury-yacht/app/backend/objectcatalog"
 	"github.com/luxury-yacht/app/backend/refresh/domain"
+	"github.com/luxury-yacht/app/backend/refresh/ingest"
 	"github.com/luxury-yacht/app/backend/resourcemodel"
 	"github.com/luxury-yacht/app/backend/testsupport"
 	"github.com/stretchr/testify/require"
@@ -697,6 +700,110 @@ func TestRegisterNamespaceDomainScopedDoesNotTouchNamespaceInformer(t *testing.T
 	notifier, err := RegisterNamespaceDomain(reg, nil, nil, []string{"prod"}, nil, false)
 	require.NoError(t, err)
 	require.NotNil(t, notifier)
+}
+
+func TestRegisterNamespaceDomainReportsStoppedEventInformer(t *testing.T) {
+	client := k8sfake.NewClientset()
+	factory := informers.NewSharedInformerFactory(client, 0)
+	eventInformer := factory.Core().V1().Events().Informer()
+	ctx, cancel := context.WithCancel(context.Background())
+	factory.Start(ctx.Done())
+	cancel()
+	require.Eventually(t, eventInformer.IsStopped, time.Second, 10*time.Millisecond)
+
+	notifier, err := RegisterNamespaceDomain(
+		domain.New(), factory, nil, []string{"prod"}, client, true,
+	)
+
+	require.Nil(t, notifier)
+	require.ErrorContains(t, err, "namespaces: register event aggregate handler")
+}
+
+func TestRegisterNamespaceDomainReportsDuplicateRegistration(t *testing.T) {
+	reg := domain.New()
+	notifier, err := RegisterNamespaceDomain(reg, nil, nil, []string{"prod"}, nil, false)
+	require.NoError(t, err)
+	require.NotNil(t, notifier)
+	defer notifier.Stop()
+
+	duplicateNotifier, err := RegisterNamespaceDomain(reg, nil, nil, []string{"prod"}, nil, false)
+
+	require.Nil(t, duplicateNotifier)
+	require.ErrorContains(t, err, "domain already registered")
+}
+
+func TestRegisterNamespaceDomainUnscopedWiresNamespaceAndEventInformers(t *testing.T) {
+	client := k8sfake.NewClientset()
+	factory := informers.NewSharedInformerFactory(client, 0)
+	reg := domain.New()
+	ingestSource := &namespaceRegistrationIngest{fakeNamespaceIngest: &fakeNamespaceIngest{}}
+
+	notifier, err := RegisterNamespaceDomain(reg, factory, ingestSource, nil, client, true)
+	require.NoError(t, err)
+	require.NotNil(t, notifier)
+	require.True(t, notifier.eventsExpected)
+	require.NotNil(t, notifier.eventLister)
+	require.NotNil(t, notifier.eventsSynced)
+	require.Len(t, ingestSource.sinks, 7)
+	defer notifier.Stop()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	factory.Start(ctx.Done())
+	require.True(t, cache.WaitForCacheSync(
+		ctx.Done(),
+		factory.Core().V1().Namespaces().Informer().HasSynced,
+		factory.Core().V1().Events().Informer().HasSynced,
+	))
+	createdNamespace, err := client.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: "team-a"},
+	}, metav1.CreateOptions{})
+	require.NoError(t, err)
+	createdEvent, err := client.CoreV1().Events("team-a").Create(ctx, &corev1.Event{
+		ObjectMeta: metav1.ObjectMeta{Name: "warning", Namespace: "team-a"},
+	}, metav1.CreateOptions{})
+	require.NoError(t, err)
+	requireNamespaceRegistrationDirty(t, notifier)
+	clearNamespaceRegistrationDirty(notifier)
+
+	createdNamespace.Labels = map[string]string{"updated": "true"}
+	_, err = client.CoreV1().Namespaces().Update(ctx, createdNamespace, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	createdEvent.Reason = "Updated"
+	_, err = client.CoreV1().Events("team-a").Update(ctx, createdEvent, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	requireNamespaceRegistrationDirty(t, notifier)
+	clearNamespaceRegistrationDirty(notifier)
+
+	require.NoError(t, client.CoreV1().Namespaces().Delete(ctx, "team-a", metav1.DeleteOptions{}))
+	require.NoError(t, client.CoreV1().Events("team-a").Delete(ctx, "warning", metav1.DeleteOptions{}))
+	requireNamespaceRegistrationDirty(t, notifier)
+}
+
+func requireNamespaceRegistrationDirty(t *testing.T, notifier *NamespaceChangeNotifier) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		notifier.mu.Lock()
+		defer notifier.mu.Unlock()
+		return notifier.namespaceDirty && notifier.eventDirty
+	}, 2*time.Second, 10*time.Millisecond)
+}
+
+func clearNamespaceRegistrationDirty(notifier *NamespaceChangeNotifier) {
+	notifier.mu.Lock()
+	notifier.namespaceDirty = false
+	notifier.eventDirty = false
+	notifier.mu.Unlock()
+}
+
+type namespaceRegistrationIngest struct {
+	*fakeNamespaceIngest
+	sinks []schema.GroupVersionResource
+}
+
+func (i *namespaceRegistrationIngest) AddBundleSink(gvr schema.GroupVersionResource, _ ingest.BundleSink) bool {
+	i.sinks = append(i.sinks, gvr)
+	return true
 }
 
 // Scoped rows are enriched by a per-namespace GET probe

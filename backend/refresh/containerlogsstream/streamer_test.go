@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -122,17 +123,10 @@ func TestMatchNoneTailAndStreamDoNotTouchKubernetes(t *testing.T) {
 		defer close(done)
 		streamer.run(
 			ctx,
-			opts,
+
 			pods,
-			selector,
-			states,
-			nil,
-			warnings,
-			make(chan Entry),
-			make(chan []string),
-			make(chan error),
-			make(chan int),
-		)
+			selector, containerLogRunConfig{opts: opts, states: states, limiterSession: nil, initialWarnings: warnings, entriesCh: make(chan Entry), warningsCh: make(chan []string), errCh: make(chan error), dropCh: make(chan int)})
+
 	}()
 	cancel()
 	select {
@@ -426,11 +420,12 @@ func TestPodPointersReturnsNewSlice(t *testing.T) {
 }
 
 type fakeWatch struct {
-	ch chan watch.Event
+	ch   chan watch.Event
+	once sync.Once
 }
 
 func (f *fakeWatch) Stop() {
-	close(f.ch)
+	f.once.Do(func() { close(f.ch) })
 }
 
 func (f *fakeWatch) ResultChan() <-chan watch.Event {
@@ -451,11 +446,8 @@ func TestConsumeWatchReturnsErrorOnWatchErrorEvent(t *testing.T) {
 			fw,
 			Options{},
 			map[string]bool{},
-			nil,
-			nil,
-			func(*corev1.Pod) {},
-			func(string) {},
-		)
+			nil, podWatchCallbacks{reconcileTargets: nil, startPod: func(*corev1.Pod) {}, stopPod: func(string) {}})
+
 	}()
 
 	fw.ch <- watch.Event{
@@ -471,6 +463,229 @@ func TestConsumeWatchReturnsErrorOnWatchErrorEvent(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for consumeWatch to return")
 	}
+}
+
+func TestConsumeWatchReportsClosedChannelAndIgnoresUnrelatedEvents(t *testing.T) {
+	streamer := NewStreamer(fake.NewClientset(), nil, nil)
+	fw := &fakeWatch{ch: make(chan watch.Event, 2)}
+	started := 0
+	stopped := 0
+	fw.ch <- watch.Event{Type: watch.Added, Object: &metav1.Status{}}
+	fw.ch <- watch.Event{Type: watch.Added, Object: testLogPod("default", "ignored", corev1.PodRunning, true, "app")}
+	close(fw.ch)
+
+	err := streamer.consumeWatch(
+		context.Background(),
+		fw,
+		Options{PodFilter: "selected"},
+		map[string]bool{},
+		nil, podWatchCallbacks{reconcileTargets: nil, startPod: func(*corev1.Pod) { started++ }, stopPod: func(string) { stopped++ }})
+
+	require.EqualError(t, err, "watch channel closed")
+	require.Zero(t, started)
+	require.Zero(t, stopped)
+}
+
+func TestContainerLogRunWatchCallbacksUpdateInventory(t *testing.T) {
+	streamer := NewStreamer(fake.NewClientset(), nil, nil)
+	warningsCh := make(chan []string, 1)
+	run := newContainerLogRun(streamer, containerLogRunConfig{
+		opts:            Options{Kind: "deployment", Namespace: "default"},
+		states:          map[string]*containerState{},
+		initialWarnings: []string{"stale warning"},
+		warningsCh:      warningsCh,
+	})
+	limiterNotify := make(chan struct{}, 1)
+	run.limiterNotify = limiterNotify
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pod-1"}}
+	fw := &fakeWatch{ch: make(chan watch.Event, 2)}
+	resultCh := make(chan error, 1)
+	go func() {
+		resultCh <- run.consumePodWatch(context.Background(), fw, map[string]bool{})
+	}()
+	limiterNotify <- struct{}{}
+	require.Empty(t, <-warningsCh)
+	fw.ch <- watch.Event{Type: watch.Added, Object: pod}
+	fw.ch <- watch.Event{Type: watch.Deleted, Object: pod}
+	close(fw.ch)
+
+	err := <-resultCh
+	require.EqualError(t, err, "watch channel closed")
+	require.Empty(t, run.currentPods)
+}
+
+func TestContainerLogRunRefreshesPodInventory(t *testing.T) {
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pod-1"}}
+	streamer := NewStreamer(fake.NewClientset(pod), nil, nil)
+	run := newContainerLogRun(streamer, containerLogRunConfig{
+		opts:   Options{Kind: "pod", Namespace: "default", Name: "pod-1"},
+		states: map[string]*containerState{},
+	})
+
+	run.refreshPodInventory(context.Background())
+
+	require.Contains(t, run.currentPods, "pod-1")
+}
+
+func TestStreamerRunCancellationBeforeAndAfterStartup(t *testing.T) {
+	streamer := NewStreamer(fake.NewClientset(), nil, nil)
+
+	t.Run("cancelled before match-none startup", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		done := make(chan struct{})
+		go func() {
+			streamer.run(ctx, nil, "", containerLogRunConfig{opts: Options{MatchNone: true}, states: nil, limiterSession: nil, initialWarnings: nil, entriesCh: nil, warningsCh: nil, errCh: nil, dropCh: nil})
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("match-none stream did not honor pre-start cancellation")
+		}
+	})
+
+	t.Run("cancelled after pod stream startup", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			streamer.run(ctx, nil, "", containerLogRunConfig{opts: Options{Kind: "pod"}, states: map[string]*containerState{}, limiterSession: nil, initialWarnings: nil, entriesCh: nil, warningsCh: nil, errCh: nil, dropCh: nil})
+			close(done)
+		}()
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("pod stream did not honor cancellation after startup")
+		}
+	})
+}
+
+func TestStreamerRunRestartsClosedWatchAndInterruptsBackoff(t *testing.T) {
+	t.Run("closed watch restarts", func(t *testing.T) {
+		client := fake.NewClientset()
+		var mu sync.Mutex
+		var watches []*fakeWatch
+		client.PrependWatchReactor("pods", func(k8stesting.Action) (bool, watch.Interface, error) {
+			fw := &fakeWatch{ch: make(chan watch.Event)}
+			mu.Lock()
+			watches = append(watches, fw)
+			mu.Unlock()
+			return true, fw, nil
+		})
+		streamer := NewStreamer(client, nil, nil)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan struct{})
+		go func() {
+			streamer.run(ctx, nil, "app=test", containerLogRunConfig{opts: Options{Kind: "deployment", Namespace: "default"}, states: map[string]*containerState{}, limiterSession: nil, initialWarnings: nil, entriesCh: nil, warningsCh: nil, errCh: make(chan error, 1), dropCh: nil})
+			close(done)
+		}()
+
+		require.Eventually(t, func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return len(watches) == 1
+		}, time.Second, 10*time.Millisecond)
+		mu.Lock()
+		first := watches[0]
+		mu.Unlock()
+		first.Stop()
+
+		require.Eventually(t, func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return len(watches) >= 2
+		}, 2*time.Second, 20*time.Millisecond, "closed watch should reconnect after backoff")
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("restarted watch did not stop after cancellation")
+		}
+	})
+
+	t.Run("watch creation backoff is cancellable", func(t *testing.T) {
+		client := fake.NewClientset()
+		watchAttempted := make(chan struct{}, 1)
+		client.PrependWatchReactor("pods", func(k8stesting.Action) (bool, watch.Interface, error) {
+			select {
+			case watchAttempted <- struct{}{}:
+			default:
+			}
+			return true, nil, errors.New("watch unavailable")
+		})
+		streamer := NewStreamer(client, nil, nil)
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			streamer.run(ctx, nil, "", containerLogRunConfig{opts: Options{Kind: "deployment", Namespace: "default"}, states: map[string]*containerState{}, limiterSession: nil, initialWarnings: nil, entriesCh: nil, warningsCh: nil, errCh: make(chan error, 1), dropCh: nil})
+			close(done)
+		}()
+		select {
+		case <-watchAttempted:
+		case <-time.After(time.Second):
+			t.Fatal("watch startup was not attempted")
+		}
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(250 * time.Millisecond):
+			t.Fatal("cancellation did not interrupt reconnect backoff")
+		}
+	})
+}
+
+func TestStreamerRunReconcilesContainerLossAndRestartWithCleanup(t *testing.T) {
+	pod := testLogPod("default", "web-1", corev1.PodRunning, true, "app", "sidecar")
+	baseClient := fake.NewClientset(pod)
+	delegateCore := baseClient.CoreV1()
+	logs := newLogPods(delegateCore.Pods("default"), "default", nil)
+	client := &stubClient{
+		Clientset: baseClient,
+		core: &logCore{CoreV1Interface: delegateCore, overrides: map[string]*logPods{
+			"default": logs,
+		}},
+	}
+	fw := &fakeWatch{ch: make(chan watch.Event, 4)}
+	baseClient.PrependWatchReactor("pods", func(k8stesting.Action) (bool, watch.Interface, error) {
+		return true, fw, nil
+	})
+	streamer := NewStreamer(client, nil, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		streamer.run(
+			ctx,
+
+			nil,
+			"app=web", containerLogRunConfig{opts: Options{Kind: "deployment", Namespace: "default", IncludeInit: true, IncludeEphemeral: true, ContainerState: containerlogs.ContainerStateAll}, states: map[string]*containerState{}, limiterSession: nil, initialWarnings: nil, entriesCh: make(chan Entry, 4), warningsCh: make(chan []string, 4), errCh: make(chan error, 4), dropCh: make(chan int, 4)})
+
+		close(done)
+	}()
+
+	fw.ch <- watch.Event{Type: watch.Added, Object: pod.DeepCopy()}
+	require.Eventually(t, func() bool {
+		return logs.containerRequestCount("app") >= 1 && logs.containerRequestCount("sidecar") >= 1
+	}, time.Second, 10*time.Millisecond)
+
+	withoutSidecar := pod.DeepCopy()
+	withoutSidecar.Spec.Containers = withoutSidecar.Spec.Containers[:1]
+	fw.ch <- watch.Event{Type: watch.Modified, Object: withoutSidecar}
+	time.Sleep(25 * time.Millisecond)
+	fw.ch <- watch.Event{Type: watch.Modified, Object: pod.DeepCopy()}
+	require.Eventually(t, func() bool {
+		return logs.containerRequestCount("sidecar") >= 2
+	}, time.Second, 10*time.Millisecond, "a container that returns to inventory should get a new follower")
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("run returned before all restarted followers were cleaned up")
+	}
+	require.Equal(t, 1, logs.containerRequestCount("app"))
+	require.Equal(t, 2, logs.containerRequestCount("sidecar"))
 }
 
 func TestWaitForReconnect(t *testing.T) {
@@ -507,16 +722,13 @@ func TestConsumeWatchReconcilesTargetsOnLimiterNotification(t *testing.T) {
 			fw,
 			Options{},
 			map[string]bool{},
-			limiterNotify,
-			func() {
+			limiterNotify, podWatchCallbacks{reconcileTargets: func() {
 				select {
 				case reconciled <- struct{}{}:
 				default:
 				}
-			},
-			func(*corev1.Pod) {},
-			func(string) {},
-		)
+			}, startPod: func(*corev1.Pod) {}, stopPod: func(string) {}})
+
 	}()
 
 	limiterNotify <- struct{}{}
@@ -669,11 +881,8 @@ func TestCronJobWatchPicksUpFutureJob(t *testing.T) {
 			fw,
 			Options{Kind: "cronjob", Namespace: "default", Name: "cron"},
 			map[string]bool{},
-			nil,
-			nil,
-			startPod,
-			stopPod,
-		)
+			nil, podWatchCallbacks{reconcileTargets: nil, startPod: startPod, stopPod: stopPod})
+
 	}()
 
 	// Deliver a pod from the future Job via the watch.

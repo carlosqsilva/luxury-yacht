@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -29,22 +30,26 @@ func sanitizeCsvFilename(name string) string {
 // is produced client-side from the table's displayed columns, so the exported CSV
 // matches the on-screen table exactly; this keeps only the file IO (and the
 // potentially large byte payload) on the Go side. Returns the chosen path and size.
-func (a *App) SaveCsvFile(defaultFilename string, content string) (CatalogQueryCSVExport, error) {
+func (a *App) SaveCsvFile(defaultFilename, content string) (CatalogQueryCSVExport, error) {
 	var empty CatalogQueryCSVExport
 	if a == nil {
 		return empty, fmt.Errorf("app is not initialised")
 	}
-	if a.Ctx == nil {
+	if !a.runtimeAvailable() {
 		return empty, fmt.Errorf("application context is not available")
 	}
 
-	path, err := runtimeSaveFileDialog(a.Ctx, wailsruntime.SaveDialogOptions{
-		Title:           "Export CSV",
-		DefaultFilename: sanitizeCsvFilename(defaultFilename),
-		Filters: []wailsruntime.FileFilter{
-			{DisplayName: "CSV files (*.csv)", Pattern: "*.csv"},
-		},
-		CanCreateDirectories: true,
+	var path string
+	var err error
+	a.runWithRuntimeContext(func(ctx context.Context) {
+		path, err = runtimeSaveFileDialog(ctx, wailsruntime.SaveDialogOptions{
+			Title:           "Export CSV",
+			DefaultFilename: sanitizeCsvFilename(defaultFilename),
+			Filters: []wailsruntime.FileFilter{
+				{DisplayName: "CSV files (*.csv)", Pattern: "*.csv"},
+			},
+			CanCreateDirectories: true,
+		})
 	})
 	if err != nil {
 		return empty, fmt.Errorf("select CSV export file: %w", err)
@@ -65,7 +70,7 @@ func (a *App) SaveCsvFile(defaultFilename string, content string) (CatalogQueryC
 // point of write-then-rename is surviving a crash; without the sync the rename
 // can land before the data), makes it user-readable (CreateTemp creates 0600),
 // and renames it into place.
-func writeCSVFileAtomically(path string, content string) (os.FileInfo, error) {
+func writeCSVFileAtomically(path, content string) (os.FileInfo, error) {
 	tempFile, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return nil, fmt.Errorf("create CSV export: %w", err)

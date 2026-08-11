@@ -46,7 +46,7 @@ func TestObjectDetailProviderFetchesKnownKinds(t *testing.T) {
 	event := &corev1.Event{ObjectMeta: metav1.ObjectMeta{Name: "demo-event", Namespace: "default"}}
 
 	app := NewApp()
-	app.Ctx = context.Background()
+	app.setRuntimeContext(context.Background())
 	// Per-cluster clients are stored in clusterClients, not in global fields.
 	clusterID := "config:ctx"
 	fakeClient := fake.NewClientset(deploy, configMap, clusterRole, namespace, event)
@@ -112,7 +112,7 @@ func TestObjectDetailProviderRejectsKnownKindWithoutGVK(t *testing.T) {
 
 func TestObjectDetailProviderRejectsKnownKindWithWrongGVK(t *testing.T) {
 	app := NewApp()
-	app.Ctx = context.Background()
+	app.setRuntimeContext(context.Background())
 	clusterID := "config:ctx"
 	client := fake.NewClientset(&corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "default"},
@@ -247,7 +247,7 @@ func TestObjectDetailProviderCacheKeyIncludesGVK(t *testing.T) {
 
 func TestObjectDetailProviderUsesClusterContext(t *testing.T) {
 	app := NewApp()
-	app.Ctx = context.Background()
+	app.setRuntimeContext(context.Background())
 
 	clusterAID := "config-a:ctx-a"
 	clusterBID := "config-b:ctx-b"
@@ -294,6 +294,20 @@ func TestObjectDetailProviderUsesClusterContext(t *testing.T) {
 func TestObjectDetailProviderFetchObjectHeaderMetadata(t *testing.T) {
 	const clusterID = "headermeta-provider"
 	app := newCollidingDBInstanceCluster(t, clusterID)
+	gvr := schema.GroupVersionResource{
+		Group: "rds.services.k8s.aws", Version: "v1alpha1", Resource: "dbinstances",
+	}
+	resource := app.clusterClients[clusterID].dynamicClient.Resource(gvr).Namespace("default")
+	object, err := resource.Get(context.Background(), "my-db", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get test object: %v", err)
+	}
+	deletionTime := metav1.NewTime(time.Date(2026, 8, 9, 12, 34, 56, 0, time.UTC))
+	object.SetDeletionTimestamp(&deletionTime)
+	object.SetFinalizers([]string{"rds.services.k8s.aws/finalizer"})
+	if _, err := resource.Update(context.Background(), object, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("update test object: %v", err)
+	}
 
 	provider, ok := app.objectDetailProvider().(snapshot.ObjectHeaderMetadataProvider)
 	if !ok {
@@ -315,6 +329,35 @@ func TestObjectDetailProviderFetchObjectHeaderMetadata(t *testing.T) {
 	// object-details snapshot has a real source clock (drives the ETag).
 	if meta.ResourceVersion != "100" {
 		t.Fatalf("expected resourceVersion %q, got %q", "100", meta.ResourceVersion)
+	}
+	if meta.Deletion == nil {
+		t.Fatal("expected deletion metadata from the live object")
+	}
+	if meta.Deletion.DeletionTimestamp != "2026-08-09T12:34:56Z" {
+		t.Fatalf("expected deletion timestamp, got %q", meta.Deletion.DeletionTimestamp)
+	}
+	if len(meta.Deletion.Finalizers) != 1 || meta.Deletion.Finalizers[0] != "rds.services.k8s.aws/finalizer" {
+		t.Fatalf("expected metadata finalizers, got %#v", meta.Deletion.Finalizers)
+	}
+
+	cached, err := provider.FetchObjectHeaderMetadata(ctx, ackDBInstanceGVK, "default", "my-db")
+	if err != nil {
+		t.Fatalf("FetchObjectHeaderMetadata cached read returned error: %v", err)
+	}
+	if cached.Deletion == nil || cached.Deletion.DeletionTimestamp != meta.Deletion.DeletionTimestamp {
+		t.Fatalf("expected cached deletion metadata, got %#v", cached.Deletion)
+	}
+}
+
+func TestObjectDetailProviderFetchObjectHeaderMetadataRequiresClusterScope(t *testing.T) {
+	provider, ok := newTestAppWithDefaults(t).objectDetailProvider().(snapshot.ObjectHeaderMetadataProvider)
+	if !ok {
+		t.Fatal("object detail provider does not implement ObjectHeaderMetadataProvider")
+	}
+
+	_, err := provider.FetchObjectHeaderMetadata(context.Background(), ackDBInstanceGVK, "default", "my-db")
+	if err == nil || !strings.Contains(err.Error(), "cluster scope is required") {
+		t.Fatalf("expected cluster scope error, got %v", err)
 	}
 }
 
@@ -399,7 +442,7 @@ func TestObjectDetailProviderCoversAdditionalKinds(t *testing.T) {
 	)
 
 	app := NewApp()
-	app.Ctx = context.Background()
+	app.setRuntimeContext(context.Background())
 	// Per-cluster clients are stored in clusterClients, not in global fields.
 	clusterID := "config:ctx"
 	app.clusterClients = map[string]*clusterClients{
@@ -486,7 +529,7 @@ func testObjectDetailGVK(kind string) schema.GroupVersionKind {
 // resolving to whichever colliding CRD discovery returns first.
 func TestObjectDetailProviderFetchObjectYAMLRejectsKindOnly(t *testing.T) {
 	app := NewApp()
-	app.Ctx = context.Background()
+	app.setRuntimeContext(context.Background())
 	app.logger = NewLogger(10)
 
 	clusterID := "config:ctx"

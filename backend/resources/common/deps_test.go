@@ -23,11 +23,9 @@ import (
 	"github.com/luxury-yacht/app/backend/internal/applog"
 	"github.com/luxury-yacht/app/backend/internal/errorcapture"
 	"github.com/luxury-yacht/app/backend/resourcekind"
-	"github.com/luxury-yacht/app/internal/sentry"
+	sentryreporting "github.com/luxury-yacht/app/internal/sentry"
 	"github.com/stretchr/testify/require"
 )
-
-type testContextKey string
 
 type recordingDepsLogger struct {
 	level   string
@@ -242,23 +240,17 @@ func TestDynamicRequestHelperBuildsCustomResourceOperation(t *testing.T) {
 	deps.LogDynamicResourceRequestFailure(
 		fmt.Errorf("forbidden"),
 		"Failed to delete DatabaseBackup customer-prod/backup-7",
-		"delete",
-		"storage.example.com",
-		"v1alpha1",
-		"databasebackups",
-		"status",
-		true,
+		DynamicResourceRequestSpec{
+			Action: "delete", Group: "storage.example.com", Version: "v1alpha1",
+			Resource: "databasebackups", Subresource: "status", Namespaced: true,
+		},
 		"GenericResource",
 	)
 
-	require.Equal(t, DynamicResourceRequestOperation(
-		"delete",
-		"storage.example.com",
-		"v1alpha1",
-		"databasebackups",
-		"status",
-		true,
-	), logger.operation)
+	require.Equal(t, DynamicResourceRequestOperation(DynamicResourceRequestSpec{
+		Action: "delete", Group: "storage.example.com", Version: "v1alpha1",
+		Resource: "databasebackups", Subresource: "status", Namespaced: true,
+	}), logger.operation)
 }
 
 func TestOperationalFailurePreservesCauseWithoutInventingOperation(t *testing.T) {
@@ -289,24 +281,11 @@ func TestLogRequestFailureToleratesNilLogger(t *testing.T) {
 	deps.LogRequestFailure(fmt.Errorf("forbidden"), "Failed to get deployment default/web", testRequestOperation(), "ResourceLoader")
 }
 
-func TestCloneWithContext(t *testing.T) {
-	original := Dependencies{Context: context.Background()}
-	newCtx := context.WithValue(context.Background(), testContextKey("k"), "v")
-
-	clone := original.CloneWithContext(newCtx)
-	if clone.Context != newCtx {
-		t.Fatalf("expected context to be replaced")
-	}
-	if original.Context == newCtx {
-		t.Fatalf("expected original context to remain unchanged")
-	}
-}
-
-func TestCloneWithContextScopesLoggerToOperation(t *testing.T) {
+func TestWithOperationContextScopesLoggerToOperation(t *testing.T) {
 	logger := &recordingStructuredDepsLogger{}
 	ctx := applog.ContextWithOperationID(context.Background(), "snapshot-op-4")
 
-	clone := (Dependencies{Logger: logger}).CloneWithContext(ctx)
+	clone := (Dependencies{Logger: logger}).WithOperationContext(ctx)
 	clone.LogRequestFailure(fmt.Errorf("forbidden"), "load pods", testRequestOperation(), "Refresh")
 
 	if got := logger.source; len(got) != 4 || got[3] != "snapshot-op-4" {

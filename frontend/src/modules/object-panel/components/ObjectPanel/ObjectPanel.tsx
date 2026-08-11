@@ -55,7 +55,7 @@ interface ObjectPanelProps {
 // ============================================================================
 // MAIN COMPONENT
 // ============================================================================
-function ObjectPanel({ panelId, objectRef }: ObjectPanelProps) {
+function ObjectPanel({ panelId, objectRef }: Readonly<ObjectPanelProps>) {
   const objectData = objectRef;
   const { closePanel, setObjectPanelActiveTab } = useObjectPanelState();
   const { tabGroups, getPreferredOpenGroupKey } = useDockablePanelContext();
@@ -127,7 +127,7 @@ function ObjectPanel({ panelId, objectRef }: ObjectPanelProps) {
     isHelmRelease
   );
 
-  const { capabilities, capabilityReasons, nodeLogsState, nodeLogSources } =
+  const { capabilityStates, capabilities, capabilityReasons, nodeLogsState, nodeLogSources } =
     useObjectPanelCapabilities({
       objectData,
       objectKind,
@@ -140,6 +140,7 @@ function ObjectPanel({ panelId, objectRef }: ObjectPanelProps) {
     detailPayload,
     creationTimestamp,
     lastModified,
+    deletion,
     detailsLoading,
     detailsError,
     fetchResourceDetails,
@@ -283,6 +284,11 @@ function ObjectPanel({ panelId, objectRef }: ObjectPanelProps) {
         isActive: isOpen && visibleActiveTab === 'details',
         detailsLoading,
         detailsError,
+        deletion,
+        finalizerRemovalCapabilities: {
+          metadata: capabilityStates.removeFinalizer,
+          namespaceSpec: capabilityStates.removeNamespaceFinalizer,
+        },
         resourceDeleted,
         deletedResourceName,
         onAfterDelete: handleAfterDelete,

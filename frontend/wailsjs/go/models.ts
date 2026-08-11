@@ -934,6 +934,40 @@ export namespace backend {
 	
 	
 	
+	export class KubeconfigDiscoveryResult {
+	    kubeconfigs: types.KubeconfigInfo[];
+	    state: string;
+	    searchPaths: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new KubeconfigDiscoveryResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.kubeconfigs = this.convertValues(source["kubeconfigs"], types.KubeconfigInfo);
+	        this.state = source["state"];
+	        this.searchPaths = source["searchPaths"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class KubernetesAPIClientDiagnostics {
 	    clusterId: string;
 	    clusterName: string;
@@ -1039,6 +1073,8 @@ export namespace backend {
 	    portForward?: ObjectActionPortForwardOptions;
 	    debugContainer?: ObjectActionDebugContainerOptions;
 	    revision?: number;
+	    finalizer?: string;
+	    finalizerPath?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new ObjectActionRequest(source);
@@ -1054,6 +1090,8 @@ export namespace backend {
 	        this.portForward = this.convertValues(source["portForward"], ObjectActionPortForwardOptions);
 	        this.debugContainer = this.convertValues(source["debugContainer"], ObjectActionDebugContainerOptions);
 	        this.revision = source["revision"];
+	        this.finalizer = source["finalizer"];
+	        this.finalizerPath = source["finalizerPath"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -3082,6 +3120,8 @@ export namespace namespaces {
 	    statusReason?: string;
 	    hasWorkloads: boolean;
 	    workloadsUnknown?: boolean;
+	    finalizers?: string[];
+	    conditions?: types.ConditionState[];
 	    labels?: Record<string, string>;
 	    annotations?: Record<string, string>;
 	    resourceQuotas?: resourcemodel.ResourceRef[];
@@ -3102,6 +3142,8 @@ export namespace namespaces {
 	        this.statusReason = source["statusReason"];
 	        this.hasWorkloads = source["hasWorkloads"];
 	        this.workloadsUnknown = source["workloadsUnknown"];
+	        this.finalizers = source["finalizers"];
+	        this.conditions = this.convertValues(source["conditions"], types.ConditionState);
 	        this.labels = source["labels"];
 	        this.annotations = source["annotations"];
 	        this.resourceQuotas = this.convertValues(source["resourceQuotas"], resourcemodel.ResourceRef);

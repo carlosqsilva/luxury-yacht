@@ -22,9 +22,6 @@ type FailureDiagnostic struct {
 	Summary string
 	// ExecCommand is the kubeconfig exec credential command, when known.
 	ExecCommand string
-	// Cause retains the original credential error for structured reporting. It
-	// is deliberately omitted from UI payloads and state equality.
-	Cause error
 }
 
 // NewFailureDiagnostic builds a FailureDiagnostic from a classified credential
@@ -40,7 +37,6 @@ func NewFailureDiagnostic(err error, d credentialerrors.Diagnostic) FailureDiagn
 		Kind:        string(d.Kind),
 		Summary:     d.Summary,
 		ExecCommand: d.ExecCommand,
-		Cause:       err,
 	}
 }
 
@@ -135,11 +131,8 @@ type Manager struct {
 	// config holds the manager configuration.
 	config Config
 
-	// ctx is the context for the manager's lifecycle.
-	ctx context.Context
-
-	// cancel cancels the manager's context (used in Shutdown).
-	cancel context.CancelFunc
+	// stopped prevents recovery from restarting after Shutdown.
+	stopped bool
 
 	// recoveryCancel cancels the current recovery goroutine, if any.
 	recoveryCancel context.CancelFunc
@@ -159,8 +152,6 @@ func New(cfg Config) *Manager {
 		backoff = DefaultBackoffSchedule
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-
 	return &Manager{
 		state: StateValid,
 		config: Config{
@@ -174,8 +165,6 @@ func New(cfg Config) *Manager {
 			ClassifyError:             cfg.ClassifyError,
 			ConnectivityRetryInterval: cfg.ConnectivityRetryInterval,
 		},
-		ctx:    ctx,
-		cancel: cancel,
 	}
 }
 
@@ -281,8 +270,7 @@ func (m *Manager) Shutdown() {
 		m.recoveryCancel()
 		m.recoveryCancel = nil
 	}
-	// Cancel the manager's context
-	m.cancel()
+	m.stopped = true
 	m.mu.Unlock()
 
 	// Wait for goroutines to finish
@@ -320,13 +308,16 @@ func (m *Manager) markSnapshotChangeLocked() {
 // startRecoveryLocked starts the recovery process in a background goroutine.
 // Must be called with m.mu held.
 func (m *Manager) startRecoveryLocked() {
+	if m.stopped {
+		return
+	}
 	// Cancel any existing recovery
 	if m.recoveryCancel != nil {
 		m.recoveryCancel()
 	}
 
 	// Create a new context for this recovery attempt
-	recoveryCtx, recoveryCancel := context.WithCancel(m.ctx)
+	recoveryCtx, recoveryCancel := context.WithCancel(context.Background())
 	m.recoveryCancel = recoveryCancel
 
 	m.wg.Add(1)
@@ -429,7 +420,7 @@ func (m *Manager) classifyProbeError(err error) ErrorClass {
 	if m.config.ClassifyError == nil {
 		return ErrorClassAuth
 	}
-	if class := m.config.ClassifyError(err); class == ErrorClassConnectivity {
+	if m.config.ClassifyError(err) == ErrorClassConnectivity {
 		return ErrorClassConnectivity
 	}
 	return ErrorClassAuth

@@ -101,10 +101,7 @@ func (a *App) restartWorkloadInternal(clusterID, namespace, group, version, work
 		return fmt.Errorf("failed to marshal restart patch: %w", err)
 	}
 
-	ctx := deps.Context
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx := a.CtxOrBackground()
 
 	ops := workloadOperationsByKind[workloadKind]
 	if ops == nil || ops.Restart == nil {
@@ -156,12 +153,16 @@ func (a *App) scaleWorkloadInternal(clusterID, namespace, group, version, worklo
 		return fmt.Errorf("kubernetes client is not initialized")
 	}
 
-	ctx := deps.Context
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx := a.CtxOrBackground()
 
-	if err := ensureHPAManagedScaleAllowed(ctx, deps, namespace, group, version, workloadKind, name, replicas); err != nil {
+	if err := ensureHPAManagedScaleAllowed(ctx, deps, ObjectActionTargetRef{
+		ClusterID: clusterID,
+		Group:     group,
+		Version:   version,
+		Kind:      workloadKind,
+		Namespace: namespace,
+		Name:      name,
+	}, replicas); err != nil {
 		return err
 	}
 
@@ -193,10 +194,10 @@ func (a *App) scaleWorkloadInternal(clusterID, namespace, group, version, worklo
 	return nil
 }
 
-func ensureHPAManagedScaleAllowed(ctx context.Context, deps common.Dependencies, namespace, group, version, workloadKind, name string, replicas int) error {
-	managed, err := isWorkloadHPAManaged(ctx, deps, namespace, group, version, workloadKind, name)
+func ensureHPAManagedScaleAllowed(ctx context.Context, deps common.Dependencies, target ObjectActionTargetRef, replicas int) error {
+	managed, err := isWorkloadHPAManaged(ctx, deps, target.Namespace, target.Group, target.Version, target.Kind, target.Name)
 	if err != nil {
-		return fmt.Errorf("failed to determine HPA ownership for %s %s/%s: %w", workloadKind, namespace, name, err)
+		return fmt.Errorf("failed to determine HPA ownership for %s %s/%s: %w", target.Kind, target.Namespace, target.Name, err)
 	}
 	if !managed {
 		return nil
@@ -205,15 +206,15 @@ func ensureHPAManagedScaleAllowed(ctx context.Context, deps common.Dependencies,
 		return nil
 	}
 	if replicas == 1 {
-		current, err := currentWorkloadDesiredReplicas(ctx, deps, namespace, workloadKind, name)
+		current, err := currentWorkloadDesiredReplicas(ctx, deps, target.Namespace, target.Kind, target.Name)
 		if err != nil {
-			return fmt.Errorf("failed to read current scale for HPA-managed %s %s/%s: %w", workloadKind, namespace, name, err)
+			return fmt.Errorf("failed to read current scale for HPA-managed %s %s/%s: %w", target.Kind, target.Namespace, target.Name, err)
 		}
 		if current == 0 {
 			return nil
 		}
 	}
-	return fmt.Errorf("manual scale is disabled for HPA-managed %s %s/%s", workloadKind, namespace, name)
+	return fmt.Errorf("manual scale is disabled for HPA-managed %s %s/%s", target.Kind, target.Namespace, target.Name)
 }
 
 func currentWorkloadDesiredReplicas(ctx context.Context, deps common.Dependencies, namespace, workloadKind, name string) (int32, error) {
@@ -246,10 +247,7 @@ func (a *App) triggerCronJobInternal(clusterID, namespace, name string) (string,
 		return "", fmt.Errorf("kubernetes client is not initialized")
 	}
 
-	ctx := deps.Context
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx := a.CtxOrBackground()
 
 	// Permission to create the Job is checked here; the CronJob fetch, suspended
 	// guard, and Job creation live in the cronjob package.
@@ -292,7 +290,8 @@ func (a *App) suspendCronJobInternal(clusterID, namespace, name string, suspend 
 		return fmt.Errorf("kubernetes client is not initialized")
 	}
 
-	if err := a.requireResourcePermission(deps.Context, deps, resourcePermissionCheck{
+	ctx := a.CtxOrBackground()
+	if err := a.requireResourcePermission(ctx, deps, resourcePermissionCheck{
 		Group:     cronjob.Identity.Group,
 		Version:   cronjob.Identity.Version,
 		Kind:      cronjob.Identity.Kind,
@@ -301,11 +300,6 @@ func (a *App) suspendCronJobInternal(clusterID, namespace, name string, suspend 
 		Verb:      "patch",
 	}); err != nil {
 		return err
-	}
-
-	ctx := deps.Context
-	if ctx == nil {
-		ctx = context.Background()
 	}
 
 	if err := cronjob.SetSuspend(ctx, deps.KubernetesClient, namespace, name, suspend); err != nil {
@@ -324,12 +318,4 @@ func (a *App) suspendCronJobInternal(clusterID, namespace, name string, suspend 
 // boolPtr returns a pointer to a bool value.
 func boolPtr(b bool) *bool {
 	return &b
-}
-
-// Helper to obtain context even when Startup not yet run.
-func (a *App) CtxOrBackground() context.Context {
-	if a.Ctx != nil {
-		return a.Ctx
-	}
-	return context.Background()
 }

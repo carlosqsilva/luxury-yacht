@@ -29,19 +29,19 @@ import (
 
 	"github.com/luxury-yacht/app/backend/internal/applog"
 	"github.com/luxury-yacht/app/backend/resources/common"
+	restypes "github.com/luxury-yacht/app/backend/resources/types"
 )
 
 func TestGetPodRequiresTargetIdentity(t *testing.T) {
 	service := NewService(common.Dependencies{
-		Context:          context.Background(),
 		Logger:           applog.Noop,
 		KubernetesClient: fake.NewClientset(),
 	})
 
-	_, err := service.GetPod("", "demo-pod", false)
+	_, err := service.GetPod(context.Background(), "", "demo-pod", false)
 	require.EqualError(t, err, "namespace is required")
 
-	_, err = service.GetPod("team-a", "", false)
+	_, err = service.GetPod(context.Background(), "team-a", "", false)
 	require.EqualError(t, err, "pod name is required")
 }
 
@@ -52,12 +52,11 @@ func TestGetPodPropagatesError(t *testing.T) {
 	})
 
 	deps := common.Dependencies{
-		Context:          context.Background(),
 		Logger:           applog.Noop,
 		KubernetesClient: client,
 	}
 
-	if _, err := GetPod(deps, "ns", "name", false); err == nil {
+	if _, err := GetPod(context.Background(), deps, "ns", "name", false); err == nil {
 		t.Fatalf("expected error from GetPod when API fails")
 	}
 }
@@ -72,12 +71,11 @@ func TestDeletePodSucceeds(t *testing.T) {
 	client := fake.NewClientset(pod)
 
 	deps := common.Dependencies{
-		Context:          context.Background(),
 		Logger:           applog.Noop,
 		KubernetesClient: client,
 	}
 
-	if err := DeletePod(deps, "team-a", "delete-me"); err != nil {
+	if err := DeletePod(context.Background(), deps, "team-a", "delete-me"); err != nil {
 		t.Fatalf("DeletePod returned error: %v", err)
 	}
 
@@ -95,15 +93,14 @@ func TestDeletePodSucceeds(t *testing.T) {
 
 func TestDeletePodRequiresTargetIdentity(t *testing.T) {
 	service := NewService(common.Dependencies{
-		Context:          context.Background(),
 		Logger:           applog.Noop,
 		KubernetesClient: fake.NewClientset(),
 	})
 
-	err := service.DeletePod("", "delete-me")
+	err := service.DeletePod(context.Background(), "", "delete-me")
 	require.EqualError(t, err, "namespace is required")
 
-	err = service.DeletePod("team-a", "")
+	err = service.DeletePod(context.Background(), "team-a", "")
 	require.EqualError(t, err, "pod name is required")
 }
 
@@ -116,28 +113,21 @@ func TestDeletePodReturnsErrorWhenAPIFails(t *testing.T) {
 	})
 
 	deps := common.Dependencies{
-		Context:          context.Background(),
 		Logger:           applog.Noop,
 		KubernetesClient: client,
 	}
 
-	if err := DeletePod(deps, "team-a", "delete-me"); err == nil {
+	if err := DeletePod(context.Background(), deps, "team-a", "delete-me"); err == nil {
 		t.Fatalf("expected DeletePod to surface API error")
 	}
 }
 
-func TestDeletePodReturnsErrorWhenContextMissing(t *testing.T) {
-	client := fake.NewClientset(&corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "delete-me", Namespace: "team-a"},
-	})
-
+func TestDeletePodReturnsErrorWhenClientMissing(t *testing.T) {
 	deps := common.Dependencies{
-		Context:          nil,
-		Logger:           applog.Noop,
-		KubernetesClient: client,
+		Logger: applog.Noop,
 	}
 
-	err := DeletePod(deps, "team-a", "delete-me")
+	err := DeletePod(context.Background(), deps, "team-a", "delete-me")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "kubernetes client not initialized")
 }
@@ -179,6 +169,66 @@ func TestCalculatePodResourcesAggregates(t *testing.T) {
 	require.Equal(t, "512Mi", memLim.String())
 }
 
+func TestCalculatePodResourcesVariants(t *testing.T) {
+	restartAlways := corev1.ContainerRestartPolicyAlways
+	tests := []struct {
+		name string
+		pod  corev1.Pod
+		want [4]string
+	}{
+		{name: "empty", pod: corev1.Pod{}, want: [4]string{"0", "0", "0", "0"}},
+		{
+			name: "regular container sums exceed init maxima",
+			pod: corev1.Pod{Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{Resources: testResourceRequirements("100m", "200m", "64Mi", "128Mi")},
+					{Resources: testResourceRequirements("150m", "100m", "96Mi", "64Mi")},
+				},
+				InitContainers: []corev1.Container{{Resources: testResourceRequirements("200m", "250m", "80Mi", "160Mi")}},
+			}},
+			want: [4]string{"250m", "300m", "160Mi", "192Mi"},
+		},
+		{
+			name: "independent init and sidecar maxima",
+			pod: corev1.Pod{Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Resources: testResourceRequirements("50m", "50m", "32Mi", "32Mi")}},
+				InitContainers: []corev1.Container{
+					{Resources: testResourceRequirements("400m", "100m", "64Mi", "512Mi")},
+					{RestartPolicy: &restartAlways, Resources: testResourceRequirements("200m", "600m", "256Mi", "128Mi")},
+				},
+			}},
+			want: [4]string{"400m", "600m", "256Mi", "512Mi"},
+		},
+		{
+			name: "missing resource dimensions stay zero",
+			pod: corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+				Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("25m")}},
+			}}}},
+			want: [4]string{"25m", "0", "0", "0"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cpuReq, cpuLim, memReq, memLim := calculatePodResources(tt.pod)
+			require.Equal(t, tt.want, [4]string{cpuReq.String(), cpuLim.String(), memReq.String(), memLim.String()})
+		})
+	}
+}
+
+func testResourceRequirements(cpuRequest, cpuLimit, memoryRequest, memoryLimit string) corev1.ResourceRequirements {
+	return corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse(cpuRequest),
+			corev1.ResourceMemory: resource.MustParse(memoryRequest),
+		},
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse(cpuLimit),
+			corev1.ResourceMemory: resource.MustParse(memoryLimit),
+		},
+	}
+}
+
 func TestBuildReplicaSetToDeploymentMap(t *testing.T) {
 	controller := true
 	rs := &appsv1.ReplicaSet{
@@ -195,11 +245,10 @@ func TestBuildReplicaSetToDeploymentMap(t *testing.T) {
 
 	client := fake.NewClientset(rs)
 	service := NewService(common.Dependencies{
-		Context:          context.Background(),
 		KubernetesClient: client,
 	})
 
-	mapping := service.buildReplicaSetToDeploymentMap("team-a")
+	mapping := service.buildReplicaSetToDeploymentMap(context.Background(), "team-a")
 	require.Equal(t, "demo-deploy", mapping["demo-rs"])
 }
 
@@ -219,11 +268,10 @@ func TestBuildReplicaSetToDeploymentMapExported(t *testing.T) {
 
 	client := fake.NewClientset(rs)
 	service := NewService(common.Dependencies{
-		Context:          context.Background(),
 		KubernetesClient: client,
 	})
 
-	mapping := service.BuildReplicaSetToDeploymentMap("team-a")
+	mapping := service.BuildReplicaSetToDeploymentMap(context.Background(), "team-a")
 	require.Equal(t, "demo-deploy", mapping["demo-rs"])
 }
 
@@ -273,30 +321,27 @@ func TestGetNodeIP(t *testing.T) {
 	}
 	client := fake.NewClientset(node)
 	service := NewService(common.Dependencies{
-		Context:          context.Background(),
 		KubernetesClient: client,
 	})
 
-	require.Equal(t, "10.0.0.1", service.getNodeIP("node-1"))
-	require.Equal(t, "", service.getNodeIP("missing"))
+	require.Equal(t, "10.0.0.1", service.getNodeIP(context.Background(), "node-1"))
+	require.Equal(t, "", service.getNodeIP(context.Background(), "missing"))
 }
 
 func TestGetNodeIPReturnsEmptyOnError(t *testing.T) {
 	service := NewService(common.Dependencies{
-		Context:          context.Background(),
 		KubernetesClient: fake.NewClientset(),
 	})
 
-	require.Equal(t, "", service.getNodeIP("node-does-not-exist"))
+	require.Equal(t, "", service.getNodeIP(context.Background(), "node-does-not-exist"))
 }
 
 func TestGetPodMetricsFallbackWhenClientMissing(t *testing.T) {
 	service := NewService(common.Dependencies{
-		Context: context.Background(),
-		Logger:  applog.Noop,
+		Logger: applog.Noop,
 	})
 
-	metrics := service.getPodMetrics("team-a")
+	metrics := service.getPodMetrics(context.Background(), "team-a")
 	require.Empty(t, metrics)
 }
 
@@ -313,7 +358,6 @@ func TestGetPodMetricsForPodsUsesIndividualFetchForSmallSets(t *testing.T) {
 	})
 
 	service := NewService(common.Dependencies{
-		Context:          ctx,
 		Logger:           applog.Noop,
 		KubernetesClient: fake.NewClientset(),
 		MetricsClient:    metricsClient,
@@ -323,7 +367,7 @@ func TestGetPodMetricsForPodsUsesIndividualFetchForSmallSets(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "pod-a", Namespace: "team-a"},
 	}}
 
-	metrics := service.getPodMetricsForPods("team-a", pods)
+	metrics := service.getPodMetricsForPods(ctx, "team-a", pods)
 	require.Len(t, metrics, len(pods))
 
 	require.Equal(t, len(pods), getCalls)
@@ -343,7 +387,6 @@ func TestGetPodMetricsForPodsListsForLargeSets(t *testing.T) {
 	})
 
 	service := NewService(common.Dependencies{
-		Context:          ctx,
 		Logger:           applog.Noop,
 		KubernetesClient: fake.NewClientset(),
 		MetricsClient:    metricsClient,
@@ -356,7 +399,7 @@ func TestGetPodMetricsForPodsListsForLargeSets(t *testing.T) {
 		{ObjectMeta: metav1.ObjectMeta{Name: "pod-d", Namespace: "team-a"}},
 	}
 
-	metrics := service.getPodMetricsForPods("team-a", pods)
+	metrics := service.getPodMetricsForPods(ctx, "team-a", pods)
 	require.Len(t, metrics, len(pods))
 
 	require.Equal(t, 1, listCalls)
@@ -370,13 +413,12 @@ func TestGetPodMetricsListErrorReturnsEmpty(t *testing.T) {
 	})
 
 	service := NewService(common.Dependencies{
-		Context:          ctx,
 		Logger:           applog.Noop,
 		KubernetesClient: fake.NewClientset(),
 		MetricsClient:    metricsClient,
 	})
 
-	values := service.getPodMetrics("team-a")
+	values := service.getPodMetrics(ctx, "team-a")
 	require.Empty(t, values)
 }
 
@@ -421,6 +463,83 @@ func TestBuildContainerDetailsFormatsPortsAndVolumes(t *testing.T) {
 	require.Equal(t, []string{"8080 (http)", "9090/UDP"}, detail.Ports)
 	require.Equal(t, []string{"cfg -> /etc/config (ro) [default]"}, detail.VolumeMounts)
 	require.Equal(t, map[string]string{"ENV": "prod", "FROM_SECRET": "secret:secret/token"}, detail.Environment)
+}
+
+func TestBuildContainerDetailsStatusVariants(t *testing.T) {
+	tests := []struct {
+		name     string
+		statuses []corev1.ContainerStatus
+		index    int
+		want     restypes.PodDetailInfoContainer
+	}{
+		{name: "missing status", want: restypes.PodDetailInfoContainer{}},
+		{
+			name: "running",
+			statuses: []corev1.ContainerStatus{{
+				Ready: true, RestartCount: 3,
+				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+			}},
+			want: restypes.PodDetailInfoContainer{Ready: true, RestartCount: 3, State: "running"},
+		},
+		{
+			name: "waiting",
+			statuses: []corev1.ContainerStatus{{}, {
+				RestartCount: 4,
+				State:        corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "BackOff", Message: "retrying"}},
+			}},
+			index: 1,
+			want:  restypes.PodDetailInfoContainer{RestartCount: 4, State: "waiting", StateReason: "BackOff", StateMessage: "retrying"},
+		},
+		{
+			name: "terminated",
+			statuses: []corev1.ContainerStatus{{
+				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Reason: "Completed", Message: "done"}},
+			}},
+			want: restypes.PodDetailInfoContainer{State: "terminated", StateReason: "Completed", StateMessage: "done"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := buildContainerDetails(corev1.Container{}, tt.statuses, tt.index)
+			require.Equal(t, tt.want.Ready, got.Ready)
+			require.Equal(t, tt.want.RestartCount, got.RestartCount)
+			require.Equal(t, tt.want.State, got.State)
+			require.Equal(t, tt.want.StateReason, got.StateReason)
+			require.Equal(t, tt.want.StateMessage, got.StateMessage)
+			require.Empty(t, got.StartedAt)
+		})
+	}
+}
+
+func TestBuildContainerDetailsRunningStartTime(t *testing.T) {
+	startedAt := metav1.NewTime(time.Now().Add(-time.Minute))
+	detail := buildContainerDetails(corev1.Container{}, []corev1.ContainerStatus{{
+		State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: startedAt}},
+	}}, 0)
+
+	require.Equal(t, "running", detail.State)
+	require.NotEmpty(t, detail.StartedAt)
+}
+
+func TestBuildContainerDetailsFormatsEveryEnvironmentSource(t *testing.T) {
+	container := corev1.Container{Env: []corev1.EnvVar{
+		{Name: "LITERAL", Value: "value"},
+		{Name: "CONFIG", ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "settings"}, Key: "mode"}}},
+		{Name: "SECRET", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "credentials"}, Key: "token"}}},
+		{Name: "FIELD", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
+		{Name: "UNSUPPORTED", ValueFrom: &corev1.EnvVarSource{ResourceFieldRef: &corev1.ResourceFieldSelector{Resource: "limits.cpu"}}},
+		{Name: "EMPTY"},
+	}}
+
+	detail := buildContainerDetails(container, nil, 0)
+
+	require.Equal(t, map[string]string{
+		"LITERAL": "value",
+		"CONFIG":  "configmap:settings/mode",
+		"SECRET":  "secret:credentials/token",
+		"FIELD":   "field:metadata.name",
+	}, detail.Environment)
 }
 
 func TestResolveOwnerFallsBackToNone(t *testing.T) {
@@ -602,13 +721,12 @@ func TestGetPodReturnsDetailedInfo(t *testing.T) {
 	client := fake.NewClientset(pod, replicaSet, node)
 
 	deps := common.Dependencies{
-		Context:          context.Background(),
 		Logger:           applog.Noop,
 		KubernetesClient: client,
 		ClusterID:        "cluster-a",
 	}
 
-	details, err := GetPod(deps, "team-a", "demo-pod", true)
+	details, err := GetPod(context.Background(), deps, "team-a", "demo-pod", true)
 	if err != nil {
 		t.Fatalf("GetPod returned error: %v", err)
 	}

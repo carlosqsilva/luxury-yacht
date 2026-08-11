@@ -15,7 +15,7 @@ import (
 	"github.com/luxury-yacht/app/backend/internal/applog"
 	"github.com/luxury-yacht/app/backend/internal/errorcapture"
 	"github.com/luxury-yacht/app/backend/resourcekind"
-	"github.com/luxury-yacht/app/internal/sentry"
+	sentryreporting "github.com/luxury-yacht/app/internal/sentry"
 	"k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -58,24 +58,26 @@ func ResourceRequestOperation(
 
 // DynamicResourceRequestOperation is the equivalent path for discovery-backed
 // or non-built-in resources whose identity is known only at runtime.
-func DynamicResourceRequestOperation(
-	action string,
-	group string,
-	version string,
-	resource string,
-	subresource string,
-	namespaced bool,
-) sentryreporting.Operation {
+type DynamicResourceRequestSpec struct {
+	Action      string
+	Group       string
+	Version     string
+	Resource    string
+	Subresource string
+	Namespaced  bool
+}
+
+func DynamicResourceRequestOperation(request DynamicResourceRequestSpec) sentryreporting.Operation {
 	scope := sentryreporting.KubernetesScopeCluster
-	if namespaced {
+	if request.Namespaced {
 		scope = sentryreporting.KubernetesScopeNamespaced
 	}
 	return sentryreporting.NewKubernetesRequestOperation(sentryreporting.KubernetesRequest{
-		Action:      sentryreporting.KubernetesAction(action),
-		Group:       group,
-		Version:     version,
-		Resource:    resource,
-		Subresource: subresource,
+		Action:      sentryreporting.KubernetesAction(request.Action),
+		Group:       request.Group,
+		Version:     request.Version,
+		Resource:    request.Resource,
+		Subresource: request.Subresource,
 		Scope:       scope,
 	})
 }
@@ -98,18 +100,13 @@ func (d Dependencies) LogResourceRequestFailure(
 func (d Dependencies) LogDynamicResourceRequestFailure(
 	err error,
 	what string,
-	action string,
-	group string,
-	version string,
-	resource string,
-	subresource string,
-	namespaced bool,
+	request DynamicResourceRequestSpec,
 	source ...string,
 ) error {
 	return d.LogRequestFailure(
 		err,
 		what,
-		DynamicResourceRequestOperation(action, group, version, resource, subresource, namespaced),
+		DynamicResourceRequestOperation(request),
 		source...,
 	)
 }
@@ -121,7 +118,6 @@ type VersionResolver interface {
 
 // Dependencies provides the common set of collaborators required by resource handlers.
 type Dependencies struct {
-	Context                context.Context
 	Logger                 Logger
 	KubernetesClient       kubernetes.Interface
 	GatewayClient          gatewayversioned.Interface
@@ -144,9 +140,8 @@ type Dependencies struct {
 	ClusterName string
 }
 
-// CloneWithContext returns a shallow copy using the supplied context.
-func (d Dependencies) CloneWithContext(ctx context.Context) Dependencies {
-	d.Context = ctx
+// WithOperationContext returns a shallow copy with operation-scoped logging.
+func (d Dependencies) WithOperationContext(ctx context.Context) Dependencies {
 	d.Logger = applog.OperationScoped(d.Logger, applog.OperationIDFromContext(ctx))
 	return d
 }

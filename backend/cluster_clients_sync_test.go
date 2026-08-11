@@ -2,6 +2,7 @@ package backend
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -77,7 +78,7 @@ users:
 // test verifies the bookkeeping around the desired-vs-existing set comparison.
 func TestSyncClusterClientPool_CreatesClientsForNewSelections(t *testing.T) {
 	app := newTestAppWithDefaults(t)
-	app.Ctx = context.Background()
+	app.setRuntimeContext(context.Background())
 	app.clusterClients = make(map[string]*clusterClients)
 	app.clusterOps = newClusterOperationCoordinator()
 	app.shellSessions = make(map[string]*shellSession)
@@ -128,7 +129,7 @@ func TestSyncClusterClientPool_CreatesClientsForNewSelections(t *testing.T) {
 // no longer in the desired selection set are removed during sync.
 func TestSyncClusterClientPool_RemovesStaleClients(t *testing.T) {
 	app := newTestAppWithDefaults(t)
-	app.Ctx = context.Background()
+	app.setRuntimeContext(context.Background())
 	app.clusterClients = make(map[string]*clusterClients)
 	app.clusterOps = newClusterOperationCoordinator()
 	app.shellSessions = make(map[string]*shellSession)
@@ -174,7 +175,7 @@ func TestSyncClusterClientPool_RemovesStaleClients(t *testing.T) {
 // twice with the same selection set does not recreate or replace client entries.
 func TestSyncClusterClientPool_IdempotentForExistingClients(t *testing.T) {
 	app := newTestAppWithDefaults(t)
-	app.Ctx = context.Background()
+	app.setRuntimeContext(context.Background())
 	app.clusterClients = make(map[string]*clusterClients)
 	app.clusterOps = newClusterOperationCoordinator()
 	app.shellSessions = make(map[string]*shellSession)
@@ -220,7 +221,7 @@ func TestSyncClusterClientPool_IdempotentForExistingClients(t *testing.T) {
 // results in no error and all existing clients being removed.
 func TestSyncClusterClientPool_EmptySelections(t *testing.T) {
 	app := newTestAppWithDefaults(t)
-	app.Ctx = context.Background()
+	app.setRuntimeContext(context.Background())
 	app.clusterClients = make(map[string]*clusterClients)
 	app.clusterOps = newClusterOperationCoordinator()
 	app.shellSessions = make(map[string]*shellSession)
@@ -257,7 +258,7 @@ func TestSyncClusterClientPool_NilAppReturnsError(t *testing.T) {
 // returns nil — but no clients are actually created.
 func TestSyncClusterClientPool_CancelledContextSkipsCreation(t *testing.T) {
 	app := newTestAppWithDefaults(t)
-	app.Ctx = context.Background()
+	app.setRuntimeContext(context.Background())
 	app.clusterClients = make(map[string]*clusterClients)
 	app.clusterOps = newClusterOperationCoordinator()
 	app.shellSessions = make(map[string]*shellSession)
@@ -287,7 +288,7 @@ func TestSyncClusterClientPool_CancelledContextSkipsCreation(t *testing.T) {
 // operations through their workflow cleanup hooks.
 func TestSyncClusterClientPool_RemovalCleansUpShellAndPortForward(t *testing.T) {
 	app := newTestAppWithDefaults(t)
-	app.Ctx = context.Background()
+	app.setRuntimeContext(context.Background())
 	app.clusterClients = make(map[string]*clusterClients)
 	app.clusterOps = newClusterOperationCoordinator()
 	app.shellSessions = make(map[string]*shellSession)
@@ -326,7 +327,7 @@ func TestSyncClusterClientPool_RemovalCleansUpShellAndPortForward(t *testing.T) 
 // a stale cluster shuts down its auth manager.
 func TestSyncClusterClientPool_RemovalShutsDownAuthManager(t *testing.T) {
 	app := newTestAppWithDefaults(t)
-	app.Ctx = context.Background()
+	app.setRuntimeContext(context.Background())
 	app.clusterClients = make(map[string]*clusterClients)
 	app.clusterOps = newClusterOperationCoordinator()
 	app.shellSessions = make(map[string]*shellSession)
@@ -355,7 +356,7 @@ func TestSyncClusterClientPool_RemovalShutsDownAuthManager(t *testing.T) {
 // from multiple goroutines (no data race on clusterClients map).
 func TestSyncClusterClientPool_ConcurrentAccess(t *testing.T) {
 	app := newTestAppWithDefaults(t)
-	app.Ctx = context.Background()
+	app.setRuntimeContext(context.Background())
 	app.clusterClients = make(map[string]*clusterClients)
 	app.clusterOps = newClusterOperationCoordinator()
 	app.shellSessions = make(map[string]*shellSession)
@@ -394,7 +395,7 @@ func TestSyncClusterClientPool_ConcurrentAccess(t *testing.T) {
 
 func TestSyncClusterClientPoolPublishesEachBuiltClientWithoutWaitingForSiblingBuilds(t *testing.T) {
 	app := newTestAppWithDefaults(t)
-	app.Ctx = context.Background()
+	app.setRuntimeContext(context.Background())
 	app.clusterClients = make(map[string]*clusterClients)
 	app.clusterOps = newClusterOperationCoordinator()
 
@@ -448,4 +449,75 @@ func TestSyncClusterClientPoolPublishesEachBuiltClientWithoutWaitingForSiblingBu
 
 	releaseBOnce.Do(func() { close(releaseB) })
 	require.NoError(t, <-result)
+}
+
+func TestSyncClusterClientPoolValidatesBuilderAndSetsLifecycle(t *testing.T) {
+	app := newTestAppWithDefaults(t)
+	require.ErrorContains(t, app.syncClusterClientPoolWithBuilder(context.Background(), nil, nil), "builder is nil")
+
+	app.clusterOps = newClusterOperationCoordinator()
+	app.clusterLifecycle = newClusterLifecycle(nil)
+	selection := kubeconfigSelection{Path: "/tmp/config", Context: "ctx"}
+	app.availableKubeconfigs = []KubeconfigInfo{{Name: "config", Path: selection.Path, Context: selection.Context}}
+	meta := app.clusterMetaForSelection(selection)
+
+	err := app.syncClusterClientPoolWithBuilder(context.Background(), []kubeconfigSelection{selection}, func(
+		_ context.Context,
+		selection kubeconfigSelection,
+		meta ClusterMeta,
+	) (*clusterClients, error) {
+		return &clusterClients{
+			meta: meta, kubeconfigPath: selection.Path, kubeconfigContext: selection.Context,
+		}, nil
+	})
+	require.NoError(t, err)
+	require.NotNil(t, app.clusterClientsForID(meta.ID))
+	require.Equal(t, ClusterStateConnected, app.clusterLifecycle.GetState(meta.ID))
+}
+
+func TestBuildAndInstallClusterClientFailurePaths(t *testing.T) {
+	selection := kubeconfigSelection{Path: "/tmp/config", Context: "ctx"}
+	task := clusterClientCreateTask{selection: selection, meta: ClusterMeta{ID: "cluster-a", Name: "Cluster A"}}
+
+	t.Run("builder error", func(t *testing.T) {
+		app := newTestAppWithDefaults(t)
+		buildErr := errors.New("build failed")
+		err := app.buildAndInstallClusterClient(context.Background(), task, func(context.Context, kubeconfigSelection, ClusterMeta) (*clusterClients, error) {
+			return nil, buildErr
+		})
+		require.ErrorIs(t, err, buildErr)
+	})
+
+	t.Run("nil clients", func(t *testing.T) {
+		app := newTestAppWithDefaults(t)
+		err := app.buildAndInstallClusterClient(context.Background(), task, func(context.Context, kubeconfigSelection, ClusterMeta) (*clusterClients, error) {
+			return nil, nil
+		})
+		require.ErrorContains(t, err, "returned nil clients")
+	})
+
+	t.Run("context canceled after build", func(t *testing.T) {
+		app := newTestAppWithDefaults(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		manager := authstate.New(authstate.Config{MaxAttempts: 0})
+		err := app.buildAndInstallClusterClient(ctx, task, func(context.Context, kubeconfigSelection, ClusterMeta) (*clusterClients, error) {
+			cancel()
+			return &clusterClients{authManager: manager}, nil
+		})
+		require.ErrorIs(t, err, context.Canceled)
+		require.Nil(t, app.clusterClientsForID(task.meta.ID))
+	})
+
+	t.Run("already installed", func(t *testing.T) {
+		app := newTestAppWithDefaults(t)
+		app.clusterClients = make(map[string]*clusterClients)
+		app.clusterClients[task.meta.ID] = &clusterClients{meta: task.meta}
+		called := false
+		err := app.buildAndInstallClusterClient(context.Background(), task, func(context.Context, kubeconfigSelection, ClusterMeta) (*clusterClients, error) {
+			called = true
+			return &clusterClients{}, nil
+		})
+		require.NoError(t, err)
+		require.False(t, called)
+	})
 }

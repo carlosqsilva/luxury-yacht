@@ -36,10 +36,11 @@ var (
 
 const beforeCloseSelectionFlushTimeout = 2 * time.Second
 
-// Startup is called when the app starts. The context passed is stored for later use.
+// Startup is called when the app starts. Backend operations retain only its
+// cancellation signal; Wails calls use the runtime capability installed here.
 func (a *App) Startup(ctx context.Context) {
-	a.Ctx = ctx
-	a.eventEmitter = runtimeEventsEmit
+	a.setRuntimeContext(ctx)
+	a.eventEmitter = bindRuntimeEventEmitter(ctx, runtimeEventsEmit)
 	a.initializeClusterLifecycle()
 	a.logger.Info("Application startup initiated", logsources.App)
 	a.startDiagnosticDumpHandler(ctx)
@@ -59,6 +60,15 @@ func (a *App) Startup(ctx context.Context) {
 	}
 	a.startUpdateCheck()
 	a.scheduleInstallationMetricRegistration(ctx)
+}
+
+func bindRuntimeEventEmitter(
+	ctx context.Context,
+	emit func(context.Context, string, ...interface{}),
+) func(context.Context, string, ...interface{}) {
+	return func(_ context.Context, name string, args ...interface{}) {
+		emit(ctx, name, args...)
+	}
 }
 
 func (a *App) initializeClusterLifecycle() {
@@ -92,7 +102,7 @@ func (a *App) configureStartupErrorCapture() {
 			"source":    "stderr",
 		})
 	})
-	errorcapture.SetLogSink(func(level string, message string) {
+	errorcapture.SetLogSink(func(level, message string) {
 		// Suppress logging when ANY cluster has auth issues to prevent log spam.
 		// Auth-related errors are already being handled by the per-cluster auth managers.
 		if a.anyClusterAuthInvalid() {
@@ -290,9 +300,6 @@ func containsAuthPattern(lower string) bool {
 		"expired",
 		"authentication",
 		"unauthorized",
-		"forbidden",
-		"permission denied",
-		"access denied",
 	}
 	for _, pattern := range authPatterns {
 		if strings.Contains(lower, pattern) {

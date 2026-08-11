@@ -64,7 +64,6 @@ type cacheEntry struct {
 var sourceVersionEpochSerial uint64
 
 type BuildRequest struct {
-	Context context.Context
 	Domain  string
 	Scope   string
 	Cluster ClusterMeta
@@ -152,116 +151,140 @@ func (s *Service) WithDomainReadiness(readiness map[string][]string) *Service {
 
 // Build returns a snapshot for the requested domain/scope.
 func (s *Service) Build(ctx context.Context, domainName, scope string) (*refresh.Snapshot, error) {
-	return s.BuildRequest(BuildRequest{
-		Context: ctx,
+	return s.BuildRequest(ctx, BuildRequest{
 		Domain:  domainName,
 		Scope:   scope,
 		Cluster: s.cluster,
 	})
 }
 
-func (s *Service) BuildRequest(req BuildRequest) (*refresh.Snapshot, error) {
-	if err := req.Cluster.Validate(); err != nil {
-		return nil, err
-	}
-	ctx := WithClusterMeta(req.Context, req.Cluster)
-	domainName := req.Domain
-	scope := req.Scope
-	permissionCacheKey := ""
-	var err error
-	ctx, permissionCacheKey, err = s.ensurePermissions(ctx, domainName, scope)
+func (s *Service) BuildRequest(ctx context.Context, req BuildRequest) (*refresh.Snapshot, error) {
+	ctx, plan, err := s.prepareBuildRequest(ctx, req)
 	if err != nil {
 		return nil, err
 	}
-	syncWait, err := s.waitForInformerSync(ctx, domainName)
-	if err != nil {
-		if errors.Is(err, errInformerSyncTimeout) {
-			s.recordTelemetry(domainName, scope, 0, err, false, 0, nil, 0, 0, 0, true, 0, syncWait.Milliseconds())
-		}
-		return nil, err
+	if cached := s.loadBuildRequestCache(plan); cached != nil {
+		return cached, nil
 	}
-	cacheKey := s.cacheKey(domainName, scope)
-	if permissionCacheKey != "" {
-		cacheKey += ":permissions:" + permissionCacheKey
-	}
-	groupKey := cacheKey
-	if refresh.HasCacheBypass(ctx) {
-		// Keep cache-bypass builds isolated from cached singleflight requests.
-		groupKey = cacheKey + ":bypass"
-	}
-	if s.shouldBypassSingleflight(domainName) {
-		groupKey = fmt.Sprintf("%s:live:%d", cacheKey, atomic.AddUint64(&s.requestSerial, 1))
-	}
-	bypassSnapshotCache := s.shouldBypassSnapshotCache(domainName)
-	if !refresh.HasCacheBypass(ctx) && !bypassSnapshotCache {
-		if cached := s.loadCache(cacheKey); cached != nil {
-			return cached, nil
-		}
-	}
-	value, err, _ := s.group.Do(groupKey, func() (interface{}, error) {
-		if !refresh.HasCacheBypass(ctx) && !bypassSnapshotCache {
-			if cached := s.loadCache(cacheKey); cached != nil {
-				return cached, nil
-			}
-		}
-		start := time.Now()
-		snap, buildErr := s.registry.Build(ctx, domainName, scope)
-		duration := time.Since(start)
-		if buildErr != nil {
-			s.recordTelemetry(
-				domainName,
-				scope,
-				duration,
-				buildErr,
-				false,
-				0,
-				nil,
-				0,
-				0,
-				0,
-				true,
-				duration.Milliseconds(),
-				syncWait.Milliseconds(),
-			)
-			return nil, buildErr
-		}
-		snap.GeneratedAt = time.Now().UnixMilli()
-		snap.Sequence = atomic.AddUint64(&s.sequence, 1)
-		snap.Stats.BuildDurationMs = duration.Milliseconds()
-		snap.Stats.BuildStartedAtUnix = start.UnixMilli()
-		if snap.Stats.BatchIndex == 0 && snap.Stats.TimeToFirstRowMs == 0 {
-			snap.Stats.TimeToFirstRowMs = duration.Milliseconds()
-		}
-		if snap.Payload != nil {
-			if data, marshalErr := json.Marshal(snap.Payload); marshalErr == nil {
-				snap.Checksum = checksumBytes(data)
-			}
-		}
-		s.finalizeSourceVersion(snap)
-		s.recordTelemetry(
-			domainName,
-			scope,
-			duration,
-			nil,
-			snap.Stats.Truncated,
-			snap.Stats.TotalItems,
-			snap.Stats.Warnings,
-			snap.Stats.BatchIndex,
-			snap.Stats.TotalBatches,
-			snap.Stats.BatchSize,
-			snap.Stats.IsFinalBatch,
-			snap.Stats.TimeToFirstRowMs,
-			syncWait.Milliseconds(),
-		)
-		if !bypassSnapshotCache {
-			s.storeCache(cacheKey, snap)
-		}
-		return snap, nil
+	value, err, _ := s.group.Do(plan.groupKey, func() (interface{}, error) {
+		return s.buildRequestSnapshot(ctx, plan)
 	})
 	if err != nil {
 		return nil, err
 	}
 	return value.(*refresh.Snapshot), nil
+}
+
+type snapshotBuildRequestPlan struct {
+	domain              string
+	scope               string
+	cacheKey            string
+	groupKey            string
+	bypassSnapshotCache bool
+	skipCacheLoad       bool
+	syncWait            time.Duration
+}
+
+func (s *Service) prepareBuildRequest(ctx context.Context, req BuildRequest) (context.Context, snapshotBuildRequestPlan, error) {
+	if err := req.Cluster.Validate(); err != nil {
+		return nil, snapshotBuildRequestPlan{}, err
+	}
+	ctx = WithClusterMeta(ctx, req.Cluster)
+	ctx, permissionCacheKey, err := s.ensurePermissions(ctx, req.Domain, req.Scope)
+	if err != nil {
+		return nil, snapshotBuildRequestPlan{}, err
+	}
+	syncWait, err := s.waitForInformerSync(ctx, req.Domain)
+	if err != nil {
+		s.recordInformerSyncFailure(req.Domain, req.Scope, syncWait, err)
+		return nil, snapshotBuildRequestPlan{}, err
+	}
+	cacheKey := s.cacheKey(req.Domain, req.Scope)
+	if permissionCacheKey != "" {
+		cacheKey += ":permissions:" + permissionCacheKey
+	}
+	bypassSnapshotCache := s.shouldBypassSnapshotCache(req.Domain)
+	return ctx, snapshotBuildRequestPlan{
+		domain:              req.Domain,
+		scope:               req.Scope,
+		cacheKey:            cacheKey,
+		groupKey:            s.snapshotBuildGroupKey(ctx, req.Domain, cacheKey),
+		bypassSnapshotCache: bypassSnapshotCache,
+		skipCacheLoad:       refresh.HasCacheBypass(ctx) || bypassSnapshotCache,
+		syncWait:            syncWait,
+	}, nil
+}
+
+func (s *Service) recordInformerSyncFailure(domainName, scope string, syncWait time.Duration, err error) {
+	if errors.Is(err, errInformerSyncTimeout) {
+		s.recordTelemetry(telemetry.SnapshotRecord{Domain: domainName, Scope: scope, Duration: 0, Err: err, Truncated: false, TotalItems: 0, Warnings: nil, BatchIndex: 0, TotalBatches: 0, BatchSize: 0, IsFinal: true, TimeToFirstBatchMs: 0, InformerSyncWaitMs: syncWait.Milliseconds()})
+	}
+}
+
+func (s *Service) snapshotBuildGroupKey(ctx context.Context, domainName, cacheKey string) string {
+	if s.shouldBypassSingleflight(domainName) {
+		return fmt.Sprintf("%s:live:%d", cacheKey, atomic.AddUint64(&s.requestSerial, 1))
+	}
+	if refresh.HasCacheBypass(ctx) {
+		return cacheKey + ":bypass"
+	}
+	return cacheKey
+}
+
+func (s *Service) loadBuildRequestCache(plan snapshotBuildRequestPlan) *refresh.Snapshot {
+	if plan.skipCacheLoad {
+		return nil
+	}
+	return s.loadCache(plan.cacheKey)
+}
+
+func (s *Service) buildRequestSnapshot(ctx context.Context, plan snapshotBuildRequestPlan) (*refresh.Snapshot, error) {
+	if cached := s.loadBuildRequestCache(plan); cached != nil {
+		return cached, nil
+	}
+	start := time.Now()
+	snapshot, err := s.registry.Build(ctx, plan.domain, plan.scope)
+	duration := time.Since(start)
+	if err != nil {
+		s.recordBuildFailure(plan, duration, err)
+		return nil, err
+	}
+	s.finalizeBuiltSnapshot(snapshot, start, duration)
+	s.recordBuildSuccess(plan, snapshot, duration)
+	if !plan.bypassSnapshotCache {
+		s.storeCache(plan.cacheKey, snapshot)
+	}
+	return snapshot, nil
+}
+
+func (s *Service) finalizeBuiltSnapshot(snapshot *refresh.Snapshot, start time.Time, duration time.Duration) {
+	snapshot.GeneratedAt = time.Now().UnixMilli()
+	snapshot.Sequence = atomic.AddUint64(&s.sequence, 1)
+	snapshot.Stats.BuildDurationMs = duration.Milliseconds()
+	snapshot.Stats.BuildStartedAtUnix = start.UnixMilli()
+	if snapshot.Stats.BatchIndex == 0 && snapshot.Stats.TimeToFirstRowMs == 0 {
+		snapshot.Stats.TimeToFirstRowMs = duration.Milliseconds()
+	}
+	if snapshot.Payload != nil {
+		if data, err := json.Marshal(snapshot.Payload); err == nil {
+			snapshot.Checksum = checksumBytes(data)
+		}
+	}
+	s.finalizeSourceVersion(snapshot)
+}
+
+func (s *Service) recordBuildFailure(plan snapshotBuildRequestPlan, duration time.Duration, err error) {
+	s.recordTelemetry(telemetry.SnapshotRecord{Domain: plan.domain, Scope: plan.scope, Duration: duration, Err: err, Truncated: false, TotalItems: 0, Warnings: nil, BatchIndex: 0, TotalBatches: 0, BatchSize: 0, IsFinal: true, TimeToFirstBatchMs: duration.Milliseconds(), InformerSyncWaitMs: plan.syncWait.Milliseconds()})
+
+}
+
+func (s *Service) recordBuildSuccess(
+	plan snapshotBuildRequestPlan,
+	snapshot *refresh.Snapshot,
+	duration time.Duration,
+) {
+	s.recordTelemetry(telemetry.SnapshotRecord{Domain: plan.domain, Scope: plan.scope, Duration: duration, Err: nil, Truncated: snapshot.Stats.Truncated, TotalItems: snapshot.Stats.TotalItems, Warnings: snapshot.Stats.Warnings, BatchIndex: snapshot.Stats.BatchIndex, TotalBatches: snapshot.Stats.TotalBatches, BatchSize: snapshot.Stats.BatchSize, IsFinal: snapshot.Stats.IsFinalBatch, TimeToFirstBatchMs: snapshot.Stats.TimeToFirstRowMs, InformerSyncWaitMs: plan.syncWait.Milliseconds()})
+
 }
 
 // waitForInformerSync blocks until the domain's informers have settled, returning the
@@ -347,21 +370,8 @@ func (s *Service) ensurePermissions(ctx context.Context, domainName, scope strin
 	}
 	if err != nil {
 		duration := time.Since(start)
-		s.recordTelemetry(
-			domainName,
-			scope,
-			duration,
-			err,
-			false,
-			0,
-			nil,
-			0,
-			0,
-			0,
-			true,
-			duration.Milliseconds(),
-			0,
-		)
+		s.recordTelemetry(telemetry.SnapshotRecord{Domain: domainName, Scope: scope, Duration: duration, Err: err, Truncated: false, TotalItems: 0, Warnings: nil, BatchIndex: 0, TotalBatches: 0, BatchSize: 0, IsFinal: true, TimeToFirstBatchMs: duration.Milliseconds(), InformerSyncWaitMs: 0})
+
 		return ctx, permissionCacheKey, err
 	}
 	if decision.Allowed {
@@ -369,59 +379,18 @@ func (s *Service) ensurePermissions(ctx context.Context, domainName, scope strin
 	}
 	denied := refresh.NewPermissionDeniedError(domainName, decision.DeniedReason)
 	duration := time.Since(start)
-	s.recordTelemetry(
-		domainName,
-		scope,
-		duration,
-		denied,
-		false,
-		0,
-		nil,
-		0,
-		0,
-		0,
-		true,
-		duration.Milliseconds(),
-		0,
-	)
+	s.recordTelemetry(telemetry.SnapshotRecord{Domain: domainName, Scope: scope, Duration: duration, Err: denied, Truncated: false, TotalItems: 0, Warnings: nil, BatchIndex: 0, TotalBatches: 0, BatchSize: 0, IsFinal: true, TimeToFirstBatchMs: duration.Milliseconds(), InformerSyncWaitMs: 0})
+
 	return ctx, permissionCacheKey, denied
 }
 
-func (s *Service) recordTelemetry(
-	domain string,
-	scope string,
-	duration time.Duration,
-	err error,
-	truncated bool,
-	totalItems int,
-	warnings []string,
-	batchIndex int,
-	totalBatches int,
-	batchSize int,
-	isFinal bool,
-	timeToFirstRowMs int64,
-	informerSyncWaitMs int64,
-) {
+func (s *Service) recordTelemetry(record telemetry.SnapshotRecord) {
 	if s.telemetry == nil {
 		return
 	}
-	s.telemetry.RecordSnapshot(
-		domain,
-		scope,
-		s.cluster.ClusterID,
-		s.cluster.ClusterName,
-		duration,
-		err,
-		truncated,
-		totalItems,
-		warnings,
-		batchIndex,
-		totalBatches,
-		batchSize,
-		isFinal,
-		timeToFirstRowMs,
-		informerSyncWaitMs,
-	)
+	record.ClusterID = s.cluster.ClusterID
+	record.ClusterName = s.cluster.ClusterName
+	s.telemetry.RecordSnapshot(record)
 }
 
 func (s *Service) cacheKey(domainName, scope string) string {

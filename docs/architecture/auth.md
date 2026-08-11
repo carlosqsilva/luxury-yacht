@@ -68,6 +68,12 @@ successful probe or cancellation. Probe failures are classified
   upgrade (multi-minute outage, often with transient 401s) from stranding the
   cluster in `invalid`.
 
+These expected auth and connectivity outcomes stay in the local application log
+and lifecycle UI instead of creating Sentry issues. Telemetry suppression uses
+only positively recognized conditions; an unrelated error remains reportable.
+Client-side `context.DeadlineExceeded` also remains reportable even though a
+deadline is a connectivity verdict for recovery.
+
 State transitions are driven only by probe results: `ReportFailure` moves
 valid → recovering; the loop settles recovering → invalid and recovers any
 non-valid state → valid. `TriggerRetry` restarts the loop (immediate probe)
@@ -94,14 +100,34 @@ discarded manager — auth failures then block all traffic forever while the
 tracked manager stays valid and `RetryClusterAuth` no-ops. Pinned by
 `TestRebuildClusterSubsystemPreservesAuthManagerWiring`.
 
+### Refresh runtime invariant
+
+An initial authentication failure can abort cluster selection before normal
+refresh setup creates its process-level context. Recovery may establish that
+never-started shared refresh context and heartbeat before scheduling the rebuilt
+cluster manager. A deliberately stopped process runtime is instead a teardown
+boundary: recovery must abort before publishing the rebuilt subsystem, and only
+normal selection setup may reopen the runtime. Recovery must successfully
+schedule the rebuilt manager before aggregate routing and catalog collection may
+expose the recovered subsystem; inability to schedule it aborts publication.
+Informer and ingest startup then runs concurrently with downstream readiness
+gates. A namespace snapshot with unsettled workload stores remains Loading; the
+readiness sweep or namespace doorbell rebuilds it after those stores settle and
+transitions the cluster to Ready. Pinned by
+`TestClusterSubsystemRebuildStartsMissingRefreshRuntimeBeforeReadiness`,
+`TestClusterSubsystemRebuildDoesNotPublishWhenRefreshRuntimeStopped`, and
+`TestTeardownRefreshSubsystemBlocksRuntimeResurrectionUntilSetup`.
+
 ## Change Checklist
 
 When changing auth behavior:
 
 1. Trace the failing cluster from backend detection to frontend presentation.
 2. Confirm unrelated clusters continue refreshing and accepting actions.
-3. Confirm recovery rebuilds clients, refresh subsystems, catalog state, and
-   streams in the right order.
+3. Confirm recovery rebuilds clients, establishes a never-started refresh runtime,
+   schedules the rebuilt manager, updates aggregate routing, and starts catalog
+   state and streams in that order; after deliberate runtime teardown, confirm it
+   aborts before subsystem publication instead.
 4. Test failure, retry/progress, recovery, and cluster removal during failure.
 
 ## Validation

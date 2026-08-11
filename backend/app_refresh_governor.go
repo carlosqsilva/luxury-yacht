@@ -386,10 +386,14 @@ func (a *App) shouldForceColdTeardown(subsystem *system.Subsystem) (time.Duratio
 // surfaces that remain visible while a cluster is Cold. The work is server-owned
 // and independent of frontend leases: until it succeeds, the subsystem stays live.
 func (a *App) startColdPreparation(clusterID string, subsystem *system.Subsystem) {
-	if a == nil || clusterID == "" || subsystem == nil || subsystem.SnapshotService == nil || a.refreshCtx == nil || a.clusterLifecycle == nil {
+	if a == nil || clusterID == "" || subsystem == nil || subsystem.SnapshotService == nil || a.clusterLifecycle == nil {
 		return
 	}
-	preparationCtx, started := subsystem.BeginColdPreparation(a.refreshCtx, a.governorTime())
+	refreshCtx := a.currentRefreshRuntimeContext()
+	if refreshCtx == nil {
+		return
+	}
+	preparationCtx, started := subsystem.BeginColdPreparation(refreshCtx, a.governorTime())
 	if !started {
 		return
 	}
@@ -425,7 +429,7 @@ func (a *App) startColdPreparation(clusterID string, subsystem *system.Subsystem
 // matches Global requests exactly.
 func primeColdServingSnapshots(
 	ctx context.Context,
-	service refresh.SnapshotService,
+	service refresh.SnapshotBuilder,
 	clusterID string,
 	namespaceBaselineReady func() bool,
 	stillCurrent func() bool,
@@ -455,7 +459,7 @@ func primeColdServingSnapshots(
 
 func buildColdPreparationSnapshot(
 	ctx context.Context,
-	service refresh.SnapshotService,
+	service refresh.SnapshotBuilder,
 	domainName string,
 	scope string,
 ) (*refresh.Snapshot, error) {
@@ -466,7 +470,7 @@ func buildColdPreparationSnapshot(
 
 // coolClusterToMmapServing transitions a cluster to the Cold-tier SERVING state: it stops the
 // feeds, swaps the maintained stores to off-heap mmap-backed columns, installs a cooled
-// (always-settled) informer hub so the SnapshotService keeps serving, marks the subsystem
+// (always-settled) informer hub so the SnapshotBuilder keeps serving, marks the subsystem
 // cooled, stops the object catalog, and reclaims the freed heap. On ANY cooling error it falls
 // back to the existing full teardown so a cluster is never left half-cooled.
 func (a *App) coolClusterToMmapServing(clusterID string) {
@@ -490,7 +494,7 @@ func (a *App) coolClusterToMmapServing(clusterID string) {
 		if err == nil {
 			// The feeds are stopped, so the manager + informer factory are shut down and the
 			// original hub's HasSynced now reports false — install a cooled hub so the
-			// SnapshotService serves the frozen, resident mmap stores without blocking on the
+			// SnapshotBuilder serves the frozen, resident mmap stores without blocking on the
 			// (now-dead) sync gate.
 			if svc, ok := subsystem.SnapshotService.(*snapshot.Service); ok {
 				svc.SetInformerHub(system.NewCooledInformerHub())

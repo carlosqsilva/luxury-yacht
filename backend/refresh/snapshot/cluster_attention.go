@@ -106,8 +106,9 @@ type ClusterAttentionSnapshot struct {
 }
 
 type ClusterAttentionBuilder struct {
-	index   *clusterAttentionIndex
-	sources []typedTableResourceSource
+	index          *clusterAttentionIndex
+	sources        []typedTableResourceSource
+	catalogService func() *objectcatalog.Service
 }
 
 func (b *ClusterAttentionBuilder) Build(ctx context.Context, scope string) (*refresh.Snapshot, error) {
@@ -129,6 +130,12 @@ func (b *ClusterAttentionBuilder) Build(ctx context.Context, scope string) (*ref
 	for _, row := range rows {
 		availableKinds[row.Ref.Kind] = true
 	}
+	capabilities := clusterAttentionQueryCapabilities()
+	capabilities.KindVocabulary = make([]string, 0, len(availableKinds))
+	for kind := range availableKinds {
+		capabilities.KindVocabulary = append(capabilities.KindVocabulary, kind)
+	}
+	sort.Strings(capabilities.KindVocabulary)
 	windowRows := func() []AttentionFinding {
 		window := append([]AttentionFinding(nil), rows...)
 		sort.SliceStable(window, func(left, right int) bool {
@@ -139,20 +146,28 @@ func (b *ClusterAttentionBuilder) Build(ctx context.Context, scope string) (*ref
 		})
 		return window
 	}
+	issues := typedTableQueryResourceIssues(ctx, clusterAttentionDomainName, query, b.sources)
+	if b.catalogService != nil {
+		if service := b.catalogService(); service != nil {
+			issues = append(issues, catalogHealthIssues(service.Health())...)
+		}
+	}
 	resolved := resolveMaintainedDirect(
 		b.index.maintained.store,
 		query,
-		availableKinds,
-		"",
+		maintainedQueryScope{availableKinds: availableKinds, namespace: ""},
 		attentionTableQueryAdapter(),
 		attentionQuerypageSchema(),
-		clusterAttentionQueryCapabilities(),
-		config.SnapshotClusterAttentionEntryLimit,
-		"findings",
-		func(row AttentionFinding) string { return row.Ref.Kind },
 		windowRows,
-		typedTableQueryResourceIssues(ctx, clusterAttentionDomainName, query, b.sources),
+		newTypedSnapshotPageConfig(
+			capabilities,
+			config.SnapshotClusterAttentionEntryLimit,
+			"findings",
+			func(row AttentionFinding) string { return row.Ref.Kind },
+			issues,
+		),
 	)
+
 	snapshotScope := ""
 	if query.Enabled {
 		snapshotScope = refresh.JoinClusterScope(clusterID, strings.TrimSpace(trimmed))
@@ -194,7 +209,7 @@ func clusterAttentionQueryCapabilities() ResourceQueryCapabilities {
 		[]string{"name", "kind", "namespace", "severity", "status", "reason", "age"},
 		[]string{"kinds", "namespaces"},
 		[]string{"kind", "name", "namespace", "severity", "status", "reason"},
-		[]string{"Pod", "Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob", "Node", "Event"},
+		nil,
 		typedTableFacetDescriptors(adapter.Facets)...,
 	)
 }
@@ -209,6 +224,8 @@ type attentionSourceRecord struct {
 	StatusReason       string
 	Ready              string
 	Restarts           int32
+	FinalizerBlocked   bool
+	DeletionTimestamp  int64
 	Message            string
 	AgeTimestamp       int64
 }
@@ -258,6 +275,8 @@ type clusterAttentionIndex struct {
 	owners              map[string]map[string]struct{}
 	ownerKinds          map[string]map[string]struct{}
 	unavailableOwners   map[string]struct{}
+	healthFindings      map[string]AttentionFinding
+	finalizerFindings   map[string]AttentionFinding
 	findings            map[string]AttentionFinding
 	deadlines           attentionDeadlineHeap
 	timer               *time.Timer
@@ -287,6 +306,8 @@ func newClusterAttentionIndex(meta ClusterMeta, now func() time.Time) *clusterAt
 		owners:            make(map[string]map[string]struct{}),
 		ownerKinds:        make(map[string]map[string]struct{}),
 		unavailableOwners: make(map[string]struct{}),
+		healthFindings:    make(map[string]AttentionFinding),
+		finalizerFindings: make(map[string]AttentionFinding),
 		findings:          make(map[string]AttentionFinding),
 		deadlines:         attentionDeadlineHeap{},
 	}
@@ -312,19 +333,12 @@ func (i *clusterAttentionIndex) SetIgnoreRules(rules AttentionIgnoreRules) {
 	i.ignoreRules = rules
 	now := i.now()
 	for key, state := range i.sources {
-		evaluation := i.filterIgnoredEvaluationLocked(evaluateAttentionSource(state.record, now))
+		evaluation := evaluateAttentionSource(state.record, now)
 		state.deadline = evaluation.NextEvaluation
 		i.sources[key] = state
-		i.applyFindingLocked(key, evaluation.Finding)
+		i.applyHealthFindingLocked(key, evaluation.Finding)
 	}
-	for _, row := range i.maintained.store.Snapshot() {
-		key := attentionRefKey(row.Ref)
-		if _, hasLiveSource := i.sources[key]; hasLiveSource {
-			continue
-		}
-		filtered := i.filterIgnoredEvaluationLocked(attentionEvaluation{Finding: &row}).Finding
-		i.applyFindingLocked(key, filtered)
-	}
+	i.reprojectAllFindingsLocked()
 	if rulesChanged {
 		i.revision++
 		i.markDirtyLocked()
@@ -532,61 +546,112 @@ func (i *clusterAttentionIndex) replaceSource(owner string, records []attentionS
 		i.mu.Unlock()
 		return
 	}
-	want := make(map[string]struct{}, len(records))
-	presentIgnoredKeys := make(map[string]struct{}, len(records))
-	pruned := make([]resourcemodel.ResourceRef, 0)
-	now := i.now()
+	replacement := newAttentionSourceReplacement(records, i.now())
+	i.upsertReplacementRecords(owner, records, replacement)
+	i.removeMissingReplacementSources(owner, replacement)
+	i.removeMissingReplacementFindings(owner, replacement)
+	if pruneMissingIgnores {
+		i.pruneMissingReplacementIgnores(owner, replacement)
+	}
+	i.owners[owner] = replacement.want
+	i.armTimerLocked()
+	pruner := i.ignoredObjectPruner
+	i.mu.Unlock()
+	pruneAttentionRefs(pruner, replacement.pruned)
+}
+
+type attentionSourceReplacement struct {
+	want               map[string]struct{}
+	presentIgnoredKeys map[string]struct{}
+	pruned             []resourcemodel.ResourceRef
+	now                time.Time
+}
+
+func newAttentionSourceReplacement(records []attentionSourceRecord, now time.Time) *attentionSourceReplacement {
+	return &attentionSourceReplacement{
+		want:               make(map[string]struct{}, len(records)),
+		presentIgnoredKeys: make(map[string]struct{}, len(records)),
+		pruned:             make([]resourcemodel.ResourceRef, 0),
+		now:                now,
+	}
+}
+
+func (i *clusterAttentionIndex) upsertReplacementRecords(
+	owner string,
+	records []attentionSourceRecord,
+	replacement *attentionSourceReplacement,
+) {
 	for _, record := range records {
 		if !completeAttentionRef(record.Ref) {
 			continue
 		}
 		key := attentionRefKey(record.Ref)
-		want[key] = struct{}{}
-		presentIgnoredKeys[attentionIgnoredObjectKey(record.Ref)] = struct{}{}
-		if replaced := i.upsertSourceLocked(owner, record, now); replaced != nil {
-			pruned = append(pruned, *replaced)
+		replacement.want[key] = struct{}{}
+		replacement.presentIgnoredKeys[attentionIgnoredObjectKey(record.Ref)] = struct{}{}
+		if replaced := i.upsertSourceLocked(owner, record, replacement.now); replaced != nil {
+			replacement.pruned = append(replacement.pruned, *replaced)
 		}
 	}
+}
+
+func (i *clusterAttentionIndex) removeMissingReplacementSources(
+	owner string,
+	replacement *attentionSourceReplacement,
+) {
 	for key := range i.owners[owner] {
-		if _, keep := want[key]; keep {
+		if _, keep := replacement.want[key]; keep {
 			continue
 		}
 		state := i.sources[key]
 		i.deleteSourceLocked(owner, key)
-		if i.pruneIgnoredObjectLocked(state.record.Ref) {
-			pruned = append(pruned, state.record.Ref)
+		if !i.finalizerConfirmsObjectLocked(state.record.Ref) && i.pruneIgnoredObjectLocked(state.record.Ref) {
+			replacement.pruned = append(replacement.pruned, state.record.Ref)
 		}
 	}
-	for key, finding := range i.findings {
+}
+
+func (i *clusterAttentionIndex) removeMissingReplacementFindings(
+	owner string,
+	replacement *attentionSourceReplacement,
+) {
+	for key, finding := range i.healthFindings {
 		if _, ownedKind := i.ownerKinds[owner][finding.Ref.Kind]; !ownedKind {
 			continue
 		}
-		if _, keep := want[key]; keep {
+		if _, keep := replacement.want[key]; keep {
 			continue
 		}
-		i.applyFindingLocked(key, nil)
+		i.applyHealthFindingLocked(key, nil)
 	}
-	if pruneMissingIgnores {
-		for _, ignored := range append([]AttentionObjectFindingIgnore(nil), i.ignoreRules.ObjectFindings...) {
-			if _, ownedKind := i.ownerKinds[owner][ignored.Ref.Kind]; !ownedKind {
-				continue
-			}
-			if _, exists := presentIgnoredKeys[attentionIgnoredObjectKey(ignored.Ref)]; exists {
-				continue
-			}
-			if i.pruneIgnoredObjectLocked(ignored.Ref) {
-				pruned = append(pruned, ignored.Ref)
-			}
+}
+
+func (i *clusterAttentionIndex) pruneMissingReplacementIgnores(
+	owner string,
+	replacement *attentionSourceReplacement,
+) {
+	ignores := append([]AttentionObjectFindingIgnore(nil), i.ignoreRules.ObjectFindings...)
+	for _, ignored := range ignores {
+		if _, ownedKind := i.ownerKinds[owner][ignored.Ref.Kind]; !ownedKind {
+			continue
+		}
+		if _, exists := replacement.presentIgnoredKeys[attentionIgnoredObjectKey(ignored.Ref)]; exists {
+			continue
+		}
+		if i.finalizerConfirmsObjectLocked(ignored.Ref) {
+			continue
+		}
+		if i.pruneIgnoredObjectLocked(ignored.Ref) {
+			replacement.pruned = append(replacement.pruned, ignored.Ref)
 		}
 	}
-	i.owners[owner] = want
-	i.armTimerLocked()
-	pruner := i.ignoredObjectPruner
-	i.mu.Unlock()
-	if pruner != nil {
-		for _, ref := range dedupeAttentionRefs(pruned) {
-			pruner(ref)
-		}
+}
+
+func pruneAttentionRefs(pruner func(resourcemodel.ResourceRef), refs []resourcemodel.ResourceRef) {
+	if pruner == nil {
+		return
+	}
+	for _, ref := range dedupeAttentionRefs(refs) {
+		pruner(ref)
 	}
 }
 
@@ -615,18 +680,31 @@ func (i *clusterAttentionIndex) RestoreFrom(path string) error {
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	for _, row := range i.maintained.store.Snapshot() {
-		key := attentionRefKey(row.Ref)
-		filtered := i.filterIgnoredEvaluationLocked(attentionEvaluation{Finding: &row}).Finding
-		if filtered == nil {
-			i.maintained.store.Delete(key)
-			continue
-		}
-		i.findings[key] = *filtered
-		i.maintained.store.Upsert(*filtered)
+	rows := i.maintained.store.Snapshot()
+	for _, row := range rows {
+		i.maintained.store.Delete(attentionRefKey(row.Ref))
 	}
-	i.maintained.bumpSinkVersion()
-	i.revision++
+	for _, row := range rows {
+		key := attentionRefKey(row.Ref)
+		healthCauses, finalizerCauses := splitFinalizerCauses(row.Causes)
+		if len(healthCauses) > 0 {
+			health := row
+			health.Causes = healthCauses
+			health.Severity = attentionCauseSeverity(healthCauses)
+			if row.Status == "Terminating" {
+				health.Status = healthCauses[0].Message
+			}
+			i.healthFindings[key] = health
+		}
+		if len(finalizerCauses) > 0 {
+			finalizer := row
+			finalizer.Status = "Terminating"
+			finalizer.Causes = finalizerCauses
+			finalizer.Severity = attentionCauseSeverity(finalizerCauses)
+			i.finalizerFindings[key] = finalizer
+		}
+		i.publishMergedFindingLocked(key)
+	}
 	return nil
 }
 
@@ -664,12 +742,85 @@ func (i *clusterAttentionIndex) DeleteSource(owner string, ref resourcemodel.Res
 		return
 	}
 	i.deleteSourceLocked(owner, attentionRefKey(ref))
-	pruned := i.pruneIgnoredObjectLocked(ref)
+	pruned := !i.finalizerConfirmsObjectLocked(ref) && i.pruneIgnoredObjectLocked(ref)
 	pruner := i.ignoredObjectPruner
 	i.armTimerLocked()
 	i.mu.Unlock()
 	if pruned && pruner != nil {
 		pruner(ref)
+	}
+}
+
+// ReplaceFinalizerBlockers replaces the catalog-owned lifecycle component for
+// this cluster. Health and lifecycle causes for the same concrete object are
+// merged into one Attention row.
+func (i *clusterAttentionIndex) ReplaceFinalizerBlockers(blockers []objectcatalog.FinalizerBlocker) {
+	if i == nil {
+		return
+	}
+	next := make(map[string]AttentionFinding, len(blockers))
+	clusterID := strings.TrimSpace(i.meta.ClusterID)
+	for _, blocker := range blockers {
+		key, finding, valid := finalizerFindingForCluster(clusterID, blocker)
+		if !valid {
+			continue
+		}
+		next[key] = finding
+	}
+
+	i.mu.Lock()
+	if i.stopped {
+		i.mu.Unlock()
+		return
+	}
+	keys := make(map[string]struct{}, len(i.finalizerFindings)+len(next))
+	pruned := make([]resourcemodel.ResourceRef, 0)
+	for key, previous := range i.finalizerFindings {
+		keys[key] = struct{}{}
+		if replacement, exists := next[key]; exists && !sameAttentionObject(previous.Ref, replacement.Ref) {
+			if i.pruneIgnoredObjectLocked(previous.Ref) {
+				pruned = append(pruned, previous.Ref)
+			}
+		}
+	}
+	for key := range next {
+		keys[key] = struct{}{}
+	}
+	i.finalizerFindings = next
+	for key := range keys {
+		i.publishMergedFindingLocked(key)
+	}
+	pruner := i.ignoredObjectPruner
+	i.mu.Unlock()
+	pruneAttentionRefs(pruner, pruned)
+}
+
+func finalizerFindingForCluster(clusterID string, blocker objectcatalog.FinalizerBlocker) (string, AttentionFinding, bool) {
+	if !completeAttentionRef(blocker.Ref) || blocker.DeletionTimestamp <= 0 {
+		return "", AttentionFinding{}, false
+	}
+	if clusterID != "" && blocker.Ref.ClusterID != clusterID {
+		return "", AttentionFinding{}, false
+	}
+	return attentionRefKey(blocker.Ref), finalizerAttentionFinding(blocker), true
+}
+
+func (i *clusterAttentionIndex) finalizerConfirmsObjectLocked(ref resourcemodel.ResourceRef) bool {
+	finding, exists := i.finalizerFindings[attentionRefKey(ref)]
+	return exists && sameAttentionObject(finding.Ref, ref)
+}
+
+func finalizerAttentionFinding(blocker objectcatalog.FinalizerBlocker) AttentionFinding {
+	policy := attentionPolicyForSignal(attentionSignalDeletionBlockedByFinalizer)
+	causes := []AttentionCause{signalCause(
+		attentionSignalDeletionBlockedByFinalizer,
+		policy,
+		"Waiting for finalizer cleanup",
+	)}
+	return AttentionFinding{
+		Ref: blocker.Ref, Namespace: blocker.Ref.Namespace, Severity: policy.Severity,
+		Status: "Terminating", Causes: causes,
+		Age: formatAge(time.UnixMilli(blocker.DeletionTimestamp)), AgeTimestamp: blocker.DeletionTimestamp,
 	}
 }
 
@@ -688,14 +839,14 @@ func (i *clusterAttentionIndex) upsertSourceLocked(owner string, record attentio
 	state := attentionSourceState{
 		record: record, owner: owner, generation: previous.generation + 1,
 	}
-	evaluation := i.filterIgnoredEvaluationLocked(evaluateAttentionSource(record, now))
+	evaluation := evaluateAttentionSource(record, now)
 	state.deadline = evaluation.NextEvaluation
 	i.sources[key] = state
 	if i.owners[owner] == nil {
 		i.owners[owner] = make(map[string]struct{})
 	}
 	i.owners[owner][key] = struct{}{}
-	i.applyFindingLocked(key, evaluation.Finding)
+	i.applyHealthFindingLocked(key, evaluation.Finding)
 	if !state.deadline.IsZero() {
 		heap.Push(&i.deadlines, attentionDeadline{key: key, generation: state.generation, at: state.deadline})
 	}
@@ -709,12 +860,22 @@ func (i *clusterAttentionIndex) deleteSourceLocked(owner, key string) {
 	}
 	delete(i.sources, key)
 	delete(i.owners[owner], key)
-	i.applyFindingLocked(key, nil)
+	i.applyHealthFindingLocked(key, nil)
 }
 
-func (i *clusterAttentionIndex) applyFindingLocked(key string, finding *AttentionFinding) {
-	previous, existed := i.findings[key]
+func (i *clusterAttentionIndex) applyHealthFindingLocked(key string, finding *AttentionFinding) {
 	if finding == nil {
+		delete(i.healthFindings, key)
+	} else {
+		i.healthFindings[key] = *finding
+	}
+	i.publishMergedFindingLocked(key)
+}
+
+func (i *clusterAttentionIndex) publishMergedFindingLocked(key string) {
+	previous, existed := i.findings[key]
+	merged := i.mergedFindingLocked(key)
+	if merged == nil {
 		if !existed {
 			return
 		}
@@ -725,7 +886,7 @@ func (i *clusterAttentionIndex) applyFindingLocked(key string, finding *Attentio
 		i.markDirtyLocked()
 		return
 	}
-	row := *finding
+	row := *merged
 	if existed && reflect.DeepEqual(previous, row) {
 		return
 	}
@@ -734,6 +895,59 @@ func (i *clusterAttentionIndex) applyFindingLocked(key string, finding *Attentio
 	i.maintained.bumpSinkVersion()
 	i.revision++
 	i.markDirtyLocked()
+}
+
+func (i *clusterAttentionIndex) mergedFindingLocked(key string) *AttentionFinding {
+	health, hasHealth := i.healthFindings[key]
+	finalizer, hasFinalizer := i.finalizerFindings[key]
+	if !hasHealth && !hasFinalizer {
+		return nil
+	}
+	var row AttentionFinding
+	switch {
+	case hasFinalizer && (!hasHealth || !sameAttentionObject(finalizer.Ref, health.Ref)):
+		row = finalizer
+	case hasFinalizer:
+		row = finalizer
+		row.Causes = compactAttentionCauses(append(append([]AttentionCause(nil), finalizer.Causes...), health.Causes...))
+		row.Severity = attentionCauseSeverity(row.Causes)
+	case hasHealth:
+		row = health
+	}
+	return i.filterIgnoredEvaluationLocked(attentionEvaluation{Finding: &row}).Finding
+}
+
+func (i *clusterAttentionIndex) reprojectAllFindingsLocked() {
+	keys := make(map[string]struct{}, len(i.healthFindings)+len(i.finalizerFindings)+len(i.findings))
+	for key := range i.healthFindings {
+		keys[key] = struct{}{}
+	}
+	for key := range i.finalizerFindings {
+		keys[key] = struct{}{}
+	}
+	for key := range i.findings {
+		keys[key] = struct{}{}
+	}
+	for key := range keys {
+		i.publishMergedFindingLocked(key)
+	}
+}
+
+func sameAttentionObject(left, right resourcemodel.ResourceRef) bool {
+	leftUID := strings.TrimSpace(left.UID)
+	rightUID := strings.TrimSpace(right.UID)
+	return leftUID == "" || rightUID == "" || leftUID == rightUID
+}
+
+func splitFinalizerCauses(causes []AttentionCause) (health, finalizer []AttentionCause) {
+	for _, cause := range causes {
+		if cause.Type == string(attentionSignalDeletionBlockedByFinalizer) {
+			finalizer = append(finalizer, cause)
+			continue
+		}
+		health = append(health, cause)
+	}
+	return health, finalizer
 }
 
 func (i *clusterAttentionIndex) EvaluateDue(now time.Time) {
@@ -755,10 +969,10 @@ func (i *clusterAttentionIndex) EvaluateDue(now time.Time) {
 		if !exists || state.generation != deadline.generation || !state.deadline.Equal(deadline.at) {
 			continue
 		}
-		evaluation := i.filterIgnoredEvaluationLocked(evaluateAttentionSource(state.record, now))
+		evaluation := evaluateAttentionSource(state.record, now)
 		state.deadline = evaluation.NextEvaluation
 		i.sources[deadline.key] = state
-		i.applyFindingLocked(deadline.key, evaluation.Finding)
+		i.applyHealthFindingLocked(deadline.key, evaluation.Finding)
 		if !state.deadline.IsZero() {
 			heap.Push(&i.deadlines, attentionDeadline{key: deadline.key, generation: state.generation, at: state.deadline})
 		}
@@ -989,6 +1203,7 @@ type ClusterAttentionPermissions struct {
 type ClusterAttentionOptions struct {
 	IgnoreRules         AttentionIgnoreRules
 	IgnoredObjectPruner func(resourcemodel.ResourceRef)
+	CatalogService      func() *objectcatalog.Service
 }
 
 type attentionIngestRegistration struct {
@@ -1026,7 +1241,11 @@ func RegisterClusterAttentionDomain(
 		return nil, err
 	}
 	reg.RegisterMaintainedStore(clusterAttentionDomainName, index)
-	if err := reg.Register(refresh.DomainConfig{Name: clusterAttentionDomainName, BuildSnapshot: (&ClusterAttentionBuilder{index: index, sources: sources}).Build}); err != nil {
+	if err := reg.Register(refresh.DomainConfig{
+		Name: clusterAttentionDomainName, BuildSnapshot: (&ClusterAttentionBuilder{
+			index: index, sources: sources, catalogService: options.CatalogService,
+		}).Build,
+	}); err != nil {
 		index.Stop()
 		return nil, err
 	}
@@ -1172,7 +1391,7 @@ func (i *clusterAttentionIndex) deleteEvent(meta ClusterMeta, obj interface{}) {
 	}
 }
 
-var _ ingest.BundleReplaceSink = attentionBundleSink{}
+var _ ingest.BundleReplacer = attentionBundleSink{}
 
 func evaluateAttentionSource(record attentionSourceRecord, now time.Time) attentionEvaluation {
 	if !completeAttentionRef(record.Ref) {
@@ -1247,6 +1466,11 @@ func attentionRecordFromEvent(meta ClusterMeta, event *corev1.Event) (attentionS
 		return attentionSourceRecord{}, false
 	}
 	timestamp := eventres.EventTimestamp(event).Time
+	lifecycle := resourcemodel.ObjectLifecycle(event.ObjectMeta)
+	deletionTimestamp := int64(0)
+	if event.DeletionTimestamp != nil {
+		deletionTimestamp = event.DeletionTimestamp.UnixMilli()
+	}
 	record := attentionSourceRecord{
 		Ref: resourcemodel.ResourceRef{
 			ClusterID: meta.ClusterID,
@@ -1258,12 +1482,14 @@ func attentionRecordFromEvent(meta ClusterMeta, event *corev1.Event) (attentionS
 			Name:      event.Name,
 			UID:       string(event.UID),
 		},
-		Source:          attentionSourceEvent,
-		objectNamespace: event.InvolvedObject.Namespace,
-		Status:          event.Type,
-		StatusReason:    event.Reason,
-		Message:         event.Message,
-		AgeTimestamp:    timestamp.UnixMilli(),
+		Source:            attentionSourceEvent,
+		objectNamespace:   event.InvolvedObject.Namespace,
+		Status:            event.Type,
+		StatusReason:      event.Reason,
+		Message:           event.Message,
+		AgeTimestamp:      timestamp.UnixMilli(),
+		FinalizerBlocked:  lifecycle.FinalizerBlocked,
+		DeletionTimestamp: deletionTimestamp,
 	}
 	return record, completeAttentionRef(record.Ref)
 }
@@ -1381,19 +1607,25 @@ func evaluateNodeAttention(record attentionSourceRecord) attentionEvaluation {
 
 func evaluateEventAttention(record attentionSourceRecord, now time.Time) attentionEvaluation {
 	classification, needsAttention := classifyAttentionSource(record)
-	if !needsAttention || record.AgeTimestamp <= 0 {
-		return attentionEvaluation{}
+	causes := appendFinalizerBlockedCause(nil, record.FinalizerBlocked)
+	nextEvaluation := time.Time{}
+	if needsAttention && record.AgeTimestamp > 0 {
+		observedAt := time.UnixMilli(record.AgeTimestamp).UTC()
+		expiresAt := observedAt.Add(attentionEventLookback)
+		if now.Before(expiresAt) {
+			message := strings.Join(compactReasons([]string{record.StatusReason, record.Message}), " · ")
+			causes = appendAttentionCause(causes, AttentionCause{
+				Type: classification.ID, Label: classification.Label, Message: message, Severity: classification.Severity,
+			})
+			nextEvaluation = expiresAt
+		}
 	}
-	observedAt := time.UnixMilli(record.AgeTimestamp).UTC()
-	expiresAt := observedAt.Add(attentionEventLookback)
-	if !now.Before(expiresAt) {
-		return attentionEvaluation{}
+	if record.FinalizerBlocked {
+		record.Status = "Terminating"
+		record.AgeTimestamp = record.DeletionTimestamp
 	}
-	message := strings.Join(compactReasons([]string{record.StatusReason, record.Message}), " · ")
-	evaluation := findingEvaluation(record, []AttentionCause{{
-		Type: classification.ID, Label: classification.Label, Message: message, Severity: classification.Severity,
-	}})
-	evaluation.NextEvaluation = expiresAt
+	evaluation := findingEvaluation(record, causes)
+	evaluation.NextEvaluation = nextEvaluation
 	return evaluation
 }
 
@@ -1451,6 +1683,18 @@ func classificationCause(rule attentionClassificationRule, record attentionSourc
 
 func signalCause(signal attentionSignal, policy attentionSignalPolicy, message string) AttentionCause {
 	return AttentionCause{Type: string(signal), Label: policy.Label, Message: message, Severity: policy.Severity}
+}
+
+func appendFinalizerBlockedCause(causes []AttentionCause, blocked bool) []AttentionCause {
+	if !blocked {
+		return causes
+	}
+	policy := attentionPolicyForSignal(attentionSignalDeletionBlockedByFinalizer)
+	return appendAttentionCause(causes, signalCause(
+		attentionSignalDeletionBlockedByFinalizer,
+		policy,
+		"Waiting for finalizer cleanup",
+	))
 }
 
 func appendAttentionCause(causes []AttentionCause, cause AttentionCause) []AttentionCause {

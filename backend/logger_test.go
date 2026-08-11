@@ -3,12 +3,15 @@ package backend
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/url"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/getsentry/sentry-go"
 	"github.com/luxury-yacht/app/backend/internal/applog"
+	"github.com/luxury-yacht/app/backend/internal/authstate"
 	"github.com/luxury-yacht/app/backend/internal/errorcapture"
 	"github.com/luxury-yacht/app/backend/internal/logsources"
 	"github.com/luxury-yacht/app/internal/sentry"
@@ -37,6 +40,7 @@ type recordingErrorReporter struct {
 	messages       []capturedReport
 	exceptions     []capturedException
 	panics         []capturedPanic
+	breadcrumbs    []sentryreporting.Breadcrumb
 	enabled        bool
 	enabledChanges []bool
 	setEnabledFn   func(bool)
@@ -94,8 +98,12 @@ func (r *recordingErrorReporter) CapturePanic(recovered any, context sentryrepor
 	defer r.mu.Unlock()
 	r.panics = append(r.panics, capturedPanic{recovered: recovered, context: context})
 }
-func (*recordingErrorReporter) AddBreadcrumb(sentryreporting.Breadcrumb) {}
-func (*recordingErrorReporter) Shutdown(time.Duration) bool              { return true }
+func (r *recordingErrorReporter) AddBreadcrumb(breadcrumb sentryreporting.Breadcrumb) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.breadcrumbs = append(r.breadcrumbs, breadcrumb)
+}
+func (*recordingErrorReporter) Shutdown(time.Duration) bool { return true }
 
 func (r *recordingErrorReporter) CaptureLogError(message string, context sentryreporting.Context) {
 	r.mu.Lock()
@@ -116,6 +124,59 @@ func TestLoggerReportsOnlyErrorsWithClusterIdentity(t *testing.T) {
 		message: "refresh failed",
 		context: sentryreporting.Context{Source: "Refresh", ClusterID: "cluster-a", ClusterName: "Production"},
 	}}, reporter.messages)
+}
+
+func TestLoggerRoutesNonErrorsWithBoundedMetadataAndLevelParity(t *testing.T) {
+	reporter := &recordingErrorReporter{}
+	logger := NewLogger(10, reporter)
+
+	logger.Debug("debug message", "DebugSource", "cluster-a", "Production", "debug-op", "ignored")
+	logger.Warn("warning message", "WarnSource")
+	logger.log(LogLevel(99), "unknown-level message", nil, nil, sentryreporting.Operation{})
+
+	reporter.mu.Lock()
+	require.Equal(t, []sentryreporting.Breadcrumb{
+		{
+			Category:    "DebugSource",
+			Message:     "debug message",
+			Level:       "debug",
+			Data:        map[string]any{"clusterId": "cluster-a", "clusterName": "Production"},
+			OperationID: "debug-op",
+		},
+		{
+			Category: "WarnSource",
+			Message:  "warning message",
+			Level:    "warning",
+			Data:     map[string]any{},
+		},
+		{
+			Message: "unknown-level message",
+			Level:   "info",
+			Data:    map[string]any{},
+		},
+	}, reporter.breadcrumbs)
+	reporter.mu.Unlock()
+
+	entries := logger.GetEntries()
+	require.Len(t, entries, 3)
+	require.Equal(t, LogEntry{
+		Sequence:    1,
+		Timestamp:   entries[0].Timestamp,
+		Level:       "DEBUG",
+		Message:     "debug message",
+		Source:      "DebugSource",
+		ClusterID:   "cluster-a",
+		ClusterName: "Production",
+		OperationID: "debug-op",
+	}, entries[0])
+	require.Equal(t, "UNKNOWN", entries[2].Level)
+}
+
+func TestNilLoggerIgnoresLog(t *testing.T) {
+	var logger *Logger
+	require.NotPanics(t, func() {
+		logger.Log(LogLevelError, "ignored")
+	})
 }
 
 func TestLoggerReportsStructuredErrorWithoutFlatteningCause(t *testing.T) {
@@ -149,6 +210,111 @@ func TestLoggerReportsStructuredErrorWithoutFlatteningCause(t *testing.T) {
 	entries := base.GetEntries()
 	require.Len(t, entries, 1)
 	require.Equal(t, "Failed to get deployment default/web: forbidden", entries[0].Message)
+}
+
+func TestLoggerKeepsExpectedClusterFailuresLocal(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{
+			name: "authentication",
+			err: fmt.Errorf(
+				"request failed: %w",
+				&authstate.AuthInvalidError{Reason: "credentials rejected"},
+			),
+		},
+		{
+			name: "raw structured authentication",
+			err:  apierrors.NewUnauthorized("credentials rejected"),
+		},
+		{
+			name: "wrapped structured not found",
+			err: fmt.Errorf(
+				"resource fetch failed: %w",
+				apierrors.NewNotFound(schema.GroupResource{Resource: "pods"}, "pod-a"),
+			),
+		},
+		{
+			name: "raw credential helper failure",
+			err:  errors.New("getting credentials: exec: executable aws failed with exit code 255"),
+		},
+		{
+			name: "connectivity",
+			err: &url.Error{
+				Op:  "Get",
+				URL: "https://cluster.example.test",
+				Err: errors.New("connection refused"),
+			},
+		},
+		{
+			name: "URL timeout",
+			err: &url.Error{
+				Op:  "Get",
+				URL: "https://cluster.example.test",
+				Err: context.DeadlineExceeded,
+			},
+		},
+		{
+			name: "cancellation",
+			err:  context.Canceled,
+		},
+		{
+			name: "API server unavailable",
+			err:  apierrors.NewServiceUnavailable("cluster temporarily unavailable"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reporter := &recordingErrorReporter{}
+			logger := NewLogger(10, reporter)
+
+			logger.ErrorWithCause(tt.err, "cluster request failed", "ResourceLoader", "cluster-a", "Production")
+
+			reporter.mu.Lock()
+			require.Empty(t, reporter.messages)
+			require.Empty(t, reporter.exceptions)
+			reporter.mu.Unlock()
+
+			entries := logger.GetEntries()
+			require.Len(t, entries, 1)
+			require.Equal(t, "ERROR", entries[0].Level)
+			require.Contains(t, entries[0].Message, tt.err.Error())
+		})
+	}
+}
+
+func TestLoggerReportsDeadlineAndUnexpectedURLFailures(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "deadline exceeded", err: context.DeadlineExceeded},
+		{
+			name: "URL application failure",
+			err: &url.Error{
+				Op:  "Get",
+				URL: "https://cluster.example.test",
+				Err: errors.New("redirect policy rejected"),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reporter := &recordingErrorReporter{}
+			logger := NewLogger(10, reporter)
+
+			logger.ErrorWithCause(tt.err, "cluster request failed", "ResourceLoader", "cluster-a", "Production")
+
+			reporter.mu.Lock()
+			require.Empty(t, reporter.messages)
+			require.Len(t, reporter.exceptions, 1)
+			require.ErrorIs(t, reporter.exceptions[0].err, tt.err)
+			reporter.mu.Unlock()
+		})
+	}
 }
 
 func TestLoggerSentryReportIncludesOriginalMessageAndCluster(t *testing.T) {
@@ -257,7 +423,7 @@ func TestFetchResourceReportsOriginalKubernetesError(t *testing.T) {
 		"deployment/default/web",
 		"Deployment",
 		"default/web",
-		func() (string, error) { return "", cause },
+		func(context.Context) (string, error) { return "", cause },
 	)
 	require.Error(t, err)
 
@@ -281,7 +447,7 @@ func TestFetchResourceDoesNotReportTelemetryHandledErrorAgain(t *testing.T) {
 		"deployment/default/web",
 		"Deployment",
 		"default/web",
-		func() (string, error) { return "", errorcapture.MarkTelemetryHandled(cause) },
+		func(context.Context) (string, error) { return "", errorcapture.MarkTelemetryHandled(cause) },
 	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, cause)

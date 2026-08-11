@@ -2,13 +2,11 @@ package backend
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/luxury-yacht/app/backend/internal/authstate"
-	"github.com/luxury-yacht/app/internal/sentry"
 	"github.com/stretchr/testify/require"
 )
 
@@ -22,7 +20,7 @@ func TestHandleClusterAuthStateChange_InvalidEmitsAuthFailed(t *testing.T) {
 	app.logger = NewLogger(100, reporter)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	app.Ctx = ctx
+	app.setRuntimeContext(ctx)
 
 	// Capture emitted events.
 	var emittedEvents []struct {
@@ -58,7 +56,6 @@ func TestHandleClusterAuthStateChange_InvalidEmitsAuthFailed(t *testing.T) {
 	// Trigger the StateInvalid handler with a typed diagnostic (missing exec helper).
 	app.handleClusterAuthStateChange("test-cluster", authstate.StateInvalid, authstate.FailureDiagnostic{
 		Reason:      "token expired",
-		Cause:       errors.New("token expired"),
 		Kind:        "missing-helper",
 		Summary:     "The kubeconfig's credential helper could not be found.",
 		ExecCommand: "gke-gcloud-auth-plugin",
@@ -82,10 +79,13 @@ func TestHandleClusterAuthStateChange_InvalidEmitsAuthFailed(t *testing.T) {
 	require.Equal(t, "missing-helper", authFailedEvents[0]["kind"])
 	require.Equal(t, "gke-gcloud-auth-plugin", authFailedEvents[0]["execCommand"])
 	require.Equal(t, "The kubeconfig's credential helper could not be found.", authFailedEvents[0]["summary"])
+	entries := app.logger.GetEntries()
+	require.Len(t, entries, 1)
+	require.Equal(t, "WARN", entries[0].Level)
+	require.Equal(t, "Cluster Test Cluster: auth failed - token expired", entries[0].Message)
 	reporter.mu.Lock()
-	require.Len(t, reporter.exceptions, 1)
-	require.EqualError(t, reporter.exceptions[0].err, "token expired")
-	require.Equal(t, sentryreporting.Operation{}, reporter.exceptions[0].context.Operation)
+	require.Empty(t, reporter.messages)
+	require.Empty(t, reporter.exceptions)
 	reporter.mu.Unlock()
 }
 
@@ -95,7 +95,7 @@ func TestHandleClusterAuthStateChange_RecoveringEmitsEvent(t *testing.T) {
 	app := newTestAppWithDefaults(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	app.Ctx = ctx
+	app.setRuntimeContext(ctx)
 
 	var emittedEvents []struct {
 		name string
@@ -155,7 +155,7 @@ func TestHandleClusterAuthStateChange_ValidEmitsRecoveredEvent(t *testing.T) {
 	app := newTestAppWithDefaults(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	app.Ctx = ctx
+	app.setRuntimeContext(ctx)
 
 	var emittedEvents []struct {
 		name string
@@ -203,6 +203,124 @@ func TestHandleClusterAuthStateChange_ValidEmitsRecoveredEvent(t *testing.T) {
 	require.Equal(t, "Valid Cluster", recoveredEvents[0]["clusterName"])
 }
 
+func TestHandleClusterAuthStateChange_InvalidWithoutCauseIsolatesBackgroundCluster(t *testing.T) {
+	app := newTestAppWithDefaults(t)
+	reporter := &recordingErrorReporter{}
+	app.logger = NewLogger(100, reporter)
+	app.setRuntimeContext(context.Background())
+	app.governorVisible = "cluster-foreground"
+	app.clusterLifecycle = newClusterLifecycle(nil)
+	app.clusterLifecycle.SetState("cluster-foreground", ClusterStateReady)
+	app.clusterLifecycle.SetState("cluster-background", ClusterStateReady)
+	app.clusterClients = map[string]*clusterClients{
+		"cluster-foreground": {meta: ClusterMeta{ID: "cluster-foreground", Name: "Foreground"}},
+		"cluster-background": {meta: ClusterMeta{ID: "cluster-background", Name: "Background"}},
+	}
+
+	var failedPayload map[string]any
+	app.eventEmitter = func(_ context.Context, name string, args ...interface{}) {
+		if name == "cluster:auth:failed" && len(args) == 1 {
+			failedPayload, _ = args[0].(map[string]any)
+		}
+	}
+
+	app.handleClusterAuthStateChange("cluster-background", authstate.StateInvalid, authstate.FailureDiagnostic{
+		Reason:  "credentials rejected",
+		Class:   "auth",
+		Kind:    "unauthorized",
+		Summary: "The cluster rejected these credentials.",
+	})
+
+	require.Equal(t, "cluster-background", failedPayload["clusterId"])
+	require.Equal(t, "Background", failedPayload["clusterName"])
+	require.Equal(t, "credentials rejected", failedPayload["reason"])
+	require.Equal(t, "auth", failedPayload["class"])
+	require.Equal(t, "unauthorized", failedPayload["kind"])
+	require.Equal(t, "The cluster rejected these credentials.", failedPayload["summary"])
+	require.Equal(t, "", failedPayload["execCommand"])
+	require.Equal(t, ClusterStateReady, app.clusterLifecycle.GetState("cluster-foreground"))
+	require.Equal(t, ClusterStateAuthFailed, app.clusterLifecycle.GetState("cluster-background"))
+
+	entries := app.logger.GetEntries()
+	require.Len(t, entries, 1)
+	require.Equal(t, "WARN", entries[0].Level)
+	require.Equal(t, "Cluster Background: auth failed - credentials rejected", entries[0].Message)
+	require.Equal(t, "cluster-background", entries[0].ClusterID)
+	require.Equal(t, "Background", entries[0].ClusterName)
+	reporter.mu.Lock()
+	require.Empty(t, reporter.messages)
+	require.Empty(t, reporter.exceptions)
+	reporter.mu.Unlock()
+}
+
+func TestHandleClusterAuthStateChange_QueuesRecoveringMutationOutsideManagerLock(t *testing.T) {
+	app := newTestAppWithDefaults(t)
+	app.setRuntimeContext(context.Background())
+	app.selectionMutationMu.Lock()
+	selectionLocked := true
+	defer func() {
+		if selectionLocked {
+			app.selectionMutationMu.Unlock()
+		}
+	}()
+
+	manager := authstate.New(authstate.Config{
+		MaxAttempts:     1,
+		BackoffSchedule: []time.Duration{time.Hour},
+		OnStateChange: func(state authstate.State, diag authstate.FailureDiagnostic) {
+			app.handleClusterAuthStateChange("cluster-background", state, diag)
+		},
+	})
+	defer manager.Shutdown()
+
+	reported := make(chan struct{})
+	go func() {
+		manager.ReportFailure("credentials rejected")
+		close(reported)
+	}()
+
+	select {
+	case <-reported:
+	case <-time.After(time.Second):
+		app.selectionMutationMu.Unlock()
+		selectionLocked = false
+		<-reported
+		require.FailNow(t, "auth state callback blocked on the coordinated mutation")
+	}
+
+	app.selectionMutationMu.Unlock()
+	selectionLocked = false
+	require.Eventually(t, func() bool {
+		return app.selectionGeneration.Load() > 0
+	}, time.Second, 10*time.Millisecond)
+	require.True(t, app.waitForSelectionMutationIdle(time.Second))
+}
+
+func TestHandleClusterAuthStateChange_UnknownStateNoOp(t *testing.T) {
+	app := newTestAppWithDefaults(t)
+	app.setRuntimeContext(context.Background())
+	app.eventEmitter = func(context.Context, string, ...interface{}) {
+		require.Fail(t, "unknown auth state emitted an event")
+	}
+
+	app.handleClusterAuthStateChange("cluster-a", authstate.State(99), authstate.FailureDiagnostic{})
+
+	require.Empty(t, app.logger.GetEntries())
+	require.Zero(t, app.selectionGeneration.Load())
+}
+
+func TestExecuteClusterAuthMutationRejectsCancelledAndUnknownCommands(t *testing.T) {
+	app := newTestAppWithDefaults(t)
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := app.executeClusterAuthMutation(cancelled, clusterAuthStateCommand{mutation: clusterAuthMutationRebuild})
+	require.ErrorIs(t, err, context.Canceled)
+
+	err = app.executeClusterAuthMutation(context.Background(), clusterAuthStateCommand{})
+	require.EqualError(t, err, `unsupported cluster auth mutation ""`)
+}
+
 // TestHandleClusterAuthStateChange_NilAppNoOp verifies the nil-receiver guard.
 func TestHandleClusterAuthStateChange_NilAppNoOp(t *testing.T) {
 	var app *App
@@ -215,7 +333,7 @@ func TestHandleClusterAuthStateChange_EmptyClusterIDNoOp(t *testing.T) {
 	app := newTestAppWithDefaults(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	app.Ctx = ctx
+	app.setRuntimeContext(ctx)
 
 	eventCalled := false
 	app.eventEmitter = func(_ context.Context, _ string, _ ...interface{}) {
@@ -234,7 +352,7 @@ func TestHandleClusterAuthRecoveryProgress_CarriesErrorClass(t *testing.T) {
 	app := newTestAppWithDefaults(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	app.Ctx = ctx
+	app.setRuntimeContext(ctx)
 
 	var progressEvents []map[string]any
 	var mu sync.Mutex
@@ -269,7 +387,7 @@ func TestHandleClusterAuthRecoveryProgress_CarriesExecCommand(t *testing.T) {
 	app := newTestAppWithDefaults(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	app.Ctx = ctx
+	app.setRuntimeContext(ctx)
 
 	mgr := authstate.New(authstate.Config{MaxAttempts: 0})
 	defer mgr.Shutdown()
@@ -338,7 +456,7 @@ func TestClusterWorkspaceStateIncludesErrorClass(t *testing.T) {
 	app := newTestAppWithDefaults(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	app.Ctx = ctx
+	app.setRuntimeContext(ctx)
 
 	gate := make(chan struct{})
 	probeStarted := make(chan struct{}, 8)

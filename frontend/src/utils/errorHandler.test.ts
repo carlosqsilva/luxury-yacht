@@ -11,7 +11,6 @@ import { ErrorCategory, ErrorSeverity, errorHandler } from './errorHandler';
 
 const telemetryMocks = vi.hoisted(() => ({
   captureUserVisibleError: vi.fn(),
-  recordExpectedCondition: vi.fn(),
 }));
 
 vi.mock('@/core/telemetry/sentry', () => telemetryMocks);
@@ -24,12 +23,12 @@ describe('ErrorHandler', () => {
   const originalConsole = {
     groupCollapsed: console.groupCollapsed,
     error: console.error,
+    info: console.info,
     groupEnd: console.groupEnd,
   };
 
   beforeEach(() => {
     telemetryMocks.captureUserVisibleError.mockReset();
-    telemetryMocks.recordExpectedCondition.mockReset();
     handler = new ErrorHandlerClass({
       enableLogging: true,
       logToConsole: true,
@@ -37,12 +36,14 @@ describe('ErrorHandler', () => {
     });
     console.groupCollapsed = vi.fn();
     console.error = vi.fn();
+    console.info = vi.fn();
     console.groupEnd = vi.fn();
   });
 
   afterEach(() => {
     console.groupCollapsed = originalConsole.groupCollapsed;
     console.error = originalConsole.error;
+    console.info = originalConsole.info;
     console.groupEnd = originalConsole.groupEnd;
   });
 
@@ -58,6 +59,13 @@ describe('ErrorHandler', () => {
     expect(handler.getHistory()).toHaveLength(1);
     expect(listener).toHaveBeenCalledWith(
       expect.objectContaining({ category: ErrorCategory.NETWORK })
+    );
+    expect(telemetryMocks.captureUserVisibleError).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({
+        category: ErrorCategory.NETWORK,
+        expectedCondition: true,
+      })
     );
 
     unsubscribe();
@@ -78,6 +86,25 @@ describe('ErrorHandler', () => {
     );
   });
 
+  it('keeps not found conditions user-visible while marking telemetry as expected', () => {
+    const listener = vi.fn();
+    handler.subscribe(listener);
+    const error = new Error('Requested resource was not found');
+
+    const details = handler.handle(error, { source: 'object-panel' });
+
+    expect(details.category).toBe(ErrorCategory.NOT_FOUND);
+    expect(handler.getHistory()).toContainEqual(details);
+    expect(listener).toHaveBeenCalledWith(details);
+    expect(telemetryMocks.captureUserVisibleError).toHaveBeenCalledWith(
+      error,
+      expect.objectContaining({
+        category: ErrorCategory.NOT_FOUND,
+        expectedCondition: true,
+      })
+    );
+  });
+
   it('reports an inline failure without creating a duplicate toast', () => {
     const listener = vi.fn();
     handler.subscribe(listener);
@@ -93,6 +120,7 @@ describe('ErrorHandler', () => {
       error,
       expect.objectContaining({
         context: { action: 'startPortForward', clusterId: 'cluster-a' },
+        expectedCondition: false,
       })
     );
     expect(listener).not.toHaveBeenCalled();
@@ -110,6 +138,7 @@ describe('ErrorHandler', () => {
       error,
       expect.objectContaining({
         surface: 'operational',
+        expectedCondition: false,
         context: { action: 'persistTableState' },
       })
     );
@@ -148,12 +177,67 @@ describe('ErrorHandler', () => {
     expect(details.category).toBe(ErrorCategory.PERMISSION);
     expect(handler.getHistory()).toHaveLength(0);
     expect(listener).not.toHaveBeenCalled();
-    expect(console.groupCollapsed).toHaveBeenCalled();
+    expect(console.info).toHaveBeenCalled();
     expect(telemetryMocks.captureUserVisibleError).not.toHaveBeenCalled();
-    expect(telemetryMocks.recordExpectedCondition).toHaveBeenCalledWith(
-      '403 forbidden access',
-      expect.objectContaining({ category: ErrorCategory.PERMISSION })
+  });
+
+  it.each([
+    ['Failed to fetch: dial tcp 10.0.0.1:8403: connection refused', ErrorCategory.NETWORK],
+    ['Fetching cluster state failed', ErrorCategory.NETWORK],
+    ['Could not refetch cluster state', ErrorCategory.NETWORK],
+    ['All cluster connections were closed', ErrorCategory.NETWORK],
+    [
+      'Post "https://cluster.example.test": dial tcp: lookup cluster.example.test: no such host',
+      ErrorCategory.NETWORK,
+    ],
+    ['Container logs stream disconnected. Reconnecting soon', ErrorCategory.NETWORK],
+    ['dial tcp 10.0.0.1:403: i/o timeout', ErrorCategory.TIMEOUT],
+    ['request took 403 ms: internal server error', ErrorCategory.SERVER_ERROR],
+    ['processed 403 records before too many requests', ErrorCategory.RATE_LIMIT],
+  ])('does not treat incidental 403 digits in %s as permission denial', (message, category) => {
+    const details = handler.handle(message);
+
+    expect(details.category).toBe(category);
+  });
+
+  it.each([
+    'request failed with HTTP 403',
+    'request failed with status code 403',
+    'server responded with a status of 403',
+  ])('treats structured 403 status in %s as permission denial', (message) => {
+    const details = handler.handle(message);
+
+    expect(details.category).toBe(ErrorCategory.PERMISSION);
+  });
+
+  it('treats forbidden Kubernetes resources with network in their API group as permission conditions', () => {
+    const listener = vi.fn();
+    handler.subscribe(listener);
+    const error = new Error(
+      'failed to list networking.k8s.aws/v1alpha1, Resource=applicationnetworkpolicies: forbidden'
     );
+
+    const details = handler.handle(error, { source: 'backend-fetch' });
+
+    expect(details.category).toBe(ErrorCategory.PERMISSION);
+    expect(handler.getHistory()).toHaveLength(0);
+    expect(listener).not.toHaveBeenCalled();
+    expect(telemetryMocks.captureUserVisibleError).not.toHaveBeenCalled();
+  });
+
+  it('suppresses authentication failures for Kubernetes resources with network in their API group', () => {
+    const listener = vi.fn();
+    handler.subscribe(listener);
+    const error = new Error(
+      'failed to watch networking.example.io/v1, Resource=widgets: auth invalid: 401 Unauthorized'
+    );
+
+    const details = handler.handle(error, { source: 'backend-fetch' });
+
+    expect(details.category).toBe(ErrorCategory.AUTHENTICATION);
+    expect(handler.getHistory()).toHaveLength(0);
+    expect(listener).not.toHaveBeenCalled();
+    expect(telemetryMocks.captureUserVisibleError).not.toHaveBeenCalled();
   });
 
   it('still captures permission-shaped failures at an operational boundary', () => {
@@ -168,7 +252,6 @@ describe('ErrorHandler', () => {
         surface: 'operational',
       })
     );
-    expect(telemetryMocks.recordExpectedCondition).not.toHaveBeenCalled();
   });
 
   it('supports scoped handlers that merge context and custom message', () => {
@@ -209,7 +292,6 @@ describe('ErrorHandler', () => {
     expect(handler.getHistory()).toHaveLength(0);
     expect(listener).not.toHaveBeenCalled();
     expect(telemetryMocks.captureUserVisibleError).not.toHaveBeenCalled();
-    expect(telemetryMocks.recordExpectedCondition).toHaveBeenCalledTimes(3);
   });
 
   it('updates options and disables console logging when requested', () => {

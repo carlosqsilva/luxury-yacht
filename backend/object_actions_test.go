@@ -70,6 +70,124 @@ func TestRunObjectActionRequiresFullTargetIdentity(t *testing.T) {
 	}
 }
 
+func TestRunObjectActionValidatesActionSpecificRequirements(t *testing.T) {
+	app := NewApp()
+	replicas := 2
+	suspend := true
+	revision := int64(3)
+	portForward := ObjectActionPortForwardOptions{ContainerPort: 8080}
+	debugContainer := ObjectActionDebugContainerOptions{Image: "busybox"}
+
+	tests := []struct {
+		name    string
+		req     ObjectActionRequest
+		wantErr string
+	}{
+		{name: "unsupported action", req: ObjectActionRequest{Action: "unknown"}, wantErr: "unsupported object action"},
+		{name: "restart namespace", req: namespacedActionRequest(ObjectActionRestart, "apps", "v1", "Deployment"), wantErr: "requires namespace"},
+		{name: "scale namespace", req: actionRequestWithReplicas(replicas), wantErr: "requires namespace"},
+		{name: "trigger namespace", req: namespacedActionRequest(ObjectActionTrigger, "batch", "v1", "CronJob"), wantErr: "requires namespace"},
+		{name: "suspend option", req: namespacedActionRequest(ObjectActionSuspend, "batch", "v1", "CronJob"), wantErr: "requires suspend"},
+		{name: "suspend namespace", req: actionRequestWithSuspend(suspend), wantErr: "requires namespace"},
+		{name: "port forward option", req: namespacedActionRequest(ObjectActionStartPortForward, "", "v1", "Pod"), wantErr: "requires portForward"},
+		{name: "port forward namespace", req: actionRequestWithPortForward(portForward), wantErr: "requires namespace"},
+		{name: "debug option", req: namespacedActionRequest(ObjectActionCreateDebugContainer, "", "v1", "Pod"), wantErr: "requires debugContainer"},
+		{name: "debug namespace", req: actionRequestWithDebugContainer(debugContainer), wantErr: "requires namespace"},
+		{name: "rollback option", req: namespacedActionRequest(ObjectActionRollback, "apps", "v1", "Deployment"), wantErr: "requires revision"},
+		{name: "rollback namespace", req: actionRequestWithRevision(revision), wantErr: "requires namespace"},
+		{name: "remove finalizer value", req: namespacedActionRequest(ObjectActionRemoveFinalizer, "", "v1", "ConfigMap"), wantErr: "requires finalizer"},
+		{name: "remove finalizer path", req: actionRequestWithFinalizer("example.com/cleanup", ""), wantErr: "requires finalizerPath"},
+		{name: "remove finalizer invalid path", req: actionRequestWithFinalizer("example.com/cleanup", "status.finalizers"), wantErr: "unsupported finalizer path"},
+		{name: "namespace spec path target", req: actionRequestWithFinalizerTarget("example.com/cleanup", "spec.finalizers", "apps", "v1", "Deployment"), wantErr: "requires core/v1 Namespace"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := app.RunObjectAction(tt.req)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
+			}
+		})
+	}
+}
+
+func actionRequestWithFinalizer(finalizer, path string) ObjectActionRequest {
+	return actionRequestWithFinalizerTarget(finalizer, path, "", "v1", "ConfigMap")
+}
+
+func actionRequestWithFinalizerTarget(finalizer, path, group, version, kind string) ObjectActionRequest {
+	request := namespacedActionRequest(ObjectActionRemoveFinalizer, group, version, kind)
+	request.Finalizer = finalizer
+	request.FinalizerPath = path
+	return request
+}
+
+func TestRunObjectActionInvokesStartDrainAndDebugHandlers(t *testing.T) {
+	app := NewApp()
+
+	drainResponse, err := app.RunObjectAction(ObjectActionRequest{
+		Action: ObjectActionStartDrain,
+		Target: objectActionTarget("missing-cluster", "", "v1", "Node", "", "worker-a"),
+	})
+	if err == nil {
+		t.Fatal("expected start drain to reach cluster resolution")
+	}
+	if drainResponse.JobID != "" {
+		t.Fatalf("unexpected drain job ID %q", drainResponse.JobID)
+	}
+
+	debugResponse, err := app.RunObjectAction(ObjectActionRequest{
+		Action: ObjectActionCreateDebugContainer,
+		Target: objectActionTarget("missing-cluster", "", "v1", "Pod", "default", "api"),
+		DebugContainer: &ObjectActionDebugContainerOptions{
+			Image: "busybox",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected debug container to reach cluster resolution")
+	}
+	if debugResponse.DebugContainer != nil {
+		t.Fatal("unexpected debug container response")
+	}
+}
+
+func namespacedActionRequest(action, group, version, kind string) ObjectActionRequest {
+	return ObjectActionRequest{
+		Action: action,
+		Target: objectActionTarget("cluster-a", group, version, kind, "", "demo"),
+	}
+}
+
+func actionRequestWithReplicas(replicas int) ObjectActionRequest {
+	request := namespacedActionRequest(ObjectActionScale, "apps", "v1", "Deployment")
+	request.Replicas = &replicas
+	return request
+}
+
+func actionRequestWithSuspend(suspend bool) ObjectActionRequest {
+	request := namespacedActionRequest(ObjectActionSuspend, "batch", "v1", "CronJob")
+	request.Suspend = &suspend
+	return request
+}
+
+func actionRequestWithPortForward(options ObjectActionPortForwardOptions) ObjectActionRequest {
+	request := namespacedActionRequest(ObjectActionStartPortForward, "", "v1", "Pod")
+	request.PortForward = &options
+	return request
+}
+
+func actionRequestWithDebugContainer(options ObjectActionDebugContainerOptions) ObjectActionRequest {
+	request := namespacedActionRequest(ObjectActionCreateDebugContainer, "", "v1", "Pod")
+	request.DebugContainer = &options
+	return request
+}
+
+func actionRequestWithRevision(revision int64) ObjectActionRequest {
+	request := namespacedActionRequest(ObjectActionRollback, "apps", "v1", "Deployment")
+	request.Revision = &revision
+	return request
+}
+
 func TestGeneratedObjectActionContractIsCurrent(t *testing.T) {
 	want, err := genobjectactions.Render()
 	if err != nil {

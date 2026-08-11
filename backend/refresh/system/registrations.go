@@ -80,61 +80,78 @@ func runDomainRegistrations(ctx context.Context, gate *permissionGate, checker *
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	access := domainpermissions.NewRuntimeAccess()
+	runner := domainRegistrationRunner{
+		gate:    gate,
+		checker: checker,
+		access:  domainpermissions.NewRuntimeAccess(),
+	}
 	for _, registration := range registrations {
-		if registration.skipIf != nil && registration.skipIf() {
-			continue
-		}
-		if registration.require != nil {
-			if err := registration.require(); err != nil {
-				return err
-			}
-		}
-
-		if checker != nil && !registration.skipRuntimePolicy {
-			decision, err := access.Check(ctx, registration.name, checker)
-			if err == nil && !decision.Allowed {
-				if regErr := snapshot.RegisterPermissionDeniedDomain(gate.registry, registration.name, decision.DeniedReason); regErr != nil {
-					return regErr
-				}
-				continue
-			}
-		}
-
-		hasList := registration.list != nil
-		hasListWatch := registration.listWatch != nil
-		hasDirect := registration.direct != nil
-		kindCount := 0
-		if hasList {
-			kindCount++
-		}
-		if hasListWatch {
-			kindCount++
-		}
-		if hasDirect {
-			kindCount++
-		}
-		if kindCount != 1 {
-			return fmt.Errorf("domain registration %q must provide exactly one registration kind", registration.name)
-		}
-
-		if hasList {
-			if err := gate.registerListDomain(*registration.list); err != nil {
-				return err
-			}
-			continue
-		}
-		if hasListWatch {
-			if err := gate.registerListWatchDomain(*registration.listWatch); err != nil {
-				return err
-			}
-			continue
-		}
-		if err := registration.direct(); err != nil {
+		if err := runner.run(ctx, registration); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+type domainRegistrationRunner struct {
+	gate    *permissionGate
+	checker *permissions.Checker
+	access  domainpermissions.RuntimeAccess
+}
+
+func (r domainRegistrationRunner) run(ctx context.Context, registration domainRegistration) error {
+	if registration.skipIf != nil && registration.skipIf() {
+		return nil
+	}
+	if registration.require != nil {
+		if err := registration.require(); err != nil {
+			return err
+		}
+	}
+	denied, err := r.registerPermissionDenied(ctx, registration)
+	if err != nil || denied {
+		return err
+	}
+	return r.register(registration)
+}
+
+func (r domainRegistrationRunner) registerPermissionDenied(ctx context.Context, registration domainRegistration) (bool, error) {
+	if r.checker == nil || registration.skipRuntimePolicy {
+		return false, nil
+	}
+	decision, err := r.access.Check(ctx, registration.name, r.checker)
+	if err != nil || decision.Allowed {
+		return false, nil
+	}
+	err = snapshot.RegisterPermissionDeniedDomain(r.gate.registry, registration.name, decision.DeniedReason)
+	return true, err
+}
+
+func (r domainRegistrationRunner) register(registration domainRegistration) error {
+	if registrationKindCount(registration) != 1 {
+		return fmt.Errorf("domain registration %q must provide exactly one registration kind", registration.name)
+	}
+	if registration.list != nil {
+		return r.gate.registerListDomain(*registration.list)
+	}
+	if registration.listWatch != nil {
+		return r.gate.registerListWatchDomain(*registration.listWatch)
+	}
+	return registration.direct()
+}
+
+func registrationKindCount(registration domainRegistration) int {
+	count := 0
+	if registration.list != nil {
+		count++
+	}
+	if registration.listWatch != nil {
+		count++
+	}
+	if registration.direct != nil {
+		count++
+	}
+	return count
 }
 
 // preflightRequests collects permission requests used to prime permission caches.
@@ -350,35 +367,7 @@ func domainRegistrations(deps registrationDeps) []domainRegistration {
 			deniedReason: "cluster overview requires nodes, pods, or namespaces",
 		}),
 
-		accessListRegistration(runtimeAccess, listDomainConfig{
-			name: "cluster-attention",
-			register: func(allowed domainpermissions.AllowedResources) error {
-				index, err := snapshot.RegisterClusterAttentionDomain(
-					deps.registry,
-					deps.informerFactory.SharedInformerFactory(),
-					snapshot.ClusterAttentionPermissions{
-						IncludePods:         allowed.Allows("", "pods"),
-						IncludeDeployments:  allowed.Allows("apps", "deployments"),
-						IncludeStatefulSets: allowed.Allows("apps", "statefulsets"),
-						IncludeDaemonSets:   allowed.Allows("apps", "daemonsets"),
-						IncludeJobs:         allowed.Allows("batch", "jobs"),
-						IncludeCronJobs:     allowed.Allows("batch", "cronjobs"),
-						IncludeNodes:        allowed.Allows("", "nodes"),
-						IncludeEvents:       allowed.Allows("", "events"),
-					},
-					snapshot.ClusterMeta{ClusterID: deps.cfg.ClusterID, ClusterName: deps.cfg.ClusterName},
-					deps.ingestManager,
-					snapshot.ClusterAttentionOptions{
-						IgnoreRules:         deps.cfg.AttentionIgnoreRules,
-						IgnoredObjectPruner: deps.cfg.AttentionIgnoredObjectPruner,
-					},
-				)
-				if err == nil && deps.noteAttentionIndex != nil {
-					deps.noteAttentionIndex(index)
-				}
-				return err
-			},
-		}),
+		clusterAttentionRegistration(deps, runtimeAccess),
 
 		withSkipUnless(directRegistration("catalog", func() error {
 			return snapshot.RegisterCatalogDomain(deps.registry, catalogConfig)
@@ -639,19 +628,53 @@ func domainRegistrations(deps registrationDeps) []domainRegistration {
 		directRegistration("object-map", func() error {
 			return snapshot.RegisterObjectMapDomain(
 				deps.registry,
-				deps.informerFactory.SharedInformerFactory(),
-				deps.informerFactory,
-				deps.informerFactory.GatewayInformerFactory(),
-				deps.cfg.GatewayAPIPresence,
-				deps.cfg.ObjectCatalogService,
-				deps.ingestManager,
-				deps.cfg.AllowedNamespaces,
+				snapshot.ObjectMapDomainConfig{
+					Shared: deps.informerFactory.SharedInformerFactory(), Permissions: deps.informerFactory,
+					GatewayShared: deps.informerFactory.GatewayInformerFactory(), GatewayPresence: deps.cfg.GatewayAPIPresence,
+					CatalogService: deps.cfg.ObjectCatalogService, IngestSource: deps.ingestManager,
+					AllowedNamespaces: deps.cfg.AllowedNamespaces,
+				},
 			)
 		}),
 		directRegistration("object-maintenance", func() error {
 			return snapshot.RegisterNodeMaintenanceDomain(deps.registry)
 		}),
 	}
+}
+
+func clusterAttentionRegistration(deps registrationDeps, access domainpermissions.RuntimeAccess) domainRegistration {
+	registration := accessListRegistration(access, listDomainConfig{
+		name:           "cluster-attention",
+		alwaysRegister: true,
+		register: func(allowed domainpermissions.AllowedResources) error {
+			index, err := snapshot.RegisterClusterAttentionDomain(
+				deps.registry,
+				deps.informerFactory.SharedInformerFactory(),
+				snapshot.ClusterAttentionPermissions{
+					IncludePods:         allowed.Allows("", "pods"),
+					IncludeDeployments:  allowed.Allows("apps", "deployments"),
+					IncludeStatefulSets: allowed.Allows("apps", "statefulsets"),
+					IncludeDaemonSets:   allowed.Allows("apps", "daemonsets"),
+					IncludeJobs:         allowed.Allows("batch", "jobs"),
+					IncludeCronJobs:     allowed.Allows("batch", "cronjobs"),
+					IncludeNodes:        allowed.Allows("", "nodes"),
+					IncludeEvents:       allowed.Allows("", "events"),
+				},
+				snapshot.ClusterMeta{ClusterID: deps.cfg.ClusterID, ClusterName: deps.cfg.ClusterName},
+				deps.ingestManager,
+				snapshot.ClusterAttentionOptions{
+					IgnoreRules:         deps.cfg.AttentionIgnoreRules,
+					IgnoredObjectPruner: deps.cfg.AttentionIgnoredObjectPruner,
+					CatalogService:      deps.cfg.ObjectCatalogService,
+				},
+			)
+			if err == nil && deps.noteAttentionIndex != nil {
+				deps.noteAttentionIndex(index)
+			}
+			return err
+		},
+	})
+	return registration
 }
 
 func directRegistration(name string, register func() error) domainRegistration {

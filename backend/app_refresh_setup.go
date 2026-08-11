@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/luxury-yacht/app/backend/internal/config"
+	"github.com/luxury-yacht/app/backend/internal/lifecycle"
 	"github.com/luxury-yacht/app/backend/internal/logsources"
 	"github.com/luxury-yacht/app/backend/internal/parallel"
 	"github.com/luxury-yacht/app/backend/objectcatalog"
@@ -27,18 +28,11 @@ func (a *App) resolveMetricsInterval() time.Duration {
 }
 
 func (a *App) setupRefreshSubsystem() error {
-	if a.Ctx == nil {
+	if !a.runtimeAvailable() {
 		return errors.New("application context not initialised")
 	}
 
-	ctx, cancel := context.WithCancel(a.Ctx)
-	a.refreshCtx = ctx
-	a.refreshCancel = cancel
-
-	// Start the per-cluster health heartbeat loop. It operates directly on
-	// a.clusterClients, so it must run even if all subsystems fail auth.
-	// Teardown is automatic via a.refreshCancel().
-	go a.startHeartbeatLoop(a.refreshCtx)
+	ctx := a.beginRefreshRuntimeContext()
 
 	selections, err := a.selectedKubeconfigSelections()
 	if err != nil {
@@ -79,6 +73,85 @@ func (a *App) setupRefreshSubsystem() error {
 	go a.startGovernorPressureLoop(ctx)
 
 	return nil
+}
+
+// beginRefreshRuntimeContext explicitly opens the process refresh lifetime for a
+// new selection setup. It is the only path that may reopen a deliberately stopped
+// runtime after global teardown.
+func (a *App) beginRefreshRuntimeContext() context.Context {
+	return a.refreshRuntimeContext(true)
+}
+
+// ensureRefreshRuntimeContext establishes the process-level lifetime shared by
+// refresh managers and the cluster heartbeat when it has never started. The first
+// selected cluster can fail auth before normal setup runs; its later auth recovery
+// may initialise the runtime, but a late recovery/governor callback may not reopen
+// one that global teardown deliberately stopped.
+func (a *App) ensureRefreshRuntimeContext() context.Context {
+	return a.refreshRuntimeContext(false)
+}
+
+func (a *App) refreshRuntimeContext(reopen bool) context.Context {
+	if a == nil || !a.runtimeAvailable() {
+		return nil
+	}
+	a.refreshRuntimeMu.Lock()
+	if reopen {
+		a.refreshRuntimeStopped = false
+	} else if a.refreshRuntimeStopped {
+		a.refreshRuntimeMu.Unlock()
+		return nil
+	}
+	if a.refreshDone != nil && !doneClosed(a.refreshDone) {
+		ctx := lifecycle.Context(a.refreshDone)
+		a.refreshRuntimeMu.Unlock()
+		return ctx
+	}
+	ctx, cancel := context.WithCancel(a.CtxOrBackground())
+	a.refreshDone = ctx.Done()
+	a.refreshCancel = cancel
+	a.refreshRuntimeMu.Unlock()
+
+	// The heartbeat reads a.clusterClients directly and must exist even when the
+	// runtime is first established by auth recovery rather than normal setup.
+	go a.startHeartbeatLoop(ctx)
+	return ctx
+}
+
+func (a *App) currentRefreshRuntimeContext() context.Context {
+	if a == nil {
+		return nil
+	}
+	a.refreshRuntimeMu.Lock()
+	defer a.refreshRuntimeMu.Unlock()
+	if a.refreshRuntimeStopped || a.refreshDone == nil || doneClosed(a.refreshDone) {
+		return nil
+	}
+	return lifecycle.Context(a.refreshDone)
+}
+
+func (a *App) stopRefreshRuntimeContext() {
+	if a == nil {
+		return
+	}
+	a.refreshRuntimeMu.Lock()
+	cancel := a.refreshCancel
+	a.refreshCancel = nil
+	a.refreshDone = nil
+	a.refreshRuntimeStopped = true
+	a.refreshRuntimeMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func doneClosed(done <-chan struct{}) bool {
+	select {
+	case <-done:
+		return true
+	default:
+		return false
+	}
 }
 
 // subsystemBuildOutcome is one selection's build result: id is always set once the
@@ -534,7 +607,7 @@ func (a *App) wireNamespacesReadinessObserver(clusterID string, subsystem *syste
 	if a == nil || subsystem == nil || subsystem.NamespacesDoorbell == nil || clusterID == "" {
 		return
 	}
-	subsystem.NamespacesDoorbell.Set(func(_ string, _ string) {
+	subsystem.NamespacesDoorbell.Set(func(_, _ string) {
 		go a.namespacesReadinessSelfBuild(clusterID)
 	})
 }

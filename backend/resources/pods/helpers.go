@@ -8,6 +8,7 @@
 package pods
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/luxury-yacht/app/backend/internal/logsources"
@@ -25,8 +26,8 @@ type PodDetailInfo = types.PodDetailInfo
 type PodDetailInfoContainer = types.PodDetailInfoContainer
 
 // Helper to fetch a single pod with full details
-func (s *Service) fetchSinglePodFull(namespace, name string) (*types.PodDetailInfo, error) {
-	pod, err := s.deps.KubernetesClient.CoreV1().Pods(namespace).Get(s.deps.Context, name, metav1.GetOptions{})
+func (s *Service) fetchSinglePodFull(ctx context.Context, namespace, name string) (*types.PodDetailInfo, error) {
+	pod, err := s.deps.KubernetesClient.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		err = s.deps.LogResourceRequestFailure(err, fmt.Sprintf("Failed to fetch pod %s/%s from Kubernetes API", namespace, name), "get", Identity, "Pod")
 		return nil, fmt.Errorf("failed to fetch pod from API: %w", err)
@@ -34,15 +35,15 @@ func (s *Service) fetchSinglePodFull(namespace, name string) (*types.PodDetailIn
 	s.deps.Logger.Debug(fmt.Sprintf("Fetched pod %s/%s from Kubernetes API", namespace, name), "Pod")
 
 	// Get metrics and owner info
-	podMetrics := s.getPodMetrics(namespace)
-	rsToDeployment := s.buildReplicaSetToDeploymentMap(namespace)
+	podMetrics := s.getPodMetrics(ctx, namespace)
+	rsToDeployment := s.buildReplicaSetToDeploymentMap(ctx, namespace)
 
 	// Build full details
 	details := s.buildPodDetailInfo(*pod, podMetrics, rsToDeployment)
 
 	// Add node IP
 	if pod.Spec.NodeName != "" {
-		details.NodeIP = s.getNodeIP(pod.Spec.NodeName)
+		details.NodeIP = s.getNodeIP(ctx, pod.Spec.NodeName)
 	}
 
 	// Add containers
@@ -69,10 +70,10 @@ func (s *Service) fetchSinglePodFull(namespace, name string) (*types.PodDetailIn
 // Helper functions for simplified pod handling
 
 // buildReplicaSetToDeploymentMap builds a map of ReplicaSet names to Deployment names.
-func (s *Service) buildReplicaSetToDeploymentMap(namespace string) map[string]string {
+func (s *Service) buildReplicaSetToDeploymentMap(ctx context.Context, namespace string) map[string]string {
 	rsToDeployment := make(map[string]string)
 
-	rsList, err := s.deps.KubernetesClient.AppsV1().ReplicaSets(namespace).List(s.deps.Context, metav1.ListOptions{})
+	rsList, err := s.deps.KubernetesClient.AppsV1().ReplicaSets(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return rsToDeployment
 	}
@@ -113,12 +114,12 @@ func getPodOwnerWithMap(pod corev1.Pod, rsToDeployment map[string]string) (strin
 
 // getNodeIP retrieves the internal IP address for the given node, returning an empty
 // string if the lookup fails.
-func (s *Service) getNodeIP(nodeName string) string {
+func (s *Service) getNodeIP(ctx context.Context, nodeName string) string {
 	if nodeName == "" {
 		return ""
 	}
 
-	node, err := s.deps.KubernetesClient.CoreV1().Nodes().Get(s.deps.Context, nodeName, metav1.GetOptions{})
+	node, err := s.deps.KubernetesClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
 	if err != nil {
 		return ""
 	}
@@ -196,86 +197,83 @@ func (s *Service) buildPodDetailInfo(pod corev1.Pod, podMetrics map[string]*metr
 	}
 }
 
-// calculatePodResources aggregates CPU and memory requests/limits for all containers
+type podResourceTotals struct {
+	cpuRequest    resource.Quantity
+	cpuLimit      resource.Quantity
+	memoryRequest resource.Quantity
+	memoryLimit   resource.Quantity
+}
+
+func newPodResourceTotals() podResourceTotals {
+	return podResourceTotals{
+		cpuRequest:    *resource.NewQuantity(0, resource.DecimalSI),
+		cpuLimit:      *resource.NewQuantity(0, resource.DecimalSI),
+		memoryRequest: *resource.NewQuantity(0, resource.BinarySI),
+		memoryLimit:   *resource.NewQuantity(0, resource.BinarySI),
+	}
+}
+
+func (totals *podResourceTotals) add(requirements corev1.ResourceRequirements) {
+	addResourceQuantity(&totals.cpuRequest, requirements.Requests, corev1.ResourceCPU)
+	addResourceQuantity(&totals.cpuLimit, requirements.Limits, corev1.ResourceCPU)
+	addResourceQuantity(&totals.memoryRequest, requirements.Requests, corev1.ResourceMemory)
+	addResourceQuantity(&totals.memoryLimit, requirements.Limits, corev1.ResourceMemory)
+}
+
+func addResourceQuantity(total *resource.Quantity, resources corev1.ResourceList, name corev1.ResourceName) {
+	if quantity, ok := resources[name]; ok {
+		total.Add(quantity)
+	}
+}
+
+func (totals *podResourceTotals) maximize(requirements corev1.ResourceRequirements) {
+	maximizeResourceQuantity(&totals.cpuRequest, requirements.Requests, corev1.ResourceCPU)
+	maximizeResourceQuantity(&totals.cpuLimit, requirements.Limits, corev1.ResourceCPU)
+	maximizeResourceQuantity(&totals.memoryRequest, requirements.Requests, corev1.ResourceMemory)
+	maximizeResourceQuantity(&totals.memoryLimit, requirements.Limits, corev1.ResourceMemory)
+}
+
+func maximizeResourceQuantity(current *resource.Quantity, resources corev1.ResourceList, name corev1.ResourceName) {
+	quantity, ok := resources[name]
+	if ok && quantity.Cmp(*current) > 0 {
+		*current = quantity
+	}
+}
+
+func (totals *podResourceTotals) maximizeWith(other podResourceTotals) {
+	maximizeQuantity(&totals.cpuRequest, other.cpuRequest)
+	maximizeQuantity(&totals.cpuLimit, other.cpuLimit)
+	maximizeQuantity(&totals.memoryRequest, other.memoryRequest)
+	maximizeQuantity(&totals.memoryLimit, other.memoryLimit)
+}
+
+func maximizeQuantity(current *resource.Quantity, candidate resource.Quantity) {
+	if candidate.Cmp(*current) > 0 {
+		*current = candidate
+	}
+}
+
+func (totals *podResourceTotals) quantities() (*resource.Quantity, *resource.Quantity, *resource.Quantity, *resource.Quantity) {
+	return &totals.cpuRequest, &totals.cpuLimit, &totals.memoryRequest, &totals.memoryLimit
+}
+
+// calculatePodResources sums regular-container resources, then takes the
+// per-dimension maximum against the sequential init-container requirements.
 func calculatePodResources(pod corev1.Pod) (*resource.Quantity, *resource.Quantity, *resource.Quantity, *resource.Quantity) {
-	cpuReq := resource.NewQuantity(0, resource.DecimalSI)
-	cpuLim := resource.NewQuantity(0, resource.DecimalSI)
-	memReq := resource.NewQuantity(0, resource.BinarySI)
-	memLim := resource.NewQuantity(0, resource.BinarySI)
-
-	// Helper to add resources
-	addResources := func(resources corev1.ResourceRequirements, addToReq, addToLim bool) {
-		if addToReq && resources.Requests != nil {
-			if cpu, ok := resources.Requests[corev1.ResourceCPU]; ok {
-				cpuReq.Add(cpu)
-			}
-			if mem, ok := resources.Requests[corev1.ResourceMemory]; ok {
-				memReq.Add(mem)
-			}
-		}
-		if addToLim && resources.Limits != nil {
-			if cpu, ok := resources.Limits[corev1.ResourceCPU]; ok {
-				cpuLim.Add(cpu)
-			}
-			if mem, ok := resources.Limits[corev1.ResourceMemory]; ok {
-				memLim.Add(mem)
-			}
-		}
-	}
-
-	// Aggregate resources from all containers
+	totals := newPodResourceTotals()
 	for _, container := range pod.Spec.Containers {
-		addResources(container.Resources, true, true)
+		totals.add(container.Resources)
 	}
-
-	// For init containers, take the max (they run sequentially)
-	var maxInitCPUReq, maxInitCPULim, maxInitMemReq, maxInitMemLim resource.Quantity
+	initMaximums := newPodResourceTotals()
 	for _, container := range pod.Spec.InitContainers {
-		if container.Resources.Requests != nil {
-			if cpu, ok := container.Resources.Requests[corev1.ResourceCPU]; ok {
-				if cpu.Cmp(maxInitCPUReq) > 0 {
-					maxInitCPUReq = cpu
-				}
-			}
-			if mem, ok := container.Resources.Requests[corev1.ResourceMemory]; ok {
-				if mem.Cmp(maxInitMemReq) > 0 {
-					maxInitMemReq = mem
-				}
-			}
-		}
-		if container.Resources.Limits != nil {
-			if cpu, ok := container.Resources.Limits[corev1.ResourceCPU]; ok {
-				if cpu.Cmp(maxInitCPULim) > 0 {
-					maxInitCPULim = cpu
-				}
-			}
-			if mem, ok := container.Resources.Limits[corev1.ResourceMemory]; ok {
-				if mem.Cmp(maxInitMemLim) > 0 {
-					maxInitMemLim = mem
-				}
-			}
-		}
+		initMaximums.maximize(container.Resources)
 	}
-
-	// Use max of init containers if greater than sum of containers
-	if maxInitCPUReq.Cmp(*cpuReq) > 0 {
-		cpuReq = &maxInitCPUReq
-	}
-	if maxInitCPULim.Cmp(*cpuLim) > 0 {
-		cpuLim = &maxInitCPULim
-	}
-	if maxInitMemReq.Cmp(*memReq) > 0 {
-		memReq = &maxInitMemReq
-	}
-	if maxInitMemLim.Cmp(*memLim) > 0 {
-		memLim = &maxInitMemLim
-	}
-
-	return cpuReq, cpuLim, memReq, memLim
+	totals.maximizeWith(initMaximums)
+	return totals.quantities()
 }
 
 // getPodMetrics fetches metrics from the metrics-server API
-func (s *Service) getPodMetrics(namespace string) map[string]*metricsv1beta1.PodMetrics {
+func (s *Service) getPodMetrics(ctx context.Context, namespace string) map[string]*metricsv1beta1.PodMetrics {
 	metrics := make(map[string]*metricsv1beta1.PodMetrics)
 
 	client := s.deps.MetricsClient
@@ -296,7 +294,7 @@ func (s *Service) getPodMetrics(namespace string) map[string]*metricsv1beta1.Pod
 	}
 
 	// Fetch pod metrics
-	podMetricsList, err := client.MetricsV1beta1().PodMetricses(namespace).List(s.deps.Context, metav1.ListOptions{})
+	podMetricsList, err := client.MetricsV1beta1().PodMetricses(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		s.deps.Logger.Info(fmt.Sprintf("Failed to fetch pod metrics for namespace %s: %v", namespace, err), logsources.ResourceLoader)
 		return metrics
@@ -315,7 +313,7 @@ func (s *Service) getPodMetrics(namespace string) map[string]*metricsv1beta1.Pod
 }
 
 // getPodMetricsForPods fetches metrics only for specific pods
-func (s *Service) getPodMetricsForPods(namespace string, pods []corev1.Pod) map[string]*metricsv1beta1.PodMetrics {
+func (s *Service) getPodMetricsForPods(ctx context.Context, namespace string, pods []corev1.Pod) map[string]*metricsv1beta1.PodMetrics {
 	metrics := make(map[string]*metricsv1beta1.PodMetrics)
 	if len(pods) == 0 {
 		return metrics
@@ -325,9 +323,9 @@ func (s *Service) getPodMetricsForPods(namespace string, pods []corev1.Pod) map[
 		return metrics
 	}
 	if len(pods) <= 3 {
-		return s.fetchIndividualPodMetrics(client, namespace, pods)
+		return s.fetchIndividualPodMetrics(ctx, client, namespace, pods)
 	}
-	return s.fetchListedPodMetrics(client, namespace, pods)
+	return s.fetchListedPodMetrics(ctx, client, namespace, pods)
 }
 
 func (s *Service) podMetricsClient() metricsclient.Interface {
@@ -347,10 +345,10 @@ func (s *Service) podMetricsClient() metricsclient.Interface {
 	return client
 }
 
-func (s *Service) fetchIndividualPodMetrics(client metricsclient.Interface, namespace string, pods []corev1.Pod) map[string]*metricsv1beta1.PodMetrics {
+func (s *Service) fetchIndividualPodMetrics(ctx context.Context, client metricsclient.Interface, namespace string, pods []corev1.Pod) map[string]*metricsv1beta1.PodMetrics {
 	metrics := make(map[string]*metricsv1beta1.PodMetrics)
 	for _, pod := range pods {
-		podMetric, err := client.MetricsV1beta1().PodMetricses(namespace).Get(s.deps.Context, pod.Name, metav1.GetOptions{})
+		podMetric, err := client.MetricsV1beta1().PodMetricses(namespace).Get(ctx, pod.Name, metav1.GetOptions{})
 		if err != nil {
 			s.deps.Logger.Debug(fmt.Sprintf("No metrics for pod %s: %v", pod.Name, err), logsources.ResourceLoader)
 			continue
@@ -360,9 +358,9 @@ func (s *Service) fetchIndividualPodMetrics(client metricsclient.Interface, name
 	return metrics
 }
 
-func (s *Service) fetchListedPodMetrics(client metricsclient.Interface, namespace string, pods []corev1.Pod) map[string]*metricsv1beta1.PodMetrics {
+func (s *Service) fetchListedPodMetrics(ctx context.Context, client metricsclient.Interface, namespace string, pods []corev1.Pod) map[string]*metricsv1beta1.PodMetrics {
 	metrics := make(map[string]*metricsv1beta1.PodMetrics)
-	podMetricsList, err := client.MetricsV1beta1().PodMetricses(namespace).List(s.deps.Context, metav1.ListOptions{})
+	podMetricsList, err := client.MetricsV1beta1().PodMetricses(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		s.deps.Logger.Info(fmt.Sprintf("Failed to fetch pod metrics for namespace %s: %v", namespace, err), logsources.ResourceLoader)
 		return metrics
@@ -516,101 +514,117 @@ func buildContainerDetails(container corev1.Container, statuses []corev1.Contain
 		Command:         container.Command,
 		Args:            container.Args,
 	}
-
-	// Get resources
-	if container.Resources.Requests != nil {
-		if cpu, ok := container.Resources.Requests[corev1.ResourceCPU]; ok {
-			detail.CPURequest = common.FormatCPU(&cpu)
-		}
-		if mem, ok := container.Resources.Requests[corev1.ResourceMemory]; ok {
-			detail.MemRequest = common.FormatMemory(&mem)
-		}
-	}
-	if container.Resources.Limits != nil {
-		if cpu, ok := container.Resources.Limits[corev1.ResourceCPU]; ok {
-			detail.CPULimit = common.FormatCPU(&cpu)
-		}
-		if mem, ok := container.Resources.Limits[corev1.ResourceMemory]; ok {
-			detail.MemLimit = common.FormatMemory(&mem)
-		}
-	}
-
-	// Get ports
-	if len(container.Ports) > 0 {
-		detail.Ports = make([]string, 0, len(container.Ports))
-		for _, port := range container.Ports {
-			portStr := fmt.Sprintf("%d", port.ContainerPort)
-			if port.Name != "" {
-				portStr = fmt.Sprintf("%s (%s)", portStr, port.Name)
-			}
-			if port.Protocol != "" && port.Protocol != corev1.ProtocolTCP {
-				portStr += fmt.Sprintf("/%s", port.Protocol)
-			}
-			detail.Ports = append(detail.Ports, portStr)
-		}
-	}
-
-	// Get volume mounts
-	if len(container.VolumeMounts) > 0 {
-		detail.VolumeMounts = make([]string, 0, len(container.VolumeMounts))
-		for _, mount := range container.VolumeMounts {
-			mountStr := fmt.Sprintf("%s -> %s", mount.Name, mount.MountPath)
-			if mount.ReadOnly {
-				mountStr += " (ro)"
-			}
-			if mount.SubPath != "" {
-				mountStr += fmt.Sprintf(" [%s]", mount.SubPath)
-			}
-			detail.VolumeMounts = append(detail.VolumeMounts, mountStr)
-		}
-	}
-
-	// Get environment variables (simplified - just name=value or name from source)
-	if len(container.Env) > 0 {
-		detail.Environment = make(map[string]string)
-		for _, env := range container.Env {
-			if env.Value != "" {
-				detail.Environment[env.Name] = env.Value
-			} else if env.ValueFrom != nil {
-				if env.ValueFrom.ConfigMapKeyRef != nil {
-					detail.Environment[env.Name] = fmt.Sprintf("configmap:%s/%s",
-						env.ValueFrom.ConfigMapKeyRef.Name,
-						env.ValueFrom.ConfigMapKeyRef.Key)
-				} else if env.ValueFrom.SecretKeyRef != nil {
-					detail.Environment[env.Name] = fmt.Sprintf("secret:%s/%s",
-						env.ValueFrom.SecretKeyRef.Name,
-						env.ValueFrom.SecretKeyRef.Key)
-				} else if env.ValueFrom.FieldRef != nil {
-					detail.Environment[env.Name] = fmt.Sprintf("field:%s", env.ValueFrom.FieldRef.FieldPath)
-				}
-			}
-		}
-	}
-
-	// Get container status if available
-	if index < len(statuses) {
-		status := statuses[index]
-		detail.Ready = status.Ready
-		detail.RestartCount = status.RestartCount
-
-		// Determine container state
-		if status.State.Running != nil {
-			detail.State = "running"
-			if !status.State.Running.StartedAt.IsZero() {
-				detail.StartedAt = common.FormatAge(status.State.Running.StartedAt.Time)
-			}
-		} else if status.State.Waiting != nil {
-			detail.State = "waiting"
-			detail.StateReason = status.State.Waiting.Reason
-			detail.StateMessage = status.State.Waiting.Message
-		} else if status.State.Terminated != nil {
-			detail.State = "terminated"
-			detail.StateReason = status.State.Terminated.Reason
-			detail.StateMessage = status.State.Terminated.Message
-		}
-	}
-
+	applyContainerResourceDetails(&detail, container.Resources)
+	detail.Ports = formatContainerPorts(container.Ports)
+	detail.VolumeMounts = formatContainerVolumeMounts(container.VolumeMounts)
+	detail.Environment = formatContainerEnvironment(container.Env)
+	applyContainerStatus(&detail, statuses, index)
 	return detail
+}
+
+func applyContainerResourceDetails(detail *types.PodDetailInfoContainer, requirements corev1.ResourceRequirements) {
+	if cpu, ok := requirements.Requests[corev1.ResourceCPU]; ok {
+		detail.CPURequest = common.FormatCPU(&cpu)
+	}
+	if cpu, ok := requirements.Limits[corev1.ResourceCPU]; ok {
+		detail.CPULimit = common.FormatCPU(&cpu)
+	}
+	if memory, ok := requirements.Requests[corev1.ResourceMemory]; ok {
+		detail.MemRequest = common.FormatMemory(&memory)
+	}
+	if memory, ok := requirements.Limits[corev1.ResourceMemory]; ok {
+		detail.MemLimit = common.FormatMemory(&memory)
+	}
+}
+
+func formatContainerPorts(ports []corev1.ContainerPort) []string {
+	var result []string
+	for _, port := range ports {
+		formatted := fmt.Sprintf("%d", port.ContainerPort)
+		if port.Name != "" {
+			formatted = fmt.Sprintf("%s (%s)", formatted, port.Name)
+		}
+		if port.Protocol != "" && port.Protocol != corev1.ProtocolTCP {
+			formatted += fmt.Sprintf("/%s", port.Protocol)
+		}
+		result = append(result, formatted)
+	}
+	return result
+}
+
+func formatContainerVolumeMounts(mounts []corev1.VolumeMount) []string {
+	var result []string
+	for _, mount := range mounts {
+		formatted := fmt.Sprintf("%s -> %s", mount.Name, mount.MountPath)
+		if mount.ReadOnly {
+			formatted += " (ro)"
+		}
+		if mount.SubPath != "" {
+			formatted += fmt.Sprintf(" [%s]", mount.SubPath)
+		}
+		result = append(result, formatted)
+	}
+	return result
+}
+
+func formatContainerEnvironment(variables []corev1.EnvVar) map[string]string {
+	if len(variables) == 0 {
+		return nil
+	}
+	result := make(map[string]string)
+	for _, variable := range variables {
+		if value, ok := containerEnvironmentValue(variable); ok {
+			result[variable.Name] = value
+		}
+	}
+	return result
+}
+
+func containerEnvironmentValue(variable corev1.EnvVar) (string, bool) {
+	if variable.Value != "" {
+		return variable.Value, true
+	}
+	if variable.ValueFrom == nil {
+		return "", false
+	}
+	switch {
+	case variable.ValueFrom.ConfigMapKeyRef != nil:
+		return fmt.Sprintf("configmap:%s/%s", variable.ValueFrom.ConfigMapKeyRef.Name, variable.ValueFrom.ConfigMapKeyRef.Key), true
+	case variable.ValueFrom.SecretKeyRef != nil:
+		return fmt.Sprintf("secret:%s/%s", variable.ValueFrom.SecretKeyRef.Name, variable.ValueFrom.SecretKeyRef.Key), true
+	case variable.ValueFrom.FieldRef != nil:
+		return fmt.Sprintf("field:%s", variable.ValueFrom.FieldRef.FieldPath), true
+	default:
+		return "", false
+	}
+}
+
+func applyContainerStatus(detail *types.PodDetailInfoContainer, statuses []corev1.ContainerStatus, index int) {
+	if index >= len(statuses) {
+		return
+	}
+	status := statuses[index]
+	detail.Ready = status.Ready
+	detail.RestartCount = status.RestartCount
+	applyContainerState(detail, status.State)
+}
+
+func applyContainerState(detail *types.PodDetailInfoContainer, state corev1.ContainerState) {
+	switch {
+	case state.Running != nil:
+		detail.State = "running"
+		if !state.Running.StartedAt.IsZero() {
+			detail.StartedAt = common.FormatAge(state.Running.StartedAt.Time)
+		}
+	case state.Waiting != nil:
+		detail.State = "waiting"
+		detail.StateReason = state.Waiting.Reason
+		detail.StateMessage = state.Waiting.Message
+	case state.Terminated != nil:
+		detail.State = "terminated"
+		detail.StateReason = state.Terminated.Reason
+		detail.StateMessage = state.Terminated.Message
+	}
 }
 
 // CalculatePodResources aggregates CPU and memory metrics for a pod.
@@ -634,13 +648,13 @@ func PodRestartCount(pod corev1.Pod) int32 {
 }
 
 // GetPodMetricsForPods exposes selective pod metrics fetching for other packages.
-func (s *Service) GetPodMetricsForPods(namespace string, pods []corev1.Pod) map[string]*metricsv1beta1.PodMetrics {
-	return s.getPodMetricsForPods(namespace, pods)
+func (s *Service) GetPodMetricsForPods(ctx context.Context, namespace string, pods []corev1.Pod) map[string]*metricsv1beta1.PodMetrics {
+	return s.getPodMetricsForPods(ctx, namespace, pods)
 }
 
 // BuildReplicaSetToDeploymentMap exposes replica set ownership lookups.
-func (s *Service) BuildReplicaSetToDeploymentMap(namespace string) map[string]string {
-	return s.buildReplicaSetToDeploymentMap(namespace)
+func (s *Service) BuildReplicaSetToDeploymentMap(ctx context.Context, namespace string) map[string]string {
+	return s.buildReplicaSetToDeploymentMap(ctx, namespace)
 }
 
 // SummarizePod converts a pod object and optional metrics into a PodSimpleInfo for list views.

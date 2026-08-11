@@ -40,7 +40,7 @@ type resolvedObjectDetailContext struct {
 
 // objectDetailFetcher maps a kind to dependency-based detail retrievals.
 type objectDetailFetcher struct {
-	withDeps func(deps common.Dependencies, namespace, name string) (interface{}, error)
+	withDeps func(ctx context.Context, deps common.Dependencies, namespace, name string) (interface{}, error)
 }
 
 // objectDetailFetchers is generated from the genappbindings binding descriptor
@@ -161,7 +161,7 @@ func (p *objectDetailProvider) FetchObjectDetails(ctx context.Context, gvk schem
 			p.app.responseCacheDelete(resolved.selectionKey, cacheKey)
 		}
 	}
-	detail, err := fetcher.withDeps(resolved.deps, namespace, name)
+	detail, err := fetcher.withDeps(ctx, resolved.deps, namespace, name)
 	if err == nil && p != nil && p.app != nil {
 		p.app.responseCacheStore(resolved.selectionKey, cacheKey, detail)
 	}
@@ -169,13 +169,12 @@ func (p *objectDetailProvider) FetchObjectDetails(ctx context.Context, gvk schem
 }
 
 // FetchObjectHeaderMetadata returns the object panel's kind-agnostic header
-// fields: the creation timestamp (RFC3339 UTC, drives Age) and the relative
-// "last modified" string (the most recent spec/metadata managedFields time,
-// formatted like Age). Both derive from a single live-object read via the
+// fields: creation time, last-modified time, resource version, and deletion
+// metadata. They derive from a single live-object read via the
 // shared strict GVK resolver (which retains managedFields), so Age works for
 // every kind — including custom resources that have no typed detail panel.
-// Either field is "" when unavailable. Results are cached alongside details so
-// an open Details tab does not issue a live GET per poll.
+// Optional fields are omitted when unavailable. Results are cached alongside
+// details so an open Details tab does not issue a live GET per poll.
 func (p *objectDetailProvider) FetchObjectHeaderMetadata(ctx context.Context, gvk schema.GroupVersionKind, namespace, name string) (snapshot.ObjectHeaderMetadata, error) {
 	resolved := p.resolveDetailContext(ctx)
 	if !resolved.scoped {
@@ -203,6 +202,12 @@ func (p *objectDetailProvider) FetchObjectHeaderMetadata(ctx context.Context, gv
 	}
 	if created := obj.GetCreationTimestamp(); !created.IsZero() {
 		meta.CreationTimestamp = created.UTC().Format(time.RFC3339)
+	}
+	if deleted := obj.GetDeletionTimestamp(); deleted != nil {
+		meta.Deletion = &snapshot.ObjectDeletionMetadata{
+			DeletionTimestamp: deleted.UTC().Format(time.RFC3339),
+			Finalizers:        append([]string(nil), obj.GetFinalizers()...),
+		}
 	}
 	if p != nil && p.app != nil {
 		p.app.responseCacheStore(resolved.selectionKey, cacheKey, meta)
@@ -241,14 +246,14 @@ func objectHeaderMetadataCacheKey(gvk schema.GroupVersionKind, namespace, name s
 // resolveDetailContext ensures object detail fetches use the cluster scoped to the snapshot request.
 func (p *objectDetailProvider) resolveDetailContext(ctx context.Context) resolvedObjectDetailContext {
 	if p == nil || p.app == nil {
-		return resolvedObjectDetailContext{deps: common.Dependencies{Context: ctx}}
+		return resolvedObjectDetailContext{}
 	}
 
 	meta := snapshot.ClusterMetaFromContext(ctx)
 	if meta.ClusterID != "" {
 		if deps, ok := p.app.resourceDependenciesForClusterID(meta.ClusterID); ok {
 			return resolvedObjectDetailContext{
-				deps:         deps.CloneWithContext(ctx),
+				deps:         deps.WithOperationContext(ctx),
 				selectionKey: meta.ClusterID,
 				scoped:       true,
 			}
@@ -256,7 +261,6 @@ func (p *objectDetailProvider) resolveDetailContext(ctx context.Context) resolve
 	}
 
 	return resolvedObjectDetailContext{
-		deps:         common.Dependencies{Context: ctx},
 		selectionKey: "",
 		scoped:       false,
 	}
@@ -313,7 +317,7 @@ func (p *objectDetailProvider) FetchHelmManifest(ctx context.Context, namespace,
 	if p != nil && p.app != nil {
 		p.app.responseCacheStore(resolved.selectionKey, manifestCacheKey, manifest)
 	}
-	return manifest, helmRevisionOrZero(p, resolved, service, namespace, name), nil
+	return manifest, helmRevisionOrZero(ctx, p, resolved, service, namespace, name), nil
 }
 
 func (p *objectDetailProvider) ResourceResolver(ctx context.Context) common.ResourceResolver {
@@ -343,7 +347,7 @@ func (p *objectDetailProvider) FetchHelmValues(ctx context.Context, namespace, n
 	if p != nil && p.app != nil {
 		p.app.responseCacheStore(resolved.selectionKey, valuesCacheKey, values)
 	}
-	return values, helmRevisionOrZero(p, resolved, service, namespace, name), nil
+	return values, helmRevisionOrZero(ctx, p, resolved, service, namespace, name), nil
 }
 
 func cachedHelmDetail[T any](
@@ -375,16 +379,17 @@ func cachedHelmDetail[T any](
 		p.app.responseCacheDelete(resolved.selectionKey, cacheKey)
 		return zero, 0, false
 	}
-	return detail, helmRevisionOrZero(p, resolved, service, namespace, name), true
+	return detail, helmRevisionOrZero(ctx, p, resolved, service, namespace, name), true
 }
 
 func helmRevisionOrZero(
+	ctx context.Context,
 	p *objectDetailProvider,
 	resolved resolvedObjectDetailContext,
 	service *helm.Service,
 	namespace, name string,
 ) int {
-	revision, err := p.helmReleaseRevisionWithCache(resolved, service, namespace, name)
+	revision, err := p.helmReleaseRevisionWithCache(ctx, resolved, service, namespace, name)
 	if err != nil {
 		return 0
 	}
@@ -393,16 +398,17 @@ func helmRevisionOrZero(
 
 // helmReleaseRevisionWithCache reuses cached Helm release details when possible.
 func (p *objectDetailProvider) helmReleaseRevisionWithCache(
+	ctx context.Context,
 	resolved resolvedObjectDetailContext,
 	service *helm.Service,
 	namespace, name string,
 ) (int, error) {
 	detailsCacheKey := objectDetailCacheKey("HelmRelease", namespace, name)
-	if revision, ok := p.cachedHelmReleaseRevision(resolved, detailsCacheKey, namespace, name); ok {
+	if revision, ok := p.cachedHelmReleaseRevision(ctx, resolved, detailsCacheKey, namespace, name); ok {
 		return revision, nil
 	}
 
-	details, err := service.ReleaseDetails(namespace, name)
+	details, err := service.ReleaseDetails(ctx, namespace, name)
 	if err != nil || details == nil {
 		return 0, err
 	}
@@ -413,6 +419,7 @@ func (p *objectDetailProvider) helmReleaseRevisionWithCache(
 }
 
 func (p *objectDetailProvider) cachedHelmReleaseRevision(
+	ctx context.Context,
 	resolved resolvedObjectDetailContext,
 	detailsCacheKey, namespace, name string,
 ) (int, bool) {
@@ -425,7 +432,7 @@ func (p *objectDetailProvider) cachedHelmReleaseRevision(
 	}
 	details, ok := cached.(*HelmReleaseDetails)
 	if ok && details != nil && p.app.canServeCachedResponse(
-		resolved.deps.Context,
+		ctx,
 		resolved.deps,
 		resolved.selectionKey,
 		schema.GroupVersionKind{Group: helmReleaseAPIGroup, Version: "v3", Kind: "HelmRelease"},

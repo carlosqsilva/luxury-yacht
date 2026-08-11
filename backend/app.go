@@ -24,13 +24,17 @@ var defaultLoopbackListener = func() (net.Listener, error) {
 
 // App provides the backend façade exposed to Wails.
 type App struct {
-	Ctx                  context.Context
-	selectedKubeconfigs  []string
-	availableKubeconfigs []KubeconfigInfo
-	windowSettings       *WindowSettings
-	appSettings          *AppSettings
-	logger               *Logger
-	errorReporter        sentryreporting.Reporter
+	appDone                  <-chan struct{}
+	runtimeReady             bool
+	withRuntimeContext       func(func(context.Context))
+	selectedKubeconfigs      []string
+	availableKubeconfigs     []KubeconfigInfo
+	kubeconfigSearchPaths    []string
+	kubeconfigDiscoveryState KubeconfigDiscoveryState
+	windowSettings           *WindowSettings
+	appSettings              *AppSettings
+	logger                   *Logger
+	errorReporter            sentryreporting.Reporter
 	// responseCache stores short-lived detail/YAML/helm GET responses.
 	responseCache           *responseCache
 	sidebarVisible          bool
@@ -40,11 +44,18 @@ type App struct {
 	refreshManager    *refresh.Manager
 	refreshHTTPServer *http.Server
 	refreshListener   net.Listener
-	refreshCtx        context.Context
-	refreshCancel     context.CancelFunc
-	refreshBaseURL    string
-	refreshServerDone chan struct{}
-	telemetryRecorder *telemetry.Recorder
+	// refreshRuntimeMu owns refreshDone and refreshCancel. Selection mutations and
+	// governor reconciliation use different lifecycle locks, so neither is a
+	// substitute for this process-runtime boundary.
+	refreshRuntimeMu sync.Mutex
+	refreshDone      <-chan struct{}
+	refreshCancel    context.CancelFunc
+	// refreshRuntimeStopped distinguishes a deliberate global teardown from the
+	// never-started state that auth recovery is allowed to initialise.
+	refreshRuntimeStopped bool
+	refreshBaseURL        string
+	refreshServerDone     chan struct{}
+	telemetryRecorder     *telemetry.Recorder
 	// containerLogsTargetLimiter is lazily built by sharedContainerLogsTargetLimiter;
 	// its mutex guards the check-then-set because subsystem builds run concurrently
 	// per cluster. Access the limiter only through the accessor. The mutex is a LEAF
@@ -95,7 +106,7 @@ type App struct {
 	// persistenceMu guards persistence.json read/write operations.
 	persistenceMu sync.Mutex
 
-	// kubeconfigsMu guards availableKubeconfigs and selectedKubeconfigs reads/writes.
+	// kubeconfigsMu guards kubeconfig discovery data and selected kubeconfig reads/writes.
 	kubeconfigsMu sync.RWMutex
 	// selectionMutationMu serializes coordinated cluster runtime mutations.
 	// This preserves sequential behavior while allowing kubeconfigChangeMu to stay
@@ -224,10 +235,10 @@ func NewApp(reporters ...sentryreporting.Reporter) *App {
 }
 
 func (a *App) emitEvent(name string, args ...interface{}) {
-	if a == nil || a.eventEmitter == nil || a.Ctx == nil {
+	if a == nil || a.eventEmitter == nil || !a.runtimeAvailable() {
 		return
 	}
-	a.eventEmitter(a.Ctx, name, args...)
+	a.eventEmitter(a.CtxOrBackground(), name, args...)
 }
 
 // initAuthManager is kept for backwards compatibility but is now a no-op.
