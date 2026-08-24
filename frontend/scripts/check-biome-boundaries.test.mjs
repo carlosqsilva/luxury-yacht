@@ -60,12 +60,12 @@ describe('Biome architectural boundary plugins', () => {
     ['no-direct-cluster-workspace', 'GetClusterWorkspaceState();', 'clusterWorkspaceStore'],
     [
       'no-direct-cluster-workspace',
-      'runtime.EventsOn("cluster:lifecycle", handler);',
+      'runtime.onEvent("cluster:lifecycle", handler);',
       'clusterWorkspaceStore',
     ],
     [
       'no-direct-cluster-workspace',
-      'EventsOn("cluster:lifecycle", handler);',
+      'onEvent("cluster:lifecycle", handler);',
       'clusterWorkspaceStore',
     ],
     [
@@ -150,8 +150,8 @@ describe('Biome architectural boundary plugins', () => {
     ['runtime.QueryPermissions([]);', 'dataAccess'],
     ['runtime.GetClusterWorkspaceState();', 'clusterWorkspaceStore'],
     ['GetClusterWorkspaceState();', 'clusterWorkspaceStore'],
-    ['runtime.EventsOn("cluster:auth:failed", handler);', 'clusterWorkspaceStore'],
-    ['EventsOn("cluster:auth:failed", handler);', 'clusterWorkspaceStore'],
+    ['runtime.onEvent("cluster:auth:failed", handler);', 'clusterWorkspaceStore'],
+    ['onEvent("cluster:auth:failed", handler);', 'clusterWorkspaceStore'],
     ['orchestrator.fetchScopedDomain("cluster", {});', 'fetchScopedDomain'],
     ['orchestrator.triggerManualRefreshForContext({});', 'triggerManualRefreshForContext'],
     ['console.error("load failed", error);', 'errorHandler'],
@@ -173,9 +173,9 @@ describe('Biome architectural boundary plugins', () => {
     expect(`${result.stdout}\n${result.stderr}`).toContain('ErrorSurface');
   });
 
-  it('rejects relative imports of the generated backend App binding', () => {
+  it('rejects relative imports of the generated backend DesktopService binding', () => {
     const result = lintWithProjectConfig(
-      'import { GetAppInfo } from "../../wailsjs/go/backend/App"; void GetAppInfo;'
+      'import { GetAppInfo } from "../../bindings/github.com/luxury-yacht/app/backend/desktopservice"; void GetAppInfo;'
     );
 
     expect(result.status).not.toBe(0);
@@ -184,9 +184,9 @@ describe('Biome architectural boundary plugins', () => {
     );
   });
 
-  it('rejects aliased imports of the generated backend App binding outside the facade', () => {
+  it('rejects aliased imports of the generated backend DesktopService binding outside the facade', () => {
     const result = lintWithProjectConfig(
-      'import { GetAppInfo } from "@wailsjs/go/backend/App"; void GetAppInfo;'
+      'import { GetAppInfo } from "@bindings/github.com/luxury-yacht/app/backend/desktopservice"; void GetAppInfo;'
     );
 
     expect(result.status).not.toBe(0);
@@ -195,9 +195,9 @@ describe('Biome architectural boundary plugins', () => {
     );
   });
 
-  it('allows the generated backend App binding inside the approved facade', () => {
+  it('allows the generated backend DesktopService binding inside the approved facade', () => {
     const result = lintWithProjectConfig(
-      'import { GetAppInfo } from "@wailsjs/go/backend/App"; void GetAppInfo;',
+      'import { GetAppInfo } from "@bindings/github.com/luxury-yacht/app/backend/desktopservice"; void GetAppInfo;',
       path.join(process.cwd(), 'src', 'core', 'backend-api')
     );
 

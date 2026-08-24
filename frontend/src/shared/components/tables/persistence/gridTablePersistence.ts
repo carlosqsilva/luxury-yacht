@@ -18,17 +18,27 @@ import type {
   GridTableFilterState,
 } from '@shared/components/tables/GridTable.types';
 import { isSortableColumn } from '@shared/components/tables/GridTable.utils';
+import { reconcileColumnOrder } from '@shared/components/tables/gridTableColumnOrder';
 import {
   hasNonDefaultGridTableFilters,
   normalizeGridTableFilterState,
   normalizeGridTableQueryFacets,
 } from '@shared/components/tables/gridTableFilterState';
 import { requestAppState } from '@/core/app-state-access';
+import {
+  ClearGridTablePersistence,
+  DeleteGridTablePersistence,
+  DeleteGridTablePersistenceEntries,
+  GetGridTablePersistence,
+  SetGridTablePersistence,
+} from '@/core/backend-api';
+import { desktopRuntimeAvailable } from '@/core/desktop-runtime';
 import { reportOperationalError } from '@/utils/errorHandler';
 
 export interface GridTablePersistedState {
-  version: 2;
+  version: 3;
   columnVisibility?: Record<string, boolean>;
+  columnOrder?: string[];
   columnWidths?: Record<string, ColumnWidthState>;
   sort?: { key: string; direction: 'asc' | 'desc' | null };
   filters?: GridTableFilterState;
@@ -36,7 +46,7 @@ export interface GridTablePersistedState {
 }
 
 interface LegacyGridTablePersistedState {
-  version: 1;
+  version: 1 | 2;
   columnVisibility?: Record<string, boolean>;
   columnWidths?: Record<string, ColumnWidthState>;
   sort?: { key: string; direction: 'asc' | 'desc' | null };
@@ -70,6 +80,7 @@ export interface GridTablePruneContext<T> {
 
 export interface GridTableSaveContext<T> extends GridTablePruneContext<T> {
   columnVisibility?: Record<string, boolean> | null;
+  columnOrder?: string[] | null;
   columnWidths?: Record<string, ColumnWidthState> | null;
   sort?: { key: string; direction: 'asc' | 'desc' | null } | null;
   filters?: GridTableFilterState | null;
@@ -78,8 +89,7 @@ export interface GridTableSaveContext<T> extends GridTablePruneContext<T> {
 
 const STORAGE_PREFIX = 'gridtable';
 const STORAGE_KEY_VERSION = 1;
-const STORAGE_VERSION = 2;
-const LOCKED_COLUMNS = new Set(['kind', 'type', 'name', 'age']);
+const STORAGE_VERSION = 3;
 
 const normalizeNamespaceKey = (namespace?: string | null): string | null => {
   if (namespace === null || namespace === undefined) {
@@ -152,13 +162,6 @@ let persistenceCache: GridTablePersistenceMap = {};
 let hydrated = false;
 let hydrationPromise: Promise<void> | null = null;
 
-const getRuntimeApp = () => {
-  if (typeof window === 'undefined') {
-    return undefined;
-  }
-  return window.go?.backend?.App;
-};
-
 const migratePersistedQueryFacets = (
   value: unknown
 ): Record<string, MultiSelectFilterSelection> | undefined => {
@@ -200,7 +203,7 @@ const migratePersistedState = (value: unknown): GridTablePersistedState | null =
     return null;
   }
   const input = value as GridTablePersistedInput;
-  if (input.version !== 1 && input.version !== STORAGE_VERSION) {
+  if (input.version !== 1 && input.version !== 2 && input.version !== STORAGE_VERSION) {
     return null;
   }
   const filters = migratePersistedFilters(input.filters);
@@ -223,15 +226,14 @@ const normalizePersistenceMap = (entries: Record<string, unknown>): GridTablePer
 };
 
 const fetchGridTablePersistence = async (): Promise<GridTablePersistenceMap> => {
-  const runtimeApp = getRuntimeApp();
-  if (!runtimeApp || typeof runtimeApp.GetGridTablePersistence !== 'function') {
+  if (!desktopRuntimeAvailable()) {
     return {};
   }
   try {
     const entries = await requestAppState({
       resource: 'grid-table-persistence',
       adapter: 'persistence-read',
-      read: () => runtimeApp.GetGridTablePersistence(),
+      read: () => GetGridTablePersistence(),
     });
     if (!entries || typeof entries !== 'object') {
       return {};
@@ -258,8 +260,7 @@ export const hydrateGridTablePersistence = async (options?: { force?: boolean })
   }
 
   hydrationPromise = (async () => {
-    const runtimeApp = getRuntimeApp();
-    if (!runtimeApp || typeof runtimeApp.GetGridTablePersistence !== 'function') {
+    if (!desktopRuntimeAvailable()) {
       hydrated = true;
       return;
     }
@@ -299,11 +300,10 @@ export const savePersistedState = (
 
   persistenceCache[key] = state;
 
-  const runtimeApp = getRuntimeApp();
-  if (!runtimeApp || typeof runtimeApp.SetGridTablePersistence !== 'function') {
+  if (!desktopRuntimeAvailable()) {
     return;
   }
-  void runtimeApp.SetGridTablePersistence(key, state).catch((error: unknown) => {
+  void SetGridTablePersistence(key, state).catch((error: unknown) => {
     reportOperationalError(error, { source: 'GridTablePersistence', action: 'persistState' });
   });
 };
@@ -315,11 +315,10 @@ export const clearPersistedState = (key: string | null): void => {
 
   delete persistenceCache[key];
 
-  const runtimeApp = getRuntimeApp();
-  if (!runtimeApp || typeof runtimeApp.DeleteGridTablePersistence !== 'function') {
+  if (!desktopRuntimeAvailable()) {
     return;
   }
-  void runtimeApp.DeleteGridTablePersistence(key).catch((error: unknown) => {
+  void DeleteGridTablePersistence(key).catch((error: unknown) => {
     reportOperationalError(error, { source: 'GridTablePersistence', action: 'deleteState' });
   });
 };
@@ -332,11 +331,10 @@ export const deletePersistedStates = (keys: string[]): void => {
     delete persistenceCache[key];
   });
 
-  const runtimeApp = getRuntimeApp();
-  if (!runtimeApp || typeof runtimeApp.DeleteGridTablePersistenceEntries !== 'function') {
+  if (!desktopRuntimeAvailable()) {
     return;
   }
-  void runtimeApp.DeleteGridTablePersistenceEntries(keys).catch((error: unknown) => {
+  void DeleteGridTablePersistenceEntries(keys).catch((error: unknown) => {
     reportOperationalError(error, { source: 'GridTablePersistence', action: 'deleteStates' });
   });
 };
@@ -345,13 +343,12 @@ export const clearAllPersistedStates = async (): Promise<number> => {
   const removed = Object.keys(persistenceCache).length;
   persistenceCache = {};
 
-  const runtimeApp = getRuntimeApp();
-  if (!runtimeApp || typeof runtimeApp.ClearGridTablePersistence !== 'function') {
+  if (!desktopRuntimeAvailable()) {
     return removed;
   }
 
   try {
-    const cleared = await runtimeApp.ClearGridTablePersistence();
+    const cleared = await ClearGridTablePersistence();
     return typeof cleared === 'number' ? cleared : removed;
   } catch (error) {
     reportOperationalError(error, { source: 'GridTablePersistence', action: 'clearState' });
@@ -444,12 +441,18 @@ const pruneColumnVisibility = <T>(
   }
   const pruned: Record<string, boolean> = {};
   for (const [key, value] of Object.entries(visibility)) {
-    if (!LOCKED_COLUMNS.has(key) && columnMap.has(key) && typeof value === 'boolean') {
+    const column = columnMap.get(key);
+    if (column && column.hideable !== false && typeof value === 'boolean') {
       pruned[key] = value;
     }
   }
   return Object.keys(pruned).length > 0 ? pruned : undefined;
 };
+
+const pruneColumnOrder = <T>(
+  order: string[] | null | undefined,
+  columns: GridColumnDefinition<T>[]
+): string[] | undefined => (order ? reconcileColumnOrder(columns, order) : undefined);
 
 const isValidColumnWidthState = (value: ColumnWidthState | undefined): value is ColumnWidthState =>
   Boolean(value && typeof value.width === 'number' && Number.isFinite(value.width));
@@ -516,6 +519,7 @@ const prunePageSize = (
 
 interface PersistedStateParts {
   columnVisibility?: Record<string, boolean>;
+  columnOrder?: string[];
   columnWidths?: Record<string, ColumnWidthState>;
   sort?: NonNullable<GridTablePersistedState['sort']>;
   filters?: GridTableFilterState;
@@ -525,6 +529,7 @@ interface PersistedStateParts {
 const hasPersistedStateParts = (parts: PersistedStateParts): boolean =>
   Boolean(
     parts.columnVisibility ||
+      parts.columnOrder ||
       parts.columnWidths ||
       parts.sort ||
       parts.filters ||
@@ -538,6 +543,9 @@ const assemblePersistedState = (parts: PersistedStateParts): GridTablePersistedS
   const state: GridTablePersistedState = { version: STORAGE_VERSION };
   if (parts.columnVisibility) {
     state.columnVisibility = parts.columnVisibility;
+  }
+  if (parts.columnOrder) {
+    state.columnOrder = parts.columnOrder;
   }
   if (parts.columnWidths) {
     state.columnWidths = parts.columnWidths;
@@ -565,6 +573,7 @@ export const prunePersistedState = <T>(
   const columnMap = buildColumnMap(context.columns);
   return assemblePersistedState({
     columnVisibility: pruneColumnVisibility(migrated.columnVisibility, columnMap),
+    columnOrder: pruneColumnOrder(migrated.columnOrder, context.columns),
     columnWidths: pruneColumnWidths(migrated.columnWidths, columnMap),
     sort: pruneSort(migrated.sort, columnMap),
     filters: pruneFilters(migrated.filters, context.filterOptions),
@@ -578,6 +587,7 @@ export const buildPersistedStateForSave = <T>(
   const columnMap = buildColumnMap(context.columns);
   return assemblePersistedState({
     columnVisibility: pruneColumnVisibility(context.columnVisibility, columnMap),
+    columnOrder: pruneColumnOrder(context.columnOrder, context.columns),
     columnWidths: pruneColumnWidths(context.columnWidths, columnMap),
     sort: pruneSort(context.sort, columnMap),
     filters: pruneFilters(context.filters, context.filterOptions),

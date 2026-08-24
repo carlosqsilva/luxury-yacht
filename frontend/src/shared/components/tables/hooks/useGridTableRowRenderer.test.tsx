@@ -44,7 +44,7 @@ const renderHook = <T,>(hook: () => T) => {
 };
 
 describe('useGridTableRowRenderer', () => {
-  const baseColumns: RowRendererOptions['columnRenderModelsWithOffsets'] = [
+  const baseColumns: RowRendererOptions['columnRenderModels'] = [
     {
       column: {
         key: 'name',
@@ -81,12 +81,13 @@ describe('useGridTableRowRenderer', () => {
     const renderers = renderHook(() =>
       useGridTableRowRenderer({
         keyExtractor: (_item, index) => `row-${index}`,
-        getRowClassName: () => 'gridtable-row--selected',
+        getRowClassName: () => 'custom-row',
+        isRowSelected: () => true,
         getRowStyle: () => ({ color: 'red' }),
         handleRowClick,
         handleRowMouseEnter: vi.fn(),
         handleRowMouseLeave: vi.fn(),
-        columnRenderModelsWithOffsets: baseColumns,
+        columnRenderModels: baseColumns,
         columnVirtualizationConfig: {
           enabled: true,
           overscanColumns: 0,
@@ -111,6 +112,7 @@ describe('useGridTableRowRenderer', () => {
       [key: string]: unknown;
     };
     expect(rowProps.className).toContain('gridtable-row');
+    expect(rowProps.className).toContain('custom-row');
     expect(rowProps['data-row-selected']).toBe('true');
 
     const fakeEvent = {
@@ -140,7 +142,7 @@ describe('useGridTableRowRenderer', () => {
         handleRowClick,
         handleRowMouseEnter: vi.fn(),
         handleRowMouseLeave: vi.fn(),
-        columnRenderModelsWithOffsets: baseColumns,
+        columnRenderModels: baseColumns,
         columnVirtualizationConfig: {
           enabled: false,
           overscanColumns: 0,
@@ -184,7 +186,7 @@ describe('useGridTableRowRenderer', () => {
   });
 
   it('supports right-aligned data independently from header alignment', () => {
-    const rightAlignedColumns: RowRendererOptions['columnRenderModelsWithOffsets'] = [
+    const rightAlignedColumns: RowRendererOptions['columnRenderModels'] = [
       {
         ...baseColumns[0],
         column: {
@@ -202,7 +204,7 @@ describe('useGridTableRowRenderer', () => {
         handleRowClick: vi.fn(),
         handleRowMouseEnter: vi.fn(),
         handleRowMouseLeave: vi.fn(),
-        columnRenderModelsWithOffsets: rightAlignedColumns,
+        columnRenderModels: rightAlignedColumns,
         columnVirtualizationConfig: {
           enabled: false,
           overscanColumns: 0,
@@ -237,7 +239,7 @@ describe('useGridTableRowRenderer', () => {
         handleRowClick: vi.fn(),
         handleRowMouseEnter: vi.fn(),
         handleRowMouseLeave: vi.fn(),
-        columnRenderModelsWithOffsets: baseColumns,
+        columnRenderModels: baseColumns,
         columnVirtualizationConfig: {
           enabled: false,
           overscanColumns: 0,

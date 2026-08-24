@@ -197,7 +197,7 @@ vi.mock('@shared/components/modals/ConfirmationModal', () => ({
   default: () => null,
 }));
 
-vi.mock('@wailsjs/go/backend/App', () => ({
+vi.mock('@core/backend-api', () => ({
   RunObjectAction: vi.fn(),
   FindCatalogObjectByUID: vi.fn(),
 }));
@@ -640,7 +640,7 @@ describe('query-backed leaf first load', () => {
   });
 
   it('settles a permission-denied domain without warm-up retries and shows the permission state', async () => {
-    // The live failure this pins (restricted identity, docs/plans/namespace-scope.md):
+    // The live failure this pins (restricted identity, docs/architecture/namespace-scope.md):
     // the backend registers namespace-autoscaling permission-denied and every
     // snapshot fetch 403s with a typed body. The orchestrator stamps
     // permissionDenied on the query scope's state — the typed query must READ

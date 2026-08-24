@@ -1,10 +1,11 @@
+import { ModalStateProvider } from '@core/contexts/ModalStateContext';
 import { act } from 'react';
 import * as ReactDOM from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import AppHeader from './AppHeader';
 
 const runtimeMock = vi.hoisted(() => ({
-  WindowToggleMaximise: vi.fn(),
+  toggleMaximise: vi.fn(),
 }));
 
 vi.mock('@ui/favorites/FavMenuDropdown', () => ({
@@ -23,11 +24,11 @@ vi.mock('@ui/status/SessionsStatus', () => ({
   default: () => <div>Sessions</div>,
 }));
 
-vi.mock('@wailsjs/runtime/runtime', async () => {
-  const actual = await vi.importActual<object>('@wailsjs/runtime/runtime');
+vi.mock('@core/desktop-runtime', async () => {
+  const actual = await vi.importActual<object>('@core/desktop-runtime');
   return {
     ...actual,
-    WindowToggleMaximise: runtimeMock.WindowToggleMaximise,
+    toggleMaximise: runtimeMock.toggleMaximise,
   };
 });
 
@@ -39,7 +40,7 @@ describe('AppHeader', () => {
     container = document.createElement('div');
     document.body.appendChild(container);
     root = ReactDOM.createRoot(container);
-    runtimeMock.WindowToggleMaximise.mockReset();
+    runtimeMock.toggleMaximise.mockReset();
   });
 
   afterEach(() => {
@@ -50,9 +51,17 @@ describe('AppHeader', () => {
     document.body.classList.remove('modal-surface-open');
   });
 
+  const renderHeader = () => {
+    root.render(
+      <ModalStateProvider>
+        <AppHeader />
+      </ModalStateProvider>
+    );
+  };
+
   it('renders header controls in the expected tab order', () => {
     act(() => {
-      root.render(<AppHeader />);
+      renderHeader();
     });
 
     const focusables = Array.from(
@@ -69,7 +78,7 @@ describe('AppHeader', () => {
   it('does not toggle maximise from the header while a modal is open', () => {
     document.body.classList.add('modal-surface-open');
     act(() => {
-      root.render(<AppHeader />);
+      renderHeader();
     });
 
     const header = container.querySelector('.app-header-drag-control') as HTMLButtonElement;
@@ -77,23 +86,23 @@ describe('AppHeader', () => {
       header.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
     });
 
-    expect(runtimeMock.WindowToggleMaximise).not.toHaveBeenCalled();
+    expect(runtimeMock.toggleMaximise).not.toHaveBeenCalled();
   });
 
   it('exposes the titlebar maximize gesture as a native keyboard control', () => {
     act(() => {
-      root.render(<AppHeader />);
+      renderHeader();
     });
 
     const dragControl = container.querySelector<HTMLButtonElement>('.app-header-drag-control');
     expect(dragControl?.type).toBe('button');
     act(() => dragControl?.click());
-    expect(runtimeMock.WindowToggleMaximise).toHaveBeenCalledTimes(1);
+    expect(runtimeMock.toggleMaximise).toHaveBeenCalledTimes(1);
   });
 
   it('does not toggle maximise when a control is double-clicked', () => {
     act(() => {
-      root.render(<AppHeader />);
+      renderHeader();
     });
 
     const commandPaletteButton = container.querySelector(
@@ -103,6 +112,6 @@ describe('AppHeader', () => {
       commandPaletteButton.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
     });
 
-    expect(runtimeMock.WindowToggleMaximise).not.toHaveBeenCalled();
+    expect(runtimeMock.toggleMaximise).not.toHaveBeenCalled();
   });
 });

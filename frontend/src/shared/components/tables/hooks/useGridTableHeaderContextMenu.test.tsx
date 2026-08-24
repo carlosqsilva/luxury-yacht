@@ -23,16 +23,15 @@ import { requireValue } from '@/test-utils/requireValue';
 // ---------------------------------------------------------------------------
 
 const runtimeMocks = vi.hoisted(() => ({
-  eventsOn: vi.fn(),
-  eventsOff: vi.fn(),
+  eventsOn: vi.fn(() => () => undefined),
 }));
 
-vi.mock('@wailsjs/runtime/runtime', () => ({
-  EventsOn: runtimeMocks.eventsOn,
-  EventsOff: runtimeMocks.eventsOff,
+vi.mock('@core/desktop-runtime', () => ({
+  desktopRuntimeAvailable: () => false,
+  onEvent: runtimeMocks.eventsOn,
 }));
 
-vi.mock('@wailsjs/go/backend/App', () => ({
+vi.mock('@core/backend-api', () => ({
   GetZoomLevel: vi.fn().mockResolvedValue(100),
   SetZoomLevel: vi.fn().mockResolvedValue(undefined),
 }));
@@ -78,13 +77,13 @@ const testRows: TestRow[] = [
 
 // Four columns covering all capability combinations:
 //   status    - implicitly sortable + hideable (not in locked set)
-//   name      - sortable + locked   (non-hideable by default)
+//   name      - sortable + locked   (explicitly non-hideable)
 //   kind      - non-sortable + locked (neither sortable nor hideable)
 //   namespace - non-sortable + hideable
 const testColumns: GridColumnDefinition<TestRow>[] = [
   { key: 'status', header: 'Status', render: (row) => row.status },
-  { key: 'name', header: 'Name', sortable: true, render: (row) => row.name },
-  { key: 'kind', header: 'Kind', sortable: false, render: (row) => row.kind },
+  { key: 'name', header: 'Name', sortable: true, hideable: false, render: (row) => row.name },
+  { key: 'kind', header: 'Kind', sortable: false, hideable: false, render: (row) => row.kind },
   { key: 'namespace', header: 'Namespace', sortable: false, render: (row) => row.namespace },
 ];
 
@@ -168,8 +167,7 @@ function renderGridTable(options: RenderOptions = {}) {
     onSort: options.onSort ?? vi.fn(),
     sortConfig: options.sortConfig,
     onColumnVisibilityChange: options.onColumnVisibilityChange,
-    // nonHideableColumns intentionally omitted - the default locked set
-    // (kind, type, name) is applied by useColumnVisibilityController.
+    // Column capabilities are declared directly on testColumns.
   };
 
   act(() => {
@@ -233,8 +231,7 @@ describe('header context menu integration', () => {
       await Promise.resolve();
     });
     cleanBody();
-    runtimeMocks.eventsOn.mockReset();
-    runtimeMocks.eventsOff.mockReset();
+    runtimeMocks.eventsOn.mockReset().mockReturnValue(() => undefined);
   });
 
   // 1. Sortable + hideable column (status)

@@ -8,6 +8,7 @@
 import { AriaGridCell, AriaGridRow } from '@shared/components/tables/AriaGridPrimitives';
 import type { GridColumnDefinition } from '@shared/components/tables/GridTable.types';
 import { getStableRowId } from '@shared/components/tables/GridTable.utils';
+import type { ColumnRenderModel } from '@shared/components/tables/hooks/useGridTableColumnVirtualization';
 import type { MeasureRowRefFn } from '@shared/components/tables/hooks/useGridTableVirtualization';
 import type React from 'react';
 import { useCallback } from 'react';
@@ -27,19 +28,12 @@ export type RenderRowContentFn<T> = (
 export interface UseGridTableRowRendererParams<T> {
   keyExtractor: (item: T, index: number) => string;
   getRowClassName?: (item: T, index: number) => string | undefined | null;
+  isRowSelected?: (item: T, index: number) => boolean;
   getRowStyle?: (item: T, index: number) => React.CSSProperties | undefined;
   handleRowClick: (item: T, index: number, event: React.MouseEvent) => void;
   handleRowMouseEnter: (element: HTMLDivElement) => void;
   handleRowMouseLeave: (element?: HTMLDivElement | null) => void;
-  columnRenderModelsWithOffsets: Array<{
-    column: GridColumnDefinition<T>;
-    key: string;
-    className: string;
-    cellStyle: React.CSSProperties;
-    start: number;
-    end: number;
-    width: number;
-  }>;
+  columnRenderModels: Array<ColumnRenderModel<T>>;
   columnVirtualizationConfig: {
     enabled: boolean;
     overscanColumns: number;
@@ -66,11 +60,12 @@ export interface UseGridTableRowRendererParams<T> {
 export function useGridTableRowRenderer<T>({
   keyExtractor,
   getRowClassName,
+  isRowSelected,
   getRowStyle,
   handleRowClick,
   handleRowMouseEnter,
   handleRowMouseLeave,
-  columnRenderModelsWithOffsets,
+  columnRenderModels,
   columnVirtualizationConfig,
   columnWindowRange,
   handleContextMenu,
@@ -88,7 +83,14 @@ export function useGridTableRowRenderer<T>({
     ): React.ReactNode => {
       const rowKey = keyExtractor(item, absoluteIndex);
       const rowExtraClass = getRowClassName?.(item, absoluteIndex);
-      const rowClassName = ['gridtable-row', rowExtraClass || ''].filter(Boolean).join(' ');
+      const selected = isRowSelected?.(item, absoluteIndex) ?? false;
+      const rowClassName = [
+        'gridtable-row',
+        selected ? 'gridtable-row--selected' : '',
+        rowExtraClass || '',
+      ]
+        .filter(Boolean)
+        .join(' ');
       const configuredRowStyle = getRowStyle ? getRowStyle(item, absoluteIndex) : undefined;
       const rowInlineStyle =
         virtualTop === undefined
@@ -98,7 +100,7 @@ export function useGridTableRowRenderer<T>({
               position: 'absolute' as const,
               transform: `translateY(${virtualTop}px)`,
             };
-      const isSelected = rowClassName.includes('gridtable-row--selected');
+      const isSelected = selected;
       const isFocused = rowClassName.includes('gridtable-row--focused');
 
       // When shouldMeasure is true (virtualized rows), attach a ref callback
@@ -126,9 +128,9 @@ export function useGridTableRowRenderer<T>({
           data-row-selected={isSelected ? 'true' : undefined}
           data-row-focused={isFocused ? 'true' : undefined}
         >
-          {columnRenderModelsWithOffsets.map((model, columnIndex) => {
+          {columnRenderModels.map((model, columnIndex) => {
             if (columnVirtualizationConfig.enabled) {
-              const total = columnRenderModelsWithOffsets.length;
+              const total = columnRenderModels.length;
               const stickyStart = Math.min(columnVirtualizationConfig.stickyStart, total);
               const stickyEnd = Math.min(columnVirtualizationConfig.stickyEnd, total - stickyStart);
               const isSticky = columnIndex < stickyStart || columnIndex >= total - stickyEnd;
@@ -168,11 +170,12 @@ export function useGridTableRowRenderer<T>({
     [
       keyExtractor,
       getRowClassName,
+      isRowSelected,
       getRowStyle,
       handleRowClick,
       handleRowMouseEnter,
       handleRowMouseLeave,
-      columnRenderModelsWithOffsets,
+      columnRenderModels,
       columnVirtualizationConfig,
       columnWindowRange,
       handleContextMenu,

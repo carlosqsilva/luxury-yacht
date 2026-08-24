@@ -37,7 +37,9 @@ import {
 } from '@shared/components/icons/SharedIcons';
 import { clearAllGridTableState } from '@shared/components/tables/persistence/gridTablePersistenceReset';
 import { navigateToFavorite } from '@ui/favorites/navigateToFavorite';
+import { closeActiveClusterOrWindow } from '@ui/navigation/closeActiveClusterOrWindow';
 import { type ReactNode, useCallback, useMemo } from 'react';
+import { CheckForUpdates } from '@/core/backend-api';
 import { requestContextRefresh } from '@/core/data-access';
 import { eventBus } from '@/core/events';
 import {
@@ -226,15 +228,12 @@ export function useCommandPaletteCommands() {
     if (viewState.viewType === 'global') {
       return;
     }
-    const active = selectedKubeconfig;
-    if (!active) {
-      return;
-    }
-    if (!selectedKubeconfigs.includes(active)) {
-      return;
-    }
-    void closeKubeconfig(active).catch((err) => {
-      console.warn('Failed to close cluster:', err);
+    void closeActiveClusterOrWindow({
+      selectedKubeconfig,
+      selectedKubeconfigs,
+      closeKubeconfig,
+    }).catch((err) => {
+      console.warn('Failed to close cluster tab or window:', err);
     });
   }, [closeKubeconfig, selectedKubeconfig, selectedKubeconfigs, viewState.viewType]);
 
@@ -272,6 +271,23 @@ export function useCommandPaletteCommands() {
           viewState.setIsAboutOpen(true);
         },
         keywords: ['about', 'info', 'version'],
+      },
+      {
+        id: 'check-for-updates',
+        label: 'Check for Updates…',
+        icon: <InfoIcon width={16} height={16} />,
+        description: 'Open About and check for a new application version',
+        category: 'Application',
+        action: () => {
+          viewState.setIsAboutOpen(true);
+          void CheckForUpdates().catch((error) => {
+            reportOperationalError(error, {
+              source: 'CommandPalette',
+              action: 'checkForUpdates',
+            });
+          });
+        },
+        keywords: ['update', 'upgrade', 'version', 'release'],
       },
       {
         id: 'open-settings',
@@ -529,13 +545,16 @@ export function useCommandPaletteCommands() {
       // Navigation Commands
       {
         id: 'close-cluster-tab',
-        label: 'Close active cluster tab',
+        label: selectedKubeconfigs.length === 0 ? 'Close window' : 'Close active cluster tab',
         icon: <CloseIcon width={16} height={16} />,
-        description: 'Close the active cluster tab',
+        description:
+          selectedKubeconfigs.length === 0
+            ? 'Close the current window'
+            : 'Close the active cluster tab',
         category: 'Navigation',
         action: closeCurrentClusterTab,
         shortcut: closeTabShortcut,
-        keywords: ['cluster', 'tab', 'close', 'kubeconfig'],
+        keywords: ['cluster', 'tab', 'close', 'kubeconfig', 'window'],
       },
       {
         id: 'select-kubeconfig',

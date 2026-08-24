@@ -5,11 +5,11 @@
  * Covers key behaviors and edge cases for KubeconfigContext.
  */
 
+import type { types } from '@core/backend-api/models';
 import {
   resetClusterTabOrderCacheForTesting,
   setClusterTabOrder,
 } from '@core/persistence/clusterTabOrder';
-import type { types } from '@wailsjs/go/models';
 import { act } from 'react';
 import * as ReactDOM from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -40,9 +40,9 @@ const {
   },
 }));
 
-vi.mock('@wailsjs/go/backend/App', () => ({
+vi.mock('@core/backend-api', () => ({
   GetKubeconfigs: () => getKubeconfigsMock(),
-  GetClusterWorkspaceState: async () => {
+  GetClusterWorkspaceStateForWindow: async () => {
     workspaceState.selections = [...((await getSelectedKubeconfigsMock()) || [])];
     return {
       selectedKubeconfigs: workspaceState.selections,

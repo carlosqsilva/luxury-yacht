@@ -16,8 +16,13 @@ the completed `v2` rewrite plan.
 - **Per-domain serve + maintained stores:** `backend/refresh/snapshot/` —
   `querypage_typed.go` (`resolveTypedSnapshotPageViaStore`, `resolveMaintainedDirect`,
   `typedMaintainedStore`); `backend/objectcatalog/` for Browse.
-- **Lifecycle / memory:** `backend/refresh/system/governor.go` +
-  `backend/app_refresh_governor.go`; spill in `backend/refresh/domain/maintained_stores.go`.
+- **Lifecycle / memory:** `backend.RefreshCoordinator` in
+  `backend/refresh_*.go`, with governor policy in
+  `backend/refresh/system/governor.go` and spill in
+  `backend/refresh/domain/maintained_stores.go`. Its reset path unpublishes
+  request/stream routing and stops producers before clearing cache and spill
+  state; offline reset removes the same cache root through
+  `internal/appstate.Manifest`.
 
 ## Invariants
 
@@ -109,7 +114,7 @@ the completed `v2` rewrite plan.
 ## Lifecycle & governor
 
 - **Foreground / Background / Cold** per cluster (`system/governor.go`,
-  `app_refresh_governor.go`). Foreground and Background both keep the subsystem
+  `refresh_governor.go`). Foreground and Background both keep the subsystem
   live; metrics polling follows cluster-scoped frontend lease demand rather than
   governor visibility. A memory-pressure poll (`runtime.ReadMemStats` HeapInuse vs budget — **not**
   `GOMEMLIMIT`) collapses the warm set under pressure and `FreeOSMemory`s.
@@ -120,7 +125,7 @@ the completed `v2` rewrite plan.
   re-warm unroutes then closes the mappings safely. Cold clusters do not run object-catalog
   discovery, capability checks, or sync loops against their stopped feeds; the catalog
   restarts as part of re-warm. Starting points:
-  `domain/maintained_stores.go`, `querypage/columnstore_mmap.go`, `app_refresh_spill.go`.
+  `domain/maintained_stores.go`, `querypage/columnstore_mmap.go`, `refresh_spill.go`.
 - **Cold has a server-owned entry gate.** A desired Cold tier stays unapplied while
   the live subsystem builds settled `namespaces` and `cluster-overview` snapshots
   for its cluster scope. The namespace build uses the aggregate lifecycle callback,
@@ -175,7 +180,8 @@ the completed `v2` rewrite plan.
 ## Delivery — page + refetch-on-signal
 
 - **Pull:** `GET /api/v2/snapshots/{domain}` (`refresh/api/server.go:59`) → `Build`.
-- **Push:** the resources **WebSocket** `/api/v2/stream/resources` carries only a change
+- **Push:** the resource-stream protocol uses the `refresh-resources` named
+  Wails JSON stream and carries only a change
   **signal**; a delta/resync advances the scoped doorbell clocks
   (`signalVersions`, plus the folded `sourceVersion`) and the query-backed view
   refetches its page. **No live row ever crosses the wire** — the
@@ -201,7 +207,7 @@ reviews, not object-state queries).
 - Per-domain `…MaintainedMatchesListPath` byte-identity gates (store serve == list+project).
 - `querypage` fuzz/property test (`apply(deltas) == recompute`) + the catalog brute-force
   oracle.
-- `mage qc:prerelease` (backend `-race`, vitest, knip, trivy) is the release gate.
+- `wails3 task qc:prerelease` (backend `-race`, vitest, knip, trivy) is the release gate.
 
 ## Deliberately not built (do not re-attempt as TODOs)
 
@@ -226,4 +232,4 @@ Validated/decided during the rewrite; reasons in git history + the memory record
 The owned-engine bet (columnar + interning + keyset indexes, no SQLite/cgo) was gated by
 **Prototype #1** (1M-object write-path benchmark) and the WatchList fallback by
 **Prototype #3**, both in the throwaway `backend/refresh/storebench/` package. Full
-design history and the migration ledger are in git.
+design history remains available in git.

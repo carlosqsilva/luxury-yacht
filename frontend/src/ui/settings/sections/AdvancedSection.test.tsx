@@ -73,6 +73,10 @@ vi.mock('@utils/linkColor', () => ({ clearLinkColor: resetMocks.clearLinkColor }
 vi.mock('@utils/paletteTint', () => ({ clearTintedPalette: resetMocks.clearTintedPalette }));
 vi.mock('@utils/errorHandler', () => ({ errorHandler: errorHandlerMocks }));
 
+vi.mock('@core/backend-api', () => ({
+  ClearAppState: (...args: unknown[]) => resetMocks.clearAppState(...args),
+}));
+
 vi.mock('@shared/components/modals/ConfirmationModal', () => ({
   __esModule: true,
   default: ({
@@ -124,7 +128,6 @@ describe('AdvancedSection', () => {
   afterEach(() => {
     act(() => root.unmount());
     container.remove();
-    window.go = undefined;
   });
 
   it('contains advanced controls without Data Management actions', () => {
@@ -133,6 +136,7 @@ describe('AdvancedSection', () => {
     expect(text).toContain('Refresh');
     expect(text).toContain('Kubernetes API');
     expect(text).toContain('Persistence');
+    expect(text).toContain('Deletes all preferences and saved state, then reloads the app.');
     expect(text).not.toContain('Data Management');
     expect(text).not.toContain('Export Settings');
     expect(text).not.toContain('Error Reporting');
@@ -211,13 +215,6 @@ describe('AdvancedSection', () => {
   });
 
   it('clears app and browser state when factory reset is confirmed', async () => {
-    window.go = {
-      backend: {
-        App: {
-          ClearAppState: resetMocks.clearAppState,
-        } as unknown as typeof import('@wailsjs/go/backend/App'),
-      },
-    };
     resetMocks.clearAppState.mockResolvedValue(undefined);
     localStorage.setItem('test-setting', 'value');
     sessionStorage.setItem('test-session', 'value');

@@ -1,20 +1,20 @@
 /**
  * frontend/src/ui/status/UpdateStatus.test.tsx
  *
- * Covers the header update chip: it appears only when an update is available,
- * opens the release URL on click, and wires version/release details into the
- * hover tooltip. The shared Tooltip is mocked to expose its `content` so the
- * test asserts THIS component's wiring, not Tooltip's hover/portal internals.
+ * Covers the header update chip: it appears only for the states that need the
+ * user's attention, carries no hover surface of its own, and opens About on
+ * click. Release detail (versions, notes, links) belongs to the About modal, so
+ * the chip must not render or fetch any of it.
  */
 
-import type { ReactNode } from 'react';
 import { act } from 'react';
 import * as ReactDOM from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { readAppInfoMock, browserOpenURLMock } = vi.hoisted(() => ({
+const { readAppInfoMock, browserOpenURLMock, setIsAboutOpenMock } = vi.hoisted(() => ({
   readAppInfoMock: vi.fn(),
   browserOpenURLMock: vi.fn(),
+  setIsAboutOpenMock: vi.fn(),
 }));
 
 vi.mock('@/core/app-state-access', () => ({
@@ -22,20 +22,14 @@ vi.mock('@/core/app-state-access', () => ({
   readAppInfo: () => readAppInfoMock(),
 }));
 
-vi.mock('@wailsjs/runtime/runtime', () => ({
-  BrowserOpenURL: (...args: unknown[]) => browserOpenURLMock(...args),
+vi.mock('@core/desktop-runtime', () => ({
+  desktopRuntimeAvailable: () => false,
+  onEvent: vi.fn(() => () => undefined),
+  openURL: (...args: unknown[]) => browserOpenURLMock(...args),
 }));
 
-vi.mock('@wailsjs/go/models', () => ({ backend: {} }));
-
-vi.mock('@shared/components/Tooltip', () => ({
-  __esModule: true,
-  default: ({ content, children }: { content: ReactNode; children: ReactNode }) => (
-    <span data-testid="tooltip">
-      {children}
-      <span data-testid="tooltip-content">{content}</span>
-    </span>
-  ),
+vi.mock('@core/contexts/ModalStateContext', () => ({
+  useModalState: () => ({ setIsAboutOpen: setIsAboutOpenMock }),
 }));
 
 import UpdateStatus from './UpdateStatus';
@@ -50,6 +44,7 @@ describe('UpdateStatus', () => {
     root = ReactDOM.createRoot(container);
     readAppInfoMock.mockReset();
     browserOpenURLMock.mockReset();
+    setIsAboutOpenMock.mockReset();
   });
 
   afterEach(() => {
@@ -67,16 +62,15 @@ describe('UpdateStatus', () => {
     });
   };
 
-  it('renders a clickable info chip with version + release notes, and links to the notes page', async () => {
+  it('renders a bare clickable chip that opens About and carries no hover surface', async () => {
     readAppInfoMock.mockResolvedValue({
       update: {
+        status: 'available',
         currentVersion: '1.10.0',
-        latestVersion: '1.10.1',
+        availableVersion: '1.10.1',
         publishedAt: '2026-07-05T12:00:00Z',
-        currentPublishedAt: '2026-06-20T12:00:00Z',
-        releaseUrl: 'https://example.com/releases/v1.10.1',
         releaseNotes: '- Fixed metrics permission notice\n- Moved the update chip to the header',
-        isUpdateAvailable: true,
+        canInstall: true,
       },
     });
 
@@ -88,53 +82,60 @@ describe('UpdateStatus', () => {
     expect(chip).not.toBeNull();
     expect(chip?.textContent).toContain('Update available');
 
-    // Tooltip shows New/Current rows, each "<version> (YYYY-MM-DD)", plus the
-    // release notes preview. Dates format from UTC, so they're timezone-stable.
-    const tooltip = container.querySelector('[data-testid="tooltip-content"]');
-    expect(tooltip?.textContent).toContain('New');
-    expect(tooltip?.textContent).toContain('Current');
-    expect(tooltip?.textContent).toContain('1.10.1');
-    expect(tooltip?.textContent).toContain('1.10.0');
-    expect(tooltip?.textContent).toContain('(2026-07-05)');
-    expect(tooltip?.textContent).toContain('(2026-06-20)');
-    const notes = container.querySelector('[data-testid="update-status-notes"]');
-    expect(notes?.textContent).toContain('Fixed metrics permission notice');
-    // The markdown stripper is applied: bullets render as • (not raw "- ").
-    expect(notes?.textContent).toContain('•');
+    // The chip is the whole surface: no tooltip wrapper, and none of the release
+    // detail that used to hang off it. That detail now lives in the About modal.
+    expect(container.querySelector('.tooltip-wrapper')).toBeNull();
+    expect(container.querySelector('[class*="tooltip"]')).toBeNull();
+    expect(container.textContent).not.toContain('1.10.1');
+    expect(container.textContent).not.toContain('2026-07-05');
+    expect(container.textContent).not.toContain('Fixed metrics permission notice');
+    expect(container.textContent).not.toContain('Full release notes');
 
-    // Clicking the chip opens the release/downloads page.
+    // Clicking opens About; it never starts a download, opens a URL, or
+    // otherwise bypasses the app-owned update workflow.
     act(() => {
       chip?.click();
     });
-    expect(browserOpenURLMock).toHaveBeenCalledWith('https://example.com/releases/v1.10.1');
-
-    // The "Full release notes" link opens the version's tag page.
-    const notesLink = container.querySelector(
-      '[data-testid="update-status-notes-link"]'
-    ) as HTMLButtonElement | null;
-    act(() => {
-      notesLink?.click();
-    });
-    expect(browserOpenURLMock).toHaveBeenCalledWith(
-      'https://github.com/luxury-yacht/app/releases/tag/1.10.1'
-    );
+    expect(setIsAboutOpenMock).toHaveBeenCalledWith(true);
+    expect(browserOpenURLMock).not.toHaveBeenCalled();
   });
 
   it('renders nothing when no update is available', async () => {
-    readAppInfoMock.mockResolvedValue({ update: { isUpdateAvailable: false } });
+    readAppInfoMock.mockResolvedValue({ update: { status: 'current' } });
 
     await renderAndSettle();
 
     expect(container.querySelector('[data-testid="update-status-chip"]')).toBeNull();
   });
 
-  it('renders nothing when the update has no release URL', async () => {
-    readAppInfoMock.mockResolvedValue({
-      update: { isUpdateAvailable: true, latestVersion: '1.10.1', releaseUrl: '' },
-    });
+  it.each([
+    ['downloading', 'Downloading update…'],
+    ['verifying', 'Verifying update…'],
+    ['preparing', 'Preparing update…'],
+    ['ready', 'Restart to update'],
+    ['check-error', 'Update needs attention'],
+    ['prepare-error', 'Update needs attention'],
+    ['restart-error', 'Update needs attention'],
+    ['apply-error', 'Update needs attention'],
+  ])('renders compact %s state and opens About', async (status, label) => {
+    readAppInfoMock.mockResolvedValue({ update: { status, availableVersion: '1.10.1' } });
 
     await renderAndSettle();
 
-    expect(container.querySelector('[data-testid="update-status-chip"]')).toBeNull();
+    const chip = container.querySelector('[data-testid="update-status-chip"]') as HTMLButtonElement;
+    expect(chip.textContent).toContain(label);
+    act(() => chip.click());
+    expect(setIsAboutOpenMock).toHaveBeenCalledWith(true);
   });
+
+  it.each(['disabled', 'idle', 'checking', 'skipped'])(
+    'stays out of the header for %s',
+    async (status) => {
+      readAppInfoMock.mockResolvedValue({ update: { status } });
+
+      await renderAndSettle();
+
+      expect(container.querySelector('[data-testid="update-status-chip"]')).toBeNull();
+    }
+  );
 });

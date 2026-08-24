@@ -6,6 +6,7 @@
  */
 
 import type { GridColumnDefinition } from '@shared/components/tables/GridTable.types';
+import type { ColumnRenderModel } from '@shared/components/tables/hooks/useGridTableColumnVirtualization';
 import { useGridTableHeaderRow } from '@shared/components/tables/hooks/useGridTableHeaderRow';
 import { act } from 'react';
 import * as ReactDOM from 'react-dom/client';
@@ -45,24 +46,49 @@ const columns: GridColumnDefinition<Row>[] = [
 
 const columnWidths = { name: 120, age: 80, role: 100 };
 
+const buildColumnRenderModels = (
+  tableColumns: GridColumnDefinition<Row>[],
+  widths: Record<string, number>
+): Array<ColumnRenderModel<Row>> => {
+  let offset = 0;
+  return tableColumns.map((column) => {
+    const width = widths[column.key];
+    const start = offset;
+    offset += width;
+    return {
+      column,
+      key: column.key,
+      className: column.className || '',
+      cellStyle: {
+        width: `${width}px`,
+        minWidth: `${width}px`,
+        maxWidth: `${width}px`,
+        flexShrink: 0,
+      },
+      start,
+      end: offset,
+      width,
+    };
+  });
+};
+
 const HeaderHarness: React.FC<{
   enableResizing: boolean;
   fixedKeys?: string[];
   withContextMenu?: boolean;
   tableColumns?: GridColumnDefinition<Row>[];
 }> = ({ enableResizing, fixedKeys = [], withContextMenu = false, tableColumns = columns }) => {
+  const renderedColumns = tableColumns.map((column) =>
+    fixedKeys.includes(column.key) ? { ...column, resizable: false } : column
+  );
   const node = useGridTableHeaderRow({
-    renderedColumns: tableColumns,
+    columnRenderModels: buildColumnRenderModels(renderedColumns, columnWidths),
     enableColumnResizing: enableResizing,
-    isFixedColumnKey: (key) => fixedKeys.includes(key),
     handleHeaderContextMenu: withContextMenu ? handleHeaderContextMenu : undefined,
-    columnWidths,
     handleHeaderClick,
     renderSortIndicator,
     handleResizeStart,
     handleResizeKeyDown,
-    getColumnMinWidth: () => 40,
-    getColumnMaxWidth: () => 400,
     autoSizeColumn,
   });
   return <>{node}</>;
@@ -193,10 +219,12 @@ describe('useGridTableHeaderRow', () => {
       await Promise.resolve();
     });
     // sortable column should still trigger click even without resize handles
-    expect(handleHeaderClick).toHaveBeenCalledWith(columns[2]);
+    expect(handleHeaderClick).toHaveBeenCalledWith(
+      expect.objectContaining({ key: columns[2].key, resizable: false })
+    );
   });
 
-  it('renders a passive separator after the Kind column when it is fixed', async () => {
+  it('does not infer resize behavior from the Kind key', async () => {
     const kindColumns: GridColumnDefinition<Row>[] = [
       { key: 'kind', header: 'Kind', sortable: true, render: (row) => row.kind ?? null },
       { key: 'name', header: 'Name', sortable: true, render: (row) => row.name },
@@ -204,17 +232,13 @@ describe('useGridTableHeaderRow', () => {
 
     const KindHarness: React.FC = () => {
       const node = useGridTableHeaderRow({
-        renderedColumns: kindColumns,
+        columnRenderModels: buildColumnRenderModels(kindColumns, { kind: 120, name: 180 }),
         enableColumnResizing: true,
-        isFixedColumnKey: (key) => key === 'kind',
         handleHeaderContextMenu: undefined,
-        columnWidths: { kind: 120, name: 180 },
         handleHeaderClick,
         renderSortIndicator,
         handleResizeStart,
         handleResizeKeyDown,
-        getColumnMinWidth: () => 40,
-        getColumnMaxWidth: () => 400,
         autoSizeColumn,
       });
       return <>{node}</>;
@@ -224,8 +248,8 @@ describe('useGridTableHeaderRow', () => {
       root.render(<KindHarness />);
     });
 
-    expect(container.querySelectorAll('.resize-handle')).toHaveLength(0);
-    expect(container.querySelectorAll('.column-separator')).toHaveLength(1);
+    expect(container.querySelectorAll('.resize-handle')).toHaveLength(1);
+    expect(container.querySelectorAll('.column-separator')).toHaveLength(0);
   });
 
   it('uses a native button for sortable-header activation', async () => {

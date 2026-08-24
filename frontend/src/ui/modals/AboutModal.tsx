@@ -1,26 +1,264 @@
 /**
- * frontend/src/components/modals/AboutModal.tsx
+ * frontend/src/ui/modals/AboutModal.tsx
  *
- * UI component for AboutModal.
- * Handles rendering and interactions for the shared components.
+ * The About dialog. It is also the single surface for the application update
+ * workflow: the header chip only opens this modal, so availability, release
+ * notes, progress, failures, and recovery actions all present here.
  */
 
 import React, { useEffect, useRef, useState } from 'react';
 import './AboutModal.css';
 import captainK8s from '@assets/captain-k8s-color.png';
 import logo from '@assets/luxury-yacht-logo.png';
+import {
+  CheckForUpdates,
+  DownloadApplicationUpdate,
+  RemoveApplicationUpdateSkip,
+  RestartAndApplyApplicationUpdate,
+  SkipApplicationUpdate,
+} from '@core/backend-api';
+import type { backend } from '@core/backend-api/models';
+import { onEvent, openURL } from '@core/desktop-runtime';
+import { ErrorSurface } from '@shared/components/errors/ErrorSurface';
 import { InfoIcon } from '@shared/components/icons/SharedIcons';
 import ModalHeader from '@shared/components/modals/ModalHeader';
 import ModalSurface from '@shared/components/modals/ModalSurface';
 import { useModalFocusTrap } from '@shared/components/modals/useModalFocusTrap';
-import type { backend } from '@wailsjs/go/models';
-import { BrowserOpenURL } from '@wailsjs/runtime/runtime';
 import { readAppInfo, requestAppState } from '@/core/app-state-access';
+import { reportOperationalError } from '@/utils/errorHandler';
+import {
+  getUpdatePresentation,
+  type UpdateAction,
+  type UpdatePresentation,
+  type UpdatePresentationAction,
+} from '../status/updatePresentation';
 
 interface AboutModalProps {
   isOpen: boolean;
   onClose: () => void;
 }
+
+const HOMEPAGE_URL = 'https://luxury-yacht.app';
+const WAILS_URL = 'https://v3.wails.io';
+const LICENSE_URL = 'https://www.gnu.org/licenses/gpl-3.0.html';
+
+const updateActionNames: Record<UpdateAction, string> = {
+  check: 'checkApplicationUpdate',
+  download: 'downloadApplicationUpdate',
+  restart: 'restartAndApplyApplicationUpdate',
+  skip: 'skipApplicationUpdate',
+  'remove-skip': 'removeApplicationUpdateSkip',
+  recovery: 'openApplicationUpdateRecovery',
+};
+
+const withUpdate = (
+  current: backend.AppInfo | null,
+  update: backend.UpdateInfo
+): backend.AppInfo | null => (current ? { ...current, update } : current);
+
+const progressPercentFor = (update: backend.UpdateInfo): number | null => {
+  const progress = update.progressPercent;
+  return typeof progress === 'number' &&
+    Number.isFinite(progress) &&
+    progress >= 0 &&
+    progress <= 100
+    ? progress
+    : null;
+};
+
+/** Desktop links open in the user's browser, never in the app window. */
+const ExternalLink: React.FC<{
+  href: string;
+  className?: string;
+  children: React.ReactNode;
+  testId?: string;
+}> = ({ href, className, children, testId }) => (
+  <a
+    href={href}
+    className={className}
+    data-testid={testId}
+    onClick={(event) => {
+      event.preventDefault();
+      openURL(href);
+    }}
+  >
+    {children}
+  </a>
+);
+
+const performUpdateAction = async (
+  action: UpdateAction,
+  update: backend.UpdateInfo,
+  url?: string
+): Promise<backend.UpdateInfo | null> => {
+  switch (action) {
+    case 'recovery':
+      if (url) {
+        openURL(url);
+      }
+      return null;
+    case 'check':
+      return CheckForUpdates();
+    case 'download':
+      return update.availableVersion ? DownloadApplicationUpdate(update.availableVersion) : null;
+    case 'restart':
+      return RestartAndApplyApplicationUpdate();
+    case 'skip':
+      return update.availableVersion ? SkipApplicationUpdate(update.availableVersion) : null;
+    case 'remove-skip':
+      return RemoveApplicationUpdateSkip();
+  }
+};
+
+const useApplicationUpdateAction = (
+  update: backend.UpdateInfo | null,
+  setAppInfo: React.Dispatch<React.SetStateAction<backend.AppInfo | null>>
+) => {
+  const [updateAction, setUpdateAction] = useState<UpdateAction | null>(null);
+
+  const runUpdateAction = async (action: UpdateAction, url?: string) => {
+    if (!update || updateAction) {
+      return;
+    }
+    if (action === 'recovery') {
+      await performUpdateAction(action, update, url);
+      return;
+    }
+    setUpdateAction(action);
+    try {
+      const next = await performUpdateAction(action, update, url);
+      if (next) {
+        setAppInfo((current) => withUpdate(current, next));
+      }
+    } catch (error) {
+      reportOperationalError(error, {
+        source: 'AboutModal',
+        action: updateActionNames[action],
+      });
+    } finally {
+      setUpdateAction(null);
+    }
+  };
+
+  return { updateAction, runUpdateAction };
+};
+
+interface UpdateActionButtonProps {
+  action?: UpdatePresentationAction;
+  primary?: boolean;
+  busy: boolean;
+  onAction: (action: UpdateAction, url?: string) => Promise<void>;
+}
+
+const UpdateActionButton: React.FC<UpdateActionButtonProps> = ({
+  action,
+  primary = false,
+  busy,
+  onAction,
+}) => {
+  if (!action) {
+    return null;
+  }
+  return (
+    <button
+      type="button"
+      className={primary ? 'button save' : 'button generic'}
+      disabled={busy}
+      onClick={() => void onAction(action.kind, action.url)}
+    >
+      {action.label}
+    </button>
+  );
+};
+
+const ReleaseNotes: React.FC<{ presentation: UpdatePresentation }> = ({ presentation }) => {
+  if (!presentation.notes) {
+    return null;
+  }
+  return (
+    <div className="about-release">
+      <div className="about-release-header">
+        <h3>{presentation.releaseTitle}</h3>
+        {presentation.published ? (
+          <span className="about-release-date">{presentation.published}</span>
+        ) : null}
+      </div>
+      <div className="about-release-notes" data-testid="about-release-notes">
+        {presentation.notes}
+      </div>
+    </div>
+  );
+};
+
+interface ApplicationUpdateSectionProps {
+  update: backend.UpdateInfo;
+  presentation: UpdatePresentation;
+  updateAction: UpdateAction | null;
+  onAction: (action: UpdateAction, url?: string) => Promise<void>;
+}
+
+const ApplicationUpdateSection: React.FC<ApplicationUpdateSectionProps> = ({
+  update,
+  presentation,
+  updateAction,
+  onAction,
+}) => {
+  const progressPercent = progressPercentFor(update);
+  return (
+    <section className="about-update" aria-label="Application update">
+      <div className="about-update-summary">
+        {/* The message is the status. A pill above it only repeated the sentence
+            — verbatim, for the downloading/verifying/preparing states. */}
+        <p className="about-update-message">{presentation.message}</p>
+        {presentation.explanation ? (
+          <p className="about-update-explanation">{presentation.explanation}</p>
+        ) : null}
+      </div>
+
+      {progressPercent !== null ? (
+        <div className="about-update-progress">
+          <progress value={progressPercent} max={100} />
+          <span>{Math.round(progressPercent)}%</span>
+        </div>
+      ) : null}
+
+      {update.error ? (
+        <p className="about-update-error">
+          <ErrorSurface kind="status" message={update.error} />
+        </p>
+      ) : null}
+
+      {/* Actions before the notes: what the user can do outranks the preview of
+          what changed, in reading order and in tab order. */}
+      {presentation.primary || presentation.secondary || presentation.releaseNotesURL ? (
+        <div className="about-update-actions">
+          <UpdateActionButton
+            action={presentation.primary}
+            primary={true}
+            busy={updateAction !== null}
+            onAction={onAction}
+          />
+          <UpdateActionButton
+            action={presentation.secondary}
+            busy={updateAction !== null}
+            onAction={onAction}
+          />
+          {presentation.releaseNotesURL ? (
+            <ExternalLink
+              href={presentation.releaseNotesURL}
+              className="about-release-link"
+              testId="about-release-notes-link"
+            >
+              Full release notes ↗
+            </ExternalLink>
+          ) : null}
+        </div>
+      ) : null}
+
+      <ReleaseNotes presentation={presentation} />
+    </section>
+  );
+};
 
 const AboutModal: React.FC<AboutModalProps> = React.memo(({ isOpen, onClose }) => {
   const [isClosing, setIsClosing] = useState(false);
@@ -53,6 +291,17 @@ const AboutModal: React.FC<AboutModalProps> = React.memo(({ isOpen, onClose }) =
   }, [isOpen, shouldRender]);
 
   useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+    return onEvent('app-update', (updateSnapshot) => {
+      if (updateSnapshot) {
+        setAppInfo((current) => withUpdate(current, updateSnapshot));
+      }
+    });
+  }, [isOpen]);
+
+  useEffect(() => {
     document.body.style.overflow = isOpen ? 'hidden' : '';
     return () => {
       document.body.style.overflow = '';
@@ -73,36 +322,14 @@ const AboutModal: React.FC<AboutModalProps> = React.memo(({ isOpen, onClose }) =
     },
   });
 
+  const update = appInfo?.update ?? null;
+  const { updateAction, runUpdateAction } = useApplicationUpdateAction(update, setAppInfo);
+
   if (!shouldRender) {
     return null;
   }
 
-  let updateStatus: React.ReactNode = null;
-  if (appInfo?.update?.isUpdateAvailable) {
-    updateStatus = (
-      <p className="about-update-available">
-        Update available:{' '}
-        <a
-          href={appInfo.update.releaseUrl}
-          onClick={(e) => {
-            e.preventDefault();
-            const releaseUrl = appInfo.update?.releaseUrl;
-            if (releaseUrl) {
-              BrowserOpenURL(releaseUrl);
-            }
-          }}
-        >
-          {appInfo.update.latestVersion}
-        </a>
-      </p>
-    );
-  } else if (appInfo?.update && !appInfo.update.error) {
-    updateStatus = (
-      <p className="about-up-to-date">
-        <span className="about-up-to-date-icon">&#x2714;</span> Up to date
-      </p>
-    );
-  }
+  const updatePresentation = update ? getUpdatePresentation(update) : null;
 
   return (
     <ModalSurface
@@ -115,72 +342,70 @@ const AboutModal: React.FC<AboutModalProps> = React.memo(({ isOpen, onClose }) =
     >
       <ModalHeader title="About" titleId="about-modal-title" icon={InfoIcon} onClose={onClose} />
 
-      <div className="modal-content">
-        <div className="about-logo-section">
-          <img
-            src={captainK8s}
-            alt="Captain K8s"
-            className="about-captain-k8s"
-            width={1024}
-            height={1024}
+      <div className="modal-content about-modal-content">
+        <div className="about-hero">
+          <div className="about-logo-section">
+            <img
+              src={captainK8s}
+              alt="Captain K8s"
+              className="about-captain-k8s"
+              width={1024}
+              height={1024}
+            />
+            <img
+              src={logo}
+              alt="Luxury Yacht Logo"
+              className="about-logo"
+              width={827}
+              height={500}
+            />
+          </div>
+          <p className="about-version">Version {appInfo?.version || 'Loading...'}</p>
+          {updatePresentation?.versionNote ? (
+            <p className="about-version-note">{updatePresentation.versionNote}</p>
+          ) : null}
+          {updatePresentation?.versionNote && updatePresentation.primary ? (
+            <UpdateActionButton
+              action={updatePresentation.primary}
+              busy={updateAction !== null}
+              onAction={runUpdateAction}
+            />
+          ) : null}
+          {appInfo?.isBeta && appInfo?.expiryDate ? (
+            <p className="about-beta-expiry">
+              Beta expires {new Date(appInfo.expiryDate).toLocaleDateString()}
+            </p>
+          ) : null}
+        </div>
+
+        {update && updatePresentation && !updatePresentation.versionNote ? (
+          <ApplicationUpdateSection
+            update={update}
+            presentation={updatePresentation}
+            updateAction={updateAction}
+            onAction={runUpdateAction}
           />
-          <img src={logo} alt="Luxury Yacht Logo" className="about-logo" width={827} height={500} />
-        </div>
+        ) : null}
 
-        <div className="about-info">
-          <div className="about-description">
-            <p>
-              <strong>Version {appInfo?.version || 'Loading...'}</strong>
-            </p>
-            {updateStatus}
-            {appInfo?.isBeta && appInfo?.expiryDate ? (
-              <p className="about-beta-expiry">
-                Beta expires: {new Date(appInfo.expiryDate).toLocaleDateString()}
-              </p>
-            ) : null}
-            <p className="about-link-row">
-              <a
-                href="https://luxury-yacht.app"
-                onClick={(e) => {
-                  e.preventDefault();
-                  BrowserOpenURL('https://luxury-yacht.app');
-                }}
-              >
-                luxury-yacht.app
-              </a>
-            </p>
-            <p className="about-link-row">
-              Built with{' '}
-              <a
-                href="https://wails.io/"
-                onClick={(e) => {
-                  e.preventDefault();
-                  BrowserOpenURL('https://wails.io/');
-                }}
-              >
-                Wails
-              </a>
-            </p>
-          </div>
+        <p className="about-links">
+          <ExternalLink href={HOMEPAGE_URL}>luxury-yacht.app</ExternalLink>
+          <span className="about-links-separator" aria-hidden="true">
+            ·
+          </span>
+          <span>
+            Built with <ExternalLink href={WAILS_URL}>Wails</ExternalLink>
+          </span>
+        </p>
+      </div>
 
-          <div className="about-footer">
-            <p className="about-license">
-              This application is licensed under the GNU General Public License, version 3 (GPLv3).
-              This application is distributed WITHOUT ANY WARRANTY, explicit or implied. See the{' '}
-              <a
-                href="https://www.gnu.org/licenses/gpl-3.0.html"
-                onClick={(e) => {
-                  e.preventDefault();
-                  BrowserOpenURL('https://www.gnu.org/licenses/gpl-3.0.html');
-                }}
-              >
-                GNU General Public License
-              </a>{' '}
-              for more details.
-            </p>
-            <p className="about-copyright">Copyright © 2025-2026 Luxury Yacht</p>
-          </div>
-        </div>
+      <div className="about-footer">
+        <p className="about-license">
+          Licensed under the GNU General Public License, version 3 (GPLv3), and distributed WITHOUT
+          ANY WARRANTY, explicit or implied. See the{' '}
+          <ExternalLink href={LICENSE_URL}>GNU General Public License</ExternalLink> for more
+          details.
+        </p>
+        <p className="about-copyright">Copyright © 2025-2026 Luxury Yacht</p>
       </div>
     </ModalSurface>
   );

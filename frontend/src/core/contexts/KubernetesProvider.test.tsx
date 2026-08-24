@@ -14,25 +14,24 @@ const wailsMocks = vi.hoisted(() => ({
   GetKubeconfigs: vi
     .fn()
     .mockResolvedValue({ kubeconfigs: [], state: 'no_kubeconfigs', searchPaths: ['~/.kube'] }),
-  GetClusterWorkspaceState: vi.fn().mockResolvedValue({
+  GetClusterWorkspaceStateForWindow: vi.fn().mockResolvedValue({
     selectedKubeconfigs: [],
     visibleClusterId: '',
     clusters: {},
   }),
   SetSidebarVisible: vi.fn(),
   GetCatalogDiagnostics: vi.fn().mockResolvedValue({ enabled: false }),
-  GetAppearanceModeInfo: vi.fn().mockResolvedValue({ userMode: 'system' }),
 }));
 
-vi.mock('@wailsjs/go/backend/App', () => ({
+vi.mock('@core/backend-api', () => ({
   GetKubeconfigs: (...args: unknown[]) => wailsMocks.GetKubeconfigs(...args),
-  GetClusterWorkspaceState: (...args: unknown[]) => wailsMocks.GetClusterWorkspaceState(...args),
+  GetClusterWorkspaceStateForWindow: (...args: unknown[]) =>
+    wailsMocks.GetClusterWorkspaceStateForWindow(...args),
   SetSidebarVisible: (...args: unknown[]) => wailsMocks.SetSidebarVisible(...args),
   GetCatalogDiagnostics: (...args: unknown[]) => wailsMocks.GetCatalogDiagnostics(...args),
-  GetAppearanceModeInfo: (...args: unknown[]) => wailsMocks.GetAppearanceModeInfo(...args),
 }));
 
-vi.mock('@wailsjs/go/models', () => ({
+vi.mock('@core/backend-api/models', () => ({
   types: {},
   backend: {},
 }));

@@ -10,8 +10,8 @@ import (
 	"github.com/luxury-yacht/app/backend/internal/lifecycle"
 )
 
-// selectionMutation carries metadata for a coordinated cluster mutation operation.
-// Phase 1 keeps execution serialized while plumbing generation-aware boundaries.
+// selectionMutation carries metadata for a coordinated cluster mutation
+// operation and keeps execution serialized across generation-aware boundaries.
 type selectionMutation struct {
 	generation uint64
 	reason     string
@@ -37,7 +37,22 @@ type selectionMutationPhases struct {
 
 // runSelectionMutation serializes a cluster-selection/runtime mutation path,
 // increments selection generation, and executes the mutation callback.
-func (a *App) runSelectionMutation(reason string, fn func(*selectionMutation) error) error {
+func (a *WorkspaceCoordinator) runSelectionMutation(reason string, fn func(*selectionMutation) error) error {
+	return a.runSelectionMutationWithQueuePolicy(reason, true, fn)
+}
+
+// runOrderedSelectionMutation preserves every queued mutation. Peer windows
+// own independent tab sets, so a later command from one peer must not supersede
+// an earlier command from another peer.
+func (a *WorkspaceCoordinator) runOrderedSelectionMutation(reason string, fn func(*selectionMutation) error) error {
+	return a.runSelectionMutationWithQueuePolicy(reason, false, fn)
+}
+
+func (a *WorkspaceCoordinator) runSelectionMutationWithQueuePolicy(
+	reason string,
+	supersedeQueued bool,
+	fn func(*selectionMutation) error,
+) error {
 	if a == nil {
 		return fmt.Errorf("app is nil")
 	}
@@ -50,18 +65,23 @@ func (a *App) runSelectionMutation(reason string, fn func(*selectionMutation) er
 	requestStarted := time.Now()
 	a.selectionDiagnosticsEnqueue()
 
-	generation := a.selectionGeneration.Add(1)
-	// Preempt work from previous generations immediately, even before this
-	// mutation acquires the serialized mutation slot.
-	a.cancelActiveSelectionGeneration()
+	var generation uint64
+	if supersedeQueued {
+		generation = a.selectionGeneration.Add(1)
+		// Preempt work from previous generations immediately, even before this
+		// mutation acquires the serialized mutation slot.
+		a.cancelActiveSelectionGeneration()
+	}
 
 	// Keep coordinated mutations sequential while allowing generation preemption.
 	a.selectionMutationMu.Lock()
 	queueWait := time.Since(requestStarted)
 	defer a.selectionMutationMu.Unlock()
 
-	// If a newer generation arrived while waiting for the mutation slot, skip.
-	if generation != a.selectionGeneration.Load() {
+	// If a newer superseding generation arrived while waiting for the mutation
+	// slot, skip. Ordered peer mutations allocate their generation only after
+	// reaching the front of the queue, so every peer's state is committed.
+	if supersedeQueued && generation != a.selectionGeneration.Load() {
 		a.selectionDiagnosticsFinalize(selectionMutationSample{
 			queueMs:    queueWait.Milliseconds(),
 			totalMs:    time.Since(requestStarted).Milliseconds(),
@@ -69,6 +89,10 @@ func (a *App) runSelectionMutation(reason string, fn func(*selectionMutation) er
 			superseded: true,
 		})
 		return nil
+	}
+	if !supersedeQueued {
+		generation = a.selectionGeneration.Add(1)
+		a.cancelActiveSelectionGeneration()
 	}
 
 	var mutation selectionMutation
@@ -139,7 +163,7 @@ func (a *App) runSelectionMutation(reason string, fn func(*selectionMutation) er
 
 // runSelectionMutationAsync executes a coordinated mutation asynchronously.
 // Errors are logged since callers are typically event/recovery callbacks.
-func (a *App) runSelectionMutationAsync(reason string, fn func(*selectionMutation) error) {
+func (a *WorkspaceCoordinator) runSelectionMutationAsync(reason string, fn func(*selectionMutation) error) {
 	if a == nil {
 		return
 	}
@@ -153,14 +177,14 @@ func (a *App) runSelectionMutationAsync(reason string, fn func(*selectionMutatio
 	}()
 }
 
-func (a *App) selectionMutationDrainCondLocked() *sync.Cond {
+func (a *WorkspaceCoordinator) selectionMutationDrainCondLocked() *sync.Cond {
 	if a.selectionMutationDrainCond == nil {
 		a.selectionMutationDrainCond = sync.NewCond(&a.selectionMutationDrainMu)
 	}
 	return a.selectionMutationDrainCond
 }
 
-func (a *App) beginSelectionMutationDrain() func() {
+func (a *WorkspaceCoordinator) beginSelectionMutationDrain() func() {
 	a.selectionMutationDrainMu.Lock()
 	a.selectionMutationPending++
 	a.selectionMutationDrainCondLocked()
@@ -178,7 +202,7 @@ func (a *App) beginSelectionMutationDrain() func() {
 	}
 }
 
-func (a *App) waitForSelectionMutationIdle(timeout time.Duration) bool {
+func (a *WorkspaceCoordinator) waitForSelectionMutationIdle(timeout time.Duration) bool {
 	if a == nil {
 		return true
 	}
@@ -210,14 +234,14 @@ func (a *App) waitForSelectionMutationIdle(timeout time.Duration) bool {
 }
 
 // isSelectionGenerationCurrent reports whether expected generation is still current.
-func (a *App) isSelectionGenerationCurrent(expected uint64) bool {
+func (a *WorkspaceCoordinator) isSelectionGenerationCurrent(expected uint64) bool {
 	if a == nil {
 		return false
 	}
 	return a.selectionGeneration.Load() == expected
 }
 
-func (a *App) cancelActiveSelectionGeneration() {
+func (a *WorkspaceCoordinator) cancelActiveSelectionGeneration() {
 	if a == nil {
 		return
 	}
@@ -230,7 +254,7 @@ func (a *App) cancelActiveSelectionGeneration() {
 	}
 }
 
-func (a *App) activateSelectionGeneration() context.Context {
+func (a *WorkspaceCoordinator) activateSelectionGeneration() context.Context {
 	if a == nil {
 		return context.Background()
 	}
@@ -248,7 +272,7 @@ func (a *App) activateSelectionGeneration() context.Context {
 }
 
 // withKubeconfigStateTransition runs a short state-transition critical section.
-func (a *App) withKubeconfigStateTransition(fn func()) {
+func (a *WorkspaceCoordinator) withKubeconfigStateTransition(fn func()) {
 	if a == nil || fn == nil {
 		return
 	}

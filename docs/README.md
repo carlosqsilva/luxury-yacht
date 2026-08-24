@@ -17,6 +17,7 @@ completed phase plans, or test lists that can be discovered with `rg`.
 
 | Question | Start here |
 | --- | --- |
+| How is the backend decomposed into services, and which dependency directions are allowed? | [architecture/backend-services.md](architecture/backend-services.md) |
 | How is cluster data isolated? | [architecture/multi-cluster.md](architecture/multi-cluster.md) |
 | When should retained data paint, refresh, stream, poll, or create background work? | [architecture/data-freshness.md](architecture/data-freshness.md) |
 | How do refresh domains, snapshots, streams, and scopes work? | [architecture/refresh-system.md](architecture/refresh-system.md) |
@@ -30,6 +31,7 @@ completed phase plans, or test lists that can be discovered with `rg`.
 | How do permission gates and action capabilities work? | [architecture/permissions.md](architecture/permissions.md) |
 | How are auth failures represented and recovered? | [architecture/auth.md](architecture/auth.md) |
 | How is Sentry error reporting configured and bounded? | [architecture/error-reporting.md](architecture/error-reporting.md) |
+| How do Wails startup, readiness, windows, single-instance launches, and shutdown work? | [architecture/application-lifecycle.md](architecture/application-lifecycle.md) |
 | What are the large-data table rules? | [architecture/large-data.md](architecture/large-data.md) |
 | How do YAML edits save, merge, and check field ownership? | [architecture/yaml-editing.md](architecture/yaml-editing.md) |
 
@@ -56,6 +58,7 @@ completed phase plans, or test lists that can be discovered with `rg`.
 | How does the object map work? | [workflows/object-map.md](workflows/object-map.md) |
 | How are live operations tracked and cleaned up? | [workflows/operation-lifecycle.md](workflows/operation-lifecycle.md) |
 | How do shell exec and debug containers work? | [workflows/shell-debug.md](workflows/shell-debug.md) |
+| How are application updates discovered, authenticated, published, applied, and recovered? | [workflows/application-updates.md](workflows/application-updates.md) |
 | Which logs doc applies? | [workflows/logs/overview.md](workflows/logs/overview.md) |
 | How do I diagnose a wedged backend (views stuck loading, suspected deadlock)? | [workflows/goroutine-dump.md](workflows/goroutine-dump.md) |
 

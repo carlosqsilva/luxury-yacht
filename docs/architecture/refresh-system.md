@@ -34,7 +34,22 @@ carry a complete `ResourceRef`: `clusterId`, `group`, `version`, `kind`,
 
 ## Ownership
 
-- Subsystem lifecycle and aggregate routing: `backend/app_refresh_*.go`
+- `backend.RefreshCoordinator` is the sole process owner of the atomically
+  published HTTP handler, per-cluster subsystems and streams, aggregate
+  routing, governor and spill state, object-catalog runtimes, refresh telemetry,
+  refresh teardown, and the shared global container-log limiter.
+- `backend.ClusterRuntimeManager` supplies cluster-scoped clients, lifecycle,
+  metadata, and dependency resolution. Refresh may call Cluster Runtime;
+  Cluster Runtime never calls back into Refresh or Workspace.
+- Refresh registers `ResourceGateway` cache invalidators during subsystem
+  construction. The invalidation direction is Refresh to Resources; resource
+  request code never acquires refresh/subsystem state. Catalog-service and
+  telemetry reads cross a shared leaf `refreshResourceProjection`: Refresh
+  publishes replacements into it and Resources only reads it, avoiding a
+  reverse callback into `RefreshCoordinator`.
+- Refresh registers and unregisters each subsystem's Attention index with
+  `ClusterAttentionService`. Attention applies persisted/live rules without a
+  callback into Refresh.
 - Registry, permission gates, manual jobs: `backend/refresh/system`
 - List/table payloads: `backend/refresh/snapshot`
 - Query-backed change signals: `backend/refresh/resourcestream`
@@ -48,6 +63,19 @@ carry a complete `ResourceRef`: `clusterId`, `group`, `version`, `kind`,
 `backend/resources` owns details and imperative helpers, not list/table refresh
 payloads. `frontend/src/core/refresh/types.generated.ts` is generated; register
 Go DTOs and run `go generate ./backend` instead of editing it.
+
+Handler and stream replacement publish the new aggregate generation before
+stopping the old producers. Global teardown reverses that visibility first:
+unpublish the handler and stream generation, then stop their producers. Factory
+Reset uses the same owner-directed teardown before clearing refresh spill/cache
+state, so no request can resolve state while it is being deleted.
+
+Preferences reaches Refresh only through two write-only sinks. The metrics
+interval is retained for future subsystem construction; a live update snapshots
+subsystem pointers under the registry read lock, releases it, and then retimes
+their managers. The global container-log limit mutates one shared limiter. Both
+sinks are push-only and never read Preferences. The limiter mutex is a leaf init
+lock and must never nest a settings or subsystem lock.
 
 Scoped frontend leases have two demand modes:
 
@@ -113,7 +141,7 @@ When a governor re-warm or recovery replaces a cluster's stream manager, the
 aggregate router points at the replacement first, then sends `COMPLETE` for only
 that cluster's existing subscriptions. The client re-subscribes through the
 current adapter and the normal ACK/replay/reset handshake re-establishes trust;
-the aggregate WebSocket and other clusters' subscriptions remain connected.
+the aggregate named stream and other clusters' subscriptions remain connected.
 
 The regression harnesses are
 `frontend/src/core/refresh/orchestrator.streamingFlap.test.ts` for lease flaps
@@ -133,4 +161,4 @@ subscribers indicates this contract regressed.
 3. Trace producer, consumers, ordering, teardown, and permission recovery.
 4. Add contract parity plus behavior tests at the real snapshot/stream/consumer
    seams.
-5. Run focused backend/frontend tests and `mage qc:prerelease`.
+5. Run focused backend/frontend tests and `wails3 task qc:prerelease`.

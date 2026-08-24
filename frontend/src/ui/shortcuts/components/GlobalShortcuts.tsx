@@ -6,6 +6,7 @@
  */
 
 import { useZoom } from '@core/contexts/ZoomContext';
+import { onEvent } from '@core/desktop-runtime';
 import {
   getClusterTabOrder,
   hydrateClusterTabOrder,
@@ -13,8 +14,8 @@ import {
   subscribeClusterTabOrder,
 } from '@core/persistence/clusterTabOrder';
 import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
-import { EventsOff, EventsOn } from '@wailsjs/runtime/runtime';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { closeActiveClusterOrWindow } from '@/ui/navigation/closeActiveClusterOrWindow';
 import { isMacPlatform } from '@/utils/platform';
 import { KeyCodes } from '../constants';
 import { useShortcut } from '../hooks';
@@ -117,14 +118,12 @@ export function GlobalShortcuts({
   );
 
   const handleCloseClusterTab = useCallback(() => {
-    if (!selectedKubeconfig) {
-      return;
-    }
-    if (!selectedKubeconfigs.includes(selectedKubeconfig)) {
-      return;
-    }
-    void closeKubeconfig(selectedKubeconfig).catch((err) => {
-      console.warn('Failed to close cluster:', err);
+    void closeActiveClusterOrWindow({
+      selectedKubeconfig,
+      selectedKubeconfigs,
+      closeKubeconfig,
+    }).catch((err) => {
+      console.warn('Failed to close cluster tab or window:', err);
     });
   }, [closeKubeconfig, selectedKubeconfig, selectedKubeconfigs]);
 
@@ -308,18 +307,14 @@ export function GlobalShortcuts({
   });
 
   // Handle menu:close event from the backend (Cmd/Ctrl+W via native menu).
-  // Closes the active cluster tab. Closing the last cluster leaves the app
-  // running in its no-clusters state; it no longer quits (handleCloseClusterTab
-  // is a no-op when nothing is open).
+  // Closes the active cluster tab, or the current peer window when it has no
+  // cluster tabs left.
   useEffect(() => {
     const handleMenuClose = () => {
       handleCloseClusterTab();
     };
 
-    EventsOn('menu:close', handleMenuClose);
-    return () => {
-      EventsOff('menu:close');
-    };
+    return onEvent('menu:close', handleMenuClose);
   }, [handleCloseClusterTab]);
 
   useShortcut({

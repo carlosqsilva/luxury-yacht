@@ -106,6 +106,23 @@ stream reconciliation path rather than creating a ManualQueue job.
 The authored domain contract declares which clocks can change a payload:
 `object`, `metric`, `event`, `catalog`, and `attention`.
 
+Request/response refresh traffic uses the same-origin Wails service route
+`/api/v2`. Resource doorbells and container logs use the named Wails streams
+`refresh-resources` and `refresh-container-logs`, with structured JSON frames
+in both directions. The backend publishes or replaces the service handler only
+after the owning aggregate is ready; an earlier request receives a bounded
+service-unavailable response. There is no application-owned loopback listener,
+runtime base-URL discovery, CORS layer, raw browser WebSocket, EventSource, or
+fallback refresh transport.
+
+The service route owns snapshots and validators, permission-shaped failures,
+manual-refresh enqueue/status, telemetry summaries, metrics activation,
+correlation identity, and request-context cancellation. The named streams own
+resource replay/reset and container-log delivery, including their
+backpressure, cancellation, manager replacement, and shutdown behavior. Keep
+those contracts on their framework-owned transports rather than recreating an
+application transport between them.
+
 - Signal-driven refetch keys only on the declared `signalVersions`. Snapshot
   responses also update validators and must not echo into another refetch.
 - Signal versions are opaque equality tokens. Sequence and Kubernetes
@@ -183,6 +200,10 @@ The authored domain contract declares which clocks can change a payload:
   sibling may not delay it. After a cluster enters `loading`, `loading_slow`, or
   `ready`, a late `connecting`/`connected` result cannot move it back behind the
   frontend serving gate.
+- `RefreshCoordinator` owns subsystem/catalog replacement, refresh telemetry,
+  Attention-target registration, and handler/stream publication. Replacement
+  publishes new routing before stopping old producers; teardown unpublishes
+  before releasing producers.
 - When a cluster subsystem is replaced, queued or running manual work moves to
   its replacement queue. Succeeded, failed, and cancelled jobs remain terminal
   and are never re-enqueued.
@@ -230,4 +251,4 @@ For a freshness change, test the contract at the producer/consumer seam:
     and under sustained memory pressure re-drives until either a settled mmap
     transition or the bounded full-teardown fallback completes.
 
-Finish non-documentation changes with `mage qc:prerelease`.
+Finish non-documentation changes with `wails3 task qc:prerelease`.

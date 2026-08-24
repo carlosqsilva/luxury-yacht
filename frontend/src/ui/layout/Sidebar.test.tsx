@@ -23,8 +23,7 @@ import Sidebar from './Sidebar';
 const sidebarStyles = readFileSync(resolve(process.cwd(), 'src/ui/layout/Sidebar.css'), 'utf8');
 
 const runtimeMocks = vi.hoisted(() => ({
-  eventsOn: vi.fn(),
-  eventsOff: vi.fn(),
+  eventsOn: vi.fn(() => () => undefined),
 }));
 
 const autoRefreshLoadingState = vi.hoisted(() => ({
@@ -49,9 +48,9 @@ const kubeconfigState = vi.hoisted(() => ({
 const testClusterId = 'cluster-a';
 const namespaceKey = (scope: string) => `${testClusterId}|${scope}`;
 
-vi.mock('@wailsjs/runtime/runtime', () => ({
-  EventsOn: runtimeMocks.eventsOn,
-  EventsOff: runtimeMocks.eventsOff,
+vi.mock('@core/desktop-runtime', () => ({
+  desktopRuntimeAvailable: () => false,
+  onEvent: runtimeMocks.eventsOn,
 }));
 
 vi.mock('@modules/kubernetes/config/KubeconfigContext', () => ({
@@ -523,7 +522,7 @@ describe('Sidebar', () => {
   it('shows the permission message and the scope editor when listing is denied', () => {
     // Fail-fast design: no catalog inference, no empty list — the user is told
     // exactly why the sidebar has no namespaces, and the inline scope editor
-    // (docs/plans/namespace-scope.md) is the way in for a restricted identity.
+    // (docs/architecture/namespace-scope.md) is the way in for a restricted identity.
     namespaceState.namespacesPermissionDenied = true;
     namespaceState.namespaces = [];
     renderSidebar();

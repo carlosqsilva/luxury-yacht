@@ -55,7 +55,7 @@ const mockExistingFavorite: Favorite = {
 
 // Populate the Storybook Go backend mock with realistic kubeconfigs.
 const installMockKubeconfigs = () => {
-  const overrides = window.__storybookGoOverrides || {};
+  const overrides = window.__storybookBackendOverrides || {};
   overrides.GetKubeconfigs = () =>
     Promise.resolve({
       kubeconfigs: [
@@ -84,13 +84,13 @@ const installMockKubeconfigs = () => {
       state: 'available',
       searchPaths: ['~/.kube'],
     });
-  overrides.GetClusterWorkspaceState = () =>
+  overrides.GetClusterWorkspaceStateForWindow = () =>
     Promise.resolve({
       selectedKubeconfigs: ['/Users/john/.kube/config:prod-cluster'],
       visibleClusterId: 'config:prod-cluster',
       clusters: {},
     });
-  window.__storybookGoOverrides = overrides;
+  window.__storybookBackendOverrides = overrides;
 };
 
 // ---------------------------------------------------------------------------

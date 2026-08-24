@@ -59,7 +59,7 @@ Typed refresh rows are enrichments. They are not competing identity systems.
   `backend/resources/common/resource_identity.go`
 - Catalog snapshots and liveness doorbells:
   `backend/refresh/snapshot/catalog.go`,
-  `backend/app_object_catalog.go`,
+  `backend/refresh_object_catalog.go`,
   `backend/refresh/resourcestream`
 - Browse catalog consumer:
   `frontend/src/modules/browse/hooks/useBrowseCatalog.ts`
@@ -80,4 +80,4 @@ When touching catalog behavior:
 ## Validation
 
 Run focused catalog/objectcatalog tests and the frontend browse tests affected
-by the change. For non-documentation work, finish with `mage qc:prerelease`.
+by the change. For non-documentation work, finish with `wails3 task qc:prerelease`.

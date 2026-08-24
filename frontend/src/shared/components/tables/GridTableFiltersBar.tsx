@@ -6,14 +6,20 @@
  */
 
 import ActiveFilterChips, { type ActiveFilterChip } from '@shared/components/ActiveFilterChips';
-import type { DropdownOption } from '@shared/components/dropdowns/Dropdown';
+import type { DropdownOption, DropdownProps } from '@shared/components/dropdowns/Dropdown';
 import { Dropdown } from '@shared/components/dropdowns/Dropdown';
+import { DROPDOWN_BULK_ACTION_ICON_SIZE } from '@shared/components/dropdowns/Dropdown/Dropdown';
+import {
+  DropdownFilterOption,
+  dropdownFilterOptionState,
+} from '@shared/components/dropdowns/Dropdown/DropdownFilterOption';
 import {
   ALL_MULTISELECT_FILTER,
   filterSelectionToDropdownValues,
+  type MultiSelectFilterSelection,
 } from '@shared/components/dropdowns/multiSelectFilterSelection';
 import IconBar, { type IconBarItem } from '@shared/components/IconBar/IconBar';
-import { CaseSensitiveIcon } from '@shared/components/icons/SharedIcons';
+import { CaseSensitiveIcon, ResetFiltersIcon } from '@shared/components/icons/SharedIcons';
 import SearchInput from '@shared/components/inputs/SearchInput';
 import Tooltip from '@shared/components/Tooltip';
 import type {
@@ -24,7 +30,7 @@ import type {
 import { hasNarrowingGridTableFilters } from '@shared/components/tables/gridTableFilterState';
 import { useSearchShortcutTarget } from '@ui/shortcuts';
 import type React from 'react';
-import { useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 interface GridTableFiltersBarProps {
   activeFilters: GridTableFilterState;
@@ -52,6 +58,10 @@ interface GridTableFiltersBarProps {
   columnOptions?: DropdownOption[];
   columnValue?: string[];
   onColumnsChange?: (value: string | string[]) => void;
+  onMoveColumn?: (key: string, offset: -1 | 1) => void;
+  onReorderColumn?: (key: string, targetIndex: number) => void;
+  canResetColumns?: boolean;
+  onResetColumns?: () => void;
   showKindDropdown?: boolean;
   showNamespaceDropdown?: boolean;
   showClusterDropdown?: boolean;
@@ -76,6 +86,37 @@ interface GridTableFiltersBarProps {
     capped?: boolean;
   };
 }
+
+type ColumnDropTarget = {
+  key: string;
+  position: 'before' | 'after';
+};
+
+type FilterControlPlacement = 'before-kinds' | 'kind' | 'namespace' | 'cluster' | 'after-clusters';
+
+interface ResolvedMultiselectFilterControl {
+  key: string;
+  role: string;
+  id: string;
+  name: string;
+  label: string;
+  singularLabel: string;
+  clearLabel: string;
+  placeholder: string;
+  placement: FilterControlPlacement;
+  visible: boolean;
+  searchable?: boolean;
+  bulkActions?: boolean;
+  selection: MultiSelectFilterSelection;
+  options: DropdownOption[];
+  onChange: (value: string | string[]) => void;
+  onClear: () => void;
+  renderValue: (value: string | string[], options: DropdownOption[]) => React.ReactNode;
+}
+
+type PrimaryFilterItem =
+  | { type: 'control'; control: ResolvedMultiselectFilterControl }
+  | { type: 'before-namespace-actions'; items: IconBarItem[] };
 
 function formatResultCountLabel(
   resultCount: NonNullable<GridTableFiltersBarProps['resultCount']>
@@ -111,6 +152,178 @@ function queryFacetChipSingularType(facet: GridTableQueryFacetDefinition): strin
   return label;
 }
 
+function buildActiveFilterChips(
+  activeFilters: GridTableFilterState,
+  filterControls: ResolvedMultiselectFilterControl[],
+  onFiltersChange: GridTableFiltersBarProps['onFiltersChange']
+): ActiveFilterChip[] {
+  const chips: ActiveFilterChip[] = [];
+  const search = activeFilters.search.trim();
+  if (search) {
+    chips.push({
+      key: 'search',
+      label: `Text: ${search}`,
+      removeLabel: 'Clear text filter',
+      onRemove: () => onFiltersChange({ search: '' }),
+    });
+  }
+  for (const control of filterControls) {
+    const { selection } = control;
+    if (selection.mode === 'all') {
+      continue;
+    }
+    const count = selection.mode === 'some' ? selection.values.length : 0;
+    const label =
+      selection.mode === 'some' && selection.values.length === 1
+        ? `${control.singularLabel}: ${control.options.find((option) => option.value === selection.values[0])?.label ?? selection.values[0]}`
+        : `${control.label}: ${count}`;
+    chips.push({
+      key: control.key,
+      label,
+      removeLabel: `Clear ${control.clearLabel} filter`,
+      onRemove: control.onClear,
+    });
+  }
+  if (activeFilters.caseSensitive) {
+    chips.push({
+      key: 'case-sensitive',
+      label: 'Match case',
+      removeLabel: 'Clear Match case filter',
+      onRemove: () => onFiltersChange({ caseSensitive: false }),
+    });
+  }
+  if (activeFilters.includeMetadata) {
+    chips.push({
+      key: 'include-metadata',
+      label: 'Include metadata',
+      removeLabel: 'Clear Include metadata filter',
+      onRemove: () => onFiltersChange({ includeMetadata: false }),
+    });
+  }
+  return chips;
+}
+
+function renderResultCountChip(
+  resultCount: GridTableFiltersBarProps['resultCount'],
+  hasNarrowingFilters: boolean,
+  searchBehavior: InternalFilterOptions['searchBehavior']
+): React.ReactNode {
+  if (!resultCount || !hasNarrowingFilters) {
+    return undefined;
+  }
+  return (
+    <span className="active-filter-chips__summary" data-gridtable-filter-role="result-count">
+      {resultCount.capped ? (
+        <Tooltip
+          content={
+            <>
+              {resultCount.totalIsExact === false && (
+                <p className="gridtable-filter-result-tooltip-paragraph">
+                  The total count is approximate because the backend stopped counting after the
+                  configured exact-count budget.
+                </p>
+              )}
+              {!!resultCount.partialDataLabel && (
+                <p className="gridtable-filter-result-tooltip-paragraph">
+                  {resultCount.partialDataLabel}
+                </p>
+              )}
+              <p className="gridtable-filter-result-tooltip-paragraph">
+                {searchBehavior === 'query'
+                  ? 'This table is showing the current backend query page.'
+                  : 'This table is showing the current local row window.'}
+              </p>
+              {searchBehavior === 'query' && (
+                <p className="gridtable-filter-result-tooltip-paragraph">
+                  Use page controls to inspect additional matching rows.
+                </p>
+              )}
+            </>
+          }
+        >
+          <span>{formatResultCountLabel(resultCount)}</span>
+        </Tooltip>
+      ) : (
+        formatResultCountLabel(resultCount)
+      )}
+    </span>
+  );
+}
+
+interface ColumnsDropdownOptions {
+  show: boolean;
+  id: string;
+  columnOptions?: DropdownOption[];
+  columnValue?: string[];
+  onColumnsChange: GridTableFiltersBarProps['onColumnsChange'];
+  renderColumnOption: NonNullable<DropdownProps['renderOption']>;
+  renderColumnOrderActions: DropdownProps['renderOptionActions'];
+  getColumnRowProps: DropdownProps['getOptionRowProps'];
+  onResetColumns: GridTableFiltersBarProps['onResetColumns'];
+  canResetColumns: boolean;
+  renderColumnsValue: NonNullable<GridTableFiltersBarProps['renderColumnsValue']>;
+}
+
+function renderColumnsDropdown({
+  show,
+  id,
+  columnOptions,
+  columnValue,
+  onColumnsChange,
+  renderColumnOption,
+  renderColumnOrderActions,
+  getColumnRowProps,
+  onResetColumns,
+  canResetColumns,
+  renderColumnsValue,
+}: ColumnsDropdownOptions): React.ReactNode {
+  if (!show || !columnOptions || !columnValue || !onColumnsChange) {
+    return null;
+  }
+  return (
+    <div className="gridtable-filter-group" data-gridtable-filter-role="columns">
+      <Dropdown
+        id={id}
+        name="gridtable-filter-columns"
+        multiple
+        showBulkActions
+        size="compact"
+        placeholder="Columns"
+        value={columnValue}
+        options={columnOptions}
+        disabled={!columnOptions.length}
+        onChange={onColumnsChange}
+        dropdownClassName="dropdown-filter-menu dropdown-columns-menu"
+        renderOption={renderColumnOption}
+        renderOptionActions={renderColumnOrderActions}
+        getOptionRowProps={getColumnRowProps}
+        additionalBulkActions={
+          onResetColumns ? (
+            <button
+              type="button"
+              className="dropdown-bulk-action dropdown-bulk-action--labeled icon-bar-button"
+              disabled={!canResetColumns}
+              title="Restore the default column order, show every column, and reset automatic widths"
+              aria-label="Reset columns"
+              onClick={(event) => {
+                event.stopPropagation();
+                onResetColumns();
+              }}
+            >
+              <ResetFiltersIcon
+                width={DROPDOWN_BULK_ACTION_ICON_SIZE}
+                height={DROPDOWN_BULK_ACTION_ICON_SIZE}
+              />
+              <span className="dropdown-bulk-action-label">Reset</span>
+            </button>
+          ) : null
+        }
+        renderValue={renderColumnsValue}
+      />
+    </div>
+  );
+}
+
 const GridTableFiltersBar: React.FC<GridTableFiltersBarProps> = ({
   activeFilters,
   resolvedFilterOptions,
@@ -136,6 +349,10 @@ const GridTableFiltersBar: React.FC<GridTableFiltersBarProps> = ({
   columnOptions,
   columnValue,
   onColumnsChange,
+  onMoveColumn,
+  onReorderColumn,
+  canResetColumns = false,
+  onResetColumns,
   showKindDropdown = false,
   showNamespaceDropdown = false,
   showClusterDropdown = false,
@@ -155,126 +372,255 @@ const GridTableFiltersBar: React.FC<GridTableFiltersBarProps> = ({
   const hasNarrowingFilters = hasNarrowingGridTableFilters(activeFilters);
   const showCaseSensitiveToggle = resolvedFilterOptions.searchBehavior !== 'query';
   const queryFacets = resolvedFilterOptions.queryFacets ?? [];
-  const leadingQueryFacets = queryFacets.filter((facet) => facet.placement === 'before-kinds');
-  const trailingQueryFacets = queryFacets.filter((facet) => facet.placement !== 'before-kinds');
-  const activeFilterChips = useMemo<ActiveFilterChip[]>(() => {
-    const chips: ActiveFilterChip[] = [];
-    const search = activeFilters.search.trim();
-    if (search) {
-      chips.push({
-        key: 'search',
-        label: `Text: ${search}`,
-        removeLabel: 'Clear text filter',
-        onRemove: () => onFiltersChange({ search: '' }),
-      });
+  const [draggingColumnKey, setDraggingColumnKey] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<ColumnDropTarget | null>(null);
+
+  useEffect(() => {
+    if (!draggingColumnKey || !onReorderColumn || !columnOptions) {
+      return;
     }
 
-    const addSelectionChip = (
-      key: 'kinds' | 'namespaces' | 'clusters',
-      pluralLabel: string,
-      singularLabel: string,
-      options: DropdownOption[]
-    ) => {
-      const selection = activeFilters[key];
-      if (selection.mode === 'all') {
-        return;
+    const getDropTarget = (event: DragEvent) => {
+      const eventTarget = event.target;
+      if (!(eventTarget instanceof Element)) {
+        return null;
       }
-      const count = selection.mode === 'some' ? selection.values.length : 0;
-      const label =
-        selection.mode === 'some' && selection.values.length === 1
-          ? `${singularLabel}: ${options.find((option) => option.value === selection.values[0])?.label ?? selection.values[0]}`
-          : `${pluralLabel}: ${count}`;
-      chips.push({
-        key,
-        label,
-        removeLabel: `Clear ${pluralLabel} filter`,
-        onRemove: () => onFiltersChange({ [key]: ALL_MULTISELECT_FILTER }),
-      });
+      const row = eventTarget.closest<HTMLElement>('.dropdown-option-row');
+      const key = row?.dataset.columnKey;
+      if (!key || key === draggingColumnKey) {
+        return null;
+      }
+      const index = columnOptions.findIndex((option) => option.value === key);
+      const draggingIndex = columnOptions.findIndex((option) => option.value === draggingColumnKey);
+      return index >= 0 && draggingIndex >= 0
+        ? { key, index, position: draggingIndex < index ? ('after' as const) : ('before' as const) }
+        : null;
     };
 
-    addSelectionChip('kinds', 'Kinds', 'Kind', resolvedFilterOptions.kinds);
-    addSelectionChip('namespaces', 'Namespaces', 'Namespace', resolvedFilterOptions.namespaces);
-    addSelectionChip('clusters', 'Clusters', 'Cluster', resolvedFilterOptions.clusters ?? []);
-
-    for (const facet of queryFacets) {
-      const selection = activeFilters.queryFacets?.[facet.key] ?? ALL_MULTISELECT_FILTER;
-      if (selection.mode === 'all') {
-        continue;
+    const handleDragOver = (event: DragEvent) => {
+      const target = getDropTarget(event);
+      setDropTarget(target ? { key: target.key, position: target.position } : null);
+      if (target) {
+        event.preventDefault();
+        if (event.dataTransfer) {
+          event.dataTransfer.dropEffect = 'move';
+        }
       }
+    };
+
+    const handleDrop = (event: DragEvent) => {
+      const target = getDropTarget(event);
+      if (target) {
+        event.preventDefault();
+        onReorderColumn(draggingColumnKey, target.index);
+      }
+      setDraggingColumnKey(null);
+      setDropTarget(null);
+    };
+
+    document.addEventListener('dragover', handleDragOver);
+    document.addEventListener('drop', handleDrop);
+    return () => {
+      document.removeEventListener('dragover', handleDragOver);
+      document.removeEventListener('drop', handleDrop);
+    };
+  }, [columnOptions, draggingColumnKey, onReorderColumn]);
+
+  // A hidden column is absent from the table, so the Columns menu is the one
+  // place where dimming an unselected label reports something real.
+  const renderColumnOption = (option: DropdownOption, isSelected: boolean) => {
+    const required = Boolean(option.disabled);
+    return (
+      <DropdownFilterOption
+        label={option.label}
+        state={dropdownFilterOptionState(isSelected, required)}
+        dimWhenOff
+        title={required ? 'Always shown' : undefined}
+      />
+    );
+  };
+
+  // The whole row is the drag target — a 14x18px handle is too small to aim at.
+  // The grip stays as the affordance that says so, and as the keyboard entry point.
+  const getColumnRowProps = (option: DropdownOption) => {
+    if (!onMoveColumn || !onReorderColumn || !columnOptions) {
+      return {};
+    }
+    return {
+      draggable: true,
+      'data-column-key': option.value,
+      'data-dragging': draggingColumnKey === option.value || undefined,
+      'data-drop-position': dropTarget?.key === option.value ? dropTarget.position : undefined,
+      onDragStart: (event: React.DragEvent<HTMLDivElement>) => {
+        event.dataTransfer.effectAllowed = 'move';
+        event.dataTransfer.setData('text/plain', option.value);
+        setDraggingColumnKey(option.value);
+      },
+      onDragEnd: () => {
+        setDraggingColumnKey(null);
+        setDropTarget(null);
+      },
+    };
+  };
+
+  const renderColumnOrderActions = (option: DropdownOption) => {
+    if (!onMoveColumn || !onReorderColumn || !columnOptions) {
+      return null;
+    }
+    return (
+      <button
+        type="button"
+        className="gridtable-column-drag-handle"
+        data-column-key={option.value}
+        onKeyDown={(event) => {
+          if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') {
+            return;
+          }
+          event.preventDefault();
+          event.stopPropagation();
+          onMoveColumn(option.value, event.key === 'ArrowUp' ? -1 : 1);
+        }}
+        aria-label={`Reorder ${option.label}. Drag the row, or use Up and Down Arrow keys.`}
+        title="Drag the row, or use Up and Down Arrow keys to reorder"
+      >
+        ⠿
+      </button>
+    );
+  };
+  const filterControls: ResolvedMultiselectFilterControl[] = [
+    {
+      key: 'kinds',
+      role: 'kind',
+      id: kindDropdownId,
+      name: 'gridtable-filter-kind',
+      label: 'Kinds',
+      singularLabel: 'Kind',
+      clearLabel: 'Kinds',
+      placeholder: 'All kinds',
+      placement: 'kind',
+      visible: showKindDropdown,
+      searchable: true,
+      bulkActions: true,
+      selection: activeFilters.kinds,
+      options: resolvedFilterOptions.kinds,
+      onChange: onKindsChange,
+      onClear: () => onFiltersChange({ kinds: ALL_MULTISELECT_FILTER }),
+      renderValue: renderKindsValue,
+    },
+    {
+      key: 'namespaces',
+      role: 'namespace',
+      id: namespaceDropdownId,
+      name: 'gridtable-filter-namespace',
+      label: 'Namespaces',
+      singularLabel: 'Namespace',
+      clearLabel: 'Namespaces',
+      placeholder: 'All namespaces',
+      placement: 'namespace',
+      visible: showNamespaceDropdown,
+      searchable: resolvedFilterOptions.namespaceDropdownSearchable,
+      bulkActions: resolvedFilterOptions.namespaceDropdownBulkActions,
+      selection: activeFilters.namespaces,
+      options: resolvedFilterOptions.namespaces,
+      onChange: onNamespacesChange,
+      onClear: () => onFiltersChange({ namespaces: ALL_MULTISELECT_FILTER }),
+      renderValue: renderNamespacesValue,
+    },
+    {
+      key: 'clusters',
+      role: 'cluster',
+      id: clusterDropdownId,
+      name: 'gridtable-filter-cluster',
+      label: 'Clusters',
+      singularLabel: 'Cluster',
+      clearLabel: 'Clusters',
+      placeholder: 'All clusters',
+      placement: 'cluster',
+      visible: showClusterDropdown,
+      searchable: resolvedFilterOptions.clusterDropdownSearchable,
+      bulkActions: resolvedFilterOptions.clusterDropdownBulkActions,
+      selection: activeFilters.clusters,
+      options: resolvedFilterOptions.clusters ?? [],
+      onChange: onClustersChange,
+      onClear: () => onFiltersChange({ clusters: ALL_MULTISELECT_FILTER }),
+      renderValue: renderClustersValue,
+    },
+    ...queryFacets.map((facet): ResolvedMultiselectFilterControl => {
+      const selection = activeFilters.queryFacets?.[facet.key] ?? ALL_MULTISELECT_FILTER;
       const count = selection.mode === 'some' ? selection.values.length : 0;
-      const label =
-        selection.mode === 'some' && selection.values.length === 1
-          ? `${queryFacetChipSingularType(facet)}: ${facet.options.find((option) => option.value === selection.values[0])?.label ?? selection.values[0]}`
-          : `${queryFacetChipType(facet)}: ${count}`;
-      chips.push({
+      return {
         key: `query-facet-${facet.key}`,
-        label,
-        removeLabel: `Clear ${facet.label} filter`,
-        onRemove: () =>
+        role: `query-facet-${facet.key}`,
+        id: `${queryFacetDropdownIdPrefix ?? 'gridtable-query-facet'}-${facet.key}`,
+        name: `gridtable-filter-${facet.key}`,
+        label: queryFacetChipType(facet),
+        singularLabel: queryFacetChipSingularType(facet),
+        clearLabel: facet.label,
+        placeholder: facet.placeholder,
+        placement: facet.placement === 'before-kinds' ? 'before-kinds' : 'after-clusters',
+        visible: true,
+        searchable: facet.searchable,
+        bulkActions: facet.bulkActions,
+        selection,
+        options: facet.options,
+        onChange: (value) => onQueryFacetChange?.(facet.key, value),
+        onClear: () =>
           onFiltersChange({
             queryFacets: {
               ...activeFilters.queryFacets,
               [facet.key]: ALL_MULTISELECT_FILTER,
             },
           }),
-      });
-    }
+        renderValue: () => (count > 0 ? `${facet.label} (${count})` : facet.label),
+      };
+    }),
+  ];
 
-    if (activeFilters.caseSensitive) {
-      chips.push({
-        key: 'case-sensitive',
-        label: 'Match case',
-        removeLabel: 'Clear Match case filter',
-        onRemove: () => onFiltersChange({ caseSensitive: false }),
-      });
-    }
-    if (activeFilters.includeMetadata) {
-      chips.push({
-        key: 'include-metadata',
-        label: 'Include metadata',
-        removeLabel: 'Clear Include metadata filter',
-        onRemove: () => onFiltersChange({ includeMetadata: false }),
-      });
-    }
-    return chips;
-  }, [
-    activeFilters,
-    onFiltersChange,
-    queryFacets,
-    resolvedFilterOptions.kinds,
-    resolvedFilterOptions.namespaces,
-    resolvedFilterOptions.clusters,
-  ]);
+  const controlsAt = (placement: FilterControlPlacement): ResolvedMultiselectFilterControl[] =>
+    filterControls.filter((control) => control.visible && control.placement === placement);
 
-  const renderQueryFacet = (facet: GridTableQueryFacetDefinition) => {
-    const selection = activeFilters.queryFacets?.[facet.key] ?? ALL_MULTISELECT_FILTER;
-    const selected = filterSelectionToDropdownValues(selection, facet.options);
-    const count = selection.mode === 'some' ? selection.values.length : 0;
-    return (
-      <div
-        key={facet.key}
-        className="gridtable-filter-group"
-        data-gridtable-filter-role={`query-facet-${facet.key}`}
-      >
-        <Dropdown
-          id={`${queryFacetDropdownIdPrefix ?? 'gridtable-query-facet'}-${facet.key}`}
-          name={`gridtable-filter-${facet.key}`}
-          multiple
-          size="compact"
-          searchable={facet.searchable}
-          showBulkActions={facet.bulkActions}
-          placeholder={facet.placeholder}
-          value={selected}
-          options={facet.options}
-          disabled={!facet.options.length}
-          onChange={(value) => onQueryFacetChange?.(facet.key, value)}
-          dropdownClassName="dropdown-filter-menu"
-          renderOption={renderOption}
-          renderValue={() => (count > 0 ? `${facet.label} (${count})` : facet.label)}
-        />
-      </div>
-    );
-  };
+  const primaryFilterItems: PrimaryFilterItem[] = [
+    ...controlsAt('before-kinds').map((control) => ({ type: 'control' as const, control })),
+    ...controlsAt('kind').map((control) => ({ type: 'control' as const, control })),
+    ...(resolvedFilterOptions.beforeNamespaceActions?.length
+      ? [
+          {
+            type: 'before-namespace-actions' as const,
+            items: resolvedFilterOptions.beforeNamespaceActions,
+          },
+        ]
+      : []),
+    ...controlsAt('namespace').map((control) => ({ type: 'control' as const, control })),
+    ...controlsAt('cluster').map((control) => ({ type: 'control' as const, control })),
+    ...controlsAt('after-clusters').map((control) => ({ type: 'control' as const, control })),
+  ];
+
+  const activeFilterChips = buildActiveFilterChips(activeFilters, filterControls, onFiltersChange);
+
+  const renderFilterControl = (control: ResolvedMultiselectFilterControl) => (
+    <div
+      key={control.key}
+      className="gridtable-filter-group"
+      data-gridtable-filter-role={control.role}
+    >
+      <Dropdown
+        id={control.id}
+        name={control.name}
+        multiple
+        size="compact"
+        searchable={control.searchable}
+        showBulkActions={control.bulkActions}
+        placeholder={control.placeholder}
+        value={filterSelectionToDropdownValues(control.selection, control.options)}
+        options={control.options}
+        disabled={!control.options.length}
+        onChange={control.onChange}
+        dropdownClassName="dropdown-filter-menu"
+        renderOption={renderOption}
+        renderValue={control.renderValue}
+      />
+    </div>
+  );
 
   const handleSearchKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'a') {
@@ -327,136 +673,31 @@ const GridTableFiltersBar: React.FC<GridTableFiltersBarProps> = ({
     postActions,
   ]);
 
-  const resultCountChip =
-    resultCount && hasNarrowingFilters ? (
-      <span className="active-filter-chips__summary" data-gridtable-filter-role="result-count">
-        {resultCount.capped ? (
-          <Tooltip
-            content={
-              <>
-                {resultCount.totalIsExact === false && (
-                  <p className="gridtable-filter-result-tooltip-paragraph">
-                    The total count is approximate because the backend stopped counting after the
-                    configured exact-count budget.
-                  </p>
-                )}
-                {!!resultCount.partialDataLabel && (
-                  <p className="gridtable-filter-result-tooltip-paragraph">
-                    {resultCount.partialDataLabel}
-                  </p>
-                )}
-                <p className="gridtable-filter-result-tooltip-paragraph">
-                  {resolvedFilterOptions.searchBehavior === 'query'
-                    ? 'This table is showing the current backend query page.'
-                    : 'This table is showing the current local row window.'}
-                </p>
-                {resolvedFilterOptions.searchBehavior === 'query' && (
-                  <p className="gridtable-filter-result-tooltip-paragraph">
-                    Use page controls to inspect additional matching rows.
-                  </p>
-                )}
-              </>
-            }
-          >
-            <span>{formatResultCountLabel(resultCount)}</span>
-          </Tooltip>
-        ) : (
-          formatResultCountLabel(resultCount)
-        )}
-      </span>
-    ) : undefined;
+  const resultCountChip = renderResultCountChip(
+    resultCount,
+    hasNarrowingFilters,
+    resolvedFilterOptions.searchBehavior
+  );
 
   return (
     <div className="gridtable-filter-container">
       <div className="gridtable-filter-bar" ref={containerRef}>
         <div className="gridtable-filter-cluster" data-gridtable-filter-cluster="primary">
-          {!!(
-            showKindDropdown ||
-            showNamespaceDropdown ||
-            showClusterDropdown ||
-            (resolvedFilterOptions.beforeNamespaceActions?.length ?? 0) > 0 ||
-            (resolvedFilterOptions.queryFacets?.length ?? 0) > 0
-          ) && (
+          {!!primaryFilterItems.length && (
             <div className="gridtable-filter-subcluster">
-              {leadingQueryFacets.map(renderQueryFacet)}
-              {!!showKindDropdown && (
-                <div className="gridtable-filter-group" data-gridtable-filter-role="kind">
-                  <Dropdown
-                    id={kindDropdownId}
-                    name="gridtable-filter-kind"
-                    multiple
-                    size="compact"
-                    searchable
-                    showBulkActions
-                    placeholder="All kinds"
-                    value={filterSelectionToDropdownValues(
-                      activeFilters.kinds,
-                      resolvedFilterOptions.kinds
-                    )}
-                    options={resolvedFilterOptions.kinds}
-                    disabled={!resolvedFilterOptions.kinds?.length}
-                    onChange={onKindsChange}
-                    dropdownClassName="dropdown-filter-menu"
-                    renderOption={renderOption}
-                    renderValue={renderKindsValue}
-                  />
-                </div>
+              {primaryFilterItems.map((item) =>
+                item.type === 'control' ? (
+                  renderFilterControl(item.control)
+                ) : (
+                  <div
+                    key="before-namespace-actions"
+                    className="gridtable-filter-group"
+                    data-gridtable-filter-role="before-namespace-actions"
+                  >
+                    <IconBar items={item.items} />
+                  </div>
+                )
               )}
-              {!!resolvedFilterOptions.beforeNamespaceActions?.length && (
-                <div
-                  className="gridtable-filter-group"
-                  data-gridtable-filter-role="before-namespace-actions"
-                >
-                  <IconBar items={resolvedFilterOptions.beforeNamespaceActions} />
-                </div>
-              )}
-              {!!showNamespaceDropdown && (
-                <div className="gridtable-filter-group" data-gridtable-filter-role="namespace">
-                  <Dropdown
-                    id={namespaceDropdownId}
-                    name="gridtable-filter-namespace"
-                    multiple
-                    size="compact"
-                    searchable={resolvedFilterOptions.namespaceDropdownSearchable}
-                    showBulkActions={resolvedFilterOptions.namespaceDropdownBulkActions}
-                    placeholder="All namespaces"
-                    value={filterSelectionToDropdownValues(
-                      activeFilters.namespaces,
-                      resolvedFilterOptions.namespaces
-                    )}
-                    options={resolvedFilterOptions.namespaces}
-                    disabled={!resolvedFilterOptions.namespaces?.length}
-                    onChange={onNamespacesChange}
-                    dropdownClassName="dropdown-filter-menu"
-                    renderOption={renderOption}
-                    renderValue={renderNamespacesValue}
-                  />
-                </div>
-              )}
-              {!!showClusterDropdown && (
-                <div className="gridtable-filter-group" data-gridtable-filter-role="cluster">
-                  <Dropdown
-                    id={clusterDropdownId}
-                    name="gridtable-filter-cluster"
-                    multiple
-                    size="compact"
-                    searchable={resolvedFilterOptions.clusterDropdownSearchable}
-                    showBulkActions={resolvedFilterOptions.clusterDropdownBulkActions}
-                    placeholder="All clusters"
-                    value={filterSelectionToDropdownValues(
-                      activeFilters.clusters,
-                      resolvedFilterOptions.clusters ?? []
-                    )}
-                    options={resolvedFilterOptions.clusters ?? []}
-                    disabled={!resolvedFilterOptions.clusters?.length}
-                    onChange={onClustersChange}
-                    dropdownClassName="dropdown-filter-menu"
-                    renderOption={renderOption}
-                    renderValue={renderClustersValue}
-                  />
-                </div>
-              )}
-              {trailingQueryFacets.map(renderQueryFacet)}
             </div>
           )}
           <div className="gridtable-filter-subcluster">
@@ -485,25 +726,19 @@ const GridTableFiltersBar: React.FC<GridTableFiltersBarProps> = ({
           </div>
         </div>
         <div className="gridtable-filter-cluster" data-gridtable-filter-cluster="tertiary">
-          {!!(showColumnsDropdown && columnOptions && columnValue && onColumnsChange) && (
-            <div className="gridtable-filter-group" data-gridtable-filter-role="columns">
-              <Dropdown
-                id={columnsDropdownId ?? `${searchInputId}-columns`}
-                name="gridtable-filter-columns"
-                multiple
-                showBulkActions
-                size="compact"
-                placeholder="Columns"
-                value={columnValue}
-                options={columnOptions}
-                disabled={!columnOptions.length}
-                onChange={onColumnsChange}
-                dropdownClassName="dropdown-filter-menu"
-                renderOption={renderOption}
-                renderValue={renderColumnsValue}
-              />
-            </div>
-          )}
+          {renderColumnsDropdown({
+            show: showColumnsDropdown,
+            id: columnsDropdownId ?? `${searchInputId}-columns`,
+            columnOptions,
+            columnValue,
+            onColumnsChange,
+            renderColumnOption,
+            renderColumnOrderActions,
+            getColumnRowProps,
+            onResetColumns,
+            canResetColumns,
+            renderColumnsValue,
+          })}
         </div>
       </div>
       <ActiveFilterChips

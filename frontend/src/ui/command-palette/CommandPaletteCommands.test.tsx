@@ -5,9 +5,9 @@
  * Covers key behaviors and edge cases for CommandPaletteCommands.
  */
 
+import type { types } from '@core/backend-api/models';
 import { WarningIcon } from '@shared/components/icons/SharedIcons';
 import { DockablePanelProvider } from '@ui/dockable/DockablePanelProvider';
-import type { types } from '@wailsjs/go/models';
 import { act, isValidElement } from 'react';
 import * as ReactDOM from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -15,7 +15,6 @@ import {
   resetAppPreferencesCacheForTesting,
   setAppPreferencesForTesting,
 } from '@/core/settings/appPreferences';
-import { installWindowProperty } from '@/test-utils/windowProperty';
 import { changeAppearanceMode } from '@/utils/appearanceMode';
 import { type Command, useCommandPaletteCommands } from './CommandPaletteCommands';
 
@@ -57,6 +56,12 @@ const { mocks } = vi.hoisted(() => ({
     },
     appSettings: {
       UpdateAppPreferences: vi.fn(),
+    },
+    appUpdates: {
+      CheckForUpdates: vi.fn(),
+    },
+    desktopRuntime: {
+      closeWindow: vi.fn(),
     },
     refreshOrchestrator: {
       triggerManualRefreshForContext: vi.fn(),
@@ -103,8 +108,14 @@ vi.mock('@/core/refresh', () => ({
   useAutoRefresh: () => mocks.autoRefresh,
 }));
 
-vi.mock('@wailsjs/go/backend/App', () => ({
+vi.mock('@core/backend-api', () => ({
   UpdateAppPreferences: (...args: unknown[]) => mocks.appSettings.UpdateAppPreferences(...args),
+  CheckForUpdates: (...args: unknown[]) => mocks.appUpdates.CheckForUpdates(...args),
+}));
+
+vi.mock('@core/desktop-runtime', () => ({
+  closeWindow: (...args: unknown[]) => mocks.desktopRuntime.closeWindow(...args),
+  desktopRuntimeAvailable: () => true,
 }));
 
 vi.mock('@/utils/appearanceMode', () => ({
@@ -162,8 +173,6 @@ const renderHook = () => {
 };
 
 describe('CommandPaletteCommands', () => {
-  let restoreGo: () => void;
-
   beforeEach(() => {
     mocks.kubeconfig.kubeconfigs = [];
     mocks.kubeconfig.selectedKubeconfigs = [];
@@ -181,6 +190,8 @@ describe('CommandPaletteCommands', () => {
     mocks.viewState.setIsAboutOpen.mockReset();
     mocks.viewState.setIsSettingsOpen.mockReset();
     mocks.viewState.setIsObjectDiffOpen.mockReset();
+    mocks.appUpdates.CheckForUpdates.mockReset();
+    mocks.appUpdates.CheckForUpdates.mockResolvedValue({ status: 'checking' });
     mocks.viewState.toggleSidebar.mockReset();
     mocks.viewState.navigateToNamespace.mockReset();
     mocks.viewState.setActiveNamespaceTab.mockReset();
@@ -191,12 +202,12 @@ describe('CommandPaletteCommands', () => {
     mocks.autoRefresh.toggle.mockReset();
     mocks.appSettings.UpdateAppPreferences.mockReset();
     mocks.appSettings.UpdateAppPreferences.mockResolvedValue({ settings: {}, changedKeys: [] });
-    restoreGo = installWindowProperty('go', { backend: { App: {} } });
+    mocks.desktopRuntime.closeWindow.mockReset();
+    mocks.desktopRuntime.closeWindow.mockResolvedValue(undefined);
     resetAppPreferencesCacheForTesting();
   });
 
   afterEach(() => {
-    restoreGo();
     document.body.innerHTML = '';
   });
 
@@ -491,6 +502,22 @@ describe('CommandPaletteCommands', () => {
     unmount();
   });
 
+  it('closes the current window when the close command has no cluster tabs', async () => {
+    const { getCommands, unmount } = renderHook();
+    const command = getCommands().find((entry) => entry.id === 'close-cluster-tab');
+
+    expect(command?.label).toBe('Close window');
+
+    await act(async () => {
+      command?.action();
+      await Promise.resolve();
+    });
+
+    expect(mocks.desktopRuntime.closeWindow).toHaveBeenCalledOnce();
+    expect(mocks.kubeconfig.closeKubeconfig).not.toHaveBeenCalled();
+    unmount();
+  });
+
   it('does not close the foreground cluster while the Global workspace is active', async () => {
     mocks.kubeconfig.selectedKubeconfigs = ['/kube/alpha:dev', '/kube/beta:prod'];
     mocks.kubeconfig.selectedKubeconfig = '/kube/beta:prod';
@@ -527,6 +554,7 @@ describe('CommandPaletteCommands', () => {
 
     await act(async () => {
       commands.get('open-about')?.action();
+      commands.get('check-for-updates')?.action();
       commands.get('open-settings')?.action();
       commands.get('toggle-sidebar')?.action();
       commands.get('open-object-diff')?.action();
@@ -537,7 +565,10 @@ describe('CommandPaletteCommands', () => {
       await commands.get('mode-dark')?.action();
     });
 
-    expect(mocks.viewState.setIsAboutOpen).toHaveBeenCalledWith(true);
+    expect(mocks.viewState.setIsAboutOpen).toHaveBeenCalledTimes(2);
+    expect(mocks.viewState.setIsAboutOpen).toHaveBeenNthCalledWith(1, true);
+    expect(mocks.viewState.setIsAboutOpen).toHaveBeenNthCalledWith(2, true);
+    expect(mocks.appUpdates.CheckForUpdates).toHaveBeenCalledOnce();
     expect(mocks.viewState.setIsSettingsOpen).toHaveBeenCalledWith(true);
     expect(mocks.viewState.toggleSidebar).toHaveBeenCalledTimes(1);
     expect(mocks.viewState.setIsObjectDiffOpen).toHaveBeenCalledWith(true);
