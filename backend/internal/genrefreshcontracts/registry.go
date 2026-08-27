@@ -34,9 +34,26 @@ type aliasSpec struct {
 }
 
 type domainSpec struct {
-	domain        string
-	payload       string
-	frontendOwned bool
+	domain                    string
+	payload                   string
+	frontendOwned             bool
+	cachePolicy               string
+	category                  string
+	sourceClocks              []string
+	backendRegistration       string
+	backendPermission         string
+	backendResourceStream     bool
+	backendBypassSingleflight bool
+	frontendRefresherName     string
+	frontendOrchestrator      string
+	frontendDiagnosticsStream string
+	frontendTimingInterval    int
+	frontendTimingCooldown    int
+	frontendTimingTimeout     int
+	frontendPriority          int
+	frontendHasPriority       bool
+	frontendRegistrationOrder int
+	frontendScheduled         bool
 }
 
 func typeOf[T any]() reflect.Type {
@@ -51,6 +68,7 @@ var contractTypes = []typeSpec{
 	{name: "DisplayRef", typeOf: typeOf[resourcemodel.DisplayRef]()},
 	{name: "ResourceLink", typeOf: typeOf[resourcemodel.ResourceLink]()},
 	{name: "ResourceMetadata", typeOf: typeOf[resourcemodel.ResourceMetadata]()},
+	{name: "ResourceTableMetadata", typeOf: typeOf[resourcemodel.ResourceTableMetadata]()},
 	{name: "ResourceStatusSignal", typeOf: typeOf[resourcemodel.ResourceStatusSignal]()},
 	{name: "ResourceStatusBadge", typeOf: typeOf[resourcemodel.ResourceStatusBadge]()},
 	{name: "ResourceLifecycle", typeOf: typeOf[resourcemodel.ResourceLifecycle]()},
@@ -178,6 +196,7 @@ var contractEnums = []enumSpec{
 	{name: "ResourceScope", typeOf: typeOf[resourcemodel.ResourceScope]()},
 	{name: "ResourceStatusSignalType", typeOf: typeOf[resourcemodel.StatusSignalType]()},
 	{name: "TelemetrySnapshotLastStatus", typeOf: typeOf[telemetry.SnapshotLastStatus]()},
+	{name: "TelemetryStreamLeafKind", typeOf: typeOf[telemetry.StreamLeafKind](), valuesName: "TELEMETRY_STREAM_LEAF_KINDS"},
 	{name: "ResourceStreamMessageType", typeOf: typeOf[streammux.MessageType](), valuesName: "RESOURCE_STREAM_MESSAGE_TYPES"},
 	{name: "ResourceStreamSource", typeOf: typeOf[streammux.Source](), valuesName: "RESOURCE_STREAM_SOURCES"},
 	{name: "ResourceStreamSignal", typeOf: typeOf[streammux.Signal](), valuesName: "RESOURCE_STREAM_SIGNALS"},

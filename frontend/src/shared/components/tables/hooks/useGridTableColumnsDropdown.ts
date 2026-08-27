@@ -14,12 +14,17 @@ type UseGridTableColumnsDropdownOptions<T> = {
   isColumnVisible: (key: string) => boolean;
   applyVisibilityChanges: (updater: (next: Record<string, boolean | undefined>) => boolean) => void;
   enableColumnVisibilityMenu: boolean;
+  canReorderColumns?: boolean;
   moveColumn: (key: string, offset: -1 | 1) => void;
   reorderColumn: (key: string, targetIndex: number) => void;
   canResetColumnOrder: boolean;
   resetColumnOrder: () => void;
   canResetAutoWidthColumns: boolean;
   resetAutoWidthColumns: () => void;
+  customMetadataColumnKeys?: Set<string>;
+  onAddCustomMetadataColumn?: () => void;
+  onEditCustomMetadataColumn?: (key: string) => void;
+  onRemoveCustomMetadataColumn?: (key: string) => void;
 };
 
 type ColumnsDropdownConfig = {
@@ -28,10 +33,14 @@ type ColumnsDropdownConfig = {
   onChange: (value: string | string[]) => void;
   /** Trigger label. Names the hidden count, and only while something is hidden. */
   renderValue: () => string;
-  onMoveColumn: (key: string, offset: -1 | 1) => void;
-  onReorderColumn: (key: string, targetIndex: number) => void;
+  onMoveColumn?: (key: string, offset: -1 | 1) => void;
+  onReorderColumn?: (key: string, targetIndex: number) => void;
   canResetColumns: boolean;
   onResetColumns: () => void;
+  customMetadataColumnKeys?: Set<string>;
+  onAddCustomMetadataColumn?: () => void;
+  onEditCustomMetadataColumn?: (key: string) => void;
+  onRemoveCustomMetadataColumn?: (key: string) => void;
 };
 
 // Builds the column visibility options and handler so GridTable does not have to
@@ -42,12 +51,17 @@ export function useGridTableColumnsDropdown<T>({
   isColumnVisible,
   applyVisibilityChanges,
   enableColumnVisibilityMenu,
+  canReorderColumns = true,
   moveColumn,
   reorderColumn,
   canResetColumnOrder,
   resetColumnOrder,
   canResetAutoWidthColumns,
   resetAutoWidthColumns,
+  customMetadataColumnKeys,
+  onAddCustomMetadataColumn,
+  onEditCustomMetadataColumn,
+  onRemoveCustomMetadataColumn,
 }: UseGridTableColumnsDropdownOptions<T>): ColumnsDropdownConfig | null {
   const hideableColumns = useMemo(
     () => columns.filter((column) => !lockedColumns.has(column.key)),
@@ -55,7 +69,8 @@ export function useGridTableColumnsDropdown<T>({
   );
 
   const showColumnsDropdown =
-    enableColumnVisibilityMenu && (hideableColumns.length > 0 || columns.length > 1);
+    enableColumnVisibilityMenu &&
+    (hideableColumns.length > 0 || columns.length > 1 || Boolean(onAddCustomMetadataColumn));
 
   const handleColumnsDropdownChange = useCallback(
     (nextValue: string | string[]) => {
@@ -126,9 +141,14 @@ export function useGridTableColumnsDropdown<T>({
     value,
     onChange: handleColumnsDropdownChange,
     renderValue: () => (hiddenCount > 0 ? `Columns (${hiddenCount} hidden)` : 'Columns'),
-    onMoveColumn: moveColumn,
-    onReorderColumn: reorderColumn,
-    canResetColumns: canResetColumnOrder || canResetAutoWidthColumns || hiddenCount > 0,
+    onMoveColumn: canReorderColumns ? moveColumn : undefined,
+    onReorderColumn: canReorderColumns ? reorderColumn : undefined,
+    canResetColumns:
+      (canReorderColumns && canResetColumnOrder) || canResetAutoWidthColumns || hiddenCount > 0,
     onResetColumns: handleResetColumns,
+    customMetadataColumnKeys,
+    onAddCustomMetadataColumn,
+    onEditCustomMetadataColumn,
+    onRemoveCustomMetadataColumn,
   };
 }

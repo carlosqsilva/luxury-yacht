@@ -88,6 +88,50 @@ workflow and that exception is documented.
   Arrow keys. The menu's top-to-bottom order maps to the table's left-to-right
   column order. Reordering and visibility are independent, and the shared
   All/None actions affect hideable columns only.
+- When the Columns menu exposes mutable order controls, visible column headers
+  are also whole-cell drag targets. Tables without that menu, and controlled
+  tables without an order-change callback, do not advertise reordering. A
+  visual grip appears on hover immediately before the column label; keyboard
+  reordering remains on the focusable grip in the Columns menu. Header dragging
+  uses the tab strip's midpoint insertion model and the Columns menu's
+  grab/grabbing, dimming, and accent-marker styling. Dropping updates the same
+  order model as the Columns menu. A drop that leaves the visible sequence
+  unchanged does not rewrite hidden-column placement. Resize handles remain
+  resize-only and suppress native drag initiation when resizing starts.
+- Resource tables may add custom metadata columns through the Columns menu.
+  Every resource table must explicitly declare `supportsCustomMetadataColumns`.
+  Set it to `true` only when the row producer carries Kubernetes labels or
+  annotations through `metadata` or the supported top-level compatibility
+  fields. Set it to `false` for projected row types without metadata so the
+  Columns menu omits the dead-end Add action. Shared and query-backed wrappers
+  forward this caller-owned capability; they must not infer it from table mode.
+  `Add` closes the Columns menu and opens the shared editor with the distinct
+  metadata keys available in the table's loaded rows. One searchable picker
+  presents Labels and Annotations as separate groups; the user selects an exact
+  key instead of typing one. Selecting a key shows up to three distinct values
+  sampled from the loaded rows. If no metadata keys are available, the editor
+  keeps the full-width picker disabled with `No metadata keys available`,
+  explains that state beneath the field, and disables creation. Custom rows
+  expose Edit and a direct Delete action beside the reorder grip; editing can
+  rename or explicitly remove the definition. Hiding and removing are separate
+  operations.
+- A custom metadata column's durable key is
+  `metadata:<label|annotation>:<exact-metadata-key>`. Its heading is presentation
+  only, so renaming must preserve width, order, visibility, and favorite
+  references. The same source/key pair may appear only once in a table scope;
+  a label and annotation with the same key are distinct definitions.
+- Custom metadata columns are hideable, resizable, automatic-width, appended on
+  creation, and deliberately non-sortable. Query-backed sorting must not claim
+  to order the complete result by an arbitrary metadata key until the provider
+  implements that contract. A missing key returns `undefined` and uses the
+  shared `-` placeholder; a present empty string remains an explicitly present,
+  blank value.
+- Persist custom definitions with the table's existing
+  cluster/view/namespace key and restore them before pruning column order,
+  visibility, or width state. Columns Reset clears presentation state while
+  preserving definitions. Favorites may reference a durable custom key but do
+  not own or recreate its definition; a deleted definition is ignored when a
+  favorite is applied.
 - Option presentation is owned by the shared `DropdownFilterOption`, not by each
   menu. A required column renders as a locked control state with the label at
   full contrast and an `Always shown` title; it must never be explained with an
@@ -214,6 +258,12 @@ loading transition can temporarily leave no rendered cells. Measurements from
 `getBoundingClientRect()` are visual pixels and must be converted back to unzoomed CSS pixels before
 becoming a column width. Intrinsic measurements reserve one additional CSS pixel so subpixel paint
 rounding cannot clip the content edge.
+
+Measurement must not mount cell components or run their effects. Plain composite values declare
+`measurementText`; composites whose wrapper styling changes box width declare an inert
+`measurementElement` with the same host tag and classes as the rendered wrapper. Keep that markup
+derived from the same presentation helpers as the live component so padding, borders, font, and text
+transform stay synchronized.
 
 Column widths come from persisted user state, the column definition, auto-width
 measurement, or the shared fallback. The table does not stretch columns to fill

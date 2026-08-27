@@ -30,6 +30,11 @@ Keep `catalog-first`. Do not turn that into `catalog-only`.
   and API-group filters, use catalog-derived metadata rather than the current
   row slice. The core API group uses the non-empty `"(core)"` query value and a
   `core` display label.
+- Catalog summaries retain the object's exact label and annotation maps in the
+  table-only `ResourceTableMetadata` projection. Browse rows pass that
+  projection through so shared custom metadata columns can resolve an exact key
+  without one API request per visible row. This projection remains object
+  metadata, not rich detail or status data.
 - Browse queries carry a structural resource scope and optional pinned
   namespaces separately from user filters. That structural scope is not a
   second user-selectable filter.
@@ -63,6 +68,11 @@ Typed refresh rows are enrichments. They are not competing identity systems.
   `backend/refresh/resourcestream`
 - Browse catalog consumer:
   `frontend/src/modules/browse/hooks/useBrowseCatalog.ts`
+
+Browse keeps separate page-query and metadata/facet report scopes, but both
+share the cluster's physical catalog doorbell subscription. Catalog delivery
+diagnostics are emitted as the `catalog` domain of the unified `resources`
+stream; there is no standalone catalog diagnostics stream.
 
 ## Change Checklist
 

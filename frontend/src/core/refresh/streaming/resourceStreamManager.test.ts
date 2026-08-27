@@ -6,6 +6,8 @@
 
 import { afterEach, beforeEach, describe, expect, it, test, vi } from 'vitest';
 
+import { eventBus } from '@/core/events';
+
 const fetchSnapshotMock = vi.hoisted(() => vi.fn());
 const logAppLogsDebugMock = vi.hoisted(() => vi.fn());
 const logAppLogsInfoMock = vi.hoisted(() => vi.fn());
@@ -375,6 +377,104 @@ describe('ResourceStreamManager', () => {
     expect(manager.getHealthStatus('namespaces', storeScope)).toBe('healthy');
   });
 
+  test('permission denial is terminal until subscription ownership is replaced', async () => {
+    vi.useFakeTimers();
+    installWindowTimers();
+    const manager = new ResourceStreamManager();
+    const storeScope = buildClusterScope('cluster-a', '');
+    const permissionDenied = vi.fn();
+    const unsubscribe = eventBus.on('refresh:resource-stream-permission-denied', permissionDenied);
+
+    try {
+      await manager.start('namespaces', storeScope);
+      await flushPromises();
+      createdSockets[0].onopen?.(new Event('open'));
+      await flushPromises();
+
+      const requestCount = () =>
+        createdSockets[0].send.mock.calls.filter(([payload]) => payload.type === 'REQUEST').length;
+      const requestsBeforeDenial = requestCount();
+      const revisionBeforeDenial =
+        getScopedDomainState('namespaces', storeScope).streamRevision ?? 0;
+
+      manager.handleMessage(
+        'cluster-a',
+        JSON.stringify({
+          type: 'ERROR',
+          clusterId: 'cluster-a',
+          domain: 'namespaces',
+          scope: '',
+          source: 'object',
+          signal: 'error',
+          version: 'object:2',
+          errorDetails: {
+            kind: 'Status',
+            apiVersion: 'v1',
+            message: 'permission denied for domain namespaces (core/namespaces)',
+            reason: 'Forbidden',
+            details: { domain: 'namespaces', resource: 'core/namespaces' },
+            code: 403,
+          },
+        })
+      );
+
+      expect(permissionDenied).toHaveBeenCalledWith({
+        domain: 'namespaces',
+        scope: storeScope,
+        reason: 'permission denied for domain namespaces (core/namespaces)',
+      });
+      expect(manager.getHealthStatus('namespaces', storeScope)).toBe('unhealthy');
+
+      manager.handleMessage(
+        'cluster-a',
+        JSON.stringify({
+          type: 'ACK',
+          clusterId: 'cluster-a',
+          domain: 'namespaces',
+          scope: '',
+        })
+      );
+      manager.handleMessage(
+        'cluster-a',
+        JSON.stringify({
+          type: 'MODIFIED',
+          clusterId: 'cluster-a',
+          domain: 'namespaces',
+          scope: '',
+          source: 'object',
+          signal: 'changed',
+          version: 'object:3',
+          sequence: '3',
+        })
+      );
+      await vi.advanceTimersByTimeAsync(200);
+
+      expect(requestCount()).toBe(requestsBeforeDenial);
+      expect(getScopedDomainState('namespaces', storeScope).streamRevision ?? 0).toBe(
+        revisionBeforeDenial
+      );
+      expect(manager.getHealthStatus('namespaces', storeScope)).toBe('unhealthy');
+
+      manager.stop('namespaces', storeScope, false);
+      await manager.start('namespaces', storeScope);
+      await flushPromises();
+
+      expect(requestCount()).toBeGreaterThan(requestsBeforeDenial);
+      manager.handleMessage(
+        'cluster-a',
+        JSON.stringify({
+          type: 'ACK',
+          clusterId: 'cluster-a',
+          domain: 'namespaces',
+          scope: '',
+        })
+      );
+      expect(manager.getHealthStatus('namespaces', storeScope)).toBe('healthy');
+    } finally {
+      unsubscribe();
+    }
+  });
+
   // Pins the namespaces doorbell: a SourceObject signal on the namespaces
   // domain must advance the scoped sourceVersion (NamespaceContext refetches on
   // it), replacing the sidebar's 2s poll.
@@ -554,6 +654,38 @@ describe('ResourceStreamManager', () => {
     expect(getScopedDomainState('catalog', metadataScope).signalVersions?.catalog).toBe(
       'catalog:42'
     );
+  });
+
+  test('adding the Browse metadata query keeps the shared catalog subscription healthy', async () => {
+    vi.useFakeTimers();
+    installWindowTimers();
+    const manager = new ResourceStreamManager();
+    const pageScope = buildClusterScope(
+      'cluster-a',
+      'limit=500&resourceScope=namespace&namespace=team-a&scopeNamespace=team-a'
+    );
+    const metadataScope = buildClusterScope(
+      'cluster-a',
+      'limit=1&resourceScope=namespace&namespace=team-a&scopeNamespace=team-a'
+    );
+
+    await manager.start('catalog', pageScope);
+    await flushPromises();
+    createdSockets[0].onopen?.(new Event('open'));
+    await vi.advanceTimersByTimeAsync(1_100);
+    manager.handleMessage(
+      'cluster-a',
+      JSON.stringify({ type: 'ACK', domain: 'catalog', scope: '', clusterId: 'cluster-a' })
+    );
+    expect(manager.getHealthStatus('catalog', pageScope)).toBe('healthy');
+
+    // Browse owns a second report scope for facets. It reuses the same physical
+    // catalog doorbell and may re-arm that subscribe after the resync cooldown.
+    await vi.advanceTimersByTimeAsync(1_100);
+    await manager.start('catalog', metadataScope);
+
+    expect(manager.getHealthStatus('catalog', pageScope)).toBe('healthy');
+    expect(manager.getHealthStatus('catalog', metadataScope)).toBe('healthy');
   });
 
   test('A1 changed signal envelope updates sourceVersion without legacy message type', () => {
@@ -1425,6 +1557,26 @@ describe('ResourceStreamManager', () => {
     expect(socket.close).toHaveBeenCalled();
     expect(manager.getHealthStatus('nodes', storeScope)).toBe('unhealthy');
     expect(manager.getTelemetrySummary()).toEqual({ resyncCount: 0, fallbackCount: 0 });
+  });
+
+  test('counts a stream-down fallback only against a live subscription for that scope', async () => {
+    const manager = new ResourceStreamManager();
+    const storeScope = buildClusterScope('cluster-a', 'namespace:default');
+    await manager.start('pods', storeScope);
+    await flushPromises();
+
+    manager.recordStreamFallback('pods', storeScope, 'stream not delivering');
+    manager.recordStreamFallback('pods', storeScope, 'stream not delivering');
+    // No subscription owns this scope, so there is nothing to attribute a
+    // fallback to — the counter must not invent a row for it.
+    manager.recordStreamFallback('pods', buildClusterScope('cluster-a', 'namespace:other'), 'nope');
+
+    const summary = manager.getTelemetrySummary();
+    expect(summary.fallbackCount).toBe(2);
+    expect(summary.lastFallbackReason).toBe('stream not delivering');
+    expect(manager.getTelemetrySummaryByClusterDomain()['cluster-a::pods']).toMatchObject({
+      fallbackCount: 2,
+    });
   });
 
   test('groups resync/fallback telemetry by cluster AND domain for per-domain rows', () => {

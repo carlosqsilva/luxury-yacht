@@ -46,14 +46,40 @@ const SNAPSHOT_REFRESH_DOMAINS = REFRESH_DOMAINS.filter(
 );
 
 type TestClusterRefreshRuntime = {
-  scopedEnabledState: Map<RefreshDomain, Map<string, boolean>>;
-  streamingCleanup: Map<string, () => void>;
-  pendingStreaming: Map<string, Promise<(() => void) | undefined>>;
-  streamingReady: Map<string, Promise<void>>;
-  cancelledStreaming: Set<string>;
-  inFlight: Map<string, unknown>;
-  streamHealth: Map<string, { status: string }>;
-  blockedStreaming: Set<string>;
+  setScopedDomainEnabled: (domain: RefreshDomain, scope: string, enabled: boolean) => unknown;
+  getKnownScopes: (domain: RefreshDomain) => string[];
+  isScopedDomainEnabled: (domain: RefreshDomain, scope: string) => boolean;
+  getDeferredReadinessRequests: () => Array<{ isManual: boolean; streamSignal: boolean }>;
+  setInFlight: (request: {
+    controller: AbortController;
+    isManual: boolean;
+    requestId: number;
+    contextVersion: number;
+    domain: RefreshDomain;
+    scope: string;
+  }) => string;
+  getInFlight: (domain: RefreshDomain, scope: string) => unknown;
+  resetAllState: () => void;
+  beginStreamingStart: (
+    domain: RefreshDomain,
+    scope: string,
+    task: Promise<(() => void) | undefined>
+  ) => void;
+  finishStreamingStart: (
+    domain: RefreshDomain,
+    scope: string,
+    task: Promise<(() => void) | undefined>,
+    cleanup: (() => void) | undefined
+  ) => boolean;
+  cancelStreamingStart: (domain: RefreshDomain, scope: string) => unknown;
+  setStreamingReady: (domain: RefreshDomain, scope: string, task: Promise<void>) => void;
+  hasStreamingReady: (domain: RefreshDomain, scope: string) => boolean;
+  hasPendingStreaming: (domain: RefreshDomain, scope: string) => boolean;
+  isStreamingCancelled: (domain: RefreshDomain, scope: string) => boolean;
+  isStreamingActive: (domain: RefreshDomain, scope: string) => boolean;
+  getStreamingCleanup: (domain: RefreshDomain, scope: string) => (() => void) | undefined;
+  getStreamHealth: (domain: RefreshDomain, scope: string) => { status: string } | undefined;
+  isStreamingBlocked: (domain: RefreshDomain, scope: string) => boolean;
 };
 
 type RefreshOrchestratorInternals = {
@@ -62,15 +88,24 @@ type RefreshOrchestratorInternals = {
   registeredRefreshers: Set<string>;
   coordinatorRuntime: TestClusterRefreshRuntime;
   clusterRuntimes: Map<string, TestClusterRefreshRuntime>;
-  pendingClusterReadiness: Map<string, Map<string, { isManual: boolean; streamSignal: boolean }>>;
   suspendedDomains: Map<RefreshDomain, boolean>;
   lastNotifiedErrors: Map<string, unknown>;
   contextVersion: number;
-  metricsDemandClusterKey: string;
-  metricsDemandRequestKey: string | null;
-  metricsDemandRetryKey: string | null;
-  metricsDemandRetryTimer: ReturnType<typeof setTimeout> | null;
-  metricsDemandRetryDelayMs: number;
+  metricsDemandState:
+    | { status: 'idle'; appliedKey: string; retryDelayMs: number }
+    | {
+        status: 'requesting';
+        appliedKey: string;
+        requestKey: string;
+        retryDelayMs: number;
+      }
+    | {
+        status: 'waiting-retry';
+        appliedKey: string;
+        retryKey: string;
+        retryTimer: ReturnType<typeof setTimeout>;
+        retryDelayMs: number;
+      };
   context: RefreshContext;
   getRuntimeForScope: (domain: RefreshDomain, scope: string) => TestClusterRefreshRuntime;
   notifyRefreshError: (domain: RefreshDomain, scope: string | undefined, message: string) => void;
@@ -147,6 +182,7 @@ const resourceStreamMocks = vi.hoisted(() => ({
   stop: vi.fn(),
   refreshOnce: vi.fn(),
   isHealthy: vi.fn(() => false),
+  recordStreamFallback: vi.fn(),
 }));
 
 vi.mock('./streaming/resourceStreamManager', () => ({
@@ -171,7 +207,6 @@ vi.mock('@utils/errorHandler', () => ({
 }));
 
 const orchestratorInternals = refreshOrchestrator as unknown as RefreshOrchestratorInternals;
-const makeTestInFlightKey = (domain: string, scope?: string) => `${domain}::${scope ?? '*'}`;
 
 describe('refreshOrchestrator', () => {
   let subscriber: ((isManual: boolean, signal?: AbortSignal) => Promise<void>) | undefined;
@@ -196,6 +231,7 @@ describe('refreshOrchestrator', () => {
     resourceStreamMocks.refreshOnce.mockReset();
     resourceStreamMocks.isHealthy.mockReset();
     resourceStreamMocks.isHealthy.mockReturnValue(false);
+    resourceStreamMocks.recordStreamFallback.mockReset();
     catalogStreamMocks.start.mockReset();
     catalogStreamMocks.stop.mockReset();
     catalogStreamMocks.refreshOnce.mockReset();
@@ -209,27 +245,19 @@ describe('refreshOrchestrator', () => {
     orchestratorInternals.configs?.clear?.();
     orchestratorInternals.unsubscriptions?.clear?.();
     orchestratorInternals.registeredRefreshers?.clear?.();
-    orchestratorInternals.coordinatorRuntime?.scopedEnabledState?.clear?.();
-    orchestratorInternals.coordinatorRuntime?.streamingCleanup?.clear?.();
-    orchestratorInternals.coordinatorRuntime?.pendingStreaming?.clear?.();
-    orchestratorInternals.coordinatorRuntime?.streamingReady?.clear?.();
-    orchestratorInternals.coordinatorRuntime?.cancelledStreaming?.clear?.();
-    orchestratorInternals.coordinatorRuntime?.inFlight?.clear?.();
-    orchestratorInternals.coordinatorRuntime?.streamHealth?.clear?.();
-    orchestratorInternals.coordinatorRuntime?.blockedStreaming?.clear?.();
+    orchestratorInternals.coordinatorRuntime?.resetAllState?.();
     orchestratorInternals.clusterRuntimes?.clear?.();
-    orchestratorInternals.pendingClusterReadiness?.clear?.();
     orchestratorInternals.suspendedDomains?.clear?.();
     orchestratorInternals.lastNotifiedErrors?.clear?.();
     orchestratorInternals.contextVersion = 0;
-    orchestratorInternals.metricsDemandClusterKey = '';
-    orchestratorInternals.metricsDemandRequestKey = null;
-    orchestratorInternals.metricsDemandRetryKey = null;
-    if (orchestratorInternals.metricsDemandRetryTimer !== null) {
-      clearTimeout(orchestratorInternals.metricsDemandRetryTimer);
+    if (orchestratorInternals.metricsDemandState.status === 'waiting-retry') {
+      clearTimeout(orchestratorInternals.metricsDemandState.retryTimer);
     }
-    orchestratorInternals.metricsDemandRetryTimer = null;
-    orchestratorInternals.metricsDemandRetryDelayMs = 1_000;
+    orchestratorInternals.metricsDemandState = {
+      status: 'idle',
+      appliedKey: '',
+      retryDelayMs: 1_000,
+    };
     orchestratorInternals.context = {
       currentView: 'namespace',
       objectPanel: { isOpen: false },
@@ -277,14 +305,15 @@ describe('refreshOrchestrator', () => {
   const markResourceStreamActive = (domain: RefreshDomain, scope: string) => {
     // Simulate an active resource stream so polling gating is deterministic in tests.
     const runtime = orchestratorInternals.getRuntimeForScope(domain, scope);
-    runtime.streamingCleanup.set(makeTestInFlightKey(domain, scope), () => undefined);
+    const cleanup = () => undefined;
+    const startTask = Promise.resolve(cleanup);
+    runtime.beginStreamingStart(domain, scope, startTask);
+    runtime.finishStreamingStart(domain, scope, startTask, cleanup);
   };
 
   const setRuntimeScopeEnabled = (domain: RefreshDomain, scope: string, enabled: boolean) => {
     const runtime = orchestratorInternals.getRuntimeForScope(domain, scope);
-    const scopedMap = runtime.scopedEnabledState.get(domain) ?? new Map<string, boolean>();
-    scopedMap.set(scope, enabled);
-    runtime.scopedEnabledState.set(domain, scopedMap);
+    runtime.setScopedDomainEnabled(domain, scope, enabled);
   };
 
   const registerObjectMaintenanceDomain = () => {
@@ -593,7 +622,7 @@ describe('refreshOrchestrator', () => {
 
     clusterReadiness.beginForegroundActivation(clusterId);
     expect(
-      Array.from(orchestratorInternals.pendingClusterReadiness.get(clusterId)?.values() ?? [])
+      orchestratorInternals.clusterRuntimes.get(clusterId)?.getDeferredReadinessRequests()
     ).toEqual([
       expect.objectContaining({
         isManual: false,
@@ -731,6 +760,31 @@ describe('refreshOrchestrator', () => {
     // A manual refresh is a deliberate user action: it may re-ask.
     clientMocks.fetchSnapshotMock.mockRejectedValueOnce(denied);
     await refreshOrchestrator.fetchScopedDomain('cluster-config', scope, { isManual: true });
+    expect(clientMocks.fetchSnapshotMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('re-asks a permission-denied scope after that cluster recovers from auth failure', async () => {
+    registerCatalogDomain();
+    const clusterId = 'cluster-auth-recovery';
+    const scope = buildClusterScope(clusterId, '');
+    setRuntimeScopeEnabled('catalog', scope, true);
+    eventBus.emit('cluster:lifecycle', { clusterId, state: 'loading' });
+    const denied = new Error('permission denied for domain catalog');
+    (denied as Error & { permissionDenied?: boolean }).permissionDenied = true;
+    clientMocks.fetchSnapshotMock.mockRejectedValueOnce(denied);
+
+    await refreshOrchestrator.fetchScopedDomain('catalog', scope, { isManual: false });
+    expect(getScopedDomainState('catalog', scope).permissionDenied).toBe(true);
+
+    orchestratorInternals.handleClusterAuthFailed({ clusterId });
+    clientMocks.fetchSnapshotMock.mockResolvedValueOnce({
+      snapshot: null,
+      etag: undefined,
+      notModified: true,
+    });
+    orchestratorInternals.handleClusterAuthRecovered({ clusterId });
+    await refreshOrchestrator.fetchScopedDomain('catalog', scope, { isManual: false });
+
     expect(clientMocks.fetchSnapshotMock).toHaveBeenCalledTimes(2);
   });
 
@@ -1230,12 +1284,9 @@ describe('refreshOrchestrator', () => {
     refreshOrchestrator.setScopedDomainEnabled('pods', 'namespace:team-a', true);
 
     const scope = 'cluster-a|namespace:team-a';
-    expect(orchestratorInternals.coordinatorRuntime.scopedEnabledState.get('pods')).toBeUndefined();
+    expect(orchestratorInternals.coordinatorRuntime.getKnownScopes('pods')).toEqual([]);
     expect(
-      orchestratorInternals.clusterRuntimes
-        .get('cluster-a')
-        ?.scopedEnabledState.get('pods')
-        ?.get(scope)
+      orchestratorInternals.clusterRuntimes.get('cluster-a')?.isScopedDomainEnabled('pods', scope)
     ).toBe(true);
   });
 
@@ -1273,7 +1324,9 @@ describe('refreshOrchestrator', () => {
     clusterReadiness.beginForegroundActivation(clusterId);
 
     await refreshOrchestrator.fetchScopedDomain('cluster-config', scope, { isManual: false });
-    expect(orchestratorInternals.pendingClusterReadiness.has(clusterId)).toBe(true);
+    expect(
+      orchestratorInternals.clusterRuntimes.get(clusterId)?.getDeferredReadinessRequests()
+    ).toHaveLength(1);
 
     refreshOrchestrator.updateContext({
       selectedClusterId: 'cluster-a',
@@ -1281,7 +1334,7 @@ describe('refreshOrchestrator', () => {
       allConnectedClusterIds: ['cluster-a'],
     });
 
-    expect(orchestratorInternals.pendingClusterReadiness.has(clusterId)).toBe(false);
+    expect(orchestratorInternals.clusterRuntimes.has(clusterId)).toBe(false);
   });
 
   it('stores namespaces enablement in the active cluster runtime', () => {
@@ -1299,14 +1352,11 @@ describe('refreshOrchestrator', () => {
     refreshOrchestrator.setScopedDomainEnabled('namespaces', 'all', true);
 
     const scope = 'cluster-a|all';
-    expect(
-      orchestratorInternals.coordinatorRuntime.scopedEnabledState.get('namespaces')
-    ).toBeUndefined();
+    expect(orchestratorInternals.coordinatorRuntime.getKnownScopes('namespaces')).toEqual([]);
     expect(
       orchestratorInternals.clusterRuntimes
         .get('cluster-a')
-        ?.scopedEnabledState.get('namespaces')
-        ?.get(scope)
+        ?.isScopedDomainEnabled('namespaces', scope)
     ).toBe(true);
   });
 
@@ -1733,15 +1783,11 @@ describe('refreshOrchestrator', () => {
 
     await refreshOrchestrator.setScopedDomainEnabled('namespace-events', 'team-a', true);
     expect(
-      orchestratorInternals.coordinatorRuntime.scopedEnabledState
-        .get('namespace-events')
-        ?.get('team-a')
+      orchestratorInternals.coordinatorRuntime.isScopedDomainEnabled('namespace-events', 'team-a')
     ).toBe(true);
 
     orchestratorInternals.handleKubeconfigChanging();
-    expect(
-      orchestratorInternals.coordinatorRuntime.scopedEnabledState.has('namespace-events')
-    ).toBe(false);
+    expect(orchestratorInternals.coordinatorRuntime.getKnownScopes('namespace-events')).toEqual([]);
     expect(orchestratorInternals.suspendedDomains.get('namespace-events')).toBe(true);
 
     orchestratorInternals.handleKubeconfigChanged();
@@ -1920,18 +1966,14 @@ describe('refreshOrchestrator', () => {
     expect(
       orchestratorInternals.clusterRuntimes
         .get('cluster-a')
-        ?.scopedEnabledState.get('cluster-overview')
-        ?.get(scopeA)
+        ?.isScopedDomainEnabled('cluster-overview', scopeA)
     ).toBe(true);
     expect(
       orchestratorInternals.clusterRuntimes
         .get('cluster-b')
-        ?.scopedEnabledState.get('cluster-overview')
-        ?.get(scopeB)
+        ?.isScopedDomainEnabled('cluster-overview', scopeB)
     ).toBe(true);
-    expect(
-      orchestratorInternals.coordinatorRuntime.scopedEnabledState.get('cluster-overview')
-    ).toBeUndefined();
+    expect(orchestratorInternals.coordinatorRuntime.getKnownScopes('cluster-overview')).toEqual([]);
     expect(getScopedDomainState('cluster-overview', scopeA).status).toBe('ready');
   });
 
@@ -1978,11 +2020,9 @@ describe('refreshOrchestrator', () => {
 
     refreshOrchestrator.setScopedDomainEnabled('cluster-overview', secondScope, true);
 
-    const scopedMap = orchestratorInternals.clusterRuntimes
-      .get('cluster-a')
-      ?.scopedEnabledState.get('cluster-overview');
-    expect(scopedMap?.get(firstScope)).toBe(false);
-    expect(scopedMap?.get(secondScope)).toBe(true);
+    const runtime = orchestratorInternals.clusterRuntimes.get('cluster-a');
+    expect(runtime?.isScopedDomainEnabled('cluster-overview', firstScope)).toBe(false);
+    expect(runtime?.isScopedDomainEnabled('cluster-overview', secondScope)).toBe(true);
     expect(getScopedDomainState('cluster-overview', firstScope).status).toBe('idle');
   });
 
@@ -2013,10 +2053,8 @@ describe('refreshOrchestrator', () => {
     refreshOrchestrator.setScopedDomainEnabled('cluster-attention', queryScope, true);
     refreshOrchestrator.setScopedDomainEnabled('cluster-attention', queryScope, false);
 
-    const scopedMap = orchestratorInternals.clusterRuntimes
-      .get('cluster-a')
-      ?.scopedEnabledState.get('cluster-attention');
-    expect(scopedMap?.get(baseScope)).toBe(true);
+    const runtime = orchestratorInternals.clusterRuntimes.get('cluster-a');
+    expect(runtime?.isScopedDomainEnabled('cluster-attention', baseScope)).toBe(true);
     expect(getScopedDomainState('cluster-attention', baseScope).data?.severityCounts).toEqual(
       severityCounts
     );
@@ -2060,11 +2098,9 @@ describe('refreshOrchestrator', () => {
 
       refreshOrchestrator.setScopedDomainEnabled(domain, secondScope, true);
 
-      const scopedMap = orchestratorInternals.clusterRuntimes
-        .get('cluster-a')
-        ?.scopedEnabledState.get(domain);
-      expect(scopedMap?.get(firstScope)).toBe(true);
-      expect(scopedMap?.get(secondScope)).toBe(true);
+      const runtime = orchestratorInternals.clusterRuntimes.get('cluster-a');
+      expect(runtime?.isScopedDomainEnabled(domain, firstScope)).toBe(true);
+      expect(runtime?.isScopedDomainEnabled(domain, secondScope)).toBe(true);
       expect(getScopedDomainState(domain, firstScope).status).toBe('ready');
     });
   });
@@ -2122,10 +2158,7 @@ describe('refreshOrchestrator', () => {
 
     // Enable the scope and simulate an already-active stream by injecting cleanup directly.
     setRuntimeScopeEnabled('catalog', 'scope=all', true);
-    orchestratorInternals.coordinatorRuntime.streamingCleanup.set(
-      makeTestInFlightKey('catalog', 'scope=all'),
-      () => undefined
-    );
+    markResourceStreamActive('catalog', 'scope=all');
 
     catalogStreamMocks.refreshOnce.mockClear();
     clientMocks.fetchSnapshotMock.mockClear();
@@ -2202,7 +2235,7 @@ describe('refreshOrchestrator', () => {
     expect(
       orchestratorInternals.clusterRuntimes
         .get('cluster-a')
-        ?.streamHealth.get(makeTestInFlightKey('cluster-config', scope))?.status
+        ?.getStreamHealth('cluster-config', scope)?.status
     ).toBe('unhealthy');
   });
 
@@ -2228,7 +2261,7 @@ describe('refreshOrchestrator', () => {
     expect(
       orchestratorInternals.clusterRuntimes
         .get('cluster-a')
-        ?.streamHealth.get(makeTestInFlightKey('cluster-config', scope))?.status
+        ?.getStreamHealth('cluster-config', scope)?.status
     ).toBe('healthy');
   });
 
@@ -2312,6 +2345,11 @@ describe('refreshOrchestrator', () => {
 
     expect(clientMocks.fetchSnapshotMock).not.toHaveBeenCalled();
     expect(getScopedDomainState('cluster-config', scope).queryReconcileVersion).toBe(1);
+    expect(resourceStreamMocks.recordStreamFallback).toHaveBeenCalledWith(
+      'cluster-config',
+      scope,
+      'stream not delivering'
+    );
     refreshOrchestrator.releaseScopedDomainLease('cluster-config', scope, { demand: 'query' });
   });
 
@@ -2334,6 +2372,7 @@ describe('refreshOrchestrator', () => {
 
     expect(clientMocks.fetchSnapshotMock).not.toHaveBeenCalled();
     expect(getScopedDomainState('cluster-config', scope).queryReconcileVersion).toBeUndefined();
+    expect(resourceStreamMocks.recordStreamFallback).not.toHaveBeenCalled();
     refreshOrchestrator.releaseScopedDomainLease('cluster-config', scope, { demand: 'query' });
   });
 
@@ -2698,7 +2737,7 @@ describe('refreshOrchestrator', () => {
       ).streaming,
       'expected test value in orchestrator.test.ts'
     );
-    const key = makeTestInFlightKey('catalog', 'scope=test');
+    const runtime = orchestratorInternals.coordinatorRuntime;
     const pendingCleanup = vi.fn(() => {
       throw new Error('pending failure');
     });
@@ -2706,16 +2745,21 @@ describe('refreshOrchestrator', () => {
     const pendingPromise = new Promise<() => void>((resolve) => {
       resolvePending = resolve;
     });
-    orchestratorInternals.coordinatorRuntime.pendingStreaming.set(key, pendingPromise);
-    orchestratorInternals.coordinatorRuntime.streamingCleanup.set(key, () => {
-      throw new Error('cleanup failure');
-    });
+    runtime.beginStreamingStart('catalog', 'scope=test', pendingPromise);
 
     orchestratorInternals.stopStreamingScope('catalog', 'scope=test', streamingRegistration, true);
     resolvePending?.(pendingCleanup);
     await Promise.resolve();
     await Promise.resolve();
     await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const activeCleanup = () => {
+      throw new Error('cleanup failure');
+    };
+    const activeTask = Promise.resolve(activeCleanup);
+    runtime.beginStreamingStart('catalog', 'scope=test', activeTask);
+    runtime.finishStreamingStart('catalog', 'scope=test', activeTask, activeCleanup);
+    orchestratorInternals.stopStreamingScope('catalog', 'scope=test', streamingRegistration, true);
 
     expect(pendingCleanup).toHaveBeenCalled();
     expect(errorHandlerMock.reportOperationalError.mock.calls).toEqual(
@@ -2738,7 +2782,7 @@ describe('refreshOrchestrator', () => {
         ],
       ])
     );
-    expect(orchestratorInternals.coordinatorRuntime.streamingCleanup.has(key)).toBe(false);
+    expect(runtime.isStreamingActive('catalog', 'scope=test')).toBe(false);
   });
 
   it('skips scheduling scoped streaming when domain is disabled', async () => {
@@ -2747,9 +2791,10 @@ describe('refreshOrchestrator', () => {
       stop: vi.fn(),
     };
 
-    orchestratorInternals.coordinatorRuntime.scopedEnabledState.set(
+    orchestratorInternals.coordinatorRuntime.setScopedDomainEnabled(
       'namespace-events',
-      new Map([['team-a', false]])
+      'team-a',
+      false
     );
 
     await orchestratorInternals.scheduleStreamingStart('namespace-events', 'team-a', streaming);
@@ -3075,7 +3120,9 @@ describe('refreshOrchestrator', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(containerLogsStreamMocks.start).toHaveBeenCalledWith('team-a');
-    expect(orchestratorInternals.coordinatorRuntime.streamingCleanup.size).toBe(0);
+    expect(
+      orchestratorInternals.coordinatorRuntime.isStreamingActive('container-logs', 'team-a')
+    ).toBe(false);
     const scopedState = getScopedDomainState('container-logs', 'team-a');
     expect(scopedState.status).toBe('error');
     expect(scopedState.error).toContain('stream boom');
@@ -3199,7 +3246,7 @@ describe('refreshOrchestrator', () => {
     expect(getScopedDomainState('pods', 'cluster-b|namespace:default').data?.rows).toHaveLength(1);
     expect(orchestratorInternals.clusterRuntimes.has('cluster-a')).toBe(true);
     expect(orchestratorInternals.clusterRuntimes.has('cluster-b')).toBe(true);
-    expect(orchestratorInternals.coordinatorRuntime.scopedEnabledState.get('pods')).toBeUndefined();
+    expect(orchestratorInternals.coordinatorRuntime.getKnownScopes('pods')).toEqual([]);
   });
 
   it('updates disabled retained scopes during background refresh without clearing cached state', async () => {
@@ -3297,11 +3344,14 @@ describe('refreshOrchestrator', () => {
       extraKeys: 0,
     });
 
-    const key = makeTestInFlightKey('cluster-config', scope);
-    expect(orchestratorInternals.clusterRuntimes.get('cluster-a')?.blockedStreaming.has(key)).toBe(
-      true
-    );
-    expect(orchestratorInternals.coordinatorRuntime.blockedStreaming.has(key)).toBe(false);
+    expect(
+      orchestratorInternals.clusterRuntimes
+        .get('cluster-a')
+        ?.isStreamingBlocked('cluster-config', scope)
+    ).toBe(true);
+    expect(
+      orchestratorInternals.coordinatorRuntime.isStreamingBlocked('cluster-config', scope)
+    ).toBe(false);
   });
 
   it('clears cluster runtime transient state on auth failure and restarts after recovery', async () => {
@@ -3320,11 +3370,10 @@ describe('refreshOrchestrator', () => {
     setRuntimeScopeEnabled('cluster-config', scopeB, true);
 
     const runtimeA = orchestratorInternals.getRuntimeForScope('cluster-config', scopeA);
-    const keyA = makeTestInFlightKey('cluster-config', scopeA);
-    runtimeA.streamingReady.set(keyA, Promise.resolve());
-    runtimeA.pendingStreaming.set(keyA, Promise.resolve(undefined));
-    runtimeA.cancelledStreaming.add(keyA);
-    runtimeA.inFlight.set(keyA, {
+    runtimeA.setStreamingReady('cluster-config', scopeA, Promise.resolve());
+    runtimeA.beginStreamingStart('cluster-config', scopeA, Promise.resolve(undefined));
+    runtimeA.cancelStreamingStart('cluster-config', scopeA);
+    runtimeA.setInFlight({
       controller: new AbortController(),
       isManual: false,
       requestId: 1,
@@ -3335,10 +3384,10 @@ describe('refreshOrchestrator', () => {
 
     orchestratorInternals.handleClusterAuthFailed({ clusterId: 'cluster-a' });
 
-    expect(runtimeA.inFlight.size).toBe(0);
-    expect(runtimeA.streamingReady.size).toBe(0);
-    expect(runtimeA.pendingStreaming.size).toBe(0);
-    expect(runtimeA.cancelledStreaming.size).toBe(0);
+    expect(runtimeA.getInFlight('cluster-config', scopeA)).toBeUndefined();
+    expect(runtimeA.hasStreamingReady('cluster-config', scopeA)).toBe(false);
+    expect(runtimeA.hasPendingStreaming('cluster-config', scopeA)).toBe(false);
+    expect(runtimeA.isStreamingCancelled('cluster-config', scopeA)).toBe(false);
 
     resourceStreamMocks.start.mockClear();
     orchestratorInternals.handleClusterAuthFailed({ clusterId: 'cluster-b' });
@@ -3376,7 +3425,7 @@ describe('refreshOrchestrator', () => {
     const runtimeB = orchestratorInternals.getRuntimeForScope('cluster-config', scopeB);
     const controllerA = new AbortController();
     const controllerB = new AbortController();
-    runtimeA.inFlight.set(makeTestInFlightKey('cluster-config', scopeA), {
+    runtimeA.setInFlight({
       controller: controllerA,
       isManual: false,
       requestId: 1,
@@ -3384,7 +3433,7 @@ describe('refreshOrchestrator', () => {
       domain: 'cluster-config',
       scope: scopeA,
     });
-    runtimeB.inFlight.set(makeTestInFlightKey('cluster-config', scopeB), {
+    runtimeB.setInFlight({
       controller: controllerB,
       isManual: false,
       requestId: 2,
@@ -3399,7 +3448,7 @@ describe('refreshOrchestrator', () => {
     expect(controllerB.signal.aborted).toBe(false);
     expect(resourceStreamMocks.stop).toHaveBeenCalledWith(scopeA, { reset: false });
     expect(resourceStreamMocks.stop).not.toHaveBeenCalledWith(scopeB, expect.anything());
-    expect(runtimeB.streamingCleanup.has(makeTestInFlightKey('cluster-config', scopeB))).toBe(true);
+    expect(runtimeB.isStreamingActive('cluster-config', scopeB)).toBe(true);
 
     eventBus.emit('cluster:auth:recovered', { clusterId: 'cluster-a' });
   });
@@ -3619,16 +3668,14 @@ describe('refreshOrchestrator', () => {
       droppedAutoRefreshes: 0,
     }));
 
-    orchestratorInternals
-      .getRuntimeForScope('cluster-config', scope)
-      .inFlight.set(`cluster-config::${scope}`, {
-        controller: new AbortController(),
-        isManual: false,
-        requestId: 1,
-        contextVersion: 0,
-        domain: 'cluster-config',
-        scope,
-      });
+    orchestratorInternals.getRuntimeForScope('cluster-config', scope).setInFlight({
+      controller: new AbortController(),
+      isManual: false,
+      requestId: 1,
+      contextVersion: 0,
+      domain: 'cluster-config',
+      scope,
+    });
 
     orchestratorInternals.handleResetViews();
 
