@@ -81,13 +81,14 @@ stream reconciliation path rather than creating a ManualQueue job.
 - Releasing one demand mode preserves work and state owned by the other.
   Releasing the final demand stops the shared live source under the existing
   retention rules.
-- A governor Cold assignment is not applied until the backend has built a settled
+- A governor Cold assignment is not applied until the backend has built a ready
   `namespaces` snapshot and a `cluster-overview` snapshot for that exact cluster
   scope. The namespace build runs through the aggregate lifecycle callback so
   loading reaches Ready without a frontend request. Until both retained baselines
   exist, the subsystem and its producers stay live; completion retries the tier
   reconciliation. Cold preparation requires both that aggregate lifecycle state
-  and the current subsystem generation's namespace workload tracker to be ready;
+  and the current subsystem generation's namespace workload tracker to report actual
+  initial sync or explicit permission skips for every tracked Pod/workload source;
   this prevents a Ready state retained across re-warm from authorizing an unsynced
   replacement subsystem. Preparation does not poll namespace snapshots, because
   scoped namespace builds can perform API probes. This is automatic preparation,
@@ -194,12 +195,15 @@ application transport between them.
   and the refresh-readiness boundary, so a missed earlier event cannot leave the
   tab behind the serving gate. Runtime lifecycle events that arrive before
   hydration take precedence over that older snapshot.
-- Startup settings restore, saved-selection restore, and client initialization
-  use the same serialized selection-mutation boundary as runtime selection
-  changes. Each completed cluster client is published independently; one slow
-  sibling may not delay it. After a cluster enters `loading`, `loading_slow`, or
-  `ready`, a late `connecting`/`connected` result cannot move it back behind the
-  frontend serving gate.
+- Startup settings and saved-selection restore use the serialized
+  selection-mutation boundary. Client preflight then runs outside that lock with
+  the restored generation's cancellation context, so a newer selection can
+  cancel stale startup work without waiting for an unreachable API server.
+  Successful preflight re-enters the boundary before refresh and catalog
+  publication. Each completed cluster client is published independently; one
+  slow sibling may not delay it. After a cluster enters `loading`,
+  `loading_slow`, `degraded`, or `ready`, a late `connecting`/`connected` result cannot move
+  it back behind the frontend serving gate.
 - `RefreshCoordinator` owns subsystem/catalog replacement, refresh telemetry,
   Attention-target registration, and handler/stream publication. Replacement
   publishes new routing before stopping old producers; teardown unpublishes

@@ -1,27 +1,11 @@
-### Added
-
-- **Custom Columns**
-  - You can now add columns derived from object metadata (labels and annotations).
-  - The Columns dropdown now has an `Add` button. This opens a modal to select a metadata field to use as a source for a new column.
-  - Custom columns can be renamed and deleted via hover icons in the Columns dropdown.
-- **Change Column Order**
-  - Drag and drop to change the order of columns in a table.
-
 ### Changed
 
-- Redesigned the Columns dropdown to support the new features. Additionally:
-  - Columns that cannot be hidden are indicated with a lock icon.
-    - Locked visibility columns can still have reordered.
-  - The new `Reset` button resets all of the column state (order, width, and visibility) to default.
-  - The new `Only` button (on hover over an item) selects only that column and hides others.
-- Column visibility and order is stored in Favorites.
-- The new "Only" button, as well as cosmetic changes from the Columns dropdown, have been applied across all dropdowns throughout the app.
-- Diagnostic panel redesign.
-  - The `Refresh Domains`, `Streams`, and `Broker Reads` tabs have been consolidated into two tabs
-    that more closely follow the actual data flow.
-    - `Cluster Data` shows a hierachical view of clusters, scopes, and domains.
-    - `Connections` lists the sockets and reads that belong to no domain.
+- The Network view's generic `Details` column has been replaced by three more specific columns (`Context`, `Network`, and `Summary`) to provide more useful data without having to open the Object Panel.
+- Namespaces in the Attention view are now clickable.
+- Clicked Namespace links should now properly scroll into view, and default to the Workloads view instead of Browse.
 
 ### Fixed
 
-- Duplicate Favorite names are now rejected. It's no longer possible to create different Favorites with the same name.
+- Fixed a performance regression introduced by `client-go`. The bump to `v0.35.0` enabled `WatchList` by default, which degraded data load performance in the app by requiring potentially very large data sets to be sent in total before showing any data. The previous `list -> watch` behavior has been restored.
+- Unreachable previously-opened clusters no longer block startup.
+- Streamed pod logs should now properly retain their proper scroll positions, whether auto-scrolling or a manual fixed scroll position.

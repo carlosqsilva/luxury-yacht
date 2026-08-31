@@ -78,7 +78,7 @@ import { containsAnsi } from './ansi';
 import { setContainerLogsStreamScopeParams } from './containerLogsStreamScopeParamsCache';
 import { useAnchoredLogEntries } from './hooks/useAnchoredLogEntries';
 import { useLogMessageRenderer } from './hooks/useLogMessageRenderer';
-import { isLogScrollAtBottom, useLogScrollRestoration } from './hooks/useLogScrollRestoration';
+import { useLogScrollRestoration } from './hooks/useLogScrollRestoration';
 import { useTerminalTheme } from './hooks/useTerminalTheme';
 import { buildCsv } from './logExport';
 import {
@@ -95,9 +95,9 @@ import { parseBracketedLogPrefix } from './logLineMetadata';
 import { buildLogSearchRegex, isValidRegexPattern } from './logSearch';
 import {
   getLogViewerPrefs,
-  getLogViewerScrollTop,
+  getLogViewerScrollPosition,
   setLogViewerPrefs,
-  setLogViewerScrollTop,
+  setLogViewerScrollPosition,
 } from './logViewerPrefsCache';
 import {
   ALL_CONTAINERS,
@@ -146,6 +146,7 @@ interface LogViewerProps {
 const CONTAINER_LOGS_DOMAIN = 'container-logs' as const;
 const PARSED_POD_COLUMN_MIN_WIDTH = 80;
 const PARSED_METADATA_AUTOSIZE_MAX_WIDTH = 320;
+const POD_LOG_COLOR_PALETTE_SLOTS = Array.from({ length: 24 }, (_, index) => index + 1);
 const RAW_LOG_VIRTUALIZATION_THRESHOLD = 120;
 const RAW_LOG_VIRTUALIZATION_OVERSCAN = 10;
 const RAW_LOG_ESTIMATE_ROW_HEIGHT = 26;
@@ -1406,19 +1407,6 @@ const getScopedContainerLogSnapshot = (
   ),
 });
 
-const shouldFollowCurrentLogTail = (
-  isParsedView: boolean,
-  logsContent: HTMLDivElement | null,
-  isTailFollowing: boolean
-): boolean => {
-  const activeScrollContainer = isParsedView
-    ? logsContent?.querySelector<HTMLElement>('.gridtable-wrapper')
-    : logsContent;
-  return Boolean(
-    isTailFollowing && (!activeScrollContainer || isLogScrollAtBottom(activeScrollContainer))
-  );
-};
-
 const getContainerLogDisplayError = (snapshotError: string | null | undefined): string | null => {
   if (!snapshotError || isLogDataUnavailable(snapshotError)) {
     return null;
@@ -1744,16 +1732,7 @@ const LogViewerInner: React.FC<LogViewerProps> = ({
       showPreviousContainerLogs,
     ]
   );
-  const shouldFollowTailForCurrentRender = shouldFollowCurrentLogTail(
-    isParsedView,
-    logsContentRef.current,
-    isTailFollowing
-  );
-  const logEntries = useAnchoredLogEntries(
-    rawLogEntries,
-    shouldFollowTailForCurrentRender,
-    anchoredLogSourceKey
-  );
+  const logEntries = useAnchoredLogEntries(rawLogEntries, isTailFollowing, anchoredLogSourceKey);
   const snapshotStatus = scopedSnapshot.status;
   const snapshotError = scopedSnapshot.error;
   // sequence 1 = connected event, sequence >= 2 = initial logs received (may be empty)
@@ -2052,8 +2031,8 @@ const LogViewerInner: React.FC<LogViewerProps> = ({
   // draw from the same set; values resolve per appearance mode.
   const podColors = useMemo(() => {
     const styles = getComputedStyle(document.documentElement);
-    const palette = Array.from({ length: 24 }, (_, i) =>
-      styles.getPropertyValue(`--hash-color-${i + 1}`).trim()
+    const palette = POD_LOG_COLOR_PALETTE_SLOTS.map((slot) =>
+      styles.getPropertyValue(`--hash-color-${slot}`).trim()
     );
     const fallbackColor = styles.getPropertyValue('--hash-color-fallback').trim();
     return buildStablePodColorMap(availablePods, palette, fallbackColor);
@@ -2478,12 +2457,13 @@ const LogViewerInner: React.FC<LogViewerProps> = ({
 
   const { resumeTailFollowing } = useLogScrollRestoration({
     rootRef: logsContentRef,
+    isActive,
     isParsedView,
     rowCount: isParsedView ? parsedContainerLogs.length : logEntries.length,
     tailFollowSignal: displayLogs,
     cacheKey: panelId,
-    getScrollTop: getLogViewerScrollTop,
-    setScrollTop: setLogViewerScrollTop,
+    getScrollPosition: getLogViewerScrollPosition,
+    setScrollPosition: setLogViewerScrollPosition,
     onTailFollowingChange: setIsTailFollowing,
   });
   const handleResumeScrolling = useCallback(() => {
