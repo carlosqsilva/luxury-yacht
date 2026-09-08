@@ -22,6 +22,18 @@ Prevention:
   edits through both ordinary content and portals stay guarded until selection
   settles. Whole-window transfer and Quit guards are separate contracts.
 
+## Treating entry-point cleanup as file consolidation
+
+Keep the root Go package limited to `main.go` with embedded assets and the startup
+call. Move helpers and their tests to the package that owns their responsibility:
+window forwarding in `internal/appwindow`, reporting in `internal/sentry`, and
+process orchestration and Wails composition in `internal/bootstrap`.
+
+Do not replace extra root files by growing `main.go`, or move unrelated helpers
+into one catch-all package. Update source-based architecture checks to inspect
+the actual owners, and preserve checks for startup order, the single service
+registration, stream wiring, and construction-cycle handling after a move.
+
 ## Confusing renderer placement with cluster ownership
 
 A native window is a place to render content. Shared cluster panels and their
@@ -153,6 +165,12 @@ to one tab. Do not let an unhandled group command fall through to a single-tab
 move. Test the actual buttons with multiple tabs and an occupied destination,
 then right-click an inactive tab and prove only that tab is affected. Include
 the native renderer's docked layout projection when testing menu destinations.
+
+For tab-menu styling, compare the cluster and object-panel menus together,
+including docked and native panel variants. Use the shared ContextMenu icon
+slot and separator styling consistently; checking one menu in isolation misses
+visible differences between equivalent controls. Keep each menu's existing
+action scope and availability while aligning its presentation.
 
 ## Adding cognitive complexity without measuring it
 
