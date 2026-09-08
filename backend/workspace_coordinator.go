@@ -8,6 +8,7 @@ import (
 	"github.com/luxury-yacht/app/backend/internal/authstate"
 	"github.com/luxury-yacht/app/backend/refresh/telemetry"
 	"github.com/luxury-yacht/app/backend/resources/common"
+	"github.com/luxury-yacht/app/internal/panelwindow"
 )
 
 type workspaceClusterRuntime interface {
@@ -42,6 +43,7 @@ type workspaceClusterRuntime interface {
 	replayClusterLifecycle(string)
 	resourceDependenciesForSelection(kubeconfigSelection, *clusterClients, string) common.Dependencies
 	runClusterOperation(context.Context, string, func(context.Context) error) error
+	runQueuedClusterOperation(context.Context, string, func(context.Context) error) error
 	selectionsForClusterIDs([]string) []kubeconfigSelection
 	setClusterLifecycleState(string, ClusterLifecycleState)
 	snapshotClusterIDs() []string
@@ -111,6 +113,9 @@ type WorkspaceCoordinator struct {
 	selectionMutationMu   sync.Mutex
 	workspaceSelectionsMu sync.RWMutex
 	workspaceSelections   map[string][]string
+	panelSelections       map[string]string
+	panelWorkspaceOnce    sync.Once
+	panelWorkspace        *panelwindow.WorkspaceDirectory
 
 	selectionMutationDrainMu   sync.Mutex
 	selectionMutationDrainCond *sync.Cond

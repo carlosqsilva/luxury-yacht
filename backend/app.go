@@ -49,26 +49,20 @@ type ApplicationRuntimeOptions struct {
 	CreateWorkspaceWindow      func()
 	IsWorkspaceWindow          func(string) bool
 	NativeWindowDescriptor     func(string) (panelwindow.NativeDescriptor, error)
+	PanelWorkspace             panelwindow.SharedWorkspaceCommands
 	BeginPanelWindowOpen       func(panelwindow.GroupSnapshot) (panelwindow.WindowDescriptor, error)
 	AcknowledgePanelReady      func(string, string) (panelwindow.WindowDescriptor, error)
 	BeginPanelWindowDock       func(string, string, panelwindow.GroupSnapshot) error
 	AcknowledgePanelDock       func(string, string, string) error
 	FailPanelTransfer          func(string, string, string) error
-	FocusPanelWindow           func(string, string, string) error
-	RequestPanelClose          func(string, string, string) error
 	AcknowledgePanelClose      func(string) error
 	AcknowledgeWorkspaceClose  func(string) error
-	RoutePanelCommand          func(string, panelwindow.OwnerCommand) error
-	RequestPanelObjectOpen     func(string, panelwindow.ObjectReference, string) error
-	AuthorizePanelObjectOpen   func(string, string, string, panelwindow.ObjectReference, string) error
+	RoutePanelCommand          func(string, panelwindow.WorkspaceCommand) error
 	UpdatePanelSnapshot        func(string, panelwindow.GroupSnapshot) error
 	RequestPanelTabClose       func(string, string) error
-	AuthorizePanelTabClose     func(string, string, string) error
 	RequestPanelTabTransfer    func(string, panelwindow.TabTransferRequest) error
 	AcceptPanelTabTransfer     func(string, string) error
 	FailPanelTabTransfer       func(string, string) error
-	RequestPanelGuard          func(string, string, string, string) error
-	AcknowledgePanelGuard      func(string, string, bool) error
 	AcknowledgeApplicationQuit func(string, string, bool) error
 }
 
@@ -109,26 +103,20 @@ func NewApplicationRuntime(wailsApplication *application.App, configured ...Appl
 			UpdateCheck: updateCheck.check, KubeconfigSearchPaths: kubeconfigSearchPaths.read,
 			CreateWorkspaceWindow:      options.CreateWorkspaceWindow,
 			NativeWindowDescriptor:     options.NativeWindowDescriptor,
+			PanelWorkspace:             options.PanelWorkspace,
 			BeginPanelWindowOpen:       options.BeginPanelWindowOpen,
 			AcknowledgePanelReady:      options.AcknowledgePanelReady,
 			BeginPanelWindowDock:       options.BeginPanelWindowDock,
 			AcknowledgePanelDock:       options.AcknowledgePanelDock,
 			FailPanelTransfer:          options.FailPanelTransfer,
-			FocusPanelWindow:           options.FocusPanelWindow,
-			RequestPanelClose:          options.RequestPanelClose,
 			AcknowledgePanelClose:      options.AcknowledgePanelClose,
 			AcknowledgeWorkspaceClose:  options.AcknowledgeWorkspaceClose,
 			RoutePanelCommand:          options.RoutePanelCommand,
-			RequestPanelObjectOpen:     options.RequestPanelObjectOpen,
-			AuthorizePanelObjectOpen:   options.AuthorizePanelObjectOpen,
 			UpdatePanelSnapshot:        options.UpdatePanelSnapshot,
 			RequestPanelTabClose:       options.RequestPanelTabClose,
-			AuthorizePanelTabClose:     options.AuthorizePanelTabClose,
 			RequestPanelTabTransfer:    options.RequestPanelTabTransfer,
 			AcceptPanelTabTransfer:     options.AcceptPanelTabTransfer,
 			FailPanelTabTransfer:       options.FailPanelTabTransfer,
-			RequestPanelGuard:          options.RequestPanelGuard,
-			AcknowledgePanelGuard:      options.AcknowledgePanelGuard,
 			AcknowledgeApplicationQuit: options.AcknowledgeApplicationQuit,
 		},
 	)
@@ -221,7 +209,7 @@ func NewApplicationRuntime(wailsApplication *application.App, configured ...Appl
 			return workspace.runSelectionMutation(name, func(_ *selectionMutation) error { return action() })
 		},
 		ResetRuntime: func() error {
-			if err := workspace.clearKubeconfigSelection(); err != nil {
+			if err := workspace.clearKubeconfigSelection(true); err != nil {
 				return err
 			}
 			return refresh.ResetRuntimeState()

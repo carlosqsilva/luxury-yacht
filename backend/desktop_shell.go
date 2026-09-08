@@ -44,6 +44,7 @@ func (p *updateCheckPort) bind(target func() error) {
 }
 
 type DesktopShellBindings struct {
+	PanelWorkspace             panelwindow.SharedWorkspaceCommands
 	UpdateCheck                func() error
 	KubeconfigSearchPaths      func() ([]string, error)
 	CreateWorkspaceWindow      func()
@@ -53,27 +54,21 @@ type DesktopShellBindings struct {
 	BeginPanelWindowDock       func(string, string, panelwindow.GroupSnapshot) error
 	AcknowledgePanelDock       func(string, string, string) error
 	FailPanelTransfer          func(string, string, string) error
-	FocusPanelWindow           func(string, string, string) error
-	RequestPanelClose          func(string, string, string) error
 	AcknowledgePanelClose      func(string) error
 	AcknowledgeWorkspaceClose  func(string) error
-	RoutePanelCommand          func(string, panelwindow.OwnerCommand) error
-	RequestPanelObjectOpen     func(string, panelwindow.ObjectReference, string) error
-	AuthorizePanelObjectOpen   func(string, string, string, panelwindow.ObjectReference, string) error
+	RoutePanelCommand          func(string, panelwindow.WorkspaceCommand) error
 	UpdatePanelSnapshot        func(string, panelwindow.GroupSnapshot) error
 	RequestPanelTabClose       func(string, string) error
-	AuthorizePanelTabClose     func(string, string, string) error
 	RequestPanelTabTransfer    func(string, panelwindow.TabTransferRequest) error
 	AcceptPanelTabTransfer     func(string, string) error
 	FailPanelTabTransfer       func(string, string) error
-	RequestPanelGuard          func(string, string, string, string) error
-	AcknowledgePanelGuard      func(string, string, bool) error
 	AcknowledgeApplicationQuit func(string, string, bool) error
 }
 
 // DesktopShell is the concrete owner of native Wails access and process-wide,
 // non-persisted shell projection state.
 type DesktopShell struct {
+	panelWorkspace             panelwindow.SharedWorkspaceCommands
 	application                *application.App
 	runtimeAvailableFn         func() bool
 	fallbackEmitter            func(string, ...interface{})
@@ -86,21 +81,14 @@ type DesktopShell struct {
 	beginPanelWindowDock       func(string, string, panelwindow.GroupSnapshot) error
 	acknowledgePanelDock       func(string, string, string) error
 	failPanelTransfer          func(string, string, string) error
-	focusPanelWindow           func(string, string, string) error
-	requestPanelClose          func(string, string, string) error
 	acknowledgePanelClose      func(string) error
 	acknowledgeWorkspaceClose  func(string) error
-	routePanelCommand          func(string, panelwindow.OwnerCommand) error
-	requestPanelObjectOpen     func(string, panelwindow.ObjectReference, string) error
-	authorizePanelObjectOpen   func(string, string, string, panelwindow.ObjectReference, string) error
+	routePanelCommand          func(string, panelwindow.WorkspaceCommand) error
 	updatePanelSnapshot        func(string, panelwindow.GroupSnapshot) error
 	requestPanelTabClose       func(string, string) error
-	authorizePanelTabClose     func(string, string, string) error
 	requestPanelTabTransfer    func(string, panelwindow.TabTransferRequest) error
 	acceptPanelTabTransfer     func(string, string) error
 	failPanelTabTransfer       func(string, string) error
-	requestPanelGuard          func(string, string, string, string) error
-	acknowledgePanelGuard      func(string, string, bool) error
 	acknowledgeApplicationQuit func(string, string, bool) error
 	sidebarVisible             bool
 	diagnosticsPanelVisible    bool
@@ -134,6 +122,7 @@ func NewDesktopShell(
 		shell.currentWindow = wailsApplication.Window.Current
 	}
 	if len(bindings) > 0 {
+		shell.panelWorkspace = bindings[0].PanelWorkspace
 		shell.checkForUpdates = bindings[0].UpdateCheck
 		shell.kubeconfigSearchPaths = bindings[0].KubeconfigSearchPaths
 		shell.createWorkspaceWindow = bindings[0].CreateWorkspaceWindow
@@ -143,21 +132,14 @@ func NewDesktopShell(
 		shell.beginPanelWindowDock = bindings[0].BeginPanelWindowDock
 		shell.acknowledgePanelDock = bindings[0].AcknowledgePanelDock
 		shell.failPanelTransfer = bindings[0].FailPanelTransfer
-		shell.focusPanelWindow = bindings[0].FocusPanelWindow
-		shell.requestPanelClose = bindings[0].RequestPanelClose
 		shell.acknowledgePanelClose = bindings[0].AcknowledgePanelClose
 		shell.acknowledgeWorkspaceClose = bindings[0].AcknowledgeWorkspaceClose
 		shell.routePanelCommand = bindings[0].RoutePanelCommand
-		shell.requestPanelObjectOpen = bindings[0].RequestPanelObjectOpen
-		shell.authorizePanelObjectOpen = bindings[0].AuthorizePanelObjectOpen
 		shell.updatePanelSnapshot = bindings[0].UpdatePanelSnapshot
 		shell.requestPanelTabClose = bindings[0].RequestPanelTabClose
-		shell.authorizePanelTabClose = bindings[0].AuthorizePanelTabClose
 		shell.requestPanelTabTransfer = bindings[0].RequestPanelTabTransfer
 		shell.acceptPanelTabTransfer = bindings[0].AcceptPanelTabTransfer
 		shell.failPanelTabTransfer = bindings[0].FailPanelTabTransfer
-		shell.requestPanelGuard = bindings[0].RequestPanelGuard
-		shell.acknowledgePanelGuard = bindings[0].AcknowledgePanelGuard
 		shell.acknowledgeApplicationQuit = bindings[0].AcknowledgeApplicationQuit
 	}
 	shell.openApplicationURL = func(url string) error {

@@ -37,6 +37,36 @@ import { getWindowIdentity } from '@/core/window-identity';
 
 export type KubeconfigDiscoveryState = 'available' | 'search_paths_missing' | 'no_kubeconfigs';
 
+export interface ClusterClosePreparation {
+  release: () => void;
+}
+type ClusterClosePreflight = (clusterId: string) => Promise<ClusterClosePreparation | null>;
+
+async function prepareClusterClose(
+  preflights: Iterable<ClusterClosePreflight>,
+  clusterId: string
+): Promise<ClusterClosePreparation | null> {
+  const preparations: ClusterClosePreparation[] = [];
+  const release = () =>
+    preparations.forEach((preparation) => {
+      preparation.release();
+    });
+  try {
+    for (const preflight of preflights) {
+      const preparation = await preflight(clusterId);
+      if (!preparation) {
+        release();
+        return null;
+      }
+      preparations.push(preparation);
+    }
+    return { release };
+  } catch (error) {
+    release();
+    throw error;
+  }
+}
+
 const resolveKubeconfigDiscoveryState = (
   state: string,
   kubeconfigs: types.KubeconfigInfo[]
@@ -46,6 +76,10 @@ const resolveKubeconfigDiscoveryState = (
   }
   return kubeconfigs.length > 0 ? 'available' : 'no_kubeconfigs';
 };
+
+function retainedActiveSelection(selections: string[], current: string): string {
+  return selections.includes(current) ? current : selections[0] || '';
+}
 
 interface KubeconfigContextType {
   kubeconfigs: types.KubeconfigInfo[];
@@ -62,8 +96,8 @@ interface KubeconfigContextType {
   closeKubeconfig: (selectionOrClusterId: string) => Promise<void>;
   setActiveKubeconfig: (config: string) => void;
   getClusterMeta: (config: string) => { id: string; name: string };
-  loadKubeconfigs: () => Promise<void>;
-  registerClusterClosePreflight: (preflight: (clusterId: string) => Promise<boolean>) => () => void;
+  loadKubeconfigs: (refreshWorkspace?: boolean) => Promise<void>;
+  registerClusterClosePreflight: (preflight: ClusterClosePreflight) => () => void;
 }
 
 const KubeconfigContext = createContext<KubeconfigContextType | undefined>(undefined);
@@ -261,7 +295,8 @@ export const KubeconfigProvider: React.FC<KubeconfigProviderProps> = ({ children
   const committedSelectionsRef = useRef<string[]>([]);
   const committedActiveRef = useRef<string>('');
   const latestSelectionRequestIdRef = useRef(0);
-  const clusterClosePreflightsRef = useRef(new Set<(clusterId: string) => Promise<boolean>>());
+  const clusterClosePreflightsRef = useRef(new Set<ClusterClosePreflight>());
+  const closingClusterIdsRef = useRef(new Set<string>());
   // Prevent refresh context churn until the backend confirms selection updates.
   const selectionPendingRef = useRef(false);
 
@@ -447,15 +482,19 @@ export const KubeconfigProvider: React.FC<KubeconfigProviderProps> = ({ children
         const normalizedSelection = normalizeSelections(
           currentSelection?.selectedKubeconfigs || []
         );
-        const initialMeta = resolveClusterMeta(normalizedSelection[0] || '', configs);
+        const activeSelection = retainedActiveSelection(
+          normalizedSelection,
+          selectedKubeconfigRef.current
+        );
+        const initialMeta = resolveClusterMeta(activeSelection, configs);
         selectedKubeconfigsRef.current = normalizedSelection;
-        selectedKubeconfigRef.current = normalizedSelection[0] || '';
+        selectedKubeconfigRef.current = activeSelection;
         committedSelectionsRef.current = normalizedSelection;
-        committedActiveRef.current = normalizedSelection[0] || '';
+        committedActiveRef.current = activeSelection;
         setSelectedKubeconfigsState(normalizedSelection);
-        setSelectedKubeconfigState(normalizedSelection[0] || '');
+        setSelectedKubeconfigState(activeSelection);
         setCommittedSelectedKubeconfigs(normalizedSelection);
-        setCommittedSelectedKubeconfig(normalizedSelection[0] || '');
+        setCommittedSelectedKubeconfig(activeSelection);
         if (initialMeta.id) {
           activateVisibleCluster(initialMeta.id, true);
         }
@@ -657,46 +696,53 @@ export const KubeconfigProvider: React.FC<KubeconfigProviderProps> = ({ children
         }
         return resolveClusterMeta(selection, kubeconfigsRef.current).id === target;
       });
-      const targetClusterId = targetSelection
-        ? resolveClusterMeta(targetSelection, kubeconfigsRef.current).id
-        : target;
-      for (const preflight of clusterClosePreflightsRef.current) {
-        if (!(await preflight(targetClusterId))) {
+      if (!targetSelection) {
+        return;
+      }
+      const targetClusterId = resolveClusterMeta(targetSelection, kubeconfigsRef.current).id;
+      if (closingClusterIdsRef.current.has(targetClusterId)) {
+        return;
+      }
+      closingClusterIdsRef.current.add(targetClusterId);
+      let preparation: ClusterClosePreparation | null = null;
+      try {
+        preparation = await prepareClusterClose(clusterClosePreflightsRef.current, targetClusterId);
+        if (!preparation) {
           return;
         }
+        const remaining = selectedKubeconfigsRef.current.filter(
+          (selection) =>
+            resolveClusterMeta(selection, kubeconfigsRef.current).id !== targetClusterId
+        );
+        clusterWorkspaceStore.confirmClosedSelection(targetSelection, targetClusterId);
+        applyCommittedSelection(
+          remaining,
+          resolveNextActiveSelection(
+            selectedKubeconfigsRef.current,
+            selectedKubeconfigRef.current,
+            remaining
+          )
+        );
+        const requestId = ++latestSelectionRequestIdRef.current;
+        await applySelectionTransition({
+          configs: remaining,
+          requestId,
+          context: 'closeKubeconfig',
+          errorMessage: 'Failed to close cluster',
+        });
+      } finally {
+        preparation?.release();
+        closingClusterIdsRef.current.delete(targetClusterId);
       }
-
-      const requestId = latestSelectionRequestIdRef.current + 1;
-      latestSelectionRequestIdRef.current = requestId;
-
-      const previousSelections = selectedKubeconfigsRef.current;
-      const matchesTarget = (selection: string) => {
-        if (selection === target) {
-          return true;
-        }
-        return resolveClusterMeta(selection, kubeconfigsRef.current).id === target;
-      };
-      const normalizedSelections = normalizeSelections(
-        previousSelections.filter((selection) => !matchesTarget(selection))
-      );
-      await applySelectionTransition({
-        configs: normalizedSelections,
-        requestId,
-        context: 'closeKubeconfig',
-        errorMessage: 'Failed to close cluster',
-      });
     },
-    [applySelectionTransition, normalizeSelections, resolveClusterMeta]
+    [applySelectionTransition, applyCommittedSelection, resolveClusterMeta]
   );
 
-  const registerClusterClosePreflight = useCallback(
-    (preflight: (clusterId: string) => Promise<boolean>) => {
-      const preflights = clusterClosePreflightsRef.current;
-      preflights.add(preflight);
-      return () => preflights.delete(preflight);
-    },
-    []
-  );
+  const registerClusterClosePreflight = useCallback((preflight: ClusterClosePreflight) => {
+    const preflights = clusterClosePreflightsRef.current;
+    preflights.add(preflight);
+    return () => preflights.delete(preflight);
+  }, []);
 
   const setActiveKubeconfig = useCallback(
     (config: string) => {

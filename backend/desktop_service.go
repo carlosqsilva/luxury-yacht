@@ -152,26 +152,20 @@ type DesktopShellCommands interface {
 
 // PanelWindowCommands is the native panel-window protocol owned by DesktopShell.
 type PanelWindowCommands interface {
+	panelwindow.SharedWorkspaceCommands
 	GetNativeWindowDescriptor(string) (panelwindow.NativeDescriptor, error)
 	BeginPanelWindowOpen(string, panelwindow.GroupSnapshot) (panelwindow.WindowDescriptor, error)
 	AcknowledgePanelWindowReady(string, string) (panelwindow.WindowDescriptor, error)
 	BeginPanelWindowDock(string, string, panelwindow.GroupSnapshot) error
 	AcknowledgePanelWindowDock(string, string, string) error
 	FailPanelWindowTransfer(string, string, string) error
-	FocusPanelWindow(string, string, string) error
-	RequestPanelWindowClose(string, string, string) error
 	AcknowledgePanelWindowClose(string) error
 	AcknowledgeWorkspaceWindowClose(string) error
-	RequestPanelObjectOpen(string, panelwindow.ObjectReference, string) error
-	AuthorizePanelObjectOpen(string, string, string, panelwindow.ObjectReference, string) error
 	UpdatePanelWindowSnapshot(string, panelwindow.GroupSnapshot) error
 	RequestPanelTabClose(string, string) error
-	AuthorizePanelTabClose(string, string, string) error
 	RequestPanelTabTransfer(string, panelwindow.TabTransferRequest) error
 	AcceptPanelTabTransfer(string, string) error
 	FailPanelTabTransfer(string, string) error
-	RequestPanelWindowGuard(string, string, string, string) error
-	AcknowledgePanelWindowGuard(string, string, bool) error
 	AcknowledgeApplicationQuitPreflight(string, string, bool) error
 }
 
@@ -681,11 +675,11 @@ func (s *DesktopService) BeginPanelWindowDock(ctx context.Context, windowName, t
 	return s.panelWindows.BeginPanelWindowDock(windowName, targetPosition, snapshot)
 }
 
-func (s *DesktopService) AcknowledgePanelWindowDock(ctx context.Context, ownerWindowName, windowName, transferID string) error {
-	if err := validatePanelCommandCaller(ctx, ownerWindowName); err != nil {
+func (s *DesktopService) AcknowledgePanelWindowDock(ctx context.Context, callerWindowName, windowName, transferID string) error {
+	if err := validatePanelCommandCaller(ctx, callerWindowName); err != nil {
 		return err
 	}
-	return s.panelWindows.AcknowledgePanelWindowDock(ownerWindowName, windowName, transferID)
+	return s.panelWindows.AcknowledgePanelWindowDock(callerWindowName, windowName, transferID)
 }
 
 func (s *DesktopService) FailPanelWindowTransfer(ctx context.Context, callerWindowName, windowName, transferID string) error {
@@ -695,20 +689,6 @@ func (s *DesktopService) FailPanelWindowTransfer(ctx context.Context, callerWind
 	return s.panelWindows.FailPanelWindowTransfer(callerWindowName, windowName, transferID)
 }
 
-func (s *DesktopService) FocusPanelWindow(ctx context.Context, ownerWindowName, windowName, panelID string) error {
-	if err := validatePanelCommandCaller(ctx, ownerWindowName); err != nil {
-		return err
-	}
-	return s.panelWindows.FocusPanelWindow(ownerWindowName, windowName, panelID)
-}
-
-func (s *DesktopService) RequestPanelWindowClose(ctx context.Context, callerWindowName, windowName, reason string) error {
-	if err := validatePanelCommandCaller(ctx, callerWindowName); err != nil {
-		return err
-	}
-	return s.panelWindows.RequestPanelWindowClose(callerWindowName, windowName, reason)
-}
-
 func (s *DesktopService) AcknowledgePanelWindowClose(ctx context.Context, windowName string) error {
 	if err := validatePanelCommandCaller(ctx, windowName); err != nil {
 		return err
@@ -716,25 +696,11 @@ func (s *DesktopService) AcknowledgePanelWindowClose(ctx context.Context, window
 	return s.panelWindows.AcknowledgePanelWindowClose(windowName)
 }
 
-func (s *DesktopService) AcknowledgeWorkspaceWindowClose(ctx context.Context, ownerWindowName string) error {
-	if err := validatePanelCommandCaller(ctx, ownerWindowName); err != nil {
+func (s *DesktopService) AcknowledgeWorkspaceWindowClose(ctx context.Context, callerWindowName string) error {
+	if err := validatePanelCommandCaller(ctx, callerWindowName); err != nil {
 		return err
 	}
-	return s.panelWindows.AcknowledgeWorkspaceWindowClose(ownerWindowName)
-}
-
-func (s *DesktopService) RequestPanelObjectOpen(ctx context.Context, windowName string, ref panelwindow.ObjectReference, activeView string) error {
-	if err := validatePanelCommandCaller(ctx, windowName); err != nil {
-		return err
-	}
-	return s.panelWindows.RequestPanelObjectOpen(windowName, ref, activeView)
-}
-
-func (s *DesktopService) AuthorizePanelObjectOpen(ctx context.Context, ownerWindowName, windowName, panelID string, ref panelwindow.ObjectReference, activeView string) error {
-	if err := validatePanelCommandCaller(ctx, ownerWindowName); err != nil {
-		return err
-	}
-	return s.panelWindows.AuthorizePanelObjectOpen(ownerWindowName, windowName, panelID, ref, activeView)
+	return s.panelWindows.AcknowledgeWorkspaceWindowClose(callerWindowName)
 }
 
 func (s *DesktopService) UpdatePanelWindowSnapshot(ctx context.Context, windowName string, snapshot panelwindow.GroupSnapshot) error {
@@ -751,13 +717,6 @@ func (s *DesktopService) RequestPanelTabClose(ctx context.Context, windowName, p
 	return s.panelWindows.RequestPanelTabClose(windowName, panelID)
 }
 
-func (s *DesktopService) AuthorizePanelTabClose(ctx context.Context, ownerWindowName, windowName, panelID string) error {
-	if err := validatePanelCommandCaller(ctx, ownerWindowName); err != nil {
-		return err
-	}
-	return s.panelWindows.AuthorizePanelTabClose(ownerWindowName, windowName, panelID)
-}
-
 func (s *DesktopService) RequestPanelTabTransfer(
 	ctx context.Context,
 	callerWindowName string,
@@ -771,12 +730,12 @@ func (s *DesktopService) RequestPanelTabTransfer(
 
 func (s *DesktopService) AcceptPanelTabTransfer(
 	ctx context.Context,
-	ownerWindowName, transferID string,
+	callerWindowName, transferID string,
 ) error {
-	if err := validatePanelCommandCaller(ctx, ownerWindowName); err != nil {
+	if err := validatePanelCommandCaller(ctx, callerWindowName); err != nil {
 		return err
 	}
-	return s.panelWindows.AcceptPanelTabTransfer(ownerWindowName, transferID)
+	return s.panelWindows.AcceptPanelTabTransfer(callerWindowName, transferID)
 }
 
 func (s *DesktopService) FailPanelTabTransfer(
@@ -789,23 +748,9 @@ func (s *DesktopService) FailPanelTabTransfer(
 	return s.panelWindows.FailPanelTabTransfer(callerWindowName, transferID)
 }
 
-func (s *DesktopService) RequestPanelWindowGuard(ctx context.Context, ownerWindowName, windowName, requestID, reason string) error {
-	if err := validatePanelCommandCaller(ctx, ownerWindowName); err != nil {
+func (s *DesktopService) AcknowledgeApplicationQuitPreflight(ctx context.Context, callerWindowName, transactionID string, allowed bool) error {
+	if err := validatePanelCommandCaller(ctx, callerWindowName); err != nil {
 		return err
 	}
-	return s.panelWindows.RequestPanelWindowGuard(ownerWindowName, windowName, requestID, reason)
-}
-
-func (s *DesktopService) AcknowledgePanelWindowGuard(ctx context.Context, windowName, requestID string, allowed bool) error {
-	if err := validatePanelCommandCaller(ctx, windowName); err != nil {
-		return err
-	}
-	return s.panelWindows.AcknowledgePanelWindowGuard(windowName, requestID, allowed)
-}
-
-func (s *DesktopService) AcknowledgeApplicationQuitPreflight(ctx context.Context, ownerWindowName, transactionID string, allowed bool) error {
-	if err := validatePanelCommandCaller(ctx, ownerWindowName); err != nil {
-		return err
-	}
-	return s.panelWindows.AcknowledgeApplicationQuitPreflight(ownerWindowName, transactionID, allowed)
+	return s.panelWindows.AcknowledgeApplicationQuitPreflight(callerWindowName, transactionID, allowed)
 }

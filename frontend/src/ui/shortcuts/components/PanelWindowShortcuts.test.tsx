@@ -2,6 +2,7 @@ import { act } from 'react';
 import * as ReactDOM from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { backend } from '@/core/backend-api/models';
+import { nativePanelPublication } from '@/core/panel-windows/publicationQueue';
 import { PanelWindowShortcuts } from './PanelWindowShortcuts';
 
 const mocks = vi.hoisted(() => ({
@@ -18,9 +19,17 @@ const mocks = vi.hoisted(() => ({
   focusWindow: vi.fn(async () => undefined),
   commitTabClose: vi.fn(),
   reportError: vi.fn(),
+  frozen: false,
   blocker: null as null | { panelId?: string; reason: 'unsaved-yaml'; focus: () => void },
   tabs: ['panel-a', 'panel-b'] as string[],
   acknowledgeGuard: vi.fn(async () => undefined),
+  acknowledgeQuit: vi.fn(async () => undefined),
+  acknowledgeClusterClose: vi.fn(async () => undefined),
+  freeze: vi.fn(),
+  freezeCluster: vi.fn(),
+  releaseTransfer: vi.fn(),
+  acceptTabTransfer: vi.fn(async () => undefined),
+  beginOpen: vi.fn(async () => undefined),
   failTabTransfer: vi.fn(async () => undefined),
   upsertOwnedPanel: vi.fn(() => 'panel-c'),
   movePanelBetweenGroups: vi.fn(),
@@ -40,6 +49,15 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('@/core/panel-windows', () => ({
   acknowledgePanelWindowClose: mocks.acknowledgeClose,
+  acknowledgeClusterPanelClose: mocks.acknowledgeClusterClose,
+  onClusterPanelCloseRequested: (handler: (event: never) => void) => {
+    mocks.handlers.clusterClose = handler;
+    return () => undefined;
+  },
+  onClusterPanelCloseSettled: (handler: (event: never) => void) => {
+    mocks.handlers.clusterCloseSettled = handler;
+    return () => undefined;
+  },
   requestPanelTabClose: mocks.requestTabClose,
   updatePanelWindowSnapshot: mocks.updateSnapshot,
   onPanelTabCloseAuthorized: (handler: (event: never) => void) => {
@@ -60,6 +78,21 @@ vi.mock('@/core/panel-windows', () => ({
   },
   acknowledgePanelWindowGuard: mocks.acknowledgeGuard,
   failPanelTabTransfer: mocks.failTabTransfer,
+  acknowledgeApplicationQuitPreflight: mocks.acknowledgeQuit,
+  acceptPanelTabTransfer: mocks.acceptTabTransfer,
+  beginPanelWindowOpen: mocks.beginOpen,
+  onApplicationQuitPreflightRequested: (handler: (event: never) => void) => {
+    mocks.handlers.quit = handler;
+    return () => undefined;
+  },
+  onApplicationQuitPreflightSettled: (handler: (event: never) => void) => {
+    mocks.handlers.quitSettled = handler;
+    return () => undefined;
+  },
+  onPanelTabTransferRequested: (handler: (event: never) => void) => {
+    mocks.handlers.transferSource = handler;
+    return () => undefined;
+  },
   onPanelTabTransferInsertRequested: (handler: (event: never) => void) => {
     mocks.handlers.tabTransferInsert = handler;
     return () => undefined;
@@ -74,8 +107,14 @@ vi.mock('@/core/panel-windows', () => ({
   },
 }));
 
-vi.mock('@/core/panel-windows/panelLifecycleGuards', () => ({
+vi.mock('@/core/panel-windows/panelLifecycleGuards', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
   usePanelLifecycleGuardRegistry: () => ({
+    freeze: mocks.freeze,
+    freezeCluster: mocks.freezeCluster,
+    releaseTransfer: mocks.releaseTransfer,
+    isFrozen: () => mocks.frozen,
+    isClusterFrozen: () => mocks.frozen,
     firstBlocker: () => mocks.blocker,
   }),
 }));
@@ -187,6 +226,7 @@ describe('PanelWindowShortcuts', () => {
     vi.clearAllMocks();
     mocks.handlers = {};
     mocks.blocker = null;
+    mocks.frozen = false;
     mocks.tabs = ['panel-a', 'panel-b'];
     mocks.applicationShortcutsProps = null;
     container = document.createElement('div');
@@ -214,6 +254,207 @@ describe('PanelWindowShortcuts', () => {
     await act(async () => mocks.handlers.authorized?.({ panelId: 'panel-a' } as never));
     expect(mocks.commitTabClose).toHaveBeenCalledWith('panel-a');
     expect(mocks.closePanel).not.toHaveBeenCalled();
+  });
+
+  const outgoingTabRequest = () => ({
+    transferId: 'outgoing-panel-tab',
+    sourceWindowName: 'panel-1',
+    targetWindowName: '',
+    sourceGroupId: 'group-1',
+    targetGroupId: 'group-new',
+    targetKind: 'new-window',
+    targetIndex: 0,
+    clusterId: 'cluster-1',
+    tab: {
+      kind: 'object',
+      panelId: 'panel-b',
+      activeView: 'details',
+      objectRef: {
+        clusterId: 'cluster-1',
+        group: '',
+        version: 'v1',
+        kind: 'Pod',
+        namespace: 'default',
+        name: 'api-1',
+      },
+    },
+  });
+
+  it('publishes a frozen native source before creating the target and retains it until commit', async () => {
+    const request = outgoingTabRequest();
+    let publish: () => void = () => {
+      throw new Error('Publication was not started');
+    };
+    const flush = vi.spyOn(nativePanelPublication, 'flush').mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          publish = resolve;
+        })
+    );
+    await act(async () => mocks.handlers.transferSource?.({ request } as never));
+    expect(mocks.freeze).toHaveBeenCalledWith(request.transferId, ['panel-b']);
+    expect(mocks.acceptTabTransfer).not.toHaveBeenCalled();
+    expect(mocks.beginOpen).not.toHaveBeenCalled();
+    await act(async () => publish());
+    expect(mocks.acceptTabTransfer).toHaveBeenCalledWith('panel-1', request.transferId);
+    expect(mocks.beginOpen).toHaveBeenCalledWith(
+      'panel-1',
+      expect.objectContaining({
+        clusterId: 'cluster-1',
+        tabs: [request.tab],
+      })
+    );
+    expect(mocks.commitTabClose).not.toHaveBeenCalled();
+    await act(async () => mocks.handlers.tabTransferCommitted?.({ request } as never));
+    expect(mocks.commitTabClose).toHaveBeenCalledWith('panel-b');
+    expect(mocks.releaseTransfer).toHaveBeenCalledWith(request.transferId);
+    flush.mockRestore();
+  });
+
+  it('keeps the native source tab when creation of its tear-off target fails', async () => {
+    const request = outgoingTabRequest();
+    mocks.beginOpen.mockRejectedValueOnce(new Error('native window creation failed'));
+    await act(async () => mocks.handlers.transferSource?.({ request } as never));
+    expect(mocks.failTabTransfer).toHaveBeenCalledWith('panel-1', request.transferId);
+    expect(mocks.reportError).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({
+        action: 'accept-tab-transfer',
+      })
+    );
+    await act(async () => mocks.handlers.tabTransferFailed?.({ request } as never));
+    expect(mocks.releaseTransfer).toHaveBeenCalledWith(request.transferId);
+    expect(mocks.commitTabClose).not.toHaveBeenCalled();
+    expect(mocks.acknowledgeClose).not.toHaveBeenCalled();
+  });
+
+  it('rejects outgoing native tabs while the renderer is closing', async () => {
+    const request = outgoingTabRequest();
+    mocks.frozen = true;
+    await act(async () => mocks.handlers.transferSource?.({ request } as never));
+    expect(mocks.failTabTransfer).toHaveBeenCalledWith('panel-1', request.transferId);
+    expect(mocks.acceptTabTransfer).not.toHaveBeenCalled();
+    expect(mocks.beginOpen).not.toHaveBeenCalled();
+  });
+
+  it('guards cluster closure and releases the freeze when another panel denies it', async () => {
+    const event = {
+      windowName: 'panel-1',
+      clusterId: 'cluster-1',
+      transactionId: 'cluster-close-1',
+    };
+    await act(async () => mocks.handlers.clusterClose?.(event as never));
+    expect(mocks.acknowledgeClusterClose).toHaveBeenCalledWith('panel-1', 'cluster-close-1', true);
+    expect(mocks.freezeCluster).toHaveBeenCalledWith('cluster-close-1', 'cluster-1', [
+      'panel-a',
+      'panel-b',
+    ]);
+    expect(mocks.acknowledgeClose).not.toHaveBeenCalled();
+    await act(async () => mocks.handlers.clusterCloseSettled?.(event as never));
+    expect(mocks.releaseTransfer).toHaveBeenCalledWith('cluster-close-1');
+  });
+
+  it('rejects cluster close before readiness and while a transfer is frozen', async () => {
+    const event = { windowName: 'panel-1', clusterId: 'cluster-1', transactionId: 'close-unready' };
+    await act(async () =>
+      root.render(<PanelWindowShortcuts descriptor={descriptor} ready={false} />)
+    );
+    await act(async () => mocks.handlers.clusterClose?.(event as never));
+    expect(mocks.acknowledgeClusterClose).toHaveBeenLastCalledWith(
+      'panel-1',
+      'close-unready',
+      false
+    );
+    await act(async () =>
+      root.render(<PanelWindowShortcuts descriptor={descriptor} ready={true} />)
+    );
+    mocks.frozen = true;
+    await act(async () =>
+      mocks.handlers.clusterClose?.({ ...event, transactionId: 'close-frozen' } as never)
+    );
+    expect(mocks.acknowledgeClusterClose).toHaveBeenLastCalledWith(
+      'panel-1',
+      'close-frozen',
+      false
+    );
+    expect(mocks.freeze).not.toHaveBeenCalled();
+  });
+
+  it('ignores cluster close events addressed to another cluster or window', async () => {
+    for (const event of [
+      { windowName: 'panel-other', clusterId: 'cluster-1' },
+      { windowName: 'panel-1', clusterId: 'cluster-other' },
+    ]) {
+      await act(async () => {
+        mocks.handlers.clusterClose?.({ ...event, transactionId: 'foreign' } as never);
+        mocks.handlers.clusterCloseSettled?.({ ...event, transactionId: 'foreign' } as never);
+      });
+    }
+    expect(mocks.acknowledgeClusterClose).not.toHaveBeenCalled();
+    expect(mocks.releaseTransfer).not.toHaveBeenCalled();
+  });
+
+  it('denies cluster closure when flushing the native panel fails', async () => {
+    const error = new Error('panel publication failed');
+    const flush = vi.spyOn(nativePanelPublication, 'flush').mockRejectedValueOnce(error);
+    const event = {
+      windowName: 'panel-1',
+      clusterId: 'cluster-1',
+      transactionId: 'close-flush-fails',
+    };
+    try {
+      await act(async () => mocks.handlers.clusterClose?.(event as never));
+      expect(mocks.acknowledgeClusterClose).toHaveBeenCalledWith(
+        'panel-1',
+        event.transactionId,
+        false
+      );
+      expect(mocks.reportError).toHaveBeenCalledWith(
+        error,
+        expect.objectContaining({ action: 'cluster-close-preflight', clusterId: 'cluster-1' })
+      );
+      expect(mocks.acknowledgeClose).not.toHaveBeenCalled();
+      await act(async () => mocks.handlers.clusterCloseSettled?.(event as never));
+      expect(mocks.releaseTransfer).toHaveBeenCalledWith(event.transactionId);
+    } finally {
+      flush.mockRestore();
+    }
+  });
+
+  it('reports a rejected acknowledgement and releases its freeze on settlement', async () => {
+    const error = new Error('stale close transaction');
+    mocks.acknowledgeClusterClose.mockRejectedValueOnce(error);
+    const event = { windowName: 'panel-1', clusterId: 'cluster-1', transactionId: 'close-stale' };
+    await act(async () => mocks.handlers.clusterClose?.(event as never));
+    expect(mocks.reportError).toHaveBeenCalledWith(
+      error,
+      expect.objectContaining({ action: 'acknowledge-cluster-close', clusterId: 'cluster-1' })
+    );
+    await act(async () => mocks.handlers.clusterCloseSettled?.(event as never));
+    expect(mocks.releaseTransfer).toHaveBeenCalledWith(event.transactionId);
+  });
+
+  it('denies cluster closure when this panel has unsaved YAML', async () => {
+    mocks.blocker = { panelId: 'panel-a', reason: 'unsaved-yaml', focus: vi.fn() };
+    await act(async () =>
+      mocks.handlers.clusterClose?.({
+        windowName: 'panel-1',
+        clusterId: 'cluster-1',
+        transactionId: 'cluster-close-2',
+      } as never)
+    );
+    expect(mocks.acknowledgeClusterClose).toHaveBeenCalledWith('panel-1', 'cluster-close-2', false);
+    expect(mocks.freeze).not.toHaveBeenCalled();
+    expect(mocks.acknowledgeClose).not.toHaveBeenCalled();
+  });
+
+  it('answers application quit directly and preserves every panel when a local draft blocks', async () => {
+    mocks.blocker = { panelId: 'panel-a', reason: 'unsaved-yaml', focus: vi.fn() };
+    await act(async () => {
+      mocks.handlers.quit?.({ windowName: 'panel-1', transactionId: 'quit-1' } as never);
+    });
+    expect(mocks.acknowledgeQuit).toHaveBeenCalledWith('panel-1', 'quit-1', false);
+    expect(mocks.acknowledgeClose).not.toHaveBeenCalled();
   });
 
   it('executes panel-local accelerators locally and routes owner commands through the backend', async () => {
@@ -411,6 +652,53 @@ describe('PanelWindowShortcuts', () => {
     expect(mocks.closeAll).not.toHaveBeenCalled();
   });
 
+  it('rejects incoming panel tabs while the native renderer is closing', async () => {
+    mocks.frozen = true;
+    const request = {
+      transferId: 'incoming-while-closing',
+      clusterId: 'cluster-1',
+      sourceWindowName: 'other',
+      targetWindowName: 'panel-1',
+      targetGroupId: 'group-1',
+      targetIndex: 0,
+      tab: {
+        kind: 'object',
+        panelId: 'panel-c',
+        activeView: 'details',
+        objectRef: {
+          clusterId: 'cluster-1',
+          group: '',
+          version: 'v1',
+          kind: 'Pod',
+          namespace: 'default',
+          name: 'incoming',
+        },
+      },
+    };
+    await act(async () => mocks.handlers.tabTransferInsert({ request } as never));
+    expect(mocks.failTabTransfer).toHaveBeenCalledWith('panel-1', request.transferId);
+    expect(mocks.upsertOwnedPanel).not.toHaveBeenCalled();
+  });
+
+  it('freezes the native window throughout close publication', async () => {
+    let publish: () => void = () => undefined;
+    vi.spyOn(nativePanelPublication, 'flush').mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          publish = resolve;
+        })
+    );
+    await act(async () => mocks.handlers.windowClose({} as never));
+    const freezesWhilePublishing = mocks.freeze.mock.calls.length;
+    expect(mocks.acknowledgeClose).not.toHaveBeenCalled();
+    await act(async () => {
+      publish();
+    });
+    expect(freezesWhilePublishing).toBe(1);
+    expect(mocks.acknowledgeClose).toHaveBeenCalledOnce();
+    expect(mocks.releaseTransfer).toHaveBeenCalledOnce();
+  });
+
   it('preserves the native group when a whole-window close commit fails', async () => {
     mocks.acknowledgeClose.mockRejectedValueOnce(new Error('native close failed'));
 
@@ -508,21 +796,27 @@ describe('PanelWindowShortcuts', () => {
     expect(mocks.requestTabClose).not.toHaveBeenCalled();
   });
 
-  it('reports whether the whole native group can participate in application quit', async () => {
+  it('blocks native close and quit while an incoming tab is provisional', async () => {
+    mocks.frozen = true;
     await act(async () => {
-      mocks.handlers.guard?.({ requestId: 'guard-1', windowName: 'panel-1' } as never);
-      await Promise.resolve();
+      mocks.handlers.quit?.({ transactionId: 'quit-moving', windowName: 'panel-1' } as never);
+      mocks.handlers.windowClose?.({} as never);
     });
-    expect(mocks.acknowledgeGuard).toHaveBeenCalledWith('panel-1', 'guard-1', true);
+    expect(mocks.acknowledgeQuit).toHaveBeenCalledWith('panel-1', 'quit-moving', false);
+    expect(mocks.acknowledgeClose).not.toHaveBeenCalled();
+  });
 
-    mocks.acknowledgeGuard.mockClear();
+  it('reports its local quit preflight directly to the registry', async () => {
+    await act(async () =>
+      mocks.handlers.quit?.({ transactionId: 'quit-clean', windowName: 'panel-1' } as never)
+    );
+    expect(mocks.acknowledgeQuit).toHaveBeenCalledWith('panel-1', 'quit-clean', true);
     const focus = vi.fn();
     mocks.blocker = { reason: 'unsaved-yaml', focus };
-    await act(async () => {
-      mocks.handlers.guard?.({ requestId: 'guard-2', windowName: 'panel-1' } as never);
-      await Promise.resolve();
-    });
+    await act(async () =>
+      mocks.handlers.quit?.({ transactionId: 'quit-dirty', windowName: 'panel-1' } as never)
+    );
     expect(focus).toHaveBeenCalledOnce();
-    expect(mocks.acknowledgeGuard).toHaveBeenCalledWith('panel-1', 'guard-2', false);
+    expect(mocks.acknowledgeQuit).toHaveBeenCalledWith('panel-1', 'quit-dirty', false);
   });
 });

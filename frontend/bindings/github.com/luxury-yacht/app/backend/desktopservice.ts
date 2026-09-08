@@ -34,32 +34,44 @@ import * as panelwindow$0 from "../internal/panelwindow/models.js";
 // @ts-ignore: Unused imports
 import * as $models from "./models.js";
 
-export function AcceptPanelTabTransfer(ownerWindowName: string, transferID: string): $CancellablePromise<void> {
-    return $Call.ByName("github.com/luxury-yacht/app/backend.DesktopService.AcceptPanelTabTransfer", ownerWindowName, transferID);
+export function AcceptClusterTabTransfer(windowName: string, transferID: string, snapshot: panelwindow$0.ClusterViewSnapshot): $CancellablePromise<void> {
+    return $Call.ByName("github.com/luxury-yacht/app/backend.DesktopService.AcceptClusterTabTransfer", windowName, transferID, snapshot);
 }
 
-export function AcknowledgeApplicationQuitPreflight(ownerWindowName: string, transactionID: string, allowed: boolean): $CancellablePromise<void> {
-    return $Call.ByName("github.com/luxury-yacht/app/backend.DesktopService.AcknowledgeApplicationQuitPreflight", ownerWindowName, transactionID, allowed);
+export function AcceptPanelTabTransfer(callerWindowName: string, transferID: string): $CancellablePromise<void> {
+    return $Call.ByName("github.com/luxury-yacht/app/backend.DesktopService.AcceptPanelTabTransfer", callerWindowName, transferID);
+}
+
+export function AcknowledgeApplicationQuitPreflight(callerWindowName: string, transactionID: string, allowed: boolean): $CancellablePromise<void> {
+    return $Call.ByName("github.com/luxury-yacht/app/backend.DesktopService.AcknowledgeApplicationQuitPreflight", callerWindowName, transactionID, allowed);
+}
+
+export function AcknowledgeClusterPanelClose(windowName: string, transactionID: string, allowed: boolean): $CancellablePromise<void> {
+    return $Call.ByName("github.com/luxury-yacht/app/backend.DesktopService.AcknowledgeClusterPanelClose", windowName, transactionID, allowed);
+}
+
+export function AcknowledgeClusterTabTransfer(windowName: string, transferID: string): $CancellablePromise<void> {
+    return $Call.ByName("github.com/luxury-yacht/app/backend.DesktopService.AcknowledgeClusterTabTransfer", windowName, transferID);
 }
 
 export function AcknowledgePanelWindowClose(windowName: string): $CancellablePromise<void> {
     return $Call.ByName("github.com/luxury-yacht/app/backend.DesktopService.AcknowledgePanelWindowClose", windowName);
 }
 
-export function AcknowledgePanelWindowDock(ownerWindowName: string, windowName: string, transferID: string): $CancellablePromise<void> {
-    return $Call.ByName("github.com/luxury-yacht/app/backend.DesktopService.AcknowledgePanelWindowDock", ownerWindowName, windowName, transferID);
-}
-
-export function AcknowledgePanelWindowGuard(windowName: string, requestID: string, allowed: boolean): $CancellablePromise<void> {
-    return $Call.ByName("github.com/luxury-yacht/app/backend.DesktopService.AcknowledgePanelWindowGuard", windowName, requestID, allowed);
+export function AcknowledgePanelWindowDock(callerWindowName: string, windowName: string, transferID: string): $CancellablePromise<void> {
+    return $Call.ByName("github.com/luxury-yacht/app/backend.DesktopService.AcknowledgePanelWindowDock", callerWindowName, windowName, transferID);
 }
 
 export function AcknowledgePanelWindowReady(windowName: string, transferID: string): $CancellablePromise<panelwindow$0.WindowDescriptor> {
     return $Call.ByName("github.com/luxury-yacht/app/backend.DesktopService.AcknowledgePanelWindowReady", windowName, transferID);
 }
 
-export function AcknowledgeWorkspaceWindowClose(ownerWindowName: string): $CancellablePromise<void> {
-    return $Call.ByName("github.com/luxury-yacht/app/backend.DesktopService.AcknowledgeWorkspaceWindowClose", ownerWindowName);
+export function AcknowledgePanelWorkspaceReady(windowName: string): $CancellablePromise<void> {
+    return $Call.ByName("github.com/luxury-yacht/app/backend.DesktopService.AcknowledgePanelWorkspaceReady", windowName);
+}
+
+export function AcknowledgeWorkspaceWindowClose(callerWindowName: string): $CancellablePromise<void> {
+    return $Call.ByName("github.com/luxury-yacht/app/backend.DesktopService.AcknowledgeWorkspaceWindowClose", callerWindowName);
 }
 
 export function AddFavorite(favorite: $models.Favorite): $CancellablePromise<$models.Favorite> {
@@ -76,14 +88,6 @@ export function ApplyObjectYaml(clusterID: string, request: $models.ObjectYAMLMu
 
 export function ApplyTheme(id: string): $CancellablePromise<void> {
     return $Call.ByName("github.com/luxury-yacht/app/backend.DesktopService.ApplyTheme", id);
-}
-
-export function AuthorizePanelObjectOpen(ownerWindowName: string, windowName: string, panelID: string, ref: panelwindow$0.ObjectReference, activeView: string): $CancellablePromise<void> {
-    return $Call.ByName("github.com/luxury-yacht/app/backend.DesktopService.AuthorizePanelObjectOpen", ownerWindowName, windowName, panelID, ref, activeView);
-}
-
-export function AuthorizePanelTabClose(ownerWindowName: string, windowName: string, panelID: string): $CancellablePromise<void> {
-    return $Call.ByName("github.com/luxury-yacht/app/backend.DesktopService.AuthorizePanelTabClose", ownerWindowName, windowName, panelID);
 }
 
 export function BeginPanelWindowDock(windowName: string, targetPosition: string, snapshot: panelwindow$0.GroupSnapshot): $CancellablePromise<void> {
@@ -120,6 +124,10 @@ export function ClearAppState(): $CancellablePromise<void> {
 
 export function ClearGridTablePersistence(): $CancellablePromise<number> {
     return $Call.ByName("github.com/luxury-yacht/app/backend.DesktopService.ClearGridTablePersistence");
+}
+
+export function CloseClusterView(windowName: string, clusterID: string): $CancellablePromise<boolean> {
+    return $Call.ByName("github.com/luxury-yacht/app/backend.DesktopService.CloseClusterView", windowName, clusterID);
 }
 
 export function CloseShellSession(sessionID: string): $CancellablePromise<void> {
@@ -162,6 +170,10 @@ export function ExportSettings(): $CancellablePromise<$models.DataManagementResu
     return $Call.ByName("github.com/luxury-yacht/app/backend.DesktopService.ExportSettings");
 }
 
+export function FailClusterTabTransfer(windowName: string, transferID: string): $CancellablePromise<void> {
+    return $Call.ByName("github.com/luxury-yacht/app/backend.DesktopService.FailClusterTabTransfer", windowName, transferID);
+}
+
 export function FailPanelTabTransfer(callerWindowName: string, transferID: string): $CancellablePromise<void> {
     return $Call.ByName("github.com/luxury-yacht/app/backend.DesktopService.FailPanelTabTransfer", callerWindowName, transferID);
 }
@@ -184,10 +196,6 @@ export function FindCatalogObjectByUID(clusterID: string, uid: string): $Cancell
 
 export function FindCatalogObjectMatch(clusterID: string, $namespace: string, group: string, version: string, kind: string, name: string): $CancellablePromise<objectcatalog$0.Summary | null> {
     return $Call.ByName("github.com/luxury-yacht/app/backend.DesktopService.FindCatalogObjectMatch", clusterID, $namespace, group, version, kind, name);
-}
-
-export function FocusPanelWindow(ownerWindowName: string, windowName: string, panelID: string): $CancellablePromise<void> {
-    return $Call.ByName("github.com/luxury-yacht/app/backend.DesktopService.FocusPanelWindow", ownerWindowName, windowName, panelID);
 }
 
 export function GetAppInfo(): $CancellablePromise<$models.AppInfo | null> {
@@ -252,6 +260,10 @@ export function GetNativeWindowDescriptor(windowName: string): $CancellablePromi
 
 export function GetObjectYAMLByGVK(clusterID: string, apiVersion: string, kind: string, $namespace: string, name: string): $CancellablePromise<string> {
     return $Call.ByName("github.com/luxury-yacht/app/backend.DesktopService.GetObjectYAMLByGVK", clusterID, apiVersion, kind, $namespace, name);
+}
+
+export function GetPanelWorkspace(windowName: string, clusterID: string): $CancellablePromise<panelwindow$0.WorkspaceSnapshot> {
+    return $Call.ByName("github.com/luxury-yacht/app/backend.DesktopService.GetPanelWorkspace", windowName, clusterID);
 }
 
 export function GetPodContainers(clusterID: string, $namespace: string, podName: string): $CancellablePromise<string[] | null> {
@@ -342,6 +354,14 @@ export function OpenKubeconfigSearchPathDialog(): $CancellablePromise<string> {
     return $Call.ByName("github.com/luxury-yacht/app/backend.DesktopService.OpenKubeconfigSearchPathDialog");
 }
 
+export function OpenPanelWorkspaceObject(windowName: string, tab: panelwindow$0.TabSnapshot): $CancellablePromise<panelwindow$0.PanelOpenResult> {
+    return $Call.ByName("github.com/luxury-yacht/app/backend.DesktopService.OpenPanelWorkspaceObject", windowName, tab);
+}
+
+export function PublishDockedPanels(windowName: string, groups: panelwindow$0.WorkspaceGroup[] | null): $CancellablePromise<void> {
+    return $Call.ByName("github.com/luxury-yacht/app/backend.DesktopService.PublishDockedPanels", windowName, groups);
+}
+
 export function QueryPermissions(queries: capabilities$0.PermissionQuery[] | null): $CancellablePromise<capabilities$0.QueryPermissionsResponse | null> {
     return $Call.ByName("github.com/luxury-yacht/app/backend.DesktopService.QueryPermissions", queries);
 }
@@ -354,8 +374,8 @@ export function ReorderThemes(ids: string[] | null): $CancellablePromise<void> {
     return $Call.ByName("github.com/luxury-yacht/app/backend.DesktopService.ReorderThemes", ids);
 }
 
-export function RequestPanelObjectOpen(windowName: string, ref: panelwindow$0.ObjectReference, activeView: string): $CancellablePromise<void> {
-    return $Call.ByName("github.com/luxury-yacht/app/backend.DesktopService.RequestPanelObjectOpen", windowName, ref, activeView);
+export function RequestClusterTabTransfer(windowName: string, request: panelwindow$0.ClusterTabTransferRequest): $CancellablePromise<void> {
+    return $Call.ByName("github.com/luxury-yacht/app/backend.DesktopService.RequestClusterTabTransfer", windowName, request);
 }
 
 export function RequestPanelTabClose(windowName: string, panelID: string): $CancellablePromise<void> {
@@ -364,14 +384,6 @@ export function RequestPanelTabClose(windowName: string, panelID: string): $Canc
 
 export function RequestPanelTabTransfer(callerWindowName: string, request: panelwindow$0.TabTransferRequest): $CancellablePromise<void> {
     return $Call.ByName("github.com/luxury-yacht/app/backend.DesktopService.RequestPanelTabTransfer", callerWindowName, request);
-}
-
-export function RequestPanelWindowClose(callerWindowName: string, windowName: string, reason: string): $CancellablePromise<void> {
-    return $Call.ByName("github.com/luxury-yacht/app/backend.DesktopService.RequestPanelWindowClose", callerWindowName, windowName, reason);
-}
-
-export function RequestPanelWindowGuard(ownerWindowName: string, windowName: string, requestID: string, reason: string): $CancellablePromise<void> {
-    return $Call.ByName("github.com/luxury-yacht/app/backend.DesktopService.RequestPanelWindowGuard", ownerWindowName, windowName, requestID, reason);
 }
 
 export function ResizeShellSession(sessionID: string, columns: number, rows: number): $CancellablePromise<void> {
