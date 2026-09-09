@@ -14,6 +14,29 @@ afterEach(() => {
 });
 
 describe('ClusterWorkspaceStore', () => {
+  it('bridges permission recovery without changing namespace scope revisions', async () => {
+    const runtime = createWailsRuntimeHarness();
+    const store = new ClusterWorkspaceStore({
+      read: async () => emptyState(),
+      onEvent: runtime.onEvent,
+    });
+    const changed = vi.fn();
+    const unsubscribe = eventBus.on('cluster:permissions-changed', changed);
+    const release = store.acquire();
+    try {
+      await store.hydrate();
+      const before = store.getSnapshot();
+      runtime.emit('cluster:permissions:changed', { clusterId: 'cluster-a' });
+      expect(changed).toHaveBeenCalledExactlyOnceWith({ clusterId: 'cluster-a' });
+      expect(store.getSnapshot()).toBe(before);
+      runtime.emit('cluster:permissions:changed', { clusterId: '' });
+      expect(changed).toHaveBeenCalledOnce();
+    } finally {
+      release();
+      unsubscribe();
+    }
+  });
+
   it('emits lifecycle only when an authoritative read changes the state', async () => {
     const workspaceState = (lifecycle: 'ready' | 'loading'): ClusterWorkspaceWireState => ({
       ...emptyState(),
@@ -421,4 +444,32 @@ describe('ClusterWorkspaceStore', () => {
     store.endForegroundActivation('cluster-a');
     expect(store.isServiceable('cluster-a')).toBe(true);
   });
+});
+
+it('keeps a confirmed cluster-view close ahead of an older workspace read', async () => {
+  let finish!: (state: ClusterWorkspaceWireState) => void;
+  const stale = {
+    ...emptyState(),
+    selectedKubeconfigs: ['alpha:dev', 'beta:prod'],
+    visibleClusterId: 'alpha',
+  };
+  const store = new ClusterWorkspaceStore({
+    read: () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    onEvent: () => () => undefined,
+  });
+  const release = store.acquire();
+  try {
+    const loading = store.hydrate();
+    store.applyWireState(stale);
+    store.confirmClosedSelection('alpha:dev', 'alpha');
+    finish(stale);
+    await loading;
+    expect(store.getSnapshot().selectedKubeconfigs).toEqual(['beta:prod']);
+    expect(store.getSnapshot().visibleClusterId).toBe('');
+  } finally {
+    release();
+  }
 });

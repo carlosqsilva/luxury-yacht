@@ -7,6 +7,7 @@ export {
 };
 
 export {
+    ApplicationMenuCommand,
     ClusterHealthState,
     ClusterLifecycleState,
     KubeconfigDiscoveryState,
@@ -19,12 +20,14 @@ export type {
     AppLogsAddedEvent,
     AppSettings,
     AppSettingsSchema,
+    AppearanceModeChangedEvent,
     BackendErrorEvent,
     CatalogQueryCSVExport,
     ClusterAuthEvent,
     ClusterAuthProgressEvent,
     ClusterHealthEvent,
     ClusterLifecycleEvent,
+    ClusterPermissionsChangedEvent,
     ClusterScopeChangedEvent,
     ClusterWorkspaceAuthState,
     ClusterWorkspaceClusterState,

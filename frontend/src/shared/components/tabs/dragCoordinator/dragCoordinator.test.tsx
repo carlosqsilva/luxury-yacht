@@ -9,7 +9,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { requireValue } from '@/test-utils/requireValue';
 
 import { TabDragContext, TabDragProvider } from './TabDragProvider';
-import { TAB_DRAG_DATA_TYPE, type TabDragPayload } from './types';
+import {
+  TAB_DRAG_DATA_TYPE,
+  type TabDragPayload,
+  tabDragKindDataType,
+  tabDragScopeDataType,
+} from './types';
 import { useTabDragSource, useTabDragSourceFactory } from './useTabDragSource';
 import { useTabDropTarget } from './useTabDropTarget';
 
@@ -89,6 +94,45 @@ describe('TabDragProvider', () => {
       ).currentDrag
     ).toBeNull();
   });
+
+  it('tears off an unconsumed drag outside the source webview at screen coordinates', () => {
+    const onTearOff = vi.fn();
+    let context: React.ContextType<typeof TabDragContext> | null = null;
+    const payload: TabDragPayload = {
+      kind: 'dockable-tab',
+      panelId: 'panel-a',
+      sourceGroupId: 'right',
+    };
+    function Probe() {
+      context = useContext(TabDragContext);
+      return null;
+    }
+
+    act(() => {
+      root.render(
+        <TabDragProvider onTearOff={onTearOff}>
+          <Probe />
+        </TabDragProvider>
+      );
+    });
+    const coordinator = requireValue<React.ContextType<typeof TabDragContext> | null>(
+      context,
+      'expected drag coordinator'
+    );
+
+    act(() => {
+      coordinator.beginDrag(payload);
+      coordinator.endDrag({
+        clientX: -1,
+        clientY: 30,
+        screenX: 2200,
+        screenY: 300,
+        dataTransfer: { dropEffect: 'none' } as DataTransfer,
+      });
+    });
+
+    expect(onTearOff).toHaveBeenCalledWith(payload, { x: 2200, y: 300 });
+  });
 });
 
 describe('useTabDragSource', () => {
@@ -112,7 +156,12 @@ describe('useTabDragSource', () => {
     let captured: ReturnType<typeof useTabDragSource> | null = null;
 
     function Probe() {
-      captured = useTabDragSource({ kind: 'cluster-tab', clusterId: 'c1' });
+      captured = useTabDragSource({
+        kind: 'cluster-tab',
+        clusterId: 'c1',
+        selection: 'c1',
+        sourceWindowName: 'workspace-1',
+      });
       return (
         <button {...captured} type="button">
           drag
@@ -159,7 +208,12 @@ describe('useTabDragSource', () => {
   it('writes the payload to dataTransfer on dragstart', () => {
     let captured: ReturnType<typeof useTabDragSource> | null = null;
     function Probe() {
-      captured = useTabDragSource({ kind: 'cluster-tab', clusterId: 'c1' });
+      captured = useTabDragSource({
+        kind: 'cluster-tab',
+        clusterId: 'c1',
+        selection: 'c1',
+        sourceWindowName: 'workspace-1',
+      });
       return (
         <button {...captured} type="button">
           drag
@@ -192,8 +246,48 @@ describe('useTabDragSource', () => {
 
     expect(setData).toHaveBeenCalledWith(
       TAB_DRAG_DATA_TYPE,
-      JSON.stringify({ kind: 'cluster-tab', clusterId: 'c1' })
+      JSON.stringify({
+        kind: 'cluster-tab',
+        clusterId: 'c1',
+        selection: 'c1',
+        sourceWindowName: 'workspace-1',
+      })
     );
+    expect(setData).toHaveBeenCalledWith(tabDragKindDataType('cluster-tab'), '1');
+  });
+
+  it('does not begin a drag when the source guard blocks it', () => {
+    const canStart = vi.fn(() => false);
+    let captured: ReturnType<typeof useTabDragSource> | null = null;
+    function Probe() {
+      captured = useTabDragSource(
+        { kind: 'dockable-tab', panelId: 'panel-a', sourceGroupId: 'right' },
+        { canStart }
+      );
+      return <button {...captured}>drag</button>;
+    }
+    act(() => {
+      root.render(
+        <TabDragProvider>
+          <Probe />
+        </TabDragProvider>
+      );
+    });
+    const preventDefault = vi.fn();
+    const setData = vi.fn();
+    act(() => {
+      requireValue(
+        requireDragSource(captured).onDragStart,
+        'expected drag start'
+      )({
+        preventDefault,
+        dataTransfer: { setData },
+      } as unknown as React.DragEvent<HTMLElement>);
+    });
+
+    expect(canStart).toHaveBeenCalledOnce();
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(setData).not.toHaveBeenCalled();
   });
 
   it('calls setDragImage when getDragImage returns an element', () => {
@@ -202,7 +296,7 @@ describe('useTabDragSource', () => {
 
     function Probe() {
       captured = useTabDragSource(
-        { kind: 'cluster-tab', clusterId: 'c1' },
+        { kind: 'cluster-tab', clusterId: 'c1', selection: 'c1', sourceWindowName: 'workspace-1' },
         { getDragImage: () => ({ element: previewEl, offsetX: 14, offsetY: 16 }) }
       );
       return (
@@ -241,7 +335,7 @@ describe('useTabDragSource', () => {
 
     function Probe() {
       captured = useTabDragSource(
-        { kind: 'cluster-tab', clusterId: 'c1' },
+        { kind: 'cluster-tab', clusterId: 'c1', selection: 'c1', sourceWindowName: 'workspace-1' },
         { getDragImage: () => null }
       );
       return (
@@ -309,7 +403,12 @@ describe('useTabDragSourceFactory', () => {
       return (
         <div>
           {tabs.map((tab) => {
-            const props = makeDragSource({ kind: 'cluster-tab', clusterId: tab.id });
+            const props = makeDragSource({
+              kind: 'cluster-tab',
+              clusterId: tab.id,
+              selection: tab.id,
+              sourceWindowName: 'workspace-1',
+            });
             if (props.onDragStart) {
               dragStartCallbacks.push(props.onDragStart);
             }
@@ -424,7 +523,7 @@ describe('useTabDropTarget', () => {
       requireValue(
         beginDragRef,
         'expected test value in dragCoordinator.test.tsx'
-      )({ kind: 'cluster-tab', clusterId: 'c1' });
+      )({ kind: 'cluster-tab', clusterId: 'c1', selection: 'c1', sourceWindowName: 'workspace-1' });
     });
 
     const target = requireValue(
@@ -433,7 +532,14 @@ describe('useTabDropTarget', () => {
     );
     // Simulate dragenter then drop.
     const dataTransfer = {
-      getData: vi.fn(() => JSON.stringify({ kind: 'cluster-tab', clusterId: 'c1' })),
+      getData: vi.fn(() =>
+        JSON.stringify({
+          kind: 'cluster-tab',
+          clusterId: 'c1',
+          selection: 'c1',
+          sourceWindowName: 'workspace-1',
+        })
+      ),
       types: [TAB_DRAG_DATA_TYPE],
       dropEffect: 'move',
     };
@@ -453,6 +559,96 @@ describe('useTabDropTarget', () => {
     }
     expect(payload.clusterId).toBe('c1');
   });
+
+  it('accepts a same-cluster panel from another app window in protected-mode dragover', () => {
+    const onDrop = vi.fn<(payload: TabDragPayload) => void>();
+    const scope = { clusterId: 'cluster-1' };
+
+    function Target() {
+      const { ref } = useTabDropTarget({ accepts: ['dockable-tab'], scope, onDrop });
+      return <div ref={ref} data-testid="cross-window-target" />;
+    }
+
+    act(() => {
+      root.render(
+        <TabDragProvider>
+          <Target />
+        </TabDragProvider>
+      );
+    });
+
+    const payload: TabDragPayload = {
+      kind: 'dockable-tab',
+      panelId: 'panel-a',
+      sourceGroupId: 'right',
+      sourceWindowName: 'panel-1',
+      sourceWindowGroupId: 'group-1',
+      clusterId: 'cluster-1',
+    };
+    const protectedTransfer = {
+      getData: vi.fn(() => ''),
+      types: [TAB_DRAG_DATA_TYPE, tabDragKindDataType('dockable-tab'), tabDragScopeDataType(scope)],
+      dropEffect: 'none',
+    };
+    const target = requireValue(
+      container.querySelector<HTMLElement>('[data-testid="cross-window-target"]'),
+      'expected isolated drag target'
+    );
+    const dragOver = createTestDragEvent('dragover', protectedTransfer);
+
+    act(() => target.dispatchEvent(dragOver));
+
+    expect(dragOver.defaultPrevented).toBe(true);
+
+    const readableTransfer = {
+      ...protectedTransfer,
+      getData: vi.fn(() => JSON.stringify(payload)),
+    };
+    act(() => target.dispatchEvent(createTestDragEvent('drop', readableTransfer)));
+
+    expect(onDrop).toHaveBeenCalledWith(payload, expect.any(Event), 0);
+  });
+
+  it.each(['cluster-tab', 'dockable-tab'] as const)(
+    'rejects a foreign %s at a local-only target',
+    (kind) => {
+      const onDrop = vi.fn();
+      function Target() {
+        const { ref } = useTabDropTarget({ accepts: [kind], onDrop });
+        return <div ref={ref} data-testid="local-target" />;
+      }
+      act(() =>
+        root.render(
+          <TabDragProvider>
+            <Target />
+          </TabDragProvider>
+        )
+      );
+      const target = requireValue(
+        container.querySelector('[data-testid="local-target"]'),
+        'local target'
+      );
+      const transfer = {
+        types: [TAB_DRAG_DATA_TYPE, tabDragKindDataType(kind)],
+        dropEffect: 'move',
+        getData: () =>
+          JSON.stringify({
+            kind,
+            clusterId: 'foreign',
+            panelId: 'foreign',
+            sourceGroupId: 'right',
+          }),
+      };
+      const over = createTestDragEvent('dragover', transfer);
+      act(() => {
+        target.dispatchEvent(over);
+        target.dispatchEvent(createTestDragEvent('drop', transfer));
+      });
+      expect(over.defaultPrevented).toBe(false);
+      expect(transfer.dropEffect).toBe('none');
+      expect(onDrop).not.toHaveBeenCalled();
+    }
+  );
 
   it('calls preventDefault on dragover under HTML5 "protected mode" semantics', () => {
     // Regression test for a spec-compliance bug: during dragenter/dragover,
@@ -501,7 +697,7 @@ describe('useTabDropTarget', () => {
       requireValue(
         beginDragRef,
         'expected test value in dragCoordinator.test.tsx'
-      )({ kind: 'cluster-tab', clusterId: 'c1' });
+      )({ kind: 'cluster-tab', clusterId: 'c1', selection: 'c1', sourceWindowName: 'workspace-1' });
     });
 
     // Protected-mode data transfer: types readable, getData returns ''.
@@ -531,7 +727,14 @@ describe('useTabDropTarget', () => {
     // At drop time the store is in read-only mode; simulate getData() now
     // returning the real payload.
     const readOnlyDataTransfer = {
-      getData: vi.fn(() => JSON.stringify({ kind: 'cluster-tab', clusterId: 'c1' })),
+      getData: vi.fn(() =>
+        JSON.stringify({
+          kind: 'cluster-tab',
+          clusterId: 'c1',
+          selection: 'c1',
+          sourceWindowName: 'workspace-1',
+        })
+      ),
       types: [TAB_DRAG_DATA_TYPE],
       dropEffect: 'move',
     };
@@ -584,7 +787,7 @@ describe('useTabDropTarget', () => {
       requireValue(
         beginDragRef,
         'expected test value in dragCoordinator.test.tsx'
-      )({ kind: 'cluster-tab', clusterId: 'c1' }); // cluster payload
+      )({ kind: 'cluster-tab', clusterId: 'c1', selection: 'c1', sourceWindowName: 'workspace-1' }); // cluster payload
     });
 
     const target = requireValue(
@@ -592,7 +795,14 @@ describe('useTabDropTarget', () => {
       'expected test value in dragCoordinator.test.tsx'
     );
     const dataTransfer = {
-      getData: vi.fn(() => JSON.stringify({ kind: 'cluster-tab', clusterId: 'c1' })),
+      getData: vi.fn(() =>
+        JSON.stringify({
+          kind: 'cluster-tab',
+          clusterId: 'c1',
+          selection: 'c1',
+          sourceWindowName: 'workspace-1',
+        })
+      ),
       types: [TAB_DRAG_DATA_TYPE],
       dropEffect: 'move',
     };
@@ -608,8 +818,10 @@ describe('useTabDropTarget', () => {
   it('stops drop-event propagation to ancestor drop targets when nested', () => {
     const outerOnDrop = vi.fn<(payload: TabDragPayload) => void>();
     const innerOnDrop = vi.fn<(payload: TabDragPayload) => void>();
+    let context: React.ContextType<typeof TabDragContext> | null = null;
 
     function Harness() {
+      context = useContext(TabDragContext);
       const { ref: outerRef } = useTabDropTarget({
         accepts: ['cluster-tab'],
         onDrop: outerOnDrop,
@@ -639,11 +851,25 @@ describe('useTabDropTarget', () => {
       container.querySelector('[data-testid="inner"]'),
       'expected test value in dragCoordinator.test.tsx'
     );
+    act(() =>
+      requireValue(context, 'local drag coordinator').beginDrag({
+        kind: 'cluster-tab',
+        clusterId: 'x',
+        selection: 'x',
+        sourceWindowName: 'workspace-1',
+      })
+    );
     // Fire a drop carrying an accepted payload on the inner target.
     const dropEvent = new Event('drop', { bubbles: true, cancelable: true });
     Object.defineProperty(dropEvent, 'dataTransfer', {
       value: {
-        getData: () => JSON.stringify({ kind: 'cluster-tab', clusterId: 'x' }),
+        getData: () =>
+          JSON.stringify({
+            kind: 'cluster-tab',
+            clusterId: 'x',
+            selection: 'x',
+            sourceWindowName: 'workspace-1',
+          }),
         types: [TAB_DRAG_DATA_TYPE],
       },
     });
@@ -695,7 +921,7 @@ describe('useTabDropTarget', () => {
       requireValue(
         beginDragRef,
         'expected test value in dragCoordinator.test.tsx'
-      )({ kind: 'cluster-tab', clusterId: 'c1' });
+      )({ kind: 'cluster-tab', clusterId: 'c1', selection: 'c1', sourceWindowName: 'workspace-1' });
     });
 
     const target = requireValue(
@@ -712,7 +938,14 @@ describe('useTabDropTarget', () => {
     );
 
     const dataTransfer = {
-      getData: vi.fn(() => JSON.stringify({ kind: 'cluster-tab', clusterId: 'c1' })),
+      getData: vi.fn(() =>
+        JSON.stringify({
+          kind: 'cluster-tab',
+          clusterId: 'c1',
+          selection: 'c1',
+          sourceWindowName: 'workspace-1',
+        })
+      ),
       types: [TAB_DRAG_DATA_TYPE],
       dropEffect: 'move',
     };

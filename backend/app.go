@@ -6,6 +6,7 @@ import (
 
 	"github.com/luxury-yacht/app/backend/nodemaintenance"
 	"github.com/luxury-yacht/app/backend/resources/common"
+	"github.com/luxury-yacht/app/internal/panelwindow"
 	"github.com/luxury-yacht/app/internal/sentry"
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
@@ -43,9 +44,26 @@ type ApplicationRuntime struct {
 // known only by the process entry point. Owners receive them before their
 // constructors return; the runtime is never configured afterward.
 type ApplicationRuntimeOptions struct {
-	Reporter              sentryreporting.Reporter
-	ApplicationUpdates    ApplicationUpdateOptions
-	CreateWorkspaceWindow func()
+	Reporter                   sentryreporting.Reporter
+	ApplicationUpdates         ApplicationUpdateOptions
+	CreateWorkspaceWindow      func()
+	IsWorkspaceWindow          func(string) bool
+	NativeWindowDescriptor     func(string) (panelwindow.NativeDescriptor, error)
+	PanelWorkspace             panelwindow.SharedWorkspaceCommands
+	BeginPanelWindowOpen       func(panelwindow.GroupSnapshot) (panelwindow.WindowDescriptor, error)
+	AcknowledgePanelReady      func(string, string) (panelwindow.WindowDescriptor, error)
+	BeginPanelWindowDock       func(string, string, panelwindow.GroupSnapshot) error
+	AcknowledgePanelDock       func(string, string, string) error
+	FailPanelTransfer          func(string, string, string) error
+	AcknowledgePanelClose      func(string) error
+	AcknowledgeWorkspaceClose  func(string) error
+	RoutePanelCommand          func(string, panelwindow.WorkspaceCommand) error
+	UpdatePanelSnapshot        func(string, panelwindow.GroupSnapshot) error
+	RequestPanelTabClose       func(string, string) error
+	RequestPanelTabTransfer    func(string, panelwindow.TabTransferRequest) error
+	AcceptPanelTabTransfer     func(string, string) error
+	FailPanelTabTransfer       func(string, string) error
+	AcknowledgeApplicationQuit func(string, string, bool) error
 }
 
 // NewApplicationRuntime composes focused backend owners around the concrete
@@ -57,6 +75,10 @@ func NewApplicationRuntime(wailsApplication *application.App, configured ...Appl
 	var options ApplicationRuntimeOptions
 	if len(configured) == 1 {
 		options = configured[0]
+	}
+	isWorkspaceWindow := options.IsWorkspaceWindow
+	if isWorkspaceWindow == nil {
+		isWorkspaceWindow = func(string) bool { return true }
 	}
 	var reporters []sentryreporting.Reporter
 	if options.Reporter != nil {
@@ -79,7 +101,23 @@ func NewApplicationRuntime(wailsApplication *application.App, configured ...Appl
 		wailsApplication, signals.runtimeAvailable, signals.emitEvent, appLogs.Logger(),
 		DesktopShellBindings{
 			UpdateCheck: updateCheck.check, KubeconfigSearchPaths: kubeconfigSearchPaths.read,
-			CreateWorkspaceWindow: options.CreateWorkspaceWindow,
+			CreateWorkspaceWindow:      options.CreateWorkspaceWindow,
+			NativeWindowDescriptor:     options.NativeWindowDescriptor,
+			PanelWorkspace:             options.PanelWorkspace,
+			BeginPanelWindowOpen:       options.BeginPanelWindowOpen,
+			AcknowledgePanelReady:      options.AcknowledgePanelReady,
+			BeginPanelWindowDock:       options.BeginPanelWindowDock,
+			AcknowledgePanelDock:       options.AcknowledgePanelDock,
+			FailPanelTransfer:          options.FailPanelTransfer,
+			AcknowledgePanelClose:      options.AcknowledgePanelClose,
+			AcknowledgeWorkspaceClose:  options.AcknowledgeWorkspaceClose,
+			RoutePanelCommand:          options.RoutePanelCommand,
+			UpdatePanelSnapshot:        options.UpdatePanelSnapshot,
+			RequestPanelTabClose:       options.RequestPanelTabClose,
+			RequestPanelTabTransfer:    options.RequestPanelTabTransfer,
+			AcceptPanelTabTransfer:     options.AcceptPanelTabTransfer,
+			FailPanelTabTransfer:       options.FailPanelTabTransfer,
+			AcknowledgeApplicationQuit: options.AcknowledgeApplicationQuit,
 		},
 	)
 	updates := NewUpdateCoordinator(
@@ -156,6 +194,7 @@ func NewApplicationRuntime(wailsApplication *application.App, configured ...Appl
 		ClusterRuntime: clusterRuntime, ClusterWorkspace: clusterWorkspace, Refresh: refresh,
 		Preferences: preferences, Operations: operations, Logger: appLogs.Logger(),
 		Context: signals.CtxOrBackground, RuntimeAvailable: signals.runtimeAvailable, EmitEvent: signals.emitEvent,
+		IsWorkspaceWindow: isWorkspaceWindow,
 	})
 	favorites := NewFavoritesService()
 	uiState := NewUIStateStore()
@@ -170,7 +209,7 @@ func NewApplicationRuntime(wailsApplication *application.App, configured ...Appl
 			return workspace.runSelectionMutation(name, func(_ *selectionMutation) error { return action() })
 		},
 		ResetRuntime: func() error {
-			if err := workspace.clearKubeconfigSelection(); err != nil {
+			if err := workspace.clearKubeconfigSelection(true); err != nil {
 				return err
 			}
 			return refresh.ResetRuntimeState()

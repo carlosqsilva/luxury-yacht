@@ -164,6 +164,53 @@ export type AppSettings = types$0.AppSettings;
  */
 export type AppSettingsSchema = types$0.AppSettingsSchema;
 
+export interface AppearanceModeChangedEvent {
+    "mode": string;
+}
+
+/**
+ * ApplicationMenuCommand is the shared command identity used by the native macOS
+ * menu and by the app-rendered Windows/Linux accelerators.
+ */
+export enum ApplicationMenuCommand {
+    /**
+     * The Go zero value for the underlying type of the enum.
+     */
+    $zero = "",
+
+    ApplicationMenuCommandNewWindow = "new-window",
+    ApplicationMenuCommandOpenCluster = "open-cluster",
+    ApplicationMenuCommandClose = "close",
+    ApplicationMenuCommandSettings = "settings",
+    ApplicationMenuCommandQuit = "quit",
+    ApplicationMenuCommandHide = "hide",
+    ApplicationMenuCommandCut = "cut",
+    ApplicationMenuCommandCopy = "copy",
+    ApplicationMenuCommandPaste = "paste",
+    ApplicationMenuCommandSelectAll = "select-all",
+    ApplicationMenuCommandCommandPalette = "command-palette",
+    ApplicationMenuCommandZoomIn = "zoom-in",
+    ApplicationMenuCommandZoomOut = "zoom-out",
+    ApplicationMenuCommandZoomReset = "zoom-reset",
+    ApplicationMenuCommandToggleSidebar = "toggle-sidebar",
+    ApplicationMenuCommandToggleObjectDiff = "toggle-object-diff",
+    ApplicationMenuCommandToggleAppLogs = "toggle-app-logs",
+    ApplicationMenuCommandToggleDiagnostics = "toggle-diagnostics",
+    ApplicationMenuCommandOpenInspector = "open-inspector",
+    ApplicationMenuCommandToggleFocusDebug = "toggle-focus-debug",
+    ApplicationMenuCommandTogglePanelDebug = "toggle-panel-debug",
+    ApplicationMenuCommandToggleMapDebug = "toggle-map-debug",
+    ApplicationMenuCommandToggleIconDebug = "toggle-icon-debug",
+    ApplicationMenuCommandToggleErrorDebug = "toggle-error-debug",
+    ApplicationMenuCommandMinimise = "minimise",
+    ApplicationMenuCommandMaximise = "maximise",
+    ApplicationMenuCommandRestore = "restore",
+    ApplicationMenuCommandToggleMaximise = "toggle-maximise",
+    ApplicationMenuCommandBringAllToFront = "bring-all-to-front",
+    ApplicationMenuCommandAbout = "about",
+    ApplicationMenuCommandCheckForUpdates = "check-for-updates",
+};
+
 export interface BackendErrorEvent {
     "clusterId": string;
     "resourceKind"?: string;
@@ -245,6 +292,10 @@ export enum ClusterLifecycleState {
     ClusterStateDisconnected = "disconnected",
     ClusterStateReconnecting = "reconnecting",
 };
+
+export interface ClusterPermissionsChangedEvent {
+    "clusterId": string;
+}
 
 export interface ClusterScopeChangedEvent {
     "clusterId": string;

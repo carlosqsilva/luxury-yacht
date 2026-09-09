@@ -66,6 +66,7 @@ export interface AppEvents {
   // Open the command palette in its normal (search) mode — the header search
   // button.
   'command-palette:open': undefined;
+  'application-menu:close': undefined;
 
   // Auth events — bridged from Wails runtime by AuthErrorContext.
   'cluster:auth:failed': { clusterId: string };
@@ -75,12 +76,18 @@ export interface AppEvents {
   // rebuilding (docs/architecture/namespace-scope.md) — bridged from the Wails
   // cluster:scope:changed event by KubeconfigContext. Streams must restart
   // and the cluster's domains refetch.
+  'cluster:permissions-changed': { clusterId: string };
   'cluster:scope-changed': { clusterId: string };
 
   // View events
   'view:reset': undefined;
   'view:toggle-diagnostics': undefined;
   'view:toggle-app-logs-panel': undefined;
+  'debug:toggle-focus-overlay': undefined;
+  'debug:toggle-panel-overlay': undefined;
+  'debug:toggle-map-overlay': undefined;
+  'debug:toggle-icon-overlay': undefined;
+  'debug:toggle-error-overlay': undefined;
   'view:open-object-diff': ObjectDiffOpenRequest;
   'cluster-tabs:order': string[];
 

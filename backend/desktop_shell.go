@@ -9,6 +9,7 @@ import (
 	"github.com/luxury-yacht/app/backend/internal/appupdates"
 	"github.com/luxury-yacht/app/backend/internal/config"
 	"github.com/luxury-yacht/app/backend/internal/logsources"
+	"github.com/luxury-yacht/app/internal/panelwindow"
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
@@ -43,31 +44,64 @@ func (p *updateCheckPort) bind(target func() error) {
 }
 
 type DesktopShellBindings struct {
-	UpdateCheck           func() error
-	KubeconfigSearchPaths func() ([]string, error)
-	CreateWorkspaceWindow func()
+	PanelWorkspace             panelwindow.SharedWorkspaceCommands
+	UpdateCheck                func() error
+	KubeconfigSearchPaths      func() ([]string, error)
+	CreateWorkspaceWindow      func()
+	NativeWindowDescriptor     func(string) (panelwindow.NativeDescriptor, error)
+	BeginPanelWindowOpen       func(panelwindow.GroupSnapshot) (panelwindow.WindowDescriptor, error)
+	AcknowledgePanelReady      func(string, string) (panelwindow.WindowDescriptor, error)
+	BeginPanelWindowDock       func(string, string, panelwindow.GroupSnapshot) error
+	AcknowledgePanelDock       func(string, string, string) error
+	FailPanelTransfer          func(string, string, string) error
+	AcknowledgePanelClose      func(string) error
+	AcknowledgeWorkspaceClose  func(string) error
+	RoutePanelCommand          func(string, panelwindow.WorkspaceCommand) error
+	UpdatePanelSnapshot        func(string, panelwindow.GroupSnapshot) error
+	RequestPanelTabClose       func(string, string) error
+	RequestPanelTabTransfer    func(string, panelwindow.TabTransferRequest) error
+	AcceptPanelTabTransfer     func(string, string) error
+	FailPanelTabTransfer       func(string, string) error
+	AcknowledgeApplicationQuit func(string, string, bool) error
 }
 
 // DesktopShell is the concrete owner of native Wails access and process-wide,
 // non-persisted shell projection state.
 type DesktopShell struct {
-	application             *application.App
-	runtimeAvailableFn      func() bool
-	fallbackEmitter         func(string, ...interface{})
-	logger                  *Logger
-	menu                    *application.Menu
-	createWorkspaceWindow   func()
-	sidebarVisible          bool
-	diagnosticsPanelVisible bool
-	appLogsPanelVisible     bool
-	openFileDialog          func(*application.OpenFileDialogOptions) (string, error)
-	saveFileDialog          func(*application.SaveFileDialogOptions) (string, error)
-	windowGeometry          func() (WindowGeometry, error)
-	openApplicationURL      func(string) error
-	quitApplication         func()
-	checkForUpdates         func() error
-	kubeconfigSearchPaths   func() ([]string, error)
-	showExpiredBetaPrompt   func(expiredBetaPrompt)
+	panelWorkspace             panelwindow.SharedWorkspaceCommands
+	application                *application.App
+	runtimeAvailableFn         func() bool
+	fallbackEmitter            func(string, ...interface{})
+	logger                     *Logger
+	menu                       *application.Menu
+	createWorkspaceWindow      func()
+	nativeWindowDescriptor     func(string) (panelwindow.NativeDescriptor, error)
+	beginPanelWindowOpen       func(panelwindow.GroupSnapshot) (panelwindow.WindowDescriptor, error)
+	acknowledgePanelReady      func(string, string) (panelwindow.WindowDescriptor, error)
+	beginPanelWindowDock       func(string, string, panelwindow.GroupSnapshot) error
+	acknowledgePanelDock       func(string, string, string) error
+	failPanelTransfer          func(string, string, string) error
+	acknowledgePanelClose      func(string) error
+	acknowledgeWorkspaceClose  func(string) error
+	routePanelCommand          func(string, panelwindow.WorkspaceCommand) error
+	updatePanelSnapshot        func(string, panelwindow.GroupSnapshot) error
+	requestPanelTabClose       func(string, string) error
+	requestPanelTabTransfer    func(string, panelwindow.TabTransferRequest) error
+	acceptPanelTabTransfer     func(string, string) error
+	failPanelTabTransfer       func(string, string) error
+	acknowledgeApplicationQuit func(string, string, bool) error
+	sidebarVisible             bool
+	diagnosticsPanelVisible    bool
+	appLogsPanelVisible        bool
+	openFileDialog             func(*application.OpenFileDialogOptions) (string, error)
+	saveFileDialog             func(*application.SaveFileDialogOptions) (string, error)
+	windowGeometry             func() (WindowGeometry, error)
+	currentWindow              func() application.Window
+	openApplicationURL         func(string) error
+	quitApplication            func()
+	checkForUpdates            func() error
+	kubeconfigSearchPaths      func() ([]string, error)
+	showExpiredBetaPrompt      func(expiredBetaPrompt)
 }
 
 func NewDesktopShell(
@@ -84,10 +118,29 @@ func NewDesktopShell(
 		logger:             logger,
 		sidebarVisible:     true,
 	}
+	if wailsApplication != nil {
+		shell.currentWindow = wailsApplication.Window.Current
+	}
 	if len(bindings) > 0 {
+		shell.panelWorkspace = bindings[0].PanelWorkspace
 		shell.checkForUpdates = bindings[0].UpdateCheck
 		shell.kubeconfigSearchPaths = bindings[0].KubeconfigSearchPaths
 		shell.createWorkspaceWindow = bindings[0].CreateWorkspaceWindow
+		shell.nativeWindowDescriptor = bindings[0].NativeWindowDescriptor
+		shell.beginPanelWindowOpen = bindings[0].BeginPanelWindowOpen
+		shell.acknowledgePanelReady = bindings[0].AcknowledgePanelReady
+		shell.beginPanelWindowDock = bindings[0].BeginPanelWindowDock
+		shell.acknowledgePanelDock = bindings[0].AcknowledgePanelDock
+		shell.failPanelTransfer = bindings[0].FailPanelTransfer
+		shell.acknowledgePanelClose = bindings[0].AcknowledgePanelClose
+		shell.acknowledgeWorkspaceClose = bindings[0].AcknowledgeWorkspaceClose
+		shell.routePanelCommand = bindings[0].RoutePanelCommand
+		shell.updatePanelSnapshot = bindings[0].UpdatePanelSnapshot
+		shell.requestPanelTabClose = bindings[0].RequestPanelTabClose
+		shell.requestPanelTabTransfer = bindings[0].RequestPanelTabTransfer
+		shell.acceptPanelTabTransfer = bindings[0].AcceptPanelTabTransfer
+		shell.failPanelTabTransfer = bindings[0].FailPanelTabTransfer
+		shell.acknowledgeApplicationQuit = bindings[0].AcknowledgeApplicationQuit
 	}
 	shell.openApplicationURL = func(url string) error {
 		if wailsApplication == nil || wailsApplication.Browser == nil {
@@ -190,7 +243,11 @@ func (s *DesktopShell) showAboutAndCheckForUpdates() {
 		return
 	}
 	s.ShowAbout()
-	if s.checkForUpdates == nil {
+	s.checkForUpdatesInBackground()
+}
+
+func (s *DesktopShell) checkForUpdatesInBackground() {
+	if s == nil || s.checkForUpdates == nil {
 		return
 	}
 	go func() {

@@ -21,6 +21,7 @@ import {
 import { DockablePanel, useDockablePanelContext } from '@ui/dockable';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { queryNamespacePermissions } from '@/core/capabilities';
+import { PanelLifecycleClusterSurface } from '@/core/panel-windows/panelLifecycleGuards';
 import './ObjectPanel.css';
 import {
   CLUSTER_SCOPE,
@@ -33,12 +34,14 @@ import { useObjectPanelTabs } from '@modules/object-panel/components/ObjectPanel
 import { ObjectPanelContent } from '@modules/object-panel/components/ObjectPanel/ObjectPanelContent';
 import { ObjectPanelHeader } from '@modules/object-panel/components/ObjectPanel/ObjectPanelHeader';
 import { ObjectPanelTabs } from '@modules/object-panel/components/ObjectPanel/ObjectPanelTabs';
+import { resolveObjectPanelOpenTarget } from '@modules/object-panel/components/ObjectPanel/objectPanelOpenTarget';
 import type { ViewType } from '@modules/object-panel/components/ObjectPanel/types';
 import type { ObjectPanelRef } from '@modules/object-panel/objectPanelRef';
 import { getObjectPanelScopes } from '@modules/object-panel/objectPanelRef';
 import { getKindColorClass } from '@shared/utils/kindBadgeColors';
 import type { DockPosition } from '@ui/dockable';
 import { getGroupForPanel, getGroupTabs } from '@ui/dockable/tabGroupState';
+import type { GroupKey } from '@ui/dockable/tabGroupTypes';
 import { buildObjectDetailModel } from './Details/objectDetailModel';
 import { resetObjectPanelScopedDomain } from './hooks/useObjectPanelScopedDomainLifecycle';
 
@@ -50,20 +53,31 @@ interface ObjectPanelProps {
   panelId: string;
   /** The cluster-complete object reference this panel displays. */
   objectRef: ObjectPanelRef;
+  defaultPosition?: DockPosition;
+  defaultGroupKey?: GroupKey;
+  suppressWorkspaceSurface?: boolean;
 }
 
 // ============================================================================
 // MAIN COMPONENT
 // ============================================================================
-function ObjectPanel({ panelId, objectRef }: Readonly<ObjectPanelProps>) {
+function ObjectPanel({
+  panelId,
+  objectRef,
+  defaultPosition,
+  defaultGroupKey,
+  suppressWorkspaceSurface = false,
+}: Readonly<ObjectPanelProps>) {
   const objectData = objectRef;
   const { closePanel, setObjectPanelActiveTab } = useObjectPanelState();
   const { tabGroups, getPreferredOpenGroupKey } = useDockablePanelContext();
-  const openTargetGroupKey = getPreferredOpenGroupKey(getDefaultObjectPanelPosition());
-  const openTargetPosition: DockPosition =
-    openTargetGroupKey === 'right' || openTargetGroupKey === 'bottom'
-      ? openTargetGroupKey
-      : 'floating';
+  const openTarget = resolveObjectPanelOpenTarget(
+    defaultPosition ?? getDefaultObjectPanelPosition(),
+    defaultGroupKey,
+    getPreferredOpenGroupKey
+  );
+  const openTargetGroupKey = openTarget.groupKey;
+  const openTargetPosition = openTarget.position;
 
   // Determine whether this tab is active within its group (for polling control).
   const groupKey = getGroupForPanel(tabGroups, panelId);
@@ -75,8 +89,8 @@ function ObjectPanel({ panelId, objectRef }: Readonly<ObjectPanelProps>) {
 
   // Close handler removes this panel from the context.
   const close = useCallback(() => {
-    closePanel(panelId);
-  }, [closePanel, panelId]);
+    closePanel(objectRef.clusterId, panelId);
+  }, [closePanel, objectRef.clusterId, panelId]);
 
   // Keep tab labels concise and consistent: object name only.
   const tabTitle = objectData?.name?.trim() || 'Object';
@@ -202,8 +216,8 @@ function ObjectPanel({ panelId, objectRef }: Readonly<ObjectPanelProps>) {
   // doesn't have to know about panel identity. The wrapper is stable
   // across renders.
   const setActiveTab = useCallback(
-    (tab: ViewType) => setObjectPanelActiveTab(panelId, tab),
-    [panelId, setObjectPanelActiveTab]
+    (tab: ViewType) => setObjectPanelActiveTab(objectRef.clusterId, panelId, tab),
+    [objectRef.clusterId, panelId, setObjectPanelActiveTab]
   );
 
   // Get available tabs based on capabilities
@@ -242,9 +256,9 @@ function ObjectPanel({ panelId, objectRef }: Readonly<ObjectPanelProps>) {
 
   const handleTabSelect = useCallback(
     (tab: ViewType) => {
-      setObjectPanelActiveTab(panelId, tab);
+      setObjectPanelActiveTab(objectRef.clusterId, panelId, tab);
     },
-    [panelId, setObjectPanelActiveTab]
+    [objectRef.clusterId, panelId, setObjectPanelActiveTab]
   );
 
   const applyRequestedTab = useCallback(
@@ -257,11 +271,11 @@ function ObjectPanel({ panelId, objectRef }: Readonly<ObjectPanelProps>) {
         return;
       }
       if (activeTab !== requestedTab) {
-        setObjectPanelActiveTab(panelId, requestedTab);
+        setObjectPanelActiveTab(objectRef.clusterId, panelId, requestedTab);
       }
       clearRequestedObjectPanelTab(panelId);
     },
-    [availableTabs, panelId, activeTab, setObjectPanelActiveTab]
+    [availableTabs, panelId, activeTab, objectRef.clusterId, setObjectPanelActiveTab]
   );
 
   useEffect(() => {
@@ -277,24 +291,22 @@ function ObjectPanel({ panelId, objectRef }: Readonly<ObjectPanelProps>) {
     });
   }, [applyRequestedTab, panelId]);
 
-  const detailTabProps: DetailsTabProps | null = objectData
-    ? {
-        objectData,
-        detailModel,
-        isActive: isOpen && visibleActiveTab === 'details',
-        detailsLoading,
-        detailsError,
-        deletion,
-        finalizerRemovalCapabilities: {
-          metadata: capabilityStates.removeFinalizer,
-          namespaceSpec: capabilityStates.removeNamespaceFinalizer,
-        },
-        resourceDeleted,
-        deletedResourceName,
-        onAfterDelete: handleAfterDelete,
-        onAfterAction: handleAfterAction,
-      }
-    : null;
+  const detailTabProps: DetailsTabProps = {
+    objectData,
+    detailModel,
+    isActive: isOpen && visibleActiveTab === 'details',
+    detailsLoading,
+    detailsError,
+    deletion,
+    finalizerRemovalCapabilities: {
+      metadata: capabilityStates.removeFinalizer,
+      namespaceSpec: capabilityStates.removeNamespaceFinalizer,
+    },
+    resourceDeleted,
+    deletedResourceName,
+    onAfterDelete: handleAfterDelete,
+    onAfterAction: handleAfterAction,
+  };
 
   const panelScopeRef = useRef<HTMLDivElement>(null);
 
@@ -316,6 +328,7 @@ function ObjectPanel({ panelId, objectRef }: Readonly<ObjectPanelProps>) {
         isOpen={isOpen}
         defaultPosition={openTargetPosition}
         defaultGroupKey={openTargetGroupKey}
+        suppressSurface={suppressWorkspaceSurface}
         className="object-panel-dockable"
         tabKindClass={tabKindClass}
         closeActiveTabOnEscape
@@ -332,42 +345,44 @@ function ObjectPanel({ panelId, objectRef }: Readonly<ObjectPanelProps>) {
             objectData (wrong GVK → wrong permission keys → gated actions
             silently disappear from grouped panels). */}
         <CurrentObjectPanelContext.Provider value={currentObjectPanelValue}>
-          {/* Kind badge + name toolbar */}
-          <div>
-            <ObjectPanelHeader
-              kind={objectData?.kind ?? null}
-              kindAlias={objectData?.kindAlias ?? null}
-              name={objectData?.name ?? null}
+          <PanelLifecycleClusterSurface clusterId={objectRef.clusterId}>
+            {/* Kind badge + name toolbar */}
+            <div>
+              <ObjectPanelHeader
+                kind={objectData?.kind ?? null}
+                kindAlias={objectData?.kindAlias ?? null}
+                name={objectData?.name ?? null}
+              />
+            </div>
+
+            <ObjectPanelTabs
+              tabs={availableTabs}
+              activeTab={visibleActiveTab}
+              onSelect={handleTabSelect}
             />
-          </div>
 
-          <ObjectPanelTabs
-            tabs={availableTabs}
-            activeTab={visibleActiveTab}
-            onSelect={handleTabSelect}
-          />
-
-          <ObjectPanelContent
-            activeTab={visibleActiveTab}
-            detailTabProps={detailTabProps}
-            isPanelOpen={isOpen && isActiveTab}
-            capabilities={capabilities}
-            capabilityReasons={capabilityReasons}
-            nodeLogsState={nodeLogsState}
-            nodeLogSources={nodeLogSources}
-            detailScope={detailScope}
-            eventsScope={eventsScope}
-            containerLogsScope={containerLogsScope}
-            mapScope={mapScope}
-            helmScope={helmScope}
-            objectData={objectData}
-            objectKind={objectKind}
-            resourceDeleted={resourceDeleted}
-            deletedResourceName={deletedResourceName}
-            onClosePanel={close}
-            onRefreshDetails={fetchResourceDetails}
-            panelId={panelId}
-          />
+            <ObjectPanelContent
+              activeTab={visibleActiveTab}
+              detailTabProps={detailTabProps}
+              isPanelOpen={isOpen && isActiveTab}
+              capabilities={capabilities}
+              capabilityReasons={capabilityReasons}
+              nodeLogsState={nodeLogsState}
+              nodeLogSources={nodeLogSources}
+              detailScope={detailScope}
+              eventsScope={eventsScope}
+              containerLogsScope={containerLogsScope}
+              mapScope={mapScope}
+              helmScope={helmScope}
+              objectData={objectData}
+              objectKind={objectKind}
+              resourceDeleted={resourceDeleted}
+              deletedResourceName={deletedResourceName}
+              onClosePanel={close}
+              onRefreshDetails={fetchResourceDetails}
+              panelId={panelId}
+            />
+          </PanelLifecycleClusterSurface>
         </CurrentObjectPanelContext.Provider>
       </DockablePanel>
     </CurrentObjectPanelContext.Provider>

@@ -58,10 +58,38 @@ Surface kinds include:
   whole app.
 - Editors may own editor-specific keys; app-level `Escape` wins unless the
   editor has a documented transient UI reason.
-- The sender-targeted `Cmd/Ctrl+W` close command closes the active cluster tab
-  through `KubeconfigContext`. When the current peer has no cluster tabs, the
-  same command closes that Wails window instead; the native window-closing hook
-  still owns last-window application shutdown.
+- The native macOS menu and app-rendered Windows/Linux menu label
+  `Cmd/Ctrl+W` as context-neutral `Close`; the focused window role decides what
+  closes. In a workspace, it closes the active cluster tab through
+  `KubeconfigContext`, or the workspace when it has no cluster tabs. In a panel
+  window, the shortcut guards and closes the active object tab; closing the
+  last tab closes that native panel window. The panel titlebar closes the whole
+  group through the same guards.
+- The app-rendered workspace menu is a `menu` keyboard surface. It owns arrows,
+  `Enter`, `Space`, and `Escape` while open, restores the prior content focus
+  before executing a command, and uses the same renderer command owner as its
+  keyboard accelerators. Only process-wide and native-window work crosses the
+  backend boundary.
+- `ApplicationMenuShortcuts` is the single Windows/Linux accelerator owner for
+  both workspace and panel windows. On macOS the same registrations remain
+  discoverable in shortcut help but are dispatch-disabled because the native
+  application menu owns them. A panel keeps dispatch disabled until that native
+  panel has acknowledged readiness.
+- Application-menu accelerators get the active surface's first chance and then
+  may cross `suppressShortcuts`. They do not implicitly dismiss a palette,
+  modal, dropdown, or context menu; a surface that intentionally reacts receives
+  the typed command identity. The app-rendered menu closes itself before its own
+  accelerator runs. Ordinary registered shortcuts remain suppressed. Standard
+  cut, copy, paste, and select-all keys remain native editing operations.
+- Panel windows mount `PanelWindowShortcuts`, not workspace
+  `GlobalShortcuts`. Close, zoom, inspector, and window commands execute in the
+  child renderer.
+  Workspace commands such as Settings, About, Open Cluster, sidebar,
+  diagnostics, object diff, and Application Logs focus the immutable owner and
+  route there through the backend's authenticated native-window descriptor.
+- Blocking modals and editors keep their existing priority. An unsaved YAML
+  draft or in-flight mutation may reject a tab/group/window close and focuses
+  the first deterministic blocker.
 
 ## Change Checklist
 

@@ -23,8 +23,9 @@ import { CloseIcon } from '@shared/components/icons/SharedIcons';
 import { type TabDescriptor, Tabs } from '@shared/components/tabs';
 import { useTabDragSourceFactory, useTabDropTarget } from '@shared/components/tabs/dragCoordinator';
 import type React from 'react';
-import type { HTMLAttributes } from 'react';
+import { type HTMLAttributes, useState } from 'react';
 import { useDockablePanelContext } from './DockablePanelProvider';
+import { DockableTabMenu } from './DockableTabMenu';
 
 /** Describes a single tab in the bar. */
 export interface TabInfo {
@@ -51,9 +52,17 @@ export const DockableTabBar: React.FC<DockableTabBarProps> = ({
   onTabClick,
   groupKey,
 }) => {
-  // Only `dragPreviewRef` (for getDragImage) and `movePanel` (for onDrop)
-  // plus `closeTab` (for per-tab close) are read from the provider.
-  const { dragPreviewRef, movePanel, closeTab } = useDockablePanelContext();
+  const [menu, setMenu] = useState<{ panelId: string; x: number; y: number } | null>(null);
+  // The provider owns local moves and routes cross-window drops through
+  // the acknowledged native tab-transfer coordinator.
+  const {
+    dragPreviewRef,
+    closeTab,
+    createDockableTabDragPayload,
+    dropDockableTab,
+    canStartDockableTabDrag,
+    tabDropScope,
+  } = useDockablePanelContext();
 
   // One useContext call for the whole bar regardless of tab count. The
   // returned factory is a plain closure that's legal to call inside .map().
@@ -61,42 +70,39 @@ export const DockableTabBar: React.FC<DockableTabBarProps> = ({
 
   const { ref: dropRef, dropInsertIndex } = useTabDropTarget({
     accepts: ['dockable-tab'],
+    scope: tabDropScope,
     onDrop: (payload, _event, insertIndex) => {
       // Forward to the provider's movePanel adapter. The adapter
       // dispatches internally between reorderTabInGroup (same group)
       // and movePanelBetweenGroups (cross group) based on whether
       // source and target groups match.
-      movePanel(payload.panelId, payload.sourceGroupId, groupKey, insertIndex);
+      dropDockableTab(payload, groupKey, insertIndex);
     },
   });
 
   const tabDescriptors: TabDescriptor[] = tabs.map((tab) => {
-    const dragProps = makeDragSource(
-      { kind: 'dockable-tab', panelId: tab.panelId, sourceGroupId: groupKey },
-      {
-        getDragImage: () => {
-          const previewEl = dragPreviewRef.current;
-          if (!previewEl) {
-            return null;
-          }
-          const labelEl = previewEl.querySelector<HTMLSpanElement>(
-            '.dockable-tab-drag-preview__label'
-          );
-          if (labelEl) {
-            labelEl.textContent = tab.title;
-          }
-          const kindEl = previewEl.querySelector<HTMLSpanElement>(
-            '.dockable-tab-drag-preview__kind'
-          );
-          if (kindEl) {
-            kindEl.className = `dockable-tab-drag-preview__kind kind-badge${
-              tab.kindClass ? ` ${tab.kindClass}` : ''
-            }`;
-          }
-          return { element: previewEl, offsetX: 14, offsetY: 16 };
-        },
-      }
-    );
+    const dragProps = makeDragSource(createDockableTabDragPayload(tab.panelId, groupKey), {
+      canStart: () => canStartDockableTabDrag(tab.panelId),
+      getDragImage: () => {
+        const previewEl = dragPreviewRef.current;
+        if (!previewEl) {
+          return null;
+        }
+        const labelEl = previewEl.querySelector<HTMLSpanElement>(
+          '.dockable-tab-drag-preview__label'
+        );
+        if (labelEl) {
+          labelEl.textContent = tab.title;
+        }
+        const kindEl = previewEl.querySelector<HTMLSpanElement>('.dockable-tab-drag-preview__kind');
+        if (kindEl) {
+          kindEl.className = `dockable-tab-drag-preview__kind kind-badge${
+            tab.kindClass ? ` ${tab.kindClass}` : ''
+          }`;
+        }
+        return { element: previewEl, offsetX: 14, offsetY: 16 };
+      },
+    });
     return {
       id: tab.panelId,
       label: tab.title,
@@ -112,6 +118,11 @@ export const DockableTabBar: React.FC<DockableTabBarProps> = ({
       extraProps: {
         'data-panel-id': tab.panelId,
         ...dragProps,
+        onContextMenu: (event: React.MouseEvent) => {
+          event.preventDefault();
+          event.stopPropagation();
+          setMenu({ panelId: tab.panelId, x: event.clientX, y: event.clientY });
+        },
       } as HTMLAttributes<HTMLElement>,
     };
   });
@@ -126,6 +137,14 @@ export const DockableTabBar: React.FC<DockableTabBarProps> = ({
         dropInsertIndex={dropInsertIndex}
         className="dockable-tab-bar"
       />
+      {menu && tabs.some((tab) => tab.panelId === menu.panelId) && (
+        <DockableTabMenu
+          panelId={menu.panelId}
+          groupKey={groupKey}
+          position={menu}
+          onClose={() => setMenu(null)}
+        />
+      )}
     </div>
   );
 };

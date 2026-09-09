@@ -1,4 +1,4 @@
-import { Browser, Clipboard, Events, System, Window as WailsWindow } from '@wailsio/runtime';
+import { Browser, Clipboard, Events, Flags, System, Window as WailsWindow } from '@wailsio/runtime';
 import { getWindowIdentity, setWindowIdentity } from '@/core/window-identity';
 
 export { getWindowIdentity } from '@/core/window-identity';
@@ -32,6 +32,16 @@ export const onEvent = <E extends DesktopEventName>(
     handler(event.data);
   });
 
+export const onBroadcastEvent = <E extends DesktopEventName>(
+  eventName: E,
+  handler: DesktopEventHandler<E>
+): (() => void) => Events.On(eventName, (event) => handler(event.data));
+
+export const emitBroadcastEvent = <E extends DesktopEventName>(
+  eventName: E,
+  payload: Events.WailsEventData<E>
+): Promise<boolean> => Events.Emit(eventName, payload);
+
 export const openURL = (url: string | URL): Promise<void> => Browser.OpenURL(url);
 
 export const readClipboardText = (): Promise<string> => Clipboard.Text();
@@ -39,6 +49,17 @@ export const readClipboardText = (): Promise<string> => Clipboard.Text();
 export const writeClipboardText = (text: string): Promise<void> => Clipboard.SetText(text);
 
 export const closeWindow = (): Promise<void> => WailsWindow.Close();
+
+export const isWindowMaximised = (): Promise<boolean> => WailsWindow.IsMaximised();
+
+export const minimiseWindow = (): Promise<void> => WailsWindow.Minimise();
+
+export const maximiseWindow = (): Promise<void> => WailsWindow.Maximise();
+
+export const restoreWindow = (): Promise<void> => WailsWindow.Restore();
+
+export const focusWindow = (windowName: string): Promise<void> =>
+  WailsWindow.Get(windowName).Focus();
 
 export const openDevTools = (): Promise<void> => WailsWindow.OpenDevTools();
 
@@ -49,3 +70,12 @@ export const getEnvironment = (): Promise<System.EnvironmentInfo> => System.Envi
 export const desktopRuntimeAvailable = (): boolean =>
   typeof window !== 'undefined' &&
   Boolean((window as Window & { _wails?: { environment?: unknown } })._wails?.environment);
+
+export const getWindowResizeHandleSize = (): { width: number; height: number } => {
+  const size = (key: string) => {
+    const value: unknown = desktopRuntimeAvailable() ? Flags.GetFlag(key) : undefined;
+    // Match the pinned runtime's fallback when the platform supplies no size.
+    return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 5;
+  };
+  return { width: size('system.resizeHandleWidth'), height: size('system.resizeHandleHeight') };
+};

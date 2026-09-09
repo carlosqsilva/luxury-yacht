@@ -8,6 +8,9 @@ import type { Events } from "@wailsio/runtime";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
 import type * as backend$0 from "../../../../luxury-yacht/app/backend/models.js";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore: Unused imports
+import type * as panelwindow$0 from "../../../../luxury-yacht/app/internal/panelwindow/models.js";
 
 declare module "@wailsio/runtime" {
     namespace Events {
@@ -15,6 +18,12 @@ declare module "@wailsio/runtime" {
             "app-logs:added": backend$0.AppLogsAddedEvent;
             "app-update": backend$0.UpdateInfo | null;
             "backend-error": backend$0.BackendErrorEvent;
+            "cluster-panel-close:requested": panelwindow$0.ClusterPanelCloseEvent;
+            "cluster-panel-close:settled": panelwindow$0.ClusterPanelCloseEvent;
+            "cluster-tab-transfer:committed": panelwindow$0.ClusterTabTransferEvent;
+            "cluster-tab-transfer:failed": panelwindow$0.ClusterTabTransferEvent;
+            "cluster-tab-transfer:insert": panelwindow$0.ClusterTabTransferEvent;
+            "cluster-tab-transfer:requested": panelwindow$0.ClusterTabTransferEvent;
             "cluster:auth:failed": backend$0.ClusterAuthEvent;
             "cluster:auth:progress": backend$0.ClusterAuthProgressEvent;
             "cluster:auth:recovered": backend$0.ClusterAuthEvent;
@@ -22,6 +31,7 @@ declare module "@wailsio/runtime" {
             "cluster:health:degraded": backend$0.ClusterHealthEvent;
             "cluster:health:healthy": backend$0.ClusterHealthEvent;
             "cluster:lifecycle": backend$0.ClusterLifecycleEvent;
+            "cluster:permissions:changed": backend$0.ClusterPermissionsChangedEvent;
             "cluster:scope:changed": backend$0.ClusterScopeChangedEvent;
             "debug:open-inspector": void;
             "debug:toggle-error-overlay": void;
@@ -42,13 +52,31 @@ declare module "@wailsio/runtime" {
             "open-cluster": void;
             "open-command-palette": void;
             "open-settings": void;
+            "panel-window:application-quit-preflight-requested": panelwindow$0.ApplicationQuitPreflightRequestedEvent;
+            "panel-window:application-quit-preflight-settled": panelwindow$0.ApplicationQuitPreflightRequestedEvent;
+            "panel-window:close-requested": panelwindow$0.WindowCloseRequestedEvent;
+            "panel-window:closed": panelwindow$0.WindowClosedEvent;
+            "panel-window:dock-requested": panelwindow$0.WindowDockRequestedEvent;
+            "panel-window:focus-requested": panelwindow$0.WindowFocusRequestedEvent;
+            "panel-window:opened": panelwindow$0.WindowOpenedEvent;
+            "panel-window:tab-close-authorized": panelwindow$0.TabCloseAuthorizedEvent;
+            "panel-window:tab-transfer-committed": panelwindow$0.TabTransferCommittedEvent;
+            "panel-window:tab-transfer-failed": panelwindow$0.TabTransferFailedEvent;
+            "panel-window:tab-transfer-insert-requested": panelwindow$0.TabTransferInsertRequestedEvent;
+            "panel-window:tab-transfer-requested": panelwindow$0.TabTransferRequestedEvent;
+            "panel-window:transfer-failed": panelwindow$0.WindowTransferFailedEvent;
+            "panel-workspace:changed": panelwindow$0.WorkspaceChangedEvent;
+            "panel-workspace:focus-requested": panelwindow$0.WorkspaceFocusRequestedEvent;
             "portforward:list": backend$0.PortForwardSession[] | null;
             "portforward:status": backend$0.PortForwardStatusEvent;
             "runtime-operations:list": backend$0.RuntimeOperation[] | null;
+            "settings:appearance-mode-changed": backend$0.AppearanceModeChangedEvent;
+            "settings:preferences-changed": void;
             "toggle-app-logs-panel": void;
             "toggle-diagnostics": void;
             "toggle-object-diff": void;
             "toggle-sidebar": void;
+            "workspace-window:close-requested": panelwindow$0.WorkspaceCloseRequestedEvent;
             "zoom-in": void;
             "zoom-out": void;
             "zoom-reset": void;

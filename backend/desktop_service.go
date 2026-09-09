@@ -3,12 +3,14 @@ package backend
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"github.com/luxury-yacht/app/backend/capabilities"
 	"github.com/luxury-yacht/app/backend/objectcatalog"
 	"github.com/luxury-yacht/app/backend/refresh/snapshot"
 	"github.com/luxury-yacht/app/backend/resourcemodel"
+	"github.com/luxury-yacht/app/internal/panelwindow"
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
@@ -141,10 +143,30 @@ type AppLogCommands interface {
 
 // DesktopShellCommands is the frontend command surface owned by DesktopShell.
 type DesktopShellCommands interface {
+	ExecuteApplicationMenuCommand(string, ApplicationMenuCommand) error
 	OpenKubeconfigSearchPathDialog() (string, error)
 	SaveCsvFile(string, string) (CatalogQueryCSVExport, error)
 	SetAppLogsPanelVisible(bool)
 	SetSidebarVisible(bool)
+}
+
+// PanelWindowCommands is the native panel-window protocol owned by DesktopShell.
+type PanelWindowCommands interface {
+	panelwindow.SharedWorkspaceCommands
+	GetNativeWindowDescriptor(string) (panelwindow.NativeDescriptor, error)
+	BeginPanelWindowOpen(string, panelwindow.GroupSnapshot) (panelwindow.WindowDescriptor, error)
+	AcknowledgePanelWindowReady(string, string) (panelwindow.WindowDescriptor, error)
+	BeginPanelWindowDock(string, string, panelwindow.GroupSnapshot) error
+	AcknowledgePanelWindowDock(string, string, string) error
+	FailPanelWindowTransfer(string, string, string) error
+	AcknowledgePanelWindowClose(string) error
+	AcknowledgeWorkspaceWindowClose(string) error
+	UpdatePanelWindowSnapshot(string, panelwindow.GroupSnapshot) error
+	RequestPanelTabClose(string, string) error
+	RequestPanelTabTransfer(string, panelwindow.TabTransferRequest) error
+	AcceptPanelTabTransfer(string, string) error
+	FailPanelTabTransfer(string, string) error
+	AcknowledgeApplicationQuitPreflight(string, string, bool) error
 }
 
 // DesktopServiceLifecycle owns Wails service startup and shutdown.
@@ -170,6 +192,7 @@ type DesktopServiceDependencies struct {
 	Updates        UpdateCommands
 	Logs           AppLogCommands
 	DesktopShell   DesktopShellCommands
+	PanelWindows   PanelWindowCommands
 	Lifecycle      DesktopServiceLifecycle
 	HTTP           http.Handler
 }
@@ -191,6 +214,7 @@ type DesktopService struct {
 	updates        UpdateCommands
 	logs           AppLogCommands
 	desktopShell   DesktopShellCommands
+	panelWindows   PanelWindowCommands
 	lifecycle      DesktopServiceLifecycle
 	http           http.Handler
 }
@@ -210,6 +234,7 @@ func NewDesktopService(dependencies DesktopServiceDependencies) *DesktopService 
 		updates:        dependencies.Updates,
 		logs:           dependencies.Logs,
 		desktopShell:   dependencies.DesktopShell,
+		panelWindows:   dependencies.PanelWindows,
 		lifecycle:      dependencies.Lifecycle,
 		http:           dependencies.HTTP,
 	}
@@ -563,6 +588,22 @@ func (s *DesktopService) OpenKubeconfigSearchPathDialog() (string, error) {
 	return s.desktopShell.OpenKubeconfigSearchPathDialog()
 }
 
+func (s *DesktopService) ExecuteApplicationMenuCommand(
+	ctx context.Context,
+	command ApplicationMenuCommand,
+) error {
+	windowName := ""
+	if ctx != nil {
+		if caller, ok := ctx.Value(application.WindowKey).(interface{ Name() string }); ok {
+			windowName = caller.Name()
+		}
+	}
+	if windowName == "" {
+		return fmt.Errorf("application menu command requires a Wails sender")
+	}
+	return s.desktopShell.ExecuteApplicationMenuCommand(windowName, command)
+}
+
 func (s *DesktopService) SaveCsvFile(defaultFilename, content string) (CatalogQueryCSVExport, error) {
 	return s.desktopShell.SaveCsvFile(defaultFilename, content)
 }
@@ -573,4 +614,143 @@ func (s *DesktopService) SetAppLogsPanelVisible(visible bool) {
 
 func (s *DesktopService) SetSidebarVisible(visible bool) {
 	s.desktopShell.SetSidebarVisible(visible)
+}
+
+func validatePanelCommandCaller(ctx context.Context, claimedWindowName string) error {
+	if ctx == nil {
+		return nil
+	}
+	caller, ok := ctx.Value(application.WindowKey).(interface{ Name() string })
+	if !ok || caller.Name() == "" {
+		// Direct Go callers and non-window test transports do not carry a Wails
+		// sender. Native webview calls always do, and are authenticated below.
+		return nil
+	}
+	if caller.Name() != claimedWindowName {
+		return fmt.Errorf(
+			"claimed panel command caller %q does not match Wails sender %q",
+			claimedWindowName,
+			caller.Name(),
+		)
+	}
+	return nil
+}
+
+func (s *DesktopService) GetNativeWindowDescriptor(
+	ctx context.Context,
+	windowName string,
+) (panelwindow.NativeDescriptor, error) {
+	if err := validatePanelCommandCaller(ctx, windowName); err != nil {
+		return panelwindow.NativeDescriptor{}, err
+	}
+	return s.panelWindows.GetNativeWindowDescriptor(windowName)
+}
+
+func (s *DesktopService) BeginPanelWindowOpen(
+	ctx context.Context,
+	windowName string,
+	snapshot panelwindow.GroupSnapshot,
+) (panelwindow.WindowDescriptor, error) {
+	if err := validatePanelCommandCaller(ctx, windowName); err != nil {
+		return panelwindow.WindowDescriptor{}, err
+	}
+	return s.panelWindows.BeginPanelWindowOpen(windowName, snapshot)
+}
+
+func (s *DesktopService) AcknowledgePanelWindowReady(
+	ctx context.Context,
+	windowName string,
+	transferID string,
+) (panelwindow.WindowDescriptor, error) {
+	if err := validatePanelCommandCaller(ctx, windowName); err != nil {
+		return panelwindow.WindowDescriptor{}, err
+	}
+	return s.panelWindows.AcknowledgePanelWindowReady(windowName, transferID)
+}
+
+func (s *DesktopService) BeginPanelWindowDock(ctx context.Context, windowName, targetPosition string, snapshot panelwindow.GroupSnapshot) error {
+	if err := validatePanelCommandCaller(ctx, windowName); err != nil {
+		return err
+	}
+	return s.panelWindows.BeginPanelWindowDock(windowName, targetPosition, snapshot)
+}
+
+func (s *DesktopService) AcknowledgePanelWindowDock(ctx context.Context, callerWindowName, windowName, transferID string) error {
+	if err := validatePanelCommandCaller(ctx, callerWindowName); err != nil {
+		return err
+	}
+	return s.panelWindows.AcknowledgePanelWindowDock(callerWindowName, windowName, transferID)
+}
+
+func (s *DesktopService) FailPanelWindowTransfer(ctx context.Context, callerWindowName, windowName, transferID string) error {
+	if err := validatePanelCommandCaller(ctx, callerWindowName); err != nil {
+		return err
+	}
+	return s.panelWindows.FailPanelWindowTransfer(callerWindowName, windowName, transferID)
+}
+
+func (s *DesktopService) AcknowledgePanelWindowClose(ctx context.Context, windowName string) error {
+	if err := validatePanelCommandCaller(ctx, windowName); err != nil {
+		return err
+	}
+	return s.panelWindows.AcknowledgePanelWindowClose(windowName)
+}
+
+func (s *DesktopService) AcknowledgeWorkspaceWindowClose(ctx context.Context, callerWindowName string) error {
+	if err := validatePanelCommandCaller(ctx, callerWindowName); err != nil {
+		return err
+	}
+	return s.panelWindows.AcknowledgeWorkspaceWindowClose(callerWindowName)
+}
+
+func (s *DesktopService) UpdatePanelWindowSnapshot(ctx context.Context, windowName string, snapshot panelwindow.GroupSnapshot) error {
+	if err := validatePanelCommandCaller(ctx, windowName); err != nil {
+		return err
+	}
+	return s.panelWindows.UpdatePanelWindowSnapshot(windowName, snapshot)
+}
+
+func (s *DesktopService) RequestPanelTabClose(ctx context.Context, windowName, panelID string) error {
+	if err := validatePanelCommandCaller(ctx, windowName); err != nil {
+		return err
+	}
+	return s.panelWindows.RequestPanelTabClose(windowName, panelID)
+}
+
+func (s *DesktopService) RequestPanelTabTransfer(
+	ctx context.Context,
+	callerWindowName string,
+	request panelwindow.TabTransferRequest,
+) error {
+	if err := validatePanelCommandCaller(ctx, callerWindowName); err != nil {
+		return err
+	}
+	return s.panelWindows.RequestPanelTabTransfer(callerWindowName, request)
+}
+
+func (s *DesktopService) AcceptPanelTabTransfer(
+	ctx context.Context,
+	callerWindowName, transferID string,
+) error {
+	if err := validatePanelCommandCaller(ctx, callerWindowName); err != nil {
+		return err
+	}
+	return s.panelWindows.AcceptPanelTabTransfer(callerWindowName, transferID)
+}
+
+func (s *DesktopService) FailPanelTabTransfer(
+	ctx context.Context,
+	callerWindowName, transferID string,
+) error {
+	if err := validatePanelCommandCaller(ctx, callerWindowName); err != nil {
+		return err
+	}
+	return s.panelWindows.FailPanelTabTransfer(callerWindowName, transferID)
+}
+
+func (s *DesktopService) AcknowledgeApplicationQuitPreflight(ctx context.Context, callerWindowName, transactionID string, allowed bool) error {
+	if err := validatePanelCommandCaller(ctx, callerWindowName); err != nil {
+		return err
+	}
+	return s.panelWindows.AcknowledgeApplicationQuitPreflight(callerWindowName, transactionID, allowed)
 }

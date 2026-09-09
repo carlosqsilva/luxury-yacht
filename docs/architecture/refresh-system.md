@@ -79,6 +79,18 @@ unpublish the handler and stream generation, then stop their producers. Factory
 Reset uses the same owner-directed teardown before clearing refresh spill/cache
 state, so no request can resolve state while it is being deleted.
 
+The cluster `loading` lifecycle state admits frontend refresh requests. Emit it
+only when a generation commits after HTTP and aggregate route publication, never
+while constructing its subsystem. The same commit starts a server-owned namespace
+readiness build, healing doorbells that arrived before routing existed. Startup,
+selector opens, auth recovery, and governor rebuilds share this boundary; a Ready
+cluster remains Ready through a continuously served replacement.
+
+The frontend holds requests while cluster lifecycle is unknown or not serving.
+Workspace-state publication resumes deferred requests whether readiness arrived
+through a live event, initial hydration, or an authoritative command response.
+Foreground activation holds remain in force until their own completion.
+
 Preferences reaches Refresh only through two write-only sinks. The metrics
 interval is retained for future subsystem construction; a live update snapshots
 subsystem pointers under the registry read lock, releases it, and then retimes
@@ -103,7 +115,8 @@ That record is the source of truth for:
 
 - activation plus independent query and snapshot demand counts;
 - deferred cluster-readiness intent and the scoped permission epoch;
-- snapshot request ownership and its coalesced trailing stream signal;
+- snapshot request ownership, coalesced trailing reads, and pending reconciliation
+  with bounded retry backoff;
 - stream policy, scheduled initialization, connection ownership, cancellation,
   and health.
 
@@ -115,8 +128,8 @@ no-op.
 
 Cluster auth availability belongs to its `ClusterRefreshRuntime`. Auth recovery
 resets only that runtime's scoped permission epoch before enabled scopes are
-reconciled. A namespace-scope rebuild is a new permission epoch for every
-runtime. Store `permissionDenied` remains a presentation projection, not the
+reconciled. Namespace-scope and permission rebuilds reset only the affected
+cluster runtime. Store `permissionDenied` remains a presentation projection, not the
 retry gate.
 
 `RefreshManager` separately reduces scheduler intent (`enabled`, `paused`, or
@@ -125,6 +138,16 @@ retry gate.
 states plus refresh metadata. Global metrics demand is independently reduced as
 `idle`, `requesting`, or `waiting-retry`; only the matching demand key may
 complete or schedule a retry.
+
+One-shot broker reads hold independent scope leases through completion. Overlapping
+reads coalesce without aborting their owners; a caller that arrives during a read
+waits for the trailing snapshot before releasing its lease. Explicit manual refresh
+commands retain their separate stream-refresh behavior.
+
+A failed snapshot keeps reconciliation pending even when its stream is healthy.
+Scheduled attempts retry with backoff capped at 60 seconds; a successful snapshot
+or settled permission denial clears that pending state. Typed query errors surface
+as errors while retaining displayed rows; missing warm-up data is a separate state.
 
 ### Frontend resource-stream protocol
 
@@ -144,7 +167,7 @@ An ACK makes a quiet subscription healthy. Advancing sequences reject replayed
 changes. A token-less first RESET completes the initial handshake, while a
 later RESET or manager-replacement COMPLETE re-arms the subscription. Pending
 source clocks are emitted before resync clears coalescing state. Permission
-denial remains terminal until the owning scope/auth lifecycle replaces the
+denial remains terminal until the owning scope/auth/permission lifecycle replaces the
 subscription, and stopping is terminal so late frames or timers cannot affect a
 replacement owner.
 
@@ -280,3 +303,15 @@ Four rules keep the two views joinable:
 4. Add contract parity plus behavior tests at the real snapshot/stream/consumer
    seams.
 5. Run focused backend/frontend tests and `wails3 task qc:prerelease`.
+
+### Backend subscription lifetime
+
+A subscription's closed update channel always produces COMPLETE, even when its
+reason channel closes simultaneously. Delivery is tied to the exact subscription
+owner so an old frame or COMPLETE cannot affect its replacement. Resource-manager
+shutdown closes subscribers, rejects new subscriptions, and serializes channel
+closure with delivery.
+
+When the shared session's outgoing queue overflows, close the session. Reconnection
+must reconcile every scope whose queued signal could have been lost. A reset of
+only the incoming frame's scope cannot repair an evicted frame from another scope.

@@ -15,30 +15,29 @@ import { FavoritesProvider } from '@core/contexts/FavoritesContext';
 // Contexts
 import { KubernetesProvider } from '@core/contexts/KubernetesProvider';
 import { useViewState } from '@core/contexts/ViewStateContext';
-import { ZoomProvider } from '@core/contexts/ZoomContext';
+import { useZoom, ZoomProvider } from '@core/contexts/ZoomContext';
 import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
-import { TabDragProvider } from '@shared/components/tabs/dragCoordinator';
-import { DockablePanelProvider } from '@ui/dockable';
 // Error Boundary
 import { AppErrorBoundary } from '@ui/errors';
 // App components
 import { AppLayout } from '@ui/layout/AppLayout';
-import { GlobalShortcuts, KeyboardProvider } from '@ui/shortcuts';
+import { ApplicationMenuShortcuts, GlobalShortcuts, KeyboardProvider } from '@ui/shortcuts';
 import TextContextMenu from '@ui/shortcuts/components/TextContextMenu';
-import { applyAccentBg, applyAccentColor } from '@utils/accentColor';
 import { errorHandler } from '@utils/errorHandler';
 import { installTypingAssistPolicyObserver } from '@utils/inputAssistPolicy';
-import { applyLinkColor } from '@utils/linkColor';
-import { applyTintedPalette, isPaletteActive } from '@utils/paletteTint';
+import type { backend } from '@/core/backend-api/models';
 import { setActivePermissionCluster } from '@/core/capabilities';
 import { isClusterOperationalState } from '@/core/contexts/clusterLifecycleState';
 import { requestContextRefresh } from '@/core/data-access';
+import { openDevTools } from '@/core/desktop-runtime';
 import { eventBus } from '@/core/events';
 import {
+  PanelLifecycleGuardProvider,
+  usePanelLifecycleGuardRegistry,
+} from '@/core/panel-windows/panelLifecycleGuards';
+import { WorkspacePanelCoordinator } from '@/core/panel-windows/WorkspacePanelCoordinator';
+import {
   applyTheme,
-  getAccentColor,
-  getLinkColor,
-  getPaletteTint,
   hydrateAppPreferences,
   matchThemeForCluster,
 } from '@/core/settings/appPreferences';
@@ -47,31 +46,15 @@ import { autoApplyClusterTheme } from '@/core/settings/clusterThemeAutoApply';
 import { useBackendErrorHandler } from '@/hooks/useBackendErrorHandler';
 import { useSidebarResize } from '@/hooks/useSidebarResize';
 import { useWailsRuntimeEvents } from '@/hooks/useWailsRuntimeEvents';
-
-// Resolve the current active appearance mode from the document attribute.
-const resolveAppearanceMode = (): 'light' | 'dark' => {
-  const attr = document.documentElement.dataset.appearanceMode;
-  return attr === 'dark' ? 'dark' : 'light';
-};
-
-// Apply palette tint and accent color overrides for the given mode.
-const applyAppearanceOverrides = (mode: 'light' | 'dark') => {
-  const tint = getPaletteTint(mode);
-  if (isPaletteActive(tint.saturation, tint.brightness)) {
-    applyTintedPalette(tint.hue, tint.saturation, tint.brightness);
-  } else {
-    applyTintedPalette(0, 0, 0);
-  }
-
-  const lightAccent = getAccentColor('light');
-  const darkAccent = getAccentColor('dark');
-  applyAccentColor(lightAccent, darkAccent);
-  applyAccentBg(mode === 'light' ? lightAccent : darkAccent, mode);
-
-  const lightLink = getLinkColor('light');
-  const darkLink = getLinkColor('dark');
-  applyLinkColor(mode === 'light' ? lightLink : darkLink, mode);
-};
+import {
+  ApplicationMenuCommandProvider,
+  executeBackendApplicationMenuCommand,
+} from '@/ui/layout/ApplicationMenuCommandContext';
+import {
+  dispatchWorkspaceApplicationMenuCommand,
+  type WorkspaceApplicationMenuActions,
+} from '@/ui/layout/workspaceApplicationMenuCommands';
+import { applyAppearanceOverrides, resolveAppearanceMode } from '@/utils/appearanceMode';
 
 /**
  * AppContent - The main app content that uses the contexts
@@ -79,6 +62,7 @@ const applyAppearanceOverrides = (mode: 'light' | 'dark') => {
 function AppContent() {
   const viewState = useViewState();
   const { selectedClusterId, selectedClusterName } = useKubeconfig();
+  const { resetZoom, zoomIn, zoomOut } = useZoom();
   const { getClusterState } = useClusterLifecycle();
   const selectedClusterOperational = selectedClusterId
     ? isClusterOperationalState(getClusterState(selectedClusterId))
@@ -89,27 +73,6 @@ function AppContent() {
   useEffect(() => {
     setActivePermissionCluster(selectedClusterId, { operational: selectedClusterOperational });
   }, [selectedClusterId, selectedClusterOperational]);
-
-  // main.ts hydrates preferences before first render. This effect only replays
-  // the hydrated appearance values into CSS and keeps them synced on mode changes.
-  useEffect(() => {
-    let active = true;
-
-    applyAppearanceOverrides(resolveAppearanceMode());
-
-    // When the resolved mode changes, apply the palette for the new mode.
-    const unsubscribeModeResolved = eventBus.on('settings:appearance-mode-resolved', (newMode) => {
-      if (!active) {
-        return;
-      }
-      applyAppearanceOverrides(newMode);
-    });
-
-    return () => {
-      active = false;
-      unsubscribeModeResolved();
-    };
-  }, []);
 
   // Disable browser typing assistance for every current and future input-like
   // field in the app. This keeps search boxes, forms, and editable surfaces
@@ -156,9 +119,62 @@ function AppContent() {
     viewState.setIsObjectDiffOpen(!viewState.isObjectDiffOpen);
   }, [viewState]);
 
+  const handleToggleSettings = useCallback(() => {
+    viewState.setIsSettingsOpen(!viewState.isSettingsOpen);
+  }, [viewState]);
+
+  const panelGuards = usePanelLifecycleGuardRegistry();
+  const executeApplicationMenuCommand = useCallback(
+    (menuCommand: backend.ApplicationMenuCommand) => {
+      if (panelGuards.isWindowFrozen()) {
+        return;
+      }
+      const actions: WorkspaceApplicationMenuActions = {
+        close: () => eventBus.emit('application-menu:close'),
+        openCluster: () => eventBus.emit('command-palette:open-kubeconfigs'),
+        toggleSettings: handleToggleSettings,
+        openCommandPalette: () => eventBus.emit('command-palette:open'),
+        zoomIn,
+        zoomOut,
+        zoomReset: resetZoom,
+        toggleSidebar: viewState.toggleSidebar,
+        toggleObjectDiff: handleToggleObjectDiff,
+        toggleAppLogs: handleToggleAppLogsPanel,
+        toggleDiagnostics: handleToggleDiagnostics,
+        openInspector: () => {
+          void openDevTools().catch((error) =>
+            errorHandler.handle(error instanceof Error ? error : new Error(String(error)), {
+              source: 'application-menu-inspector',
+            })
+          );
+        },
+        toggleFocusDebug: () => eventBus.emit('debug:toggle-focus-overlay'),
+        togglePanelDebug: () => eventBus.emit('debug:toggle-panel-overlay'),
+        toggleMapDebug: () => eventBus.emit('debug:toggle-map-overlay'),
+        toggleIconDebug: () => eventBus.emit('debug:toggle-icon-overlay'),
+        toggleErrorDebug: () => eventBus.emit('debug:toggle-error-overlay'),
+        openAbout: () => viewState.setIsAboutOpen(true),
+      };
+      if (!dispatchWorkspaceApplicationMenuCommand(menuCommand, actions)) {
+        executeBackendApplicationMenuCommand(menuCommand);
+      }
+    },
+    [
+      handleToggleAppLogsPanel,
+      handleToggleDiagnostics,
+      handleToggleObjectDiff,
+      handleToggleSettings,
+      resetZoom,
+      viewState,
+      zoomIn,
+      zoomOut,
+      panelGuards.isWindowFrozen,
+    ]
+  );
+
   // Handle Wails runtime events (menu items, etc.)
   useWailsRuntimeEvents({
-    onOpenSettings: () => viewState.setIsSettingsOpen(true),
+    onOpenSettings: handleToggleSettings,
     onOpenAbout: () => viewState.setIsAboutOpen(true),
     onOpenCluster: () => eventBus.emit('command-palette:open-kubeconfigs'),
     onToggleSidebar: () => viewState.toggleSidebar(),
@@ -176,7 +192,7 @@ function AppContent() {
 
   // The command palette (CommandPaletteCommands.tsx) emits this event when
   // the user picks "Toggle Application Logs". Forward it to the shared
-  // handler also used by keyboard shortcuts and native menu events, so every
+  // handler also used by keyboard shortcuts and application-menu events, so every
   // path shares the single source of truth in ModalStateContext.
   useEffect(() => {
     return eventBus.on('view:toggle-app-logs-panel', handleToggleAppLogsPanel);
@@ -192,21 +208,19 @@ function AppContent() {
   }, []);
 
   return (
-    <>
+    <ApplicationMenuCommandProvider execute={executeApplicationMenuCommand}>
+      <ApplicationMenuShortcuts />
       <GlobalShortcuts
-        onToggleSidebar={viewState.toggleSidebar}
         onToggleAppLogsPanel={handleToggleAppLogsPanel}
-        onToggleSettings={() => viewState.setIsSettingsOpen(!viewState.isSettingsOpen)}
-        onToggleObjectDiff={() => viewState.setIsObjectDiffOpen(!viewState.isObjectDiffOpen)}
+        onToggleSettings={handleToggleSettings}
         onRefresh={handleManualRefresh}
-        onToggleDiagnostics={handleToggleDiagnostics}
         isAppLogsPanelOpen={viewState.showAppLogsPanel}
         isObjectPanelOpen={viewState.showObjectPanel}
         isSettingsOpen={viewState.isSettingsOpen}
       />
       <TextContextMenu />
       <AppLayout />
-    </>
+    </ApplicationMenuCommandProvider>
   );
 }
 
@@ -223,11 +237,11 @@ function App() {
               <div className="app">
                 <KubernetesProvider>
                   <FavoritesProvider>
-                    <TabDragProvider>
-                      <DockablePanelProvider>
+                    <PanelLifecycleGuardProvider>
+                      <WorkspacePanelCoordinator>
                         <AppContent />
-                      </DockablePanelProvider>
-                    </TabDragProvider>
+                      </WorkspacePanelCoordinator>
+                    </PanelLifecycleGuardProvider>
                   </FavoritesProvider>
                 </KubernetesProvider>
               </div>

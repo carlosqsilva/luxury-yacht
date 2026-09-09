@@ -5,6 +5,8 @@ const runtimeMocks = vi.hoisted(() => ({
   clipboardSetText: vi.fn(),
   clipboardText: vi.fn(),
   environment: vi.fn(),
+  getFlag: vi.fn(),
+  eventsEmit: vi.fn(),
   eventsOn: vi.fn<
     (
       eventName: string,
@@ -12,6 +14,8 @@ const runtimeMocks = vi.hoisted(() => ({
     ) => () => void
   >(() => () => undefined),
   closeWindow: vi.fn(),
+  isWindowMaximised: vi.fn(),
+  minimiseWindow: vi.fn(),
   openDevTools: vi.fn(),
   toggleMaximise: vi.fn(),
   windowName: vi.fn(),
@@ -20,10 +24,13 @@ const runtimeMocks = vi.hoisted(() => ({
 vi.mock('@wailsio/runtime', () => ({
   Browser: { OpenURL: runtimeMocks.browserOpenURL },
   Clipboard: { SetText: runtimeMocks.clipboardSetText, Text: runtimeMocks.clipboardText },
-  Events: { On: runtimeMocks.eventsOn },
+  Events: { Emit: runtimeMocks.eventsEmit, On: runtimeMocks.eventsOn },
   System: { Environment: runtimeMocks.environment },
+  Flags: { GetFlag: runtimeMocks.getFlag },
   Window: {
     Close: runtimeMocks.closeWindow,
+    IsMaximised: runtimeMocks.isWindowMaximised,
+    Minimise: runtimeMocks.minimiseWindow,
     Name: runtimeMocks.windowName,
     OpenDevTools: runtimeMocks.openDevTools,
     ToggleMaximise: runtimeMocks.toggleMaximise,
@@ -36,9 +43,13 @@ import {
   type DesktopEventName,
   type DesktopEventPayload,
   desktopRuntimeAvailable,
+  emitBroadcastEvent,
   getEnvironment,
   getWindowIdentity,
   initializeWindowIdentity,
+  isWindowMaximised,
+  minimiseWindow,
+  onBroadcastEvent,
   onEvent,
   openDevTools,
   openURL,
@@ -55,6 +66,15 @@ describe('desktop runtime adapter', () => {
 
   it('does not expose event-wide listener removal', () => {
     expect(desktopRuntime).not.toHaveProperty('offEvent');
+  });
+
+  it('uses the platform resize handle dimensions and the runtime defaults', () => {
+    expect(desktopRuntime.getWindowResizeHandleSize()).toEqual({ width: 5, height: 5 });
+    Object.assign(window, { _wails: { environment: { OS: 'windows' } } });
+    runtimeMocks.getFlag.mockImplementation((key) => (key === 'system.resizeHandleWidth' ? 8 : 6));
+    expect(desktopRuntime.getWindowResizeHandleSize()).toEqual({ width: 8, height: 6 });
+    runtimeMocks.getFlag.mockReturnValue(undefined);
+    expect(desktopRuntime.getWindowResizeHandleSize()).toEqual({ width: 5, height: 5 });
   });
 
   it('unwraps v3 event payloads and returns the v3 disposer', () => {
@@ -87,12 +107,36 @@ describe('desktop runtime adapter', () => {
     expect(handler).toHaveBeenCalledOnce();
   });
 
+  it('sends and receives process-wide events across peer windows', async () => {
+    runtimeMocks.windowName.mockResolvedValue('panel-2');
+    runtimeMocks.eventsEmit.mockResolvedValue(false);
+    await initializeWindowIdentity();
+    const handler = vi.fn();
+
+    onBroadcastEvent('settings:appearance-mode-changed', handler);
+    const runtimeHandler = runtimeMocks.eventsOn.mock.calls[0]?.[1];
+    runtimeHandler?.({
+      name: 'settings:appearance-mode-changed',
+      data: { mode: 'dark' },
+      sender: 'workspace-1',
+    });
+    await emitBroadcastEvent('settings:appearance-mode-changed', { mode: 'light' });
+
+    expect(handler).toHaveBeenCalledWith({ mode: 'dark' });
+    expect(runtimeMocks.eventsEmit).toHaveBeenCalledWith('settings:appearance-mode-changed', {
+      mode: 'light',
+    });
+  });
+
   it('delegates desktop capabilities to the v3 runtime', async () => {
     runtimeMocks.clipboardText.mockResolvedValue('clipboard');
     runtimeMocks.environment.mockResolvedValue({ OS: 'darwin' });
+    runtimeMocks.isWindowMaximised.mockResolvedValue(true);
 
     await openURL('https://luxury-yacht.app');
     await closeWindow();
+    await expect(isWindowMaximised()).resolves.toBe(true);
+    await minimiseWindow();
     await openDevTools();
     await toggleMaximise();
     await writeClipboardText('copied');
@@ -101,6 +145,8 @@ describe('desktop runtime adapter', () => {
     await expect(getEnvironment()).resolves.toEqual({ OS: 'darwin' });
     expect(runtimeMocks.browserOpenURL).toHaveBeenCalledWith('https://luxury-yacht.app');
     expect(runtimeMocks.closeWindow).toHaveBeenCalledOnce();
+    expect(runtimeMocks.isWindowMaximised).toHaveBeenCalledOnce();
+    expect(runtimeMocks.minimiseWindow).toHaveBeenCalledOnce();
     expect(runtimeMocks.openDevTools).toHaveBeenCalledOnce();
     expect(runtimeMocks.toggleMaximise).toHaveBeenCalledOnce();
     expect(runtimeMocks.clipboardSetText).toHaveBeenCalledWith('copied');

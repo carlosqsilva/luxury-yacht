@@ -13,12 +13,5 @@ func ObjectMapEdges(clusterID string, obj metav1.Object) []objectmapspec.Edge {
 		return nil
 	}
 	facts := BuildFacts(clusterID, binding)
-	edges := []objectmapspec.Edge{{Type: objectmapspec.EdgeGrants, Link: facts.RoleRef}}
-	for _, subject := range facts.Subjects {
-		if subject.Link == nil {
-			continue
-		}
-		edges = append(edges, objectmapspec.Edge{Type: objectmapspec.EdgeBinds, Link: *subject.Link})
-	}
-	return edges
+	return objectmapspec.RBACBindingEdges(facts.RoleRef, facts.Subjects)
 }

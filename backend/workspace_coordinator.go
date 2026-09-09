@@ -8,6 +8,7 @@ import (
 	"github.com/luxury-yacht/app/backend/internal/authstate"
 	"github.com/luxury-yacht/app/backend/refresh/telemetry"
 	"github.com/luxury-yacht/app/backend/resources/common"
+	"github.com/luxury-yacht/app/internal/panelwindow"
 )
 
 type workspaceClusterRuntime interface {
@@ -42,6 +43,7 @@ type workspaceClusterRuntime interface {
 	replayClusterLifecycle(string)
 	resourceDependenciesForSelection(kubeconfigSelection, *clusterClients, string) common.Dependencies
 	runClusterOperation(context.Context, string, func(context.Context) error) error
+	runQueuedClusterOperation(context.Context, string, func(context.Context) error) error
 	selectionsForClusterIDs([]string) []kubeconfigSelection
 	setClusterLifecycleState(string, ClusterLifecycleState)
 	snapshotClusterIDs() []string
@@ -101,6 +103,7 @@ type WorkspaceCoordinator struct {
 	logger                *Logger
 	context               func() context.Context
 	runtimeAvailableFn    func() bool
+	isWorkspaceWindowFn   func(string) bool
 	emitEventFn           func(string, ...interface{})
 	kubeClientInitializer func(context.Context) error
 
@@ -110,6 +113,9 @@ type WorkspaceCoordinator struct {
 	selectionMutationMu   sync.Mutex
 	workspaceSelectionsMu sync.RWMutex
 	workspaceSelections   map[string][]string
+	panelSelections       map[string]string
+	panelWorkspaceOnce    sync.Once
+	panelWorkspace        *panelwindow.WorkspaceDirectory
 
 	selectionMutationDrainMu   sync.Mutex
 	selectionMutationDrainCond *sync.Cond
@@ -128,15 +134,16 @@ type WorkspaceCoordinator struct {
 }
 
 type WorkspaceCoordinatorDependencies struct {
-	ClusterRuntime   workspaceClusterRuntime
-	ClusterWorkspace workspaceClusterProjection
-	Refresh          workspaceRefresh
-	Preferences      workspacePreferences
-	Operations       clusterStopper
-	Logger           *Logger
-	Context          func() context.Context
-	RuntimeAvailable func() bool
-	EmitEvent        func(string, ...interface{})
+	ClusterRuntime    workspaceClusterRuntime
+	ClusterWorkspace  workspaceClusterProjection
+	Refresh           workspaceRefresh
+	Preferences       workspacePreferences
+	Operations        clusterStopper
+	Logger            *Logger
+	Context           func() context.Context
+	RuntimeAvailable  func() bool
+	IsWorkspaceWindow func(string) bool
+	EmitEvent         func(string, ...interface{})
 }
 
 func newWorkspaceCoordinator(dependencies WorkspaceCoordinatorDependencies) *WorkspaceCoordinator {
@@ -150,6 +157,7 @@ func newWorkspaceCoordinator(dependencies WorkspaceCoordinatorDependencies) *Wor
 		logger:              dependencies.Logger,
 		context:             dependencies.Context,
 		runtimeAvailableFn:  dependencies.RuntimeAvailable,
+		isWorkspaceWindowFn: dependencies.IsWorkspaceWindow,
 		emitEventFn:         dependencies.EmitEvent,
 		workspaceSelections: make(map[string][]string),
 		clusterIntentLatest: make(map[clusterRuntimeIntentKey]uint64),
@@ -175,6 +183,8 @@ func requireWorkspaceCoordinatorDependencies(dependencies WorkspaceCoordinatorDe
 		panic("newWorkspaceCoordinator: Context is required")
 	case dependencies.RuntimeAvailable == nil:
 		panic("newWorkspaceCoordinator: RuntimeAvailable is required")
+	case dependencies.IsWorkspaceWindow == nil:
+		panic("newWorkspaceCoordinator: IsWorkspaceWindow is required")
 	case dependencies.EmitEvent == nil:
 		panic("newWorkspaceCoordinator: EmitEvent is required")
 	}

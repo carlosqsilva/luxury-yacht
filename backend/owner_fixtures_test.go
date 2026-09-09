@@ -184,9 +184,10 @@ func newWorkspaceCoordinatorTestFixture(t testing.TB, reporters ...sentryreporti
 		ClusterRuntime: refreshFixture.ClusterRuntime, ClusterWorkspace: refreshFixture.ClusterWorkspace,
 		Refresh: refreshFixture.Refresh, Preferences: refreshFixture.Preferences,
 		Operations: refreshFixture.Operations, Logger: refreshFixture.AppLogs.Logger(),
-		Context:          refreshFixture.signals.CtxOrBackground,
-		RuntimeAvailable: refreshFixture.signals.runtimeAvailable,
-		EmitEvent:        refreshFixture.signals.emitEvent,
+		Context:           refreshFixture.signals.CtxOrBackground,
+		RuntimeAvailable:  refreshFixture.signals.runtimeAvailable,
+		IsWorkspaceWindow: func(string) bool { return true },
+		EmitEvent:         refreshFixture.signals.emitEvent,
 	})
 	refreshFixture.Lifecycle = newApplicationLifecycle(refreshFixture.signals, ApplicationLifecycleDependencies{
 		DesktopShell: refreshFixture.DesktopShell, Logger: refreshFixture.AppLogs.Logger(),
@@ -266,7 +267,7 @@ func newSettingsEffectsTestFixture(t testing.TB, reporters ...sentryreporting.Re
 			return fixture.Workspace.runSelectionMutation(name, func(_ *selectionMutation) error { return action() })
 		},
 		ResetRuntime: func() error {
-			if err := fixture.Workspace.clearKubeconfigSelection(); err != nil {
+			if err := fixture.Workspace.clearKubeconfigSelection(true); err != nil {
 				return err
 			}
 			return fixture.Refresh.ResetRuntimeState()

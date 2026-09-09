@@ -8,14 +8,21 @@
  * instance can access the correct objectData for their specific panel.
  */
 
+import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
 import type { ViewType } from '@modules/object-panel/components/ObjectPanel/types';
 import { useObjectPanelState } from '@modules/object-panel/contexts/ObjectPanelStateContext';
-import type { ObjectPanelRef } from '@modules/object-panel/objectPanelRef';
+import { type ObjectPanelRef, objectPanelId } from '@modules/object-panel/objectPanelRef';
 import { assertObjectRefHasRequiredIdentity } from '@shared/utils/objectIdentity';
 import { useDockablePanelContext } from '@ui/dockable';
 import { getGroupForPanel } from '@ui/dockable/tabGroupState';
 import { createContext, useCallback, useContext, useEffect, useRef } from 'react';
+import type { panelwindow } from '@/core/backend-api/models';
+import { usePanelWindowRole } from '@/core/panel-windows/PanelWindowRoleContext';
+import { objectPanelTabSnapshot } from '@/core/panel-windows/tabTransfer';
+import { usePanelWorkspaceOpen } from '@/core/panel-windows/WorkspacePanelSync';
+import { getDefaultObjectPanelPosition } from '@/core/settings/appPreferences';
 import type { KubernetesObjectReference } from '@/types/view-state';
+import { reportOperationalError } from '@/utils/errorHandler';
 
 export interface OpenWithObjectOptions {
   /**
@@ -55,7 +62,7 @@ export const CurrentObjectPanelContext = createContext<CurrentObjectPanelContext
 });
 
 // Read the current panel's object data. Only meaningful inside a <ObjectPanel> tree.
-const useCurrentObjectPanel = () => useContext(CurrentObjectPanelContext);
+export const useCurrentObjectPanel = () => useContext(CurrentObjectPanelContext);
 
 // ---------------------------------------------------------------------------
 // closeObjectPanelGlobal  (test-only)
@@ -80,6 +87,7 @@ let closeCallback: (() => void) | null = null;
  * - openPanels: all open panels from context
  */
 export function useObjectPanel() {
+  const openSharedPanel = usePanelWorkspaceOpen();
   const {
     showObjectPanel,
     openPanels,
@@ -88,8 +96,12 @@ export function useObjectPanel() {
     onCloseObjectPanel,
     hydrateClusterMeta,
     setObjectPanelActiveTab,
+    getOwnedPanel,
   } = useObjectPanelState();
-  const { tabGroups, focusPanel } = useDockablePanelContext();
+  const { selectedClusterId, selectedKubeconfigs, getClusterMeta, setActiveKubeconfig } =
+    useKubeconfig();
+  const { tabGroups, focusPanel, requestGroupMove } = useDockablePanelContext();
+  const panelWindowRole = usePanelWindowRole();
 
   // Per-instance object data (only set when called inside an ObjectPanel tree).
   const {
@@ -99,6 +111,7 @@ export function useObjectPanel() {
     lastModified,
   } = useCurrentObjectPanel();
   const pendingFocusPanelIdRef = useRef<string | null>(null);
+  const pendingFloatPanelIdRef = useRef<string | null>(null);
 
   // Keep the close callback updated for closeObjectPanelGlobal (test-only).
   // Last mount wins — not safe for concurrent multi-panel production use.
@@ -124,23 +137,42 @@ export function useObjectPanel() {
     focusPanel(pendingPanelId);
   }, [tabGroups, focusPanel]);
 
-  const openWithObject = useCallback(
-    (obj: KubernetesObjectReference, options?: OpenWithObjectOptions) => {
-      const enriched = hydrateClusterMeta(obj);
-      // Runtime defense for incomplete object refs. Catches programmatic ref
-      // constructions that the openWithObjectAudit literal walker can't see.
-      assertObjectRefHasRequiredIdentity(enriched);
-      const panelId = onRowClick(enriched);
+  useEffect(() => {
+    const panelId = pendingFloatPanelIdRef.current;
+    if (!panelId) {
+      return;
+    }
+    const groupKey = getGroupForPanel(tabGroups, panelId);
+    if (!groupKey || !requestGroupMove?.(groupKey, 'floating')) {
+      return;
+    }
+    pendingFloatPanelIdRef.current = null;
+  }, [requestGroupMove, tabGroups]);
 
-      // Set the requested initial tab BEFORE focusing so the panel
-      // mounts on the right tab instead of flashing Details first. The
-      // active-tab map is per-panel sticky state, so calling this for
-      // a re-opened panel will also override the user's last selection
-      // — which is what we want for "right-click → Map".
-      if (options?.initialTab) {
-        setObjectPanelActiveTab(panelId, options.initialTab);
+  const activateObjectCluster = useCallback(
+    (clusterId: string): boolean => {
+      if (clusterId !== selectedClusterId) {
+        const targetSelection = selectedKubeconfigs.find(
+          (selection) => getClusterMeta(selection).id === clusterId
+        );
+        if (!targetSelection) {
+          reportOperationalError(new Error(`Object panel cluster is not open: ${clusterId}`), {
+            source: 'useObjectPanel',
+            action: 'activate-object-panel-cluster',
+            clusterId,
+          });
+          return false;
+        }
+        setActiveKubeconfig(targetSelection);
       }
 
+      return true;
+    },
+    [selectedClusterId, selectedKubeconfigs, getClusterMeta, setActiveKubeconfig]
+  );
+
+  const focusOpenedPanel = useCallback(
+    (panelId: string) => {
       // If the panel already exists in the dockable system, activate its tab
       // and bring the panel to the front. Newly-created panels join the
       // dockable group after their component mounts, so focus them from the
@@ -153,22 +185,106 @@ export function useObjectPanel() {
         pendingFocusPanelIdRef.current = panelId;
       }
     },
-    [onRowClick, hydrateClusterMeta, tabGroups, focusPanel, setObjectPanelActiveTab]
+    [tabGroups, focusPanel]
+  );
+
+  const updateExistingPanelView = useCallback(
+    (clusterId: string, panelId: string, initialTab?: ViewType) => {
+      if (initialTab) {
+        setObjectPanelActiveTab(clusterId, panelId, initialTab);
+      }
+    },
+    [setObjectPanelActiveTab]
+  );
+
+  const mountSharedPanel = useCallback(
+    (
+      tab: panelwindow.TabSnapshot,
+      enriched: KubernetesObjectReference,
+      shouldAutoFloat: boolean,
+      requestedView?: ViewType
+    ) => {
+      const panelId = objectPanelId(enriched);
+      if (!activateObjectCluster(tab.objectRef.clusterId)) {
+        return;
+      }
+      onRowClick({ ...enriched, ...tab.objectRef }, { pendingNativeOpen: shouldAutoFloat });
+      // Set the requested initial tab in the same React batch as the open so
+      // the panel mounts on that tab instead of flashing Details first.
+      setObjectPanelActiveTab(
+        tab.objectRef.clusterId,
+        panelId,
+        (requestedView ?? tab.activeView) as ViewType
+      );
+      if (shouldAutoFloat) {
+        pendingFloatPanelIdRef.current = panelId;
+      }
+
+      focusOpenedPanel(panelId);
+    },
+    [activateObjectCluster, onRowClick, setObjectPanelActiveTab, focusOpenedPanel]
+  );
+
+  const openWithObject = useCallback(
+    (obj: KubernetesObjectReference, options?: OpenWithObjectOptions) => {
+      const enriched = hydrateClusterMeta(obj);
+      // Runtime defense for incomplete object refs. Catches programmatic ref
+      // constructions that the openWithObjectAudit literal walker can't see.
+      assertObjectRefHasRequiredIdentity(enriched);
+      const panelId = objectPanelId(enriched);
+      const ownedPanel = getOwnedPanel(enriched.clusterId, panelId);
+      const requestedView = options?.initialTab;
+      const shouldAutoFloat =
+        !panelWindowRole && ownedPanel === null && getDefaultObjectPanelPosition() === 'floating';
+
+      void openSharedPanel(
+        objectPanelTabSnapshot(panelId, enriched, options?.initialTab ?? 'details')
+      )
+        .then((result) => {
+          if (!result) {
+            return;
+          }
+          if (!result.render) {
+            if (ownedPanel) {
+              updateExistingPanelView(enriched.clusterId, panelId, requestedView);
+            }
+            return;
+          }
+
+          mountSharedPanel(result.panel.tab, enriched, shouldAutoFloat, requestedView);
+        })
+        .catch((error) =>
+          reportOperationalError(error, {
+            source: 'useObjectPanel',
+            action: 'open-shared-cluster-panel',
+            clusterId: enriched.clusterId,
+          })
+        );
+    },
+    [
+      hydrateClusterMeta,
+      getOwnedPanel,
+      panelWindowRole,
+      updateExistingPanelView,
+      mountSharedPanel,
+      openSharedPanel,
+    ]
   );
 
   const close = useCallback(() => {
-    if (currentPanelId) {
+    if (currentPanelId && objectData?.clusterId) {
       // Close just this panel.
-      closePanel(currentPanelId);
+      closePanel(objectData.clusterId, currentPanelId);
     } else {
       // No panel context -- close all panels (legacy behavior).
       onCloseObjectPanel();
     }
-  }, [currentPanelId, closePanel, onCloseObjectPanel]);
+  }, [currentPanelId, objectData?.clusterId, closePanel, onCloseObjectPanel]);
 
   return {
     // Object data for the current panel instance (null outside an ObjectPanel tree).
     objectData,
+    panelId: currentPanelId,
     // Object creation time (RFC3339 UTC) for the current object (when available);
     // the shared ResourceHeader formats it into Age.
     creationTimestamp,

@@ -171,7 +171,8 @@ type ClusterWorkspaceEventName =
   | 'cluster:auth:progress'
   | 'cluster:health:healthy'
   | 'cluster:health:degraded'
-  | 'cluster:scope:changed';
+  | 'cluster:scope:changed'
+  | 'cluster:permissions:changed';
 
 type ClusterWorkspaceEventSubscriber = <E extends ClusterWorkspaceEventName>(
   event: E,
@@ -389,6 +390,18 @@ export class ClusterWorkspaceStore {
     this.mergeWireState(wire);
   }
 
+  // The native close command has already removed this view. A later selection
+  // RPC failure or an older hydration must not restore its former membership.
+  confirmClosedSelection(selection: string, clusterId: string): void {
+    this.authoritativeGeneration++;
+    this.publish({
+      ...this.snapshot,
+      selectedKubeconfigs: this.snapshot.selectedKubeconfigs.filter((value) => value !== selection),
+      visibleClusterId:
+        this.snapshot.visibleClusterId === clusterId ? '' : this.snapshot.visibleClusterId,
+    });
+  }
+
   hydrate(): Promise<ClusterWorkspaceWireState> {
     if (this.hydrationPromise) {
       return this.hydrationPromise;
@@ -460,6 +473,11 @@ export class ClusterWorkspaceStore {
     on('cluster:auth:progress', (payload) => this.handleAuthProgress(payload));
     on('cluster:health:healthy', (payload) => this.handleHealth(payload, 'healthy'));
     on('cluster:health:degraded', (payload) => this.handleHealth(payload, 'degraded'));
+    on('cluster:permissions:changed', (payload) => {
+      if (payload.clusterId?.trim()) {
+        eventBus.emit('cluster:permissions-changed', { clusterId: payload.clusterId });
+      }
+    });
     on('cluster:scope:changed', (payload) => this.handleScopeChanged(payload));
 
     void this.hydrate().catch((error) => {
@@ -526,17 +544,9 @@ export class ClusterWorkspaceStore {
     if (!clusterId) {
       return;
     }
-    const wasServiceable = this.isServiceable(clusterId);
     this.updateCluster(clusterId, 'lifecycle', (current) =>
       current.lifecycle === lifecycle ? current : { ...current, lifecycle }
     );
-    if (!wasServiceable && this.isServiceable(clusterId)) {
-      this.notifyListeners(
-        this.serviceableListeners,
-        (listener) => listener(clusterId),
-        'A serviceability listener failed'
-      );
-    }
   }
 
   private handleAuthFailed(payload: DesktopEventPayload<'cluster:auth:failed'>): void {
@@ -611,8 +621,22 @@ export class ClusterWorkspaceStore {
   }
 
   private publish(next: ClusterWorkspaceSnapshot): void {
+    // Readiness can arrive through an event, hydration, or a command response.
+    // Publish the state before resuming requests regardless of its input path.
+    const waitingClusters = [...next.clusters.keys()].filter(
+      (clusterId) => !this.isServiceable(clusterId)
+    );
     this.snapshot = next;
     this.notifyListeners(this.listeners, (listener) => listener(), 'A snapshot listener failed');
+    for (const clusterId of waitingClusters) {
+      if (this.isServiceable(clusterId)) {
+        this.notifyListeners(
+          this.serviceableListeners,
+          (listener) => listener(clusterId),
+          'A serviceability listener failed'
+        );
+      }
+    }
   }
 
   private notifyListeners<T>(
@@ -639,7 +663,7 @@ export class ClusterWorkspaceStore {
     }
     const lifecycle = this.getCluster(clusterId)?.lifecycle;
     if (!lifecycle) {
-      return !this.foregroundActivations.has(clusterId);
+      return false;
     }
     return serviceableStates.has(lifecycle) && !this.foregroundActivations.has(clusterId);
   }

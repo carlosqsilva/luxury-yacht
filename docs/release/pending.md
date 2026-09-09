@@ -1,11 +1,7 @@
-### Changed
+### Added
 
-- The Network view's generic `Details` column has been replaced by three more specific columns (`Context`, `Network`, and `Summary`) to provide more useful data without having to open the Object Panel.
-- Namespaces in the Attention view are now clickable.
-- Clicked Namespace links should now properly scroll into view, and default to the Workloads view instead of Browse.
+- Roles and Rolebindings are now visible in Object Maps
 
 ### Fixed
 
-- Fixed a performance regression introduced by `client-go`. The bump to `v0.35.0` enabled `WatchList` by default, which degraded data load performance in the app by requiring potentially very large data sets to be sent in total before showing any data. The previous `list -> watch` behavior has been restored.
-- Unreachable previously-opened clusters no longer block startup.
-- Streamed pod logs should now properly retain their proper scroll positions, whether auto-scrolling or a manual fixed scroll position.
+- Container logs crashing due to miscalculated virtualized window size
