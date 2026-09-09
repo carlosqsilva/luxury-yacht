@@ -190,6 +190,14 @@ slot and separator styling consistently; checking one menu in isolation misses
 visible differences between equivalent controls. Keep each menu's existing
 action scope and availability while aligning its presentation.
 
+## Leaving related resource kinds out of object-map support
+
+When adding map support for a resource family, check both namespaced and
+cluster-scoped variants. A frontend allowlist alone does not supply graph nodes
+or links. Verify registry collectors, ingest projections, relationship builders,
+namespace/object snapshots, and the table and panel navigation consumers. Include
+bindings that cross the variants, such as a RoleBinding referencing a ClusterRole.
+
 ## Adding cognitive complexity without measuring it
 
 Recovery guards and channel-close handling can become deeply nested inside
@@ -211,6 +219,14 @@ Prevention:
   weakening tests, or accepting increased complexity in a baseline.
 - Treat local scores as directional. Confirm remote closure with Sonar analysis
   of the pushed revision; commit and push only when explicitly authorized.
+
+## Linting generated coverage reports
+
+Generated HTML under `frontend/coverage` can enter the frontend lint scope and
+produce parser errors during the prerelease gate. If this happens, preserve the
+generated reports outside the frontend tree and rerun the unchanged gate. Keep
+coverage summaries available for completion evidence; do not weaken source lint
+rules to accommodate generated reports.
 
 ## Putting shared prevention rules in ignored memory
 
