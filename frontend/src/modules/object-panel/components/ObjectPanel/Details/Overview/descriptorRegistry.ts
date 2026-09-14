@@ -7,6 +7,7 @@
  * overviewRegistry/GenericOverview path.
  */
 
+import { argoCDDescriptor, getArgoCDOverviewDescriptor } from './descriptors/argocd';
 import {
   crdDescriptor,
   ingressClassDescriptor,
@@ -30,8 +31,10 @@ import {
 import { helmReleaseDescriptor } from './descriptors/helm';
 import { ingressDescriptor } from './descriptors/ingress';
 import { cronJobDescriptor, jobDescriptor } from './descriptors/job';
+import { getKarpenterOverviewDescriptor, karpenterDescriptor } from './descriptors/karpenter';
 import { networkPolicyDescriptor } from './descriptors/networkpolicy';
 import { nodeDescriptor } from './descriptors/node';
+import { getOperatorOverviewDescriptor, operatorDescriptor } from './descriptors/operators';
 import { podDescriptor } from './descriptors/pod';
 import {
   hpaDescriptor,
@@ -119,13 +122,24 @@ for (const reg of registrations) {
 }
 
 export function getOverviewDescriptor(
-  kind: string | null | undefined
+  kind: string | null | undefined,
+  detail?: unknown
 ): OverviewDescriptor<never> | undefined {
   if (!kind) {
     return undefined;
   }
-  return byKind.get(kind.toLowerCase());
+  return (
+    getArgoCDOverviewDescriptor(kind, detail) ??
+    getKarpenterOverviewDescriptor(kind, detail) ??
+    getOperatorOverviewDescriptor(kind, detail) ??
+    byKind.get(kind.toLowerCase())
+  );
 }
 
 /** Unique descriptors (one per registration) — for the drift-check to iterate. */
-export const registeredDescriptors = registrations.map((reg) => reg.descriptor);
+export const registeredDescriptors = [
+  ...registrations.map((reg) => reg.descriptor),
+  karpenterDescriptor as OverviewDescriptor<never>,
+  argoCDDescriptor as OverviewDescriptor<never>,
+  operatorDescriptor as OverviewDescriptor<never>,
+];

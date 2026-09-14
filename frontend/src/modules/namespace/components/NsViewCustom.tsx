@@ -1,3 +1,8 @@
+import {
+  type NamespaceResourceFamily,
+  RESOURCE_FAMILY_LABELS,
+} from '@core/navigation/resourceFamilies';
+import { operatorColumns } from '@modules/browse/components/operatorColumns';
 /**
  * frontend/src/modules/namespace/components/NsViewCustom.tsx
  *
@@ -18,12 +23,27 @@ import { useQueryResourceGridTable } from '@modules/resource-grid/useResourceGri
 import * as cf from '@shared/components/tables/columnFactories';
 import { TABLE_PAGE_SIZE_OPTIONS } from '@shared/components/tables/pageSizeOptions';
 import React, { useMemo } from 'react';
+import { argoCDColumns } from './argoCDColumns';
 
+const CUSTOM_VIEW = {
+  viewId: 'namespace-custom',
+  label: 'Custom',
+  objectLabel: 'custom',
+  spinner: 'Loading custom resources...',
+  exportFilename: 'custom-resources',
+};
+const FAMILY_VIEWS = {
+  argocd: { viewId: 'namespace-argocd' },
+  'cert-manager': { viewId: 'namespace-cert-manager' },
+  'external-secrets': { viewId: 'namespace-external-secrets' },
+  prometheus: { viewId: 'namespace-prometheus' },
+} satisfies Record<NamespaceResourceFamily, { viewId: string }>;
 // Data interface for custom resources
 export type CustomResourceData = CustomResourceGridRow;
 
 interface CustomViewProps {
   namespace: string;
+  resourceFamily?: NamespaceResourceFamily;
   showNamespaceColumn?: boolean;
 }
 
@@ -31,29 +51,67 @@ interface CustomViewProps {
  * GridTable component for namespace custom resources (instances of CRDs)
  */
 const CustomViewGrid: React.FC<CustomViewProps> = React.memo(
-  ({ namespace, showNamespaceColumn = false }) => {
+  ({ namespace, resourceFamily, showNamespaceColumn = false }) => {
     const parts = useCustomResourceGridParts({ kindFallback: 'Custom' });
-    const { keyExtractor, selectedClusterId } = parts;
-    const namespaceColumnLink = useNamespaceColumnLink<CustomResourceData>('custom');
+    const {
+      keyExtractor,
+      selectedClusterId,
+      baseColumns: customColumns,
+      openReference,
+      navigateReference,
+      selectedClusterName,
+    } = parts;
+    const namespaceColumnLink = useNamespaceColumnLink<CustomResourceData>(
+      resourceFamily ?? 'custom'
+    );
 
+    const label = resourceFamily ? RESOURCE_FAMILY_LABELS[resourceFamily] : '';
+    const config = resourceFamily
+      ? {
+          ...FAMILY_VIEWS[resourceFamily],
+          label,
+          objectLabel: label,
+          spinner: `Loading ${label} resources...`,
+          exportFilename: `${resourceFamily}-resources`,
+        }
+      : CUSTOM_VIEW;
     const columns = useMemo(() => {
-      if (!showNamespaceColumn) {
-        return parts.baseColumns;
+      let baseColumns = customColumns;
+      const familyParts = {
+        baseColumns: customColumns,
+        openReference,
+        navigateReference,
+        selectedClusterName,
+      };
+      if (resourceFamily === 'argocd') {
+        baseColumns = argoCDColumns(familyParts);
+      } else if (resourceFamily) {
+        baseColumns = operatorColumns(resourceFamily, familyParts);
       }
-      return cf.withNamespaceColumn(parts.baseColumns, {
+      if (!showNamespaceColumn) {
+        return baseColumns;
+      }
+      return cf.withNamespaceColumn(baseColumns, {
         afterColumnKey: 'name',
         accessor: (resource) => resource.ref.namespace,
         sortValue: (resource) => (resource.ref.namespace || '').toLowerCase(),
         ...namespaceColumnLink,
       });
-    }, [namespaceColumnLink, parts.baseColumns, showNamespaceColumn]);
+    }, [
+      namespaceColumnLink,
+      customColumns,
+      openReference,
+      navigateReference,
+      selectedClusterName,
+      showNamespaceColumn,
+      resourceFamily,
+    ]);
 
     const showNamespaceFilter = namespace === ALL_NAMESPACES_SCOPE;
-    const diagnosticsLabel =
-      namespace === ALL_NAMESPACES_SCOPE ? 'All Namespaces Custom' : 'Namespace Custom';
+    const diagnosticsLabel = `${namespace === ALL_NAMESPACES_SCOPE ? 'All Namespaces' : 'Namespace'} ${config.label}`;
 
     const persistenceState = useNamespaceGridTablePersistence<CustomResourceData>({
-      viewId: 'namespace-custom',
+      viewId: config.viewId,
       namespace,
       columns,
       keyExtractor,
@@ -66,6 +124,7 @@ const CustomViewGrid: React.FC<CustomViewProps> = React.memo(
 
     const catalog = useCatalogBackedCustomResourceRows({
       clusterId: selectedClusterId,
+      resourceFamily,
       namespace,
       allNamespaces: namespace === ALL_NAMESPACES_SCOPE,
       persistence,
@@ -103,7 +162,7 @@ const CustomViewGrid: React.FC<CustomViewProps> = React.memo(
       },
     });
 
-    const emptyText = `No custom objects found ${
+    const emptyText = `No ${config.objectLabel} objects found ${
       namespace === ALL_NAMESPACES_SCOPE ? 'in any namespaces' : 'in this namespace'
     }`;
 
@@ -114,10 +173,10 @@ const CustomViewGrid: React.FC<CustomViewProps> = React.memo(
         gridTableProps={gridTableProps}
         favModal={favModal}
         columns={columns}
-        idPrefix="namespace-custom"
+        idPrefix={config.viewId}
         cacheKeySuffix={namespace}
-        exportFilename="custom-resources"
-        spinnerMessage="Loading custom resources..."
+        exportFilename={config.exportFilename}
+        spinnerMessage={config.spinner}
         diagnosticsLabel={diagnosticsLabel}
         tableClassName="ns-custom-table"
         emptyText={emptyText}
@@ -127,5 +186,21 @@ const CustomViewGrid: React.FC<CustomViewProps> = React.memo(
 );
 
 CustomViewGrid.displayName = 'NsViewCustom';
+
+type NamespaceCustomViewProps = Omit<CustomViewProps, 'resourceFamily'>;
+
+export const NsViewArgoCD = (props: NamespaceCustomViewProps) => (
+  <CustomViewGrid {...props} resourceFamily="argocd" />
+);
+
+export const NsViewCertManager = (props: NamespaceCustomViewProps) => (
+  <CustomViewGrid {...props} resourceFamily="cert-manager" />
+);
+export const NsViewExternalSecrets = (props: NamespaceCustomViewProps) => (
+  <CustomViewGrid {...props} resourceFamily="external-secrets" />
+);
+export const NsViewPrometheus = (props: NamespaceCustomViewProps) => (
+  <CustomViewGrid {...props} resourceFamily="prometheus" />
+);
 
 export default CustomViewGrid;

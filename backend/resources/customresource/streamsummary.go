@@ -12,6 +12,8 @@ package customresource
 import (
 	"github.com/luxury-yacht/app/backend/kind/streamrows"
 	"github.com/luxury-yacht/app/backend/resourcemodel"
+	"github.com/luxury-yacht/app/backend/resources/argocd"
+	"github.com/luxury-yacht/app/backend/resources/karpenter"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
@@ -20,6 +22,9 @@ import (
 func BuildNamespaceStreamSummary(meta streamrows.ClusterMeta, resource *unstructured.Unstructured, descriptor Descriptor, defaultNamespace string) streamrows.NamespaceCustomSummary {
 	if resource == nil {
 		return streamrows.NamespaceCustomSummary{
+			CertManager:     certManagerSummary(meta.ClusterID, resource),
+			ExternalSecrets: externalSecretsSummary(meta.ClusterID, resource),
+			Prometheus:      prometheusSummary(meta.ClusterID, resource),
 			Ref: resourcemodel.NewResourceRef(resourcemodel.ResourceRef{
 				ClusterID: meta.ClusterID, Group: descriptor.GVR.Group, Version: descriptor.GVR.Version,
 				Kind: descriptor.KindFallback, Resource: descriptor.GVR.Resource,
@@ -31,6 +36,10 @@ func BuildNamespaceStreamSummary(meta streamrows.ClusterMeta, resource *unstruct
 	model := BuildResourceModel(meta.ClusterID, resource, descriptor, resourcemodel.ResourceScopeNamespaced, defaultNamespace)
 	facts := BuildFacts(meta.ClusterID, resource, gvr, descriptor.CRDName, resourcemodel.ResourceModelBuildOptions{})
 	return streamrows.NamespaceCustomSummary{
+		CertManager:        certManagerSummary(meta.ClusterID, resource),
+		ExternalSecrets:    externalSecretsSummary(meta.ClusterID, resource),
+		Prometheus:         prometheusSummary(meta.ClusterID, resource),
+		ArgoCD:             argoCDTableSummary(argocd.BuildFacts(meta.ClusterID, resource), model.Status),
 		Ref:                model.Ref,
 		CRDName:            descriptor.CRDName,
 		Status:             model.Status.Label,
@@ -50,6 +59,9 @@ func BuildNamespaceStreamSummary(meta streamrows.ClusterMeta, resource *unstruct
 func BuildClusterStreamSummary(meta streamrows.ClusterMeta, resource *unstructured.Unstructured, descriptor Descriptor) streamrows.ClusterCustomSummary {
 	if resource == nil {
 		return streamrows.ClusterCustomSummary{
+			CertManager:     certManagerSummary(meta.ClusterID, resource),
+			ExternalSecrets: externalSecretsSummary(meta.ClusterID, resource),
+			Prometheus:      prometheusSummary(meta.ClusterID, resource),
 			Ref: resourcemodel.NewResourceRef(resourcemodel.ResourceRef{
 				ClusterID: meta.ClusterID, Group: descriptor.GVR.Group, Version: descriptor.GVR.Version,
 				Kind: descriptor.KindFallback, Resource: descriptor.GVR.Resource,
@@ -61,6 +73,10 @@ func BuildClusterStreamSummary(meta streamrows.ClusterMeta, resource *unstructur
 	model := BuildResourceModel(meta.ClusterID, resource, descriptor, resourcemodel.ResourceScopeCluster, "")
 	facts := BuildFacts(meta.ClusterID, resource, gvr, descriptor.CRDName, resourcemodel.ResourceModelBuildOptions{})
 	return streamrows.ClusterCustomSummary{
+		CertManager:        certManagerSummary(meta.ClusterID, resource),
+		ExternalSecrets:    externalSecretsSummary(meta.ClusterID, resource),
+		Prometheus:         prometheusSummary(meta.ClusterID, resource),
+		Karpenter:          karpenterTableSummary(karpenter.BuildFacts(meta.ClusterID, resource)),
 		Ref:                model.Ref,
 		CRDName:            descriptor.CRDName,
 		Status:             model.Status.Label,
@@ -73,4 +89,39 @@ func BuildClusterStreamSummary(meta streamrows.ClusterMeta, resource *unstructur
 		Labels:             model.Metadata.Labels,
 		Annotations:        model.Metadata.Annotations,
 	}
+}
+
+func karpenterTableSummary(facts *karpenter.Facts) *streamrows.KarpenterSummary {
+	if facts == nil {
+		return nil
+	}
+	return &streamrows.KarpenterSummary{
+		NodePool: facts.NodePool, NodeClass: facts.NodeClass,
+		InstanceType: facts.InstanceType, CapacityType: facts.CapacityType,
+		Capacity: facts.Capacity, Limits: facts.Limits,
+	}
+}
+
+func argoCDTableSummary(facts *argocd.Facts, status resourcemodel.ResourceStatusPresentation) *streamrows.ArgoCDSummary {
+	if facts == nil {
+		return nil
+	}
+	summary := &streamrows.ArgoCDSummary{}
+	if facts.Application != nil || facts.ApplicationSet != nil || status.Presentation == "terminating" {
+		summary.Health = status.Label
+		summary.HealthPresentation = status.Presentation
+	}
+	var spec argocd.ApplicationSpec
+	if facts.Application != nil {
+		spec = facts.Application.Spec
+		summary.Sync = facts.Application.Sync
+		summary.SyncPresentation = facts.Application.SyncPresentation
+	}
+	if facts.ApplicationSet != nil {
+		spec = facts.ApplicationSet.Template
+	}
+	summary.Project = spec.Project
+	summary.Destination = spec.Destination.DisplayName()
+	summary.DestinationNamespace = spec.Destination.Namespace
+	return summary
 }

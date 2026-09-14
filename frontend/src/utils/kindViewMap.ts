@@ -8,6 +8,7 @@
  * Returns null for unknown kinds — callers should fall back to browse.
  */
 
+import { resourceFamilyForObject } from '@core/navigation/resourceFamilies';
 import type { ClusterViewType, NamespaceViewType, ViewType } from '@/types/navigation/views';
 
 export interface ViewDestination {
@@ -73,16 +74,15 @@ const CLUSTER_SCOPED_MAP: Record<string, ViewDestination> = {
  * Look up the view destination for a Kubernetes resource kind.
  * Case-insensitive. Returns null for unknown kinds.
  */
-export function getViewForKind(kind: string): ViewDestination | null {
+export function getViewForKind(
+  kind: string,
+  group?: string | null,
+  namespace?: string | null
+): ViewDestination | null {
+  const family = group ? resourceFamilyForObject(group, kind, Boolean(namespace)) : undefined;
+  if (family) {
+    return { viewType: namespace ? 'namespace' : 'cluster', tab: family };
+  }
   const normalized = kind.toLowerCase();
   return NAMESPACE_SCOPED_MAP[normalized] ?? CLUSTER_SCOPED_MAP[normalized] ?? null;
-}
-
-/**
- * Returns true if the kind maps to a namespace-scoped view.
- * Useful for determining whether namespace selection is needed.
- */
-export function isNamespaceScopedKind(kind: string): boolean {
-  const normalized = kind.toLowerCase();
-  return normalized in NAMESPACE_SCOPED_MAP;
 }

@@ -184,6 +184,7 @@ const selectFilterOptionsPayload = (
  * Options for the useBrowseCatalog hook.
  */
 export interface UseBrowseCatalogOptions {
+  resourceFamily?: string;
   /** Enables catalog scope lifecycle and startup refresh once owning state is ready. */
   enabled?: boolean;
   /** Cluster ID to filter items by */
@@ -310,12 +311,14 @@ export function useBrowseCatalog({
   pinnedNamespaces,
   clusterScopedOnly = false,
   customOnly = false,
+  resourceFamily,
   filters,
   sort,
   pageLimit: pageLimitProp,
   onPageLimitChange,
   diagnosticLabel,
 }: UseBrowseCatalogOptions): UseBrowseCatalogResult {
+  const search = filters.search ?? '';
   const [items, setItems] = useState<CatalogItem[]>([]);
   const [continueToken, setContinueToken] = useState<string | null>(null);
   const [previousToken, setPreviousToken] = useState<string | null>(null);
@@ -329,7 +332,10 @@ export function useBrowseCatalog({
   const [pageError, setPageError] = useState<string | null>(null);
   // Last derived filter options, held across transient no-payload gaps so the
   // filter dropdowns never blank mid-interaction (see the filterOptions memo).
-  const lastFilterOptionsRef = useRef<BrowseFilterOptions | null>(null);
+  const lastFilterOptionsRef = useRef<{
+    scopeIdentity: string;
+    options: BrowseFilterOptions;
+  } | null>(null);
   // Controlled page size: normalize the owner-provided value; no local mirror.
   // Views without a persisted page size fall back to the app-wide Default Page
   // Size preference (Settings ▸ Display ▸ Tables).
@@ -338,7 +344,7 @@ export function useBrowseCatalog({
     () => normalizeInitialPageLimit(pageLimitProp ?? defaultTablePageSize, defaultTablePageSize),
     [defaultTablePageSize, pageLimitProp]
   );
-  const [debouncedSearch, setDebouncedSearch] = useState(filters.search ?? '');
+  const [debouncedSearch, setDebouncedSearch] = useState(search);
   const { isPaused, isManualRefreshActive } = useAutoRefreshLoadingState();
 
   const collectionRef = useRef(emptyBrowseCatalogCollection());
@@ -392,6 +398,7 @@ export function useBrowseCatalog({
         clusterId,
         clusterScopedOnly,
         customOnly,
+        resourceFamily,
         pinnedNamespaces,
         filters: queryFilters,
         sort,
@@ -404,14 +411,28 @@ export function useBrowseCatalog({
       clusterId,
       clusterScopedOnly,
       customOnly,
+      resourceFamily,
       queryFilters,
       sort,
       pinnedNamespaces,
     ]
   );
   const { catalogScope, metadataScope, metadataUsesActiveScope } = plan;
+  // Like typed resource queries, reset structural scope changes before commit:
+  // an effect would let the table cache the previous rows under the new view.
+  const [appliedScopeIdentity, setAppliedScopeIdentity] = useState(plan.scopeIdentityKey);
+  if (appliedScopeIdentity !== plan.scopeIdentityKey) {
+    setAppliedScopeIdentity(plan.scopeIdentityKey);
+    setItems([]);
+    setHasLoadedOnce(false);
+    setTotalCount(0);
+    setUnfilteredTotal(0);
+    setTotalIsExact(true);
+    setAvailableNamespaces([]);
+    setDebouncedSearch(search);
+  }
   const activeSort = browseCatalogSortDescriptor(sort);
-  const queryPending = (filters.search ?? '') !== debouncedSearch;
+  const queryPending = search !== debouncedSearch;
   const queryDescriptor = useMemo<BrowseCatalogQueryDescriptor>(
     () => ({
       clusterId: clusterId ?? '',
@@ -513,6 +534,11 @@ export function useBrowseCatalog({
     }
 
     const payload = domain.data;
+    // A rebuild with no rows yet must not replace a previously served page.
+    // A final empty result still applies so deletions and empty filters show.
+    if (!isRenderableCatalogPayload(payload)) {
+      return;
+    }
     const currentLength = collectionRef.current.items.length;
     const next = applyCatalogBaseline(collectionRef.current, payload);
     if (currentPageTokenRef.current) {
@@ -771,17 +797,20 @@ export function useBrowseCatalog({
   );
   const filterOptionsResolved = Boolean(filterOptionsPayload);
   const filterOptions = useMemo<BrowseFilterOptions>(() => {
-    if (!filterOptionsPayload && lastFilterOptionsRef.current) {
-      return lastFilterOptionsRef.current;
+    if (
+      !filterOptionsPayload &&
+      lastFilterOptionsRef.current?.scopeIdentity === plan.scopeIdentityKey
+    ) {
+      return lastFilterOptionsRef.current.options;
     }
     const derived = deriveBrowseFilterOptions({
       payload: filterOptionsPayload,
       clusterScopedOnly,
       isNamespaceScoped: plan.isNamespaceScoped,
     });
-    lastFilterOptionsRef.current = derived;
+    lastFilterOptionsRef.current = { scopeIdentity: plan.scopeIdentityKey, options: derived };
     return derived;
-  }, [clusterScopedOnly, filterOptionsPayload, plan.isNamespaceScoped]);
+  }, [clusterScopedOnly, filterOptionsPayload, plan.isNamespaceScoped, plan.scopeIdentityKey]);
 
   // Update available namespaces when the snapshot includes them.
   // This enables querying all namespaces when no filter is selected in all-namespaces mode.

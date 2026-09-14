@@ -298,6 +298,11 @@ type ClusterCRDEntry struct {
 
 // NamespaceCustomSummary is a CRD-backed namespaced custom resource row.
 type NamespaceCustomSummary struct {
+	CertManager     *CertManagerSummary     `json:"certManager,omitempty"`
+	ExternalSecrets *ExternalSecretsSummary `json:"externalSecrets,omitempty"`
+	Prometheus      *PrometheusSummary      `json:"prometheus,omitempty"`
+
+	ArgoCD             *ArgoCDSummary                 `json:"argoCD,omitempty"`
 	Ref                resourcemodel.ResourceRef      `json:"ref"`
 	CRDName            string                         `json:"crdName,omitempty"`
 	Status             string                         `json:"status,omitempty"`
@@ -311,8 +316,36 @@ type NamespaceCustomSummary struct {
 	Annotations        map[string]string              `json:"annotations,omitempty"`
 }
 
+// ArgoCDSummary holds the focused fields used by the Argo CD table.
+type ArgoCDSummary struct {
+	Health               string `json:"health,omitempty"`
+	HealthPresentation   string `json:"healthPresentation,omitempty"`
+	Sync                 string `json:"sync,omitempty"`
+	SyncPresentation     string `json:"syncPresentation,omitempty"`
+	Project              string `json:"project,omitempty"`
+	Destination          string `json:"destination,omitempty"`
+	DestinationNamespace string `json:"destinationNamespace,omitempty"`
+}
+
+// KarpenterSummary contains only the facts shown in the Karpenter table.
+// Capacity and limits supply NodePool usage; scheduling and provider configuration
+// belong to the rich detail DTO.
+type KarpenterSummary struct {
+	NodePool     *resourcemodel.ResourceLink `json:"nodePool,omitempty"`
+	NodeClass    *resourcemodel.ResourceLink `json:"nodeClass,omitempty"`
+	InstanceType string                      `json:"instanceType,omitempty"`
+	CapacityType string                      `json:"capacityType,omitempty"`
+	Capacity     map[string]string           `json:"capacity,omitempty"`
+	Limits       map[string]string           `json:"limits,omitempty"`
+}
+
 // ClusterCustomSummary is a CRD-backed cluster-scoped custom resource row.
 type ClusterCustomSummary struct {
+	CertManager     *CertManagerSummary     `json:"certManager,omitempty"`
+	ExternalSecrets *ExternalSecretsSummary `json:"externalSecrets,omitempty"`
+	Prometheus      *PrometheusSummary      `json:"prometheus,omitempty"`
+
+	Karpenter          *KarpenterSummary              `json:"karpenter,omitempty"`
 	Ref                resourcemodel.ResourceRef      `json:"ref"`
 	CRDName            string                         `json:"crdName,omitempty"`
 	Status             string                         `json:"status,omitempty"`

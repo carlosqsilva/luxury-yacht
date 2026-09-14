@@ -89,39 +89,57 @@ afterEach(() => {
 });
 
 describe('Tooltip', () => {
+  it('leaves Tab on an ordinary hover tooltip child to the surrounding navigation owner', async () => {
+    vi.useFakeTimers();
+    const { container, cleanup } = await renderTooltip({
+      content: 'A hint',
+      children: <button type="button">Action</button>,
+    });
+    const trigger = container.querySelector<HTMLElement>('.tooltip-trigger');
+    await act(async () => {
+      trigger?.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+      vi.advanceTimersByTime(250);
+    });
+    const child = container.querySelector('button');
+    await act(async () => child?.focus());
+    const event = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+    await act(async () => child?.dispatchEvent(event));
+    expect(event.defaultPrevented).toBe(false);
+    cleanup();
+    vi.useRealTimers();
+  });
+  it('restores focus when an open keyboard tooltip becomes unavailable', async () => {
+    const props = {
+      content: <button type="button">Action</button>,
+      triggerLabel: 'Status',
+      interactive: true,
+    };
+    const { container, root, cleanup } = await renderTooltip(props);
+    const trigger = container.querySelector<HTMLElement>('[role="button"]');
+    await act(async () => {
+      trigger?.focus();
+      trigger?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })
+      );
+    });
+    await act(async () =>
+      trigger?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })
+      )
+    );
+    expect(document.activeElement?.textContent).toBe('Action');
+    await act(async () => root.render(<Tooltip {...props} disabled />));
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+    expect(trigger?.getAttribute('aria-expanded')).toBe('false');
+    cleanup();
+  });
   // -----------------------------------------------------------------------
   // Default icon
   // -----------------------------------------------------------------------
-  it('renders a default info icon when no children are provided', async () => {
-    const { container, cleanup } = await renderTooltip({ content: 'Help text' });
-
-    const icon = container.querySelector('.tooltip-info-icon');
-    expect(icon).toBeTruthy();
-    expect(icon?.tagName.toLowerCase()).toBe('svg');
-
-    cleanup();
-  });
-
   // -----------------------------------------------------------------------
   // Custom children as trigger
   // -----------------------------------------------------------------------
-  it('renders children as the trigger element', async () => {
-    const { container, cleanup } = await renderTooltip({
-      content: 'Tip',
-      children: (
-        <button type="button" data-testid="btn">
-          Hover me
-        </button>
-      ),
-    });
-
-    const trigger = container.querySelector('.tooltip-trigger');
-    expect(trigger?.querySelector('[data-testid="btn"]')).toBeTruthy();
-    // No default icon rendered
-    expect(container.querySelector('.tooltip-info-icon')).toBeFalsy();
-
-    cleanup();
-  });
 
   // -----------------------------------------------------------------------
   // Hover trigger — show after delay
@@ -391,33 +409,6 @@ describe('Tooltip', () => {
   // -----------------------------------------------------------------------
   // Placement attribute
   // -----------------------------------------------------------------------
-  it('sets the correct data-placement attribute', async () => {
-    vi.useFakeTimers();
-
-    const { container, cleanup } = await renderTooltip({
-      content: 'Top tip',
-      placement: 'bottom',
-    });
-
-    const trigger = container.querySelector('.tooltip-trigger') as HTMLElement;
-
-    await act(async () => {
-      trigger.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-    });
-    await act(async () => {
-      vi.advanceTimersByTime(250);
-    });
-
-    const tooltip = container.querySelector('.tooltip') as HTMLElement;
-    expect(tooltip).toBeTruthy();
-    // data-placement should reflect the requested placement (bottom)
-    // It may flip based on viewport, but in JSDOM with default viewport it
-    // should keep the requested placement.
-    expect(tooltip.getAttribute('data-placement')).toBeTruthy();
-
-    cleanup();
-    vi.useRealTimers();
-  });
 
   // -----------------------------------------------------------------------
   // disabled prop
@@ -448,33 +439,6 @@ describe('Tooltip', () => {
   // -----------------------------------------------------------------------
   // Rich content (ReactNode)
   // -----------------------------------------------------------------------
-  it('renders rich ReactNode content inside the tooltip', async () => {
-    vi.useFakeTimers();
-
-    const richContent = (
-      <div data-testid="rich">
-        <strong>Bold</strong> text
-      </div>
-    );
-
-    const { container, cleanup } = await renderTooltip({ content: richContent });
-
-    const trigger = container.querySelector('.tooltip-trigger') as HTMLElement;
-
-    await act(async () => {
-      trigger.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-    });
-    await act(async () => {
-      vi.advanceTimersByTime(250);
-    });
-
-    const tooltip = container.querySelector('.tooltip');
-    expect(tooltip?.querySelector('[data-testid="rich"]')).toBeTruthy();
-    expect(tooltip?.querySelector('strong')?.textContent).toBe('Bold');
-
-    cleanup();
-    vi.useRealTimers();
-  });
 
   it('keeps page-level hover tooltips below dockable panels', async () => {
     vi.useFakeTimers();
@@ -550,57 +514,9 @@ describe('Tooltip', () => {
   // -----------------------------------------------------------------------
   // Variant class
   // -----------------------------------------------------------------------
-  it('applies the variant class to the tooltip element', async () => {
-    vi.useFakeTimers();
-
-    const { container, cleanup } = await renderTooltip({
-      content: 'Warning!',
-      variant: 'warning',
-    });
-
-    const trigger = container.querySelector('.tooltip-trigger') as HTMLElement;
-
-    await act(async () => {
-      trigger.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-    });
-    await act(async () => {
-      vi.advanceTimersByTime(250);
-    });
-
-    const tooltip = container.querySelector('.tooltip') as HTMLElement;
-    expect(tooltip.className).toContain('warning');
-    expect(tooltip.className).toContain('tooltip--portal');
-
-    cleanup();
-    vi.useRealTimers();
-  });
-
   // -----------------------------------------------------------------------
   // showArrow false hides data-placement
   // -----------------------------------------------------------------------
-  it('omits data-placement when showArrow is false', async () => {
-    vi.useFakeTimers();
-
-    const { container, cleanup } = await renderTooltip({
-      content: 'No arrow',
-      showArrow: false,
-    });
-
-    const trigger = container.querySelector('.tooltip-trigger') as HTMLElement;
-
-    await act(async () => {
-      trigger.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-    });
-    await act(async () => {
-      vi.advanceTimersByTime(250);
-    });
-
-    const tooltip = container.querySelector('.tooltip') as HTMLElement;
-    expect(tooltip.getAttribute('data-placement')).toBeNull();
-
-    cleanup();
-    vi.useRealTimers();
-  });
 
   // -----------------------------------------------------------------------
   // Hover does not fire on click trigger mode

@@ -31,8 +31,6 @@ export type CatalogItemScope = 'Cluster' | 'Namespace';
 
 export type ResourceQueryProvider = 'typed-resource' | 'catalog';
 
-export type ResourceQueryScope = 'cluster' | 'namespace' | 'all-namespaces';
-
 export type ResourceQueryCompleteness = 'complete' | 'partial';
 
 export type NamespaceScopeStatus = 'not-found' | 'no-access';
@@ -86,6 +84,142 @@ export type ResourceStreamSource = (typeof RESOURCE_STREAM_SOURCES)[number];
 export const RESOURCE_STREAM_SIGNALS = ['changed', 'reset', 'error'] as const;
 
 export type ResourceStreamSignal = (typeof RESOURCE_STREAM_SIGNALS)[number];
+
+export interface ArgoCDApplicationFacts {
+  spec: ArgoCDApplicationSpec;
+  sync?: string;
+  syncPresentation?: string;
+  health?: string;
+  healthPresentation?: string;
+  healthMessage?: string;
+  revisions?: Array<string>;
+  operation?: ArgoCDOperation;
+  applicationSet?: ResourceLink;
+  resourceCount?: number;
+}
+
+export interface ArgoCDApplicationSetFacts {
+  templateName?: string;
+  template: ArgoCDApplicationSpec;
+  generators?: Array<ArgoCDGenerator>;
+  strategy?: string;
+  applicationsSync?: string;
+  preserveResourcesOnDeletion?: boolean;
+  goTemplate?: boolean;
+}
+
+export interface ArgoCDApplicationSpec {
+  project?: string;
+  destination: ArgoCDDestination;
+  source?: ArgoCDSource;
+  sources?: Array<ArgoCDSource>;
+  syncPolicy?: ArgoCDSyncPolicy;
+}
+
+export interface ArgoCDAutomatedSync {
+  enabled?: boolean;
+  prune: boolean;
+  selfHeal: boolean;
+  allowEmpty: boolean;
+}
+
+export interface ArgoCDCondition {
+  type: string;
+  status?: string;
+  presentation: string;
+  message?: string;
+  reason?: string;
+  lastTransitionTime?: string;
+}
+
+export interface ArgoCDDestination {
+  name?: string;
+  server?: string;
+  namespace?: string;
+  resolvedName?: string;
+}
+
+export interface ArgoCDFacts {
+  application?: ArgoCDApplicationFacts;
+  applicationSet?: ArgoCDApplicationSetFacts;
+  project?: ArgoCDProjectFacts;
+  conditions?: Array<ArgoCDCondition>;
+}
+
+export interface ArgoCDGenerator {
+  type: string;
+  repoURL?: string;
+  revision?: string;
+}
+
+export interface ArgoCDOperation {
+  phase?: string;
+  message?: string;
+  startedAt?: string;
+  finishedAt?: string;
+}
+
+export interface ArgoCDProjectFacts {
+  description?: string;
+  sourceRepos?: Array<string>;
+  sourceNamespaces?: Array<string>;
+  destinations?: Array<ArgoCDDestination>;
+  clusterResourceWhitelist?: Array<ArgoCDResourceRestriction>;
+  clusterResourceBlacklist?: Array<ArgoCDResourceRestriction>;
+  namespaceResourceWhitelist?: Array<ArgoCDResourceRestriction>;
+  namespaceResourceBlacklist?: Array<ArgoCDResourceRestriction>;
+  roles?: Array<ArgoCDProjectRole>;
+  syncWindows?: Array<ArgoCDSyncWindow>;
+}
+
+export interface ArgoCDProjectRole {
+  name: string;
+  description?: string;
+  groups?: Array<string>;
+  policies?: Array<string>;
+}
+
+export interface ArgoCDResourceRestriction {
+  group: string;
+  kind: string;
+  name?: string;
+}
+
+export interface ArgoCDSource {
+  repoURL?: string;
+  path?: string;
+  chart?: string;
+  targetRevision?: string;
+  ref?: string;
+  name?: string;
+}
+
+export interface ArgoCDSummary {
+  health?: string;
+  healthPresentation?: string;
+  sync?: string;
+  syncPresentation?: string;
+  project?: string;
+  destination?: string;
+  destinationNamespace?: string;
+}
+
+export interface ArgoCDSyncPolicy {
+  automated?: ArgoCDAutomatedSync;
+  syncOptions?: Array<string>;
+}
+
+export interface ArgoCDSyncWindow {
+  kind: string;
+  schedule: string;
+  duration: string;
+  timeZone?: string;
+  applications?: Array<string>;
+  namespaces?: Array<string>;
+  clusters?: Array<string>;
+  manualSync: boolean;
+  andOperator: boolean;
+}
 
 export interface AttentionCause {
   type: string;
@@ -142,6 +276,7 @@ export interface CatalogNamespaceGroup {
 }
 
 export interface CatalogSnapshotPayload {
+  resourceFamilies: ResourceFamilies;
   clusterId: string;
   clusterName: string;
   provider: ResourceQueryProvider;
@@ -172,6 +307,84 @@ export interface CatalogSnapshotPayload {
   totalBatches: number;
   isFinal: boolean;
   firstBatchLatencyMs?: number;
+}
+
+export interface CertManagerAuthority {
+  type: string;
+  server?: string;
+  email?: string;
+  path?: string;
+  solvers?: Array<string>;
+}
+
+export interface CertManagerCertificate {
+  commonName?: string;
+  dnsNames?: Array<string>;
+  ipAddresses?: Array<string>;
+  uris?: Array<string>;
+  emailAddresses?: Array<string>;
+  duration?: string;
+  renewBefore?: string;
+  isCA: boolean;
+  usages?: Array<string>;
+  privateKey?: CertmanagerPrivateKey;
+  notBefore?: string;
+  notAfter?: string;
+  renewalTime?: string;
+  revision?: number;
+}
+
+export interface CertManagerChallenge {
+  dnsName?: string;
+  type?: string;
+  wildcard: boolean;
+  presented?: boolean;
+  processing?: boolean;
+  state?: string;
+  reason?: string;
+}
+
+export interface CertManagerFacts {
+  conditions?: Array<OperatorCondition>;
+  issuer?: ResourceLink;
+  secret?: ResourceLink;
+  owners?: Array<ResourceLink>;
+  certificate?: CertManagerCertificate;
+  request?: CertManagerRequest;
+  authority?: CertManagerAuthority;
+  order?: CertManagerOrder;
+  challenge?: CertManagerChallenge;
+}
+
+export interface CertManagerOrder {
+  dnsNames?: Array<string>;
+  duration?: string;
+  state?: string;
+  reason?: string;
+  url?: string;
+  failureTime?: string;
+}
+
+export interface CertManagerRequest {
+  duration?: string;
+  isCA: boolean;
+  usages?: Array<string>;
+  failureTime?: string;
+}
+
+export interface CertManagerSummary {
+  issuerType?: string;
+  server?: string;
+  issuer?: ResourceLink;
+  secret?: ResourceLink;
+  notAfter?: string;
+}
+
+export interface CertmanagerPrivateKey {
+  algorithm?: string;
+  size?: number;
+  encoding?: string;
+  rotationPolicy?: string;
 }
 
 export interface ClusterAttentionFinding {
@@ -289,6 +502,10 @@ export interface ClusterConfigSnapshotPayload {
 }
 
 export interface ClusterCustomEntry {
+  certManager?: CertManagerSummary;
+  externalSecrets?: ExternalSecretsSummary;
+  prometheus?: PrometheusSummary;
+  karpenter?: KarpenterSummary;
   ref: CanonicalResourceRef;
   crdName?: string;
   status?: string;
@@ -350,6 +567,17 @@ export interface ClusterEventsSnapshotPayload {
   dynamic?: ResourceQueryDynamicRef;
   capabilities: ResourceQueryCapabilities;
   rows: Array<ClusterEventEntry> | null;
+}
+
+export interface ClusterExternalSecretFacts {
+  externalSecretName?: string;
+  refreshTime?: string;
+  namespaceSelector?: OperatorLabelSelector;
+  namespaceSelectors?: Array<OperatorLabelSelector>;
+  namespaces?: Array<string>;
+  provisionedNamespaces?: Array<string>;
+  failedNamespaces?: Array<ExternalsecretsFailedNamespace>;
+  template?: ExternalSecretFacts;
 }
 
 export interface ClusterNodeSnapshotEntry {
@@ -581,7 +809,36 @@ export interface ContainerLogsWireEntry {
   isEphemeral?: boolean;
 }
 
+export interface CrdfactsLabelSelectorRequirement {
+  key: string;
+  operator: string;
+  values?: Array<string>;
+}
+
+export interface CustomResourceDetails {
+  certManager?: CertManagerFacts;
+  externalSecrets?: ExternalSecretsFacts;
+  prometheus?: PrometheusFacts;
+  argoCD?: ArgoCDFacts;
+  ref: ResourceRef;
+  resourceFamily: string;
+  kind: string;
+  name: string;
+  status: string;
+  statusState: string;
+  statusPresentation: string;
+  conditions?: Array<ConditionFacts>;
+  labels?: Record<string, string>;
+  annotations?: Record<string, string>;
+  karpenter?: KarpenterFacts;
+}
+
 export interface CustomResourceSummary {
+  certManager?: CertManagerSummary;
+  externalSecrets?: ExternalSecretsSummary;
+  prometheus?: PrometheusSummary;
+  argoCD?: ArgoCDSummary;
+  karpenter?: KarpenterSummary;
   ref: CanonicalResourceRef;
   crdName?: string;
   status?: string;
@@ -623,6 +880,163 @@ export interface DrainNodeOptionsPayload {
   force: boolean;
   disableEviction: boolean;
   skipWaitForPodsToTerminate: boolean;
+}
+
+export interface ExternalSecretFacts {
+  storeName?: string;
+  storeKind?: string;
+  store?: ResourceLink;
+  target?: ResourceLink;
+  targetName?: string;
+  refreshInterval?: string;
+  refreshPolicy?: string;
+  refreshTime?: string;
+  creationPolicy?: string;
+  deletionPolicy?: string;
+  data?: Array<ExternalsecretsDataMapping>;
+  dataFrom?: Array<ExternalsecretsDataSource>;
+}
+
+export interface ExternalSecretStoreFacts {
+  providers?: Array<string>;
+  controller?: string;
+  refreshInterval?: number;
+  capabilities?: string;
+  retrySettings?: ExternalsecretsRetrySettings;
+  conditions?: Array<ExternalsecretsNamespaceCondition>;
+}
+
+export interface ExternalSecretsFacts {
+  conditions?: Array<OperatorCondition>;
+  externalSecret?: ExternalSecretFacts;
+  store?: ExternalSecretStoreFacts;
+  clusterExternalSecret?: ClusterExternalSecretFacts;
+}
+
+export interface ExternalSecretsSummary {
+  provider?: string;
+  storeName?: string;
+  store?: ResourceLink;
+  target?: ResourceLink;
+  targetName?: string;
+  refreshInterval?: string;
+}
+
+export interface ExternalsecretsDataMapping {
+  secretKey: string;
+  remoteRef: ExternalsecretsRemoteRef;
+}
+
+export interface ExternalsecretsDataSource {
+  extract?: ExternalsecretsRemoteRef;
+  find?: ExternalsecretsFind;
+  sourceRef?: ExternalsecretsGeneratorSource;
+}
+
+export interface ExternalsecretsFailedNamespace {
+  namespace: string;
+  reason?: string;
+}
+
+export interface ExternalsecretsFind {
+  path?: string;
+  name?: ExternalsecretsNamePattern;
+  tags?: Record<string, string>;
+}
+
+export interface ExternalsecretsGeneratorRef {
+  apiVersion?: string;
+  kind?: string;
+  name?: string;
+}
+
+export interface ExternalsecretsGeneratorSource {
+  generatorRef?: ExternalsecretsGeneratorRef;
+}
+
+export interface ExternalsecretsNamePattern {
+  regexp?: string;
+}
+
+export interface ExternalsecretsNamespaceCondition {
+  namespaces?: Array<string>;
+  namespaceSelector?: OperatorLabelSelector;
+  namespaceRegexes?: Array<string>;
+}
+
+export interface ExternalsecretsRemoteRef {
+  key: string;
+  property?: string;
+  version?: string;
+  conversionStrategy?: string;
+  decodingStrategy?: string;
+}
+
+export interface ExternalsecretsRetrySettings {
+  maxRetries?: number;
+  retryInterval?: string;
+}
+
+export interface KarpenterBudget {
+  nodes: string;
+  reasons?: Array<string>;
+  schedule?: string;
+  duration?: string;
+}
+
+export interface KarpenterFacts {
+  nodeClass?: ResourceLink;
+  nodePool?: ResourceLink;
+  node?: ResourceLink;
+  weight?: number;
+  replicas?: number;
+  limits?: Record<string, string>;
+  capacity?: Record<string, string>;
+  allocatable?: Record<string, string>;
+  consolidationPolicy?: string;
+  consolidateAfter?: string;
+  expireAfter?: string;
+  terminationGracePeriod?: string;
+  requirements?: Array<KarpenterRequirement>;
+  taints?: Array<KarpenterTaint>;
+  startupTaints?: Array<KarpenterTaint>;
+  budgets?: Array<KarpenterBudget>;
+  providerID?: string;
+  imageID?: string;
+  instanceType?: string;
+  capacityType?: string;
+  zone?: string;
+  architecture?: string;
+  role?: string;
+  instanceProfile?: string;
+  imageFamily?: string;
+  subnets?: Array<string>;
+  securityGroups?: Array<string>;
+  images?: Array<string>;
+  tags?: Record<string, string>;
+  priceAdjustment?: string;
+}
+
+export interface KarpenterRequirement {
+  key: string;
+  operator: string;
+  values?: Array<string>;
+  minValues?: number;
+}
+
+export interface KarpenterSummary {
+  nodePool?: ResourceLink;
+  nodeClass?: ResourceLink;
+  instanceType?: string;
+  capacityType?: string;
+  capacity?: Record<string, string>;
+  limits?: Record<string, string>;
+}
+
+export interface KarpenterTaint {
+  key: string;
+  value?: string;
+  effect: string;
 }
 
 export interface KindInfo {
@@ -711,6 +1125,10 @@ export interface NamespaceCustomSnapshotPayload {
 }
 
 export interface NamespaceCustomSummary {
+  certManager?: CertManagerSummary;
+  externalSecrets?: ExternalSecretsSummary;
+  prometheus?: PrometheusSummary;
+  argoCD?: ArgoCDSummary;
   ref: CanonicalResourceRef;
   crdName?: string;
   status?: string;
@@ -1218,6 +1636,21 @@ export interface ObjectYAMLSnapshotPayload {
   yaml: string;
 }
 
+export interface OperatorCondition {
+  type: string;
+  status: string;
+  reason?: string;
+  message?: string;
+  lastTransitionTime?: string;
+  observedGeneration?: number;
+  presentation: string;
+}
+
+export interface OperatorLabelSelector {
+  matchLabels?: Record<string, string>;
+  matchExpressions?: Array<CrdfactsLabelSelectorRequirement>;
+}
+
 export interface PodMetricsInfo {
   collectedAt?: number;
   stale: boolean;
@@ -1284,6 +1717,91 @@ export interface PodSnapshotPayload {
   healthCounts: Record<string, number> | null;
 }
 
+export interface PrometheusEndpoint {
+  port?: string;
+  targetPort?: string;
+  portNumber?: number;
+  path?: string;
+  scheme?: string;
+  interval?: string;
+  scrapeTimeout?: string;
+  honorLabels?: boolean;
+  honorTimestamps?: boolean;
+}
+
+export interface PrometheusFacts {
+  conditions?: Array<OperatorCondition>;
+  monitor?: PrometheusMonitor;
+  ruleGroups?: Array<PrometheusRuleGroup>;
+  instance?: PrometheusInstance;
+}
+
+export interface PrometheusInstance {
+  version?: string;
+  replicas?: number;
+  shards?: number;
+  availableReplicas?: number;
+  updatedReplicas?: number;
+  unavailableReplicas?: number;
+  paused: boolean;
+  retention?: string;
+  retentionSize?: string;
+  scrapeInterval?: string;
+  evaluationInterval?: string;
+  externalLabels?: Record<string, string>;
+  serviceMonitorSelector: OperatorLabelSelector | null;
+  serviceMonitorNamespaceSelector: OperatorLabelSelector | null;
+  podMonitorSelector: OperatorLabelSelector | null;
+  podMonitorNamespaceSelector: OperatorLabelSelector | null;
+  ruleSelector: OperatorLabelSelector | null;
+  ruleNamespaceSelector: OperatorLabelSelector | null;
+  alertmanagerConfigSelector: OperatorLabelSelector | null;
+  alertmanagerConfigNamespaceSelector: OperatorLabelSelector | null;
+  configSecret?: string;
+  storageRequest?: string;
+}
+
+export interface PrometheusMonitor {
+  selector: OperatorLabelSelector;
+  namespaceSelector: PrometheusNamespaceSelector;
+  endpoints?: Array<PrometheusEndpoint>;
+  jobLabel?: string;
+  targetLabels?: Array<string>;
+  podTargetLabels?: Array<string>;
+  sampleLimit?: number;
+  targetLimit?: number;
+}
+
+export interface PrometheusNamespaceSelector {
+  any: boolean;
+  matchNames?: Array<string>;
+}
+
+export interface PrometheusRule {
+  alert?: string;
+  record?: string;
+  expr: string;
+  for?: string;
+  keepFiringFor?: string;
+  labels?: Record<string, string>;
+  annotations?: Record<string, string>;
+}
+
+export interface PrometheusRuleGroup {
+  name: string;
+  interval?: string;
+  limit?: number;
+  rules?: Array<PrometheusRule>;
+}
+
+export interface PrometheusSummary {
+  endpoints?: number;
+  rules?: number;
+  version?: string;
+  replicas?: number;
+  availableReplicas?: number;
+}
+
 export interface QuotaStatus {
   disruptionsAllowed: number;
   currentHealthy: number;
@@ -1317,6 +1835,11 @@ export interface RefreshPermissionDeniedStatus {
   reason: string;
   details: RefreshPermissionDeniedDetails;
   code: number;
+}
+
+export interface ResourceFamilies {
+  cluster?: Array<string>;
+  namespaced?: Array<string>;
 }
 
 export interface ResourceLifecycle {
@@ -1376,29 +1899,6 @@ export interface ResourceQueryDynamicRef {
   policy: string;
 }
 
-export interface ResourceQueryEnvelopeFields {
-  provider: ResourceQueryProvider;
-  table: string;
-  queryIdentity?: string;
-  continue?: string;
-  previous?: string;
-  self?: string;
-  cursorInvalid?: boolean;
-  anchor?: ResourceQueryAnchorResult;
-  pageStartRank?: number;
-  total: number;
-  unfilteredTotal: number;
-  totalIsExact: boolean;
-  kinds?: Array<string>;
-  namespaces?: Array<string>;
-  facetValues?: Array<ResourceQueryFacetValues>;
-  facetsExact: boolean;
-  completeness?: ResourceQueryCompleteness;
-  issues?: Array<ResourceQueryIssue>;
-  dynamic?: ResourceQueryDynamicRef;
-  capabilities: ResourceQueryCapabilities;
-}
-
 export interface ResourceQueryFacetDescriptor {
   key: string;
   label: string;
@@ -1421,32 +1921,6 @@ export interface ResourceQueryFacetValues {
 export interface ResourceQueryIssue {
   kind: string;
   message: string;
-}
-
-export interface ResourceQueryPredicate {
-  field: string;
-  op: string;
-  value?: string;
-}
-
-export interface ResourceQueryRequest {
-  clusterId: string;
-  provider?: ResourceQueryProvider;
-  table: string;
-  scope?: ResourceQueryScope;
-  namespaces?: Array<string>;
-  kinds?: Array<string>;
-  facets?: Record<string, Array<string> | null>;
-  matchNone?: boolean;
-  search?: string;
-  includeMetadata?: boolean;
-  predicates?: Array<ResourceQueryPredicate>;
-  sortField?: string;
-  sortDirection?: string;
-  limit?: number;
-  continue?: string;
-  anchor?: ResourceQueryAnchor;
-  startRank?: number;
 }
 
 export interface ResourceRef {

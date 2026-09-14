@@ -42,6 +42,7 @@ completed phase plans, or test lists that can be discovered with `rg`.
 | Where should frontend code live? | [frontend/component-structure.md](frontend/component-structure.md) |
 | How are Global and per-cluster workspaces separated? | [frontend/navigation.md](frontend/navigation.md) |
 | How should shared tables be built? | [frontend/gridtable.md](frontend/gridtable.md) |
+| How should dedicated CRD-family tables and overviews be presented? | [frontend/custom-resource-views.md](frontend/custom-resource-views.md) |
 | How should object age text update? | [frontend/live-age.md](frontend/live-age.md) |
 | How are shortcuts and focus owned? | [frontend/keyboard.md](frontend/keyboard.md) |
 | How should blocking modals work? | [frontend/modals.md](frontend/modals.md) |
@@ -56,6 +57,7 @@ completed phase plans, or test lists that can be discovered with `rg`.
 | Question | Start here |
 | --- | --- |
 | Which recurring implementation mistakes must agents prevent? | [workflows/common-mistakes.md](workflows/common-mistakes.md) |
+| Which tests are worth adding or retaining? | [workflows/testing.md](workflows/testing.md) |
 | How does the object map work? | [workflows/object-map.md](workflows/object-map.md) |
 | How are live operations tracked and cleaned up? | [workflows/operation-lifecycle.md](workflows/operation-lifecycle.md) |
 | How do shell exec and debug containers work? | [workflows/shell-debug.md](workflows/shell-debug.md) |

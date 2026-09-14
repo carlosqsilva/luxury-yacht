@@ -48,6 +48,15 @@ Keep `catalog-first`. Do not turn that into `catalog-only`.
   selection before the dependent query runs.
 - `unfilteredTotal` removes search, Kind, user namespace, and API-group filters
   while retaining the structural boundary.
+- Cold collection may publish progressive batches. A warm resync retains the
+  published query rows, counts, facets, and readiness until collection finishes;
+  it publishes the replacement, including retained failed descriptors, before
+  broadcasting its completion signal. A kind still being collected is not an
+  authoritative deletion.
+- Frontend catalog state resets structural scope changes before React commits,
+  so prior rows cannot enter the destination view's replay cache. Custom-resource
+  hydration decorates only current catalog membership by full identity and UID,
+  retaining those details during background reads and transient failures.
 
 ## Ingest callback ordering
 
@@ -105,3 +114,78 @@ When touching catalog behavior:
 
 Run focused catalog/objectcatalog tests and the frontend browse tests affected
 by the change. For non-documentation work, finish with `wails3 task qc:prerelease`.
+
+## Discovered resource families
+
+The catalog owns optional resource-family availability. `DiscoveredResourceFamilies`
+reads discovered API identities before LIST permissions and object collection;
+`CatalogSnapshot.resourceFamilies.cluster` and `.namespaced` carry that
+availability separately for each scope with the cluster ID. Only a discovered
+kind in the matching scope enables a family view; a ClusterIssuer alone does
+not enable the namespace cert-manager view.
+The shell subscribes to a small catalog scope before optional views open, and
+accepts availability only for the active cluster. Empty installations remain
+visible; successful rediscovery without the APIs removes the entry.
+
+Karpenter is the cluster-scoped `karpenter.*` API family, including core kinds,
+provider NodeClasses, and other discovered kinds. Its dedicated cluster view uses
+`resourceFamily=karpenter` as a structural catalog boundary. Totals, facets,
+continuation signatures, subsequent pages, and exports retain this boundary.
+Discovery remains authoritative for GVK/GVR and served versions; Karpenter CRDs
+are not added to the built-in identity registry.
+
+Custom-resource row hydration and rich Karpenter details share the typed projection
+in `backend/resources/karpenter`. Cluster custom rows carry a compact
+`KarpenterSummary` with named relationship and instance fields; table cells and CSV
+exports each display one value. The single table retains its kind filter. The overview exposes source configuration,
+capacity, relationships, and conditions without inventing defaults. Related
+NodeClass references without a source API version are resolved at the gateway
+boundary using this cluster's catalog discovery, for both hydrated rows and rich
+details. Resolution requires an unambiguous group/kind/scope match; unavailable
+or ambiguous discovery leaves the reference display-only. Explicit source
+versions are preserved. Resolution neither waits for object collection nor adds
+API requests. Enriched details
+use a live GET in the requested cluster and discovered Kubernetes scope, and
+refresh header metadata from that same object,
+so the snapshot's source version changes with its contents. Existing custom
+resource YAML, capabilities, edit, and delete paths retain discovered identity.
+
+Argo CD is the namespaced `argoproj.io` Application, ApplicationSet, and AppProject
+family. Its namespace and All Namespaces views retain `resourceFamily=argocd`
+alongside the namespace boundary across counts, facets, pages, and exports.
+Classification matches both group and kind because other Argo products share
+that API group. Namespace row hydration and rich details share
+`backend/resources/argocd`; compact `ArgoCDSummary` rows contain table fields,
+while source configuration and project policy remain detail-only. Application
+health and sync are separate signals, and ApplicationSet errors take precedence
+over ResourcesUpToDate when projecting health.
+
+Family availability and catalog filtering are reusable; family registration is
+explicit. Add classification in `backend/resourcekind/family.go`, discovered
+availability in `useAvailableResourceViews`, table selection/persistence, and
+rich-detail projection/descriptor for each family. The navigation registry marks
+optional entries with `resourceFamily`; the availability hook applies the
+discovered scope arrays uniformly. `customresource.BuildDetails`
+accepts the resolved scope; its gateway rejects namespace/scope mismatches before
+GET and keys header metadata by namespace. Preserve discovered scope through
+navigation, queries, details and permissions. Related references need complete
+identity; Argo destination cluster names and project names do not establish a
+local cluster or control-plane namespace and must not be guessed into links.
+Family projections may depend on shared resource semantics; they must not import
+catalog, refresh or gateway packages. Object-map support is a separate surface
+and does not follow automatically from a dedicated table or overview.
+
+cert-manager, External Secrets, and Prometheus Operator use this same path.
+Their supported group/kind/scope combinations are explicit in
+`backend/resourcekind/family.go`; served versions remain discovered. Family
+packages share decoding and condition primitives in `backend/resources/crdfacts`.
+Gateway-owned `ResolveLinks` passes the active cluster's catalog resolver into
+detail and row projections. Missing or ambiguous issuer/store versions remain
+display-only; no Secret contents are read to enrich these families. A
+ClusterExternalSecret template has no concrete destination namespace, so its
+namespaced store and Secret references cannot become openable object links.
+Unknown boolean readiness remains absent in row facts, not false. Operator
+status overrides are applied before the shared deletion lifecycle precedence.
+
+Presentation decisions are documented in
+[custom-resource views](../frontend/custom-resource-views.md).

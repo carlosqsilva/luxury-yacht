@@ -5,6 +5,8 @@
  * Covers key behaviors and edge cases for NsViewCustom.
  */
 
+import AllNamespacesView from '@modules/namespace/components/AllNamespacesView';
+import NsResourcesViews from '@modules/namespace/components/NsResourcesViews';
 import { ALL_NAMESPACES_SCOPE } from '@modules/namespace/constants';
 import { OBJECT_ACTION_IDS } from '@shared/actions/objectActionContract';
 import type ConfirmationModal from '@shared/components/modals/ConfirmationModal';
@@ -12,6 +14,7 @@ import type { GridTableProps } from '@shared/components/tables/GridTable';
 import type React from 'react';
 import { act } from 'react';
 import * as ReactDOM from 'react-dom/client';
+import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CanonicalRowTestOverrides, CatalogItem } from '@/core/refresh/types';
 import { requireReactElement } from '@/test-utils/requireReactElement';
@@ -166,6 +169,7 @@ vi.mock('@/core/capabilities', () => ({
       ['CronJob:delete', { allowed: true, pending: false }],
       ['CustomResource:delete', { allowed: true, pending: false }],
       ['DBInstance:delete', { allowed: true, pending: false }],
+      ['Application:delete', { allowed: true, pending: false }],
     ]),
   getPermissionKey: (kind: string, action: string) => `${kind}:${action}`,
   // Stubbed for CRDs not covered by the static permission map; the real
@@ -333,6 +337,50 @@ describe('NsViewCustom', () => {
     });
   };
 
+  it.each(['all namespaces', 'one namespace'] as const)(
+    'discards a pending object action when leaving an extension in %s',
+    async (scope) => {
+      const application = catalogItemFromResource({
+        ref: {
+          clusterId: 'cluster-a',
+          group: 'argoproj.io',
+          version: 'v1alpha1',
+          kind: 'Application',
+          resource: 'applications',
+          namespace: 'argocd',
+          name: 'app',
+        },
+      });
+      useBrowseCatalogMock.mockReturnValue(browseCatalogResult([application]));
+      const renderRoute = async (activeTab: 'argocd' | 'external-secrets') => {
+        await act(async () => {
+          root.render(
+            scope === 'all namespaces' ? (
+              <AllNamespacesView activeTab={activeTab} />
+            ) : (
+              <NsResourcesViews namespace="argocd" activeTab={activeTab} />
+            )
+          );
+        });
+      };
+      await renderRoute('argocd');
+      const grid = requireValue(getLastGridProps(), 'expected the resource table');
+      const remove = grid
+        .getCustomContextMenuItems(grid.data[0], 'name')
+        .find((item) => item.actionId === OBJECT_ACTION_IDS.delete);
+      act(() => requireValue(remove?.onClick, 'expected the delete action')());
+      expect(modalProps.current.isOpen).toBe(true);
+
+      await renderRoute('argocd');
+      expect(modalProps.current.isOpen).toBe(true);
+      await renderRoute('external-secrets');
+      expect(modalProps.current.isOpen).toBe(false);
+      await renderRoute('argocd');
+      expect(modalProps.current.isOpen).toBe(false);
+      expect(runObjectActionMock).not.toHaveBeenCalled();
+    }
+  );
+
   it('renders GridTable with context menu actions and opens the object panel', async () => {
     useBrowseCatalogMock.mockReturnValue(
       browseCatalogResult([catalogItemFromResource(baseResource)])
@@ -375,6 +423,27 @@ describe('NsViewCustom', () => {
       })
     );
   });
+
+  it.each(['team-a', ALL_NAMESPACES_SCOPE])(
+    'keeps Argo CD filtering and namespace scope for %s',
+    async (namespace) => {
+      await renderComponent({
+        namespace,
+        resourceFamily: 'argocd',
+        showNamespaceColumn: namespace === ALL_NAMESPACES_SCOPE,
+      });
+      expect(useBrowseCatalogMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          clusterId: 'cluster-a',
+          resourceFamily: 'argocd',
+          customOnly: true,
+          pinnedNamespaces: namespace === ALL_NAMESPACES_SCOPE ? [] : ['team-a'],
+        })
+      );
+      expect(getLastGridProps()?.columns.map((column) => column.key)).toContain('sync');
+      expect(getLastGridProps()?.columns.map((column) => column.key)).not.toContain('crd');
+    }
+  );
 
   it('uses the catalog query current page on first render for a single namespace', async () => {
     const queryResource: CustomResourceData = {
@@ -995,6 +1064,38 @@ describe('NsViewCustom', () => {
       // Non-interactive accessor-undefined path returns the string '-'
       // directly (no wrapping span, no role="button", no onClick).
       expect(rendered).toBe('-');
+    });
+
+    it('renders hydrated Argo CD sync and health independently with the backend presentation', async () => {
+      const resource: CustomResourceData = {
+        ...baseResource,
+        ref: { ...baseResource.ref, group: 'argoproj.io', kind: 'Application' },
+        argoCD: {
+          sync: 'Synced',
+          syncPresentation: 'ready',
+          health: 'Degraded',
+          healthPresentation: 'error',
+          project: 'production',
+          destination: 'remote-prod',
+          destinationNamespace: 'store',
+        },
+      };
+      useHydratedCustomCatalogRowsMock.mockReturnValue([resource]);
+      await renderComponent({ resourceFamily: 'argocd' });
+      const props = requireValue(getLastGridProps(), 'Argo CD table props');
+      for (const [key, value, presentation] of [
+        ['sync', 'Synced', 'status-text ready'],
+        ['health', 'Degraded', 'status-text error'],
+        ['project', 'production', undefined],
+        ['destination', 'remote-prod', undefined],
+        ['destinationNamespace', 'store', undefined],
+      ] as const) {
+        const rendered = renderToStaticMarkup(findColumn(props, key).render(props.data[0]));
+        expect(rendered).toContain(value);
+        if (presentation) {
+          expect(rendered).toContain(presentation);
+        }
+      }
     });
 
     it('uses backend statusPresentation for custom-resource status styling', async () => {

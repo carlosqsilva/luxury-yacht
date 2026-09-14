@@ -53,6 +53,12 @@ describe('Sidebar keyboard helpers', () => {
       )
     ).toBe(true);
     expect(targetsAreEqual({ kind: 'overview' }, null)).toBe(false);
+    expect(
+      targetsAreEqual(
+        { kind: 'namespace-group-toggle', namespace: 'a|dev', id: 'resources' },
+        { kind: 'namespace-group-toggle', namespace: 'b|dev', id: 'resources' }
+      )
+    ).toBe(false);
   });
 
   it('describes sidebar targets from DOM nodes', () => {
@@ -103,6 +109,37 @@ describe('Sidebar keyboard helpers', () => {
   });
 
   it('yields no target for dataset view values outside the view unions', () => {
+    expect(
+      describeElementTarget(
+        buildTargetElement({
+          'data-sidebar-target-kind': 'namespace-group-toggle',
+          'data-sidebar-target-namespace': 'a|dev',
+          'data-sidebar-target-id': 'resources',
+        })
+      )
+    ).toEqual({ kind: 'namespace-group-toggle', namespace: 'a|dev', id: 'resources' });
+    const invalidGroupAttributes: Record<string, string>[] = [
+      { 'data-sidebar-target-id': 'resources' },
+      { 'data-sidebar-target-namespace': 'a|dev', 'data-sidebar-target-id': 'unknown' },
+    ];
+    for (const attributes of invalidGroupAttributes) {
+      expect(
+        describeElementTarget(
+          buildTargetElement({
+            'data-sidebar-target-kind': 'namespace-group-toggle',
+            ...attributes,
+          })
+        )
+      ).toBeNull();
+    }
+    expect(
+      describeElementTarget(
+        buildTargetElement({
+          'data-sidebar-target-kind': 'cluster-toggle',
+          'data-sidebar-target-id': 'not-a-group',
+        })
+      )
+    ).toBeNull();
     // The dataset round-trips through the DOM as strings; a value that is not
     // a member of the view unions must not become a cursor target.
     expect(
@@ -387,20 +424,17 @@ describe('useSidebarKeyboardControls', () => {
     cleanup();
   });
 
-  it('tabs from the last header control into the current sidebar selection', async () => {
-    const { container, cleanup } = renderHarness({
+  it('leaves header Tab navigation to the owning region', async () => {
+    const { cleanup } = renderHarness({
       selectionTarget: { kind: 'overview' },
     });
     const headerButton = document.createElement('button');
-    headerButton.setAttribute('data-app-header-last-focusable', 'true');
     document.body.appendChild(headerButton);
     headerButton.focus();
 
     await dispatchTab(headerButton);
 
-    expect(document.activeElement).toBe(
-      container.querySelector('[data-sidebar-target-kind="overview"]')
-    );
+    expect(document.activeElement).toBe(headerButton);
 
     headerButton.remove();
     cleanup();
@@ -414,7 +448,6 @@ describe('useSidebarKeyboardControls', () => {
     const headerButton = document.createElement('button');
     headerButton.type = 'button';
     headerButton.textContent = 'Settings';
-    headerButton.setAttribute('data-app-header-last-focusable', 'true');
     document.body.appendChild(headerButton);
     headerButton.focus();
 
@@ -426,12 +459,11 @@ describe('useSidebarKeyboardControls', () => {
     cleanup();
   });
 
-  it('shift-tabs from the sidebar back to the last header control', async () => {
+  it('leaves sidebar Shift+Tab navigation to the owning region', async () => {
     const { container, cleanup } = renderHarness({
       selectionTarget: { kind: 'overview' },
     });
     const headerButton = document.createElement('button');
-    headerButton.setAttribute('data-app-header-last-focusable', 'true');
     document.body.appendChild(headerButton);
     const overview = container.querySelector(
       '[data-sidebar-target-kind="overview"]'
@@ -440,20 +472,17 @@ describe('useSidebarKeyboardControls', () => {
 
     await dispatchTab(overview, true);
 
-    expect((document.activeElement as HTMLElement | null)?.dataset.appHeaderLastFocusable).toBe(
-      'true'
-    );
+    expect(document.activeElement).toBe(overview);
 
     headerButton.remove();
     cleanup();
   });
 
-  it('shift-tabs from the sidebar back to the active cluster tab before the header', async () => {
+  it('does not jump from the sidebar to a cluster tab on plain Shift+Tab', async () => {
     const { container, cleanup } = renderHarness({
       selectionTarget: { kind: 'overview' },
     });
     const headerButton = document.createElement('button');
-    headerButton.setAttribute('data-app-header-last-focusable', 'true');
     document.body.appendChild(headerButton);
     const clusterTabsWrapper = document.createElement('div');
     clusterTabsWrapper.className = 'cluster-tabs-wrapper';
@@ -469,7 +498,7 @@ describe('useSidebarKeyboardControls', () => {
 
     await dispatchTab(overview, true);
 
-    expect(document.activeElement).toBe(activeClusterTab);
+    expect(document.activeElement).toBe(overview);
 
     clusterTabsWrapper.remove();
     headerButton.remove();

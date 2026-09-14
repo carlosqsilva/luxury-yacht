@@ -1,12 +1,21 @@
 package snapshot
 
-import "github.com/luxury-yacht/app/backend/resourcemodel"
+import (
+	"github.com/luxury-yacht/app/backend/kind/streamrows"
+	"github.com/luxury-yacht/app/backend/resourcemodel"
+)
 
 // CustomResourceSummary is the page-hydration row shape used by catalog-backed
 // custom-resource tables. It preserves the rich status and metadata fields from
 // the legacy namespace/cluster custom snapshot rows without requiring the
 // production Custom tabs to subscribe to full CRD fanout domains.
 type CustomResourceSummary struct {
+	CertManager     *streamrows.CertManagerSummary     `json:"certManager,omitempty"`
+	ExternalSecrets *streamrows.ExternalSecretsSummary `json:"externalSecrets,omitempty"`
+	Prometheus      *streamrows.PrometheusSummary      `json:"prometheus,omitempty"`
+
+	ArgoCD             *streamrows.ArgoCDSummary      `json:"argoCD,omitempty"`
+	Karpenter          *streamrows.KarpenterSummary   `json:"karpenter,omitempty"`
 	Ref                resourcemodel.ResourceRef      `json:"ref"`
 	CRDName            string                         `json:"crdName,omitempty"`
 	Status             string                         `json:"status,omitempty"`
@@ -20,8 +29,22 @@ type CustomResourceSummary struct {
 	Annotations        map[string]string              `json:"annotations,omitempty"`
 }
 
+func (row *CustomResourceSummary) ResolveLinks(resolve func(*resourcemodel.ResourceLink) *resourcemodel.ResourceLink) {
+	if row.Karpenter != nil {
+		row.Karpenter.NodeClass = resolve(row.Karpenter.NodeClass)
+	}
+	if row.CertManager != nil {
+		row.CertManager.Issuer = resolve(row.CertManager.Issuer)
+	}
+	if row.ExternalSecrets != nil {
+		row.ExternalSecrets.Store = resolve(row.ExternalSecrets.Store)
+	}
+}
+
 func CustomResourceSummaryFromNamespace(row NamespaceCustomSummary) CustomResourceSummary {
 	return CustomResourceSummary{
+		CertManager: row.CertManager, ExternalSecrets: row.ExternalSecrets, Prometheus: row.Prometheus,
+		ArgoCD:             row.ArgoCD,
 		Ref:                row.Ref,
 		CRDName:            row.CRDName,
 		Status:             row.Status,
@@ -38,6 +61,8 @@ func CustomResourceSummaryFromNamespace(row NamespaceCustomSummary) CustomResour
 
 func CustomResourceSummaryFromCluster(row ClusterCustomSummary) CustomResourceSummary {
 	return CustomResourceSummary{
+		CertManager: row.CertManager, ExternalSecrets: row.ExternalSecrets, Prometheus: row.Prometheus,
+		Karpenter:          row.Karpenter,
 		Ref:                row.Ref,
 		CRDName:            row.CRDName,
 		Status:             row.Status,

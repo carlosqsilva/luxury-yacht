@@ -3,6 +3,9 @@
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
+import * as streamrows$0 from "../../kind/streamrows/models.js";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore: Unused imports
 import * as resourcemodel$0 from "../../resourcemodel/models.js";
 
 /**
@@ -33,6 +36,11 @@ export interface AttentionObjectFindingIgnore {
  * production Custom tabs to subscribe to full CRD fanout domains.
  */
 export interface CustomResourceSummary {
+    "certManager"?: streamrows$0.CertManagerSummary | null;
+    "externalSecrets"?: streamrows$0.ExternalSecretsSummary | null;
+    "prometheus"?: streamrows$0.PrometheusSummary | null;
+    "argoCD"?: streamrows$0.ArgoCDSummary | null;
+    "karpenter"?: streamrows$0.KarpenterSummary | null;
     "ref": resourcemodel$0.ResourceRef;
     "crdName"?: string;
     "status"?: string;

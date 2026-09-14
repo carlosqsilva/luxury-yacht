@@ -13,6 +13,14 @@ import (
 	"github.com/luxury-yacht/app/backend/refresh/streammux"
 	"github.com/luxury-yacht/app/backend/refresh/telemetry"
 	"github.com/luxury-yacht/app/backend/resourcemodel"
+	"github.com/luxury-yacht/app/backend/resources/argocd"
+	"github.com/luxury-yacht/app/backend/resources/certmanager"
+	"github.com/luxury-yacht/app/backend/resources/crdfacts"
+	"github.com/luxury-yacht/app/backend/resources/externalsecrets"
+	"github.com/luxury-yacht/app/backend/resources/prometheus"
+
+	"github.com/luxury-yacht/app/backend/resources/customresource"
+	"github.com/luxury-yacht/app/backend/resources/karpenter"
 	restypes "github.com/luxury-yacht/app/backend/resources/types"
 )
 
@@ -61,6 +69,50 @@ func typeOf[T any]() reflect.Type {
 }
 
 var contractTypes = []typeSpec{
+	{name: "CertManagerFacts", typeOf: typeOf[certmanager.Facts]()},
+	{name: "CertManagerCertificate", typeOf: typeOf[certmanager.Certificate]()},
+	{name: "CertManagerRequest", typeOf: typeOf[certmanager.Request]()},
+	{name: "CertManagerAuthority", typeOf: typeOf[certmanager.Authority]()},
+	{name: "CertManagerOrder", typeOf: typeOf[certmanager.Order]()},
+	{name: "CertManagerChallenge", typeOf: typeOf[certmanager.Challenge]()},
+	{name: "OperatorCondition", typeOf: typeOf[crdfacts.Condition]()},
+	{name: "OperatorLabelSelector", typeOf: typeOf[crdfacts.LabelSelector]()},
+	{name: "ExternalSecretsFacts", typeOf: typeOf[externalsecrets.Facts]()},
+	{name: "ExternalSecretFacts", typeOf: typeOf[externalsecrets.ExternalSecret]()},
+	{name: "ExternalSecretStoreFacts", typeOf: typeOf[externalsecrets.Store]()},
+	{name: "ClusterExternalSecretFacts", typeOf: typeOf[externalsecrets.ClusterExternalSecret]()},
+	{name: "PrometheusFacts", typeOf: typeOf[prometheus.Facts]()},
+	{name: "PrometheusMonitor", typeOf: typeOf[prometheus.Monitor]()},
+	{name: "PrometheusEndpoint", typeOf: typeOf[prometheus.Endpoint]()},
+	{name: "PrometheusRuleGroup", typeOf: typeOf[prometheus.RuleGroup]()},
+	{name: "PrometheusInstance", typeOf: typeOf[prometheus.Instance]()},
+	{name: "CertManagerSummary", typeOf: typeOf[streamrows.CertManagerSummary]()},
+	{name: "ExternalSecretsSummary", typeOf: typeOf[streamrows.ExternalSecretsSummary]()},
+	{name: "PrometheusSummary", typeOf: typeOf[streamrows.PrometheusSummary]()},
+	{name: "ResourceFamilies", typeOf: typeOf[objectcatalog.ResourceFamilies]()},
+
+	{name: "ArgoCDFacts", typeOf: typeOf[argocd.Facts]()},
+	{name: "ArgoCDApplicationFacts", typeOf: typeOf[argocd.ApplicationFacts]()},
+	{name: "ArgoCDApplicationSpec", typeOf: typeOf[argocd.ApplicationSpec]()},
+	{name: "ArgoCDApplicationSetFacts", typeOf: typeOf[argocd.ApplicationSetFacts]()},
+	{name: "ArgoCDDestination", typeOf: typeOf[argocd.Destination]()},
+	{name: "ArgoCDSource", typeOf: typeOf[argocd.Source]()},
+	{name: "ArgoCDSyncPolicy", typeOf: typeOf[argocd.SyncPolicy]()},
+	{name: "ArgoCDAutomatedSync", typeOf: typeOf[argocd.AutomatedSync]()},
+	{name: "ArgoCDOperation", typeOf: typeOf[argocd.Operation]()},
+	{name: "ArgoCDGenerator", typeOf: typeOf[argocd.Generator]()},
+	{name: "ArgoCDProjectFacts", typeOf: typeOf[argocd.ProjectFacts]()},
+	{name: "ArgoCDResourceRestriction", typeOf: typeOf[argocd.ResourceRestriction]()},
+	{name: "ArgoCDProjectRole", typeOf: typeOf[argocd.ProjectRole]()},
+	{name: "ArgoCDSyncWindow", typeOf: typeOf[argocd.SyncWindow]()},
+	{name: "ArgoCDCondition", typeOf: typeOf[argocd.Condition]()},
+	{name: "ArgoCDSummary", typeOf: typeOf[streamrows.ArgoCDSummary]()},
+	{name: "KarpenterSummary", typeOf: typeOf[streamrows.KarpenterSummary]()},
+	{name: "KarpenterFacts", typeOf: typeOf[karpenter.Facts]()},
+	{name: "KarpenterRequirement", typeOf: typeOf[karpenter.Requirement]()},
+	{name: "KarpenterTaint", typeOf: typeOf[karpenter.Taint]()},
+	{name: "KarpenterBudget", typeOf: typeOf[karpenter.Budget]()},
+	{name: "CustomResourceDetails", typeOf: typeOf[customresource.Details]()},
 	{name: "RefreshPermissionDeniedDetails", typeOf: typeOf[refresh.PermissionDeniedDetails]()},
 	{name: "RefreshPermissionDeniedStatus", typeOf: typeOf[refresh.PermissionDeniedStatus]()},
 	{name: "SnapshotStats", typeOf: typeOf[refresh.SnapshotStats]()},
@@ -120,15 +172,12 @@ var contractTypes = []typeSpec{
 	{name: "CatalogNamespaceGroup", typeOf: typeOf[snapshot.CatalogNamespaceGroup]()},
 	{name: "CatalogSnapshotPayload", typeOf: typeOf[snapshot.CatalogSnapshot]()},
 	{name: "CustomResourceSummary", typeOf: typeOf[snapshot.CustomResourceSummary]()},
-	{name: "ResourceQueryRequest", typeOf: typeOf[snapshot.ResourceQueryRequest]()},
-	{name: "ResourceQueryPredicate", typeOf: typeOf[snapshot.ResourceQueryPredicate]()},
 	{name: "ResourceQueryAnchor", typeOf: typeOf[snapshot.ResourceQueryAnchor]()},
 	{name: "ResourceQueryAnchorResult", typeOf: typeOf[snapshot.ResourceQueryAnchorResult]()},
 	{name: "ResourceQueryCapabilities", typeOf: typeOf[snapshot.ResourceQueryCapabilities]()},
 	{name: "ResourceQueryFacetDescriptor", typeOf: typeOf[snapshot.ResourceQueryFacetDescriptor]()},
 	{name: "ResourceQueryFacetOption", typeOf: typeOf[snapshot.ResourceQueryFacetOption]()},
 	{name: "ResourceQueryFacetValues", typeOf: typeOf[snapshot.ResourceQueryFacetValues]()},
-	{name: "ResourceQueryEnvelopeFields", typeOf: typeOf[snapshot.ResourceQueryEnvelope]()},
 	{name: "ResourceQueryIssue", typeOf: typeOf[snapshot.ResourceQueryIssue]()},
 	{name: "ResourceQueryDynamicRef", typeOf: typeOf[snapshot.ResourceQueryDynamicRef]()},
 	{name: "PodSnapshotEntry", typeOf: typeOf[streamrows.PodSummary]()},
@@ -186,7 +235,6 @@ var contractEnums = []enumSpec{
 	{name: "DrainStatus", typeOf: typeOf[nodemaintenance.DrainStatus]()},
 	{name: "CatalogItemScope", typeOf: typeOf[objectcatalog.Scope]()},
 	{name: "ResourceQueryProvider", typeOf: typeOf[snapshot.ResourceQueryProvider]()},
-	{name: "ResourceQueryScope", typeOf: typeOf[snapshot.ResourceQueryScope]()},
 	{name: "ResourceQueryCompleteness", typeOf: typeOf[snapshot.ResourceQueryCompleteness]()},
 	{name: "NamespaceScopeStatus", typeOf: typeOf[snapshot.NamespaceScopeStatus]()},
 	{name: "NamespaceSignalState", typeOf: typeOf[snapshot.NamespaceSignalState]()},
