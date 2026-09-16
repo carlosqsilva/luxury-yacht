@@ -5,6 +5,7 @@ import { resourceLinkToObjectReference } from '@shared/utils/resourceLinkIdentit
 import { withStableListKeys } from '@shared/utils/stableListKeys';
 import type { ReactNode } from 'react';
 import { formatFullDate } from '@/utils/ageFormatter';
+import { ConditionChips } from './ConditionChips';
 import { OverviewItem } from './OverviewItem';
 import './OverviewBlocks.css';
 import './OperatorOverview.css';
@@ -38,14 +39,30 @@ export function OperatorFields({
 
 export function OperatorCard({
   title,
+  meta,
+  tag,
   children,
-}: Readonly<{ title: string; children: ReactNode }>) {
+}: Readonly<{ title: string; meta?: string; tag?: string; children?: ReactNode }>) {
   return (
     <div className="overview-card">
       <div className="overview-card-header">
         <h4 className="overview-card-title">{title}</h4>
+        {!!meta && <span className="overview-card-meta">{meta}</span>}
+        {!!tag && <span className="overview-card-tag">{tag}</span>}
       </div>
       {children}
+    </div>
+  );
+}
+
+export function OperatorList({ values }: Readonly<{ values: readonly string[] }>) {
+  return (
+    <div className="overview-ref-list">
+      {withStableListKeys([...values], (value) => value).map(({ key, value }) => (
+        <span key={key} className="overview-ref-item">
+          {value}
+        </span>
+      ))}
     </div>
   );
 }
@@ -57,13 +74,7 @@ export function OperatorValues({
   return values?.length ? (
     <div className="overview-stacked">
       <div className="operator-subtitle">{label}</div>
-      <div className="overview-ref-list">
-        {withStableListKeys([...values], (value) => value).map(({ key, value }) => (
-          <span key={key} className="overview-ref-item">
-            {value}
-          </span>
-        ))}
-      </div>
+      <OperatorList values={values} />
     </div>
   ) : null;
 }
@@ -111,21 +122,11 @@ export function OperatorStatus({
         [
           'Conditions',
           conditions?.length ? (
-            <div key="conditions" className="overview-condition-list">
-              {withStableListKeys(conditions, (condition) => condition.type).map(
-                ({ key, value }) => (
-                  <StatusChip
-                    key={key}
-                    variant={variants[value.presentation] ?? 'info'}
-                    tooltip={[value.status, value.message || value.reason]
-                      .filter(Boolean)
-                      .join(': ')}
-                  >
-                    {value.type}
-                  </StatusChip>
-                )
-              )}
-            </div>
+            <ConditionChips
+              key="conditions"
+              conditions={conditions}
+              variant={(condition) => variants[condition.presentation] ?? 'info'}
+            />
           ) : undefined,
         ],
       ]}
@@ -133,17 +134,12 @@ export function OperatorStatus({
   );
 }
 
-export function OperatorSelector({
-  label,
-  selector,
-  absent = 'None',
-  empty = 'All',
-}: Readonly<{
-  label: string;
-  selector?: OperatorLabelSelector | null;
-  absent?: string;
-  empty?: string;
-}>) {
+// A missing selector and an explicitly empty one mean different things in operator APIs, so
+// each gets its own fallback wording.
+export const operatorSelectorValues = (
+  selector: OperatorLabelSelector | null | undefined,
+  { absent = 'None', empty = 'All' }: { absent?: string; empty?: string } = {}
+): string[] => {
   const values = Object.entries(selector?.matchLabels ?? {}).map(
     ([key, value]) => `${key}=${value}`
   );
@@ -152,8 +148,23 @@ export function OperatorSelector({
       [expression.key, expression.operator, expression.values?.join(', ')].filter(Boolean).join(' ')
     );
   }
-  const fallback = selector ? empty : absent;
-  return <OperatorValues label={label} values={values.length ? values : [fallback]} />;
+  return values.length ? values : [selector ? empty : absent];
+};
+
+export function OperatorSelector({
+  label,
+  selector,
+  absent,
+  empty,
+}: Readonly<{
+  label: string;
+  selector?: OperatorLabelSelector | null;
+  absent?: string;
+  empty?: string;
+}>) {
+  return (
+    <OperatorValues label={label} values={operatorSelectorValues(selector, { absent, empty })} />
+  );
 }
 
 export const operatorDate = (value?: string) => (value ? formatFullDate(value) : undefined);
