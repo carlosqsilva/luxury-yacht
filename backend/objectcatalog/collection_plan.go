@@ -19,8 +19,8 @@ type collectionSourcePlan struct {
 	promotable    bool
 }
 
-func planCollectionSource(desc resourceDescriptor) collectionSourcePlan {
-	return planCollectionSourceForGroupResource(desc.GVR.GroupResource())
+func planCollectionSource(desc Descriptor) collectionSourcePlan {
+	return planCollectionSourceForGroupResource(desc.GVR().GroupResource())
 }
 
 func planCollectionSourceForGroupResource(gr schema.GroupResource) collectionSourcePlan {
@@ -47,6 +47,7 @@ func planCollectionSourceForGroupResource(gr schema.GroupResource) collectionSou
 		}
 		if _, ok := gatewayInformerGroupResources[gr]; ok {
 			plan.source = collectionSourceGatewayInformer
+			plan.watchable = true
 			plan.promotable = false
 			return plan
 		}

@@ -6,8 +6,6 @@ import { getWindowIdentity } from '@/core/desktop-runtime';
 import { getClusterTabOrder, setClusterTabOrder } from '@/core/persistence/clusterTabOrder';
 import { useKubeconfig } from '@/modules/kubernetes/config/KubeconfigContext';
 import { useNamespace } from '@/modules/namespace/contexts/NamespaceContext';
-import type { ViewType } from '@/modules/object-panel/components/ObjectPanel/types';
-import { useObjectPanelState } from '@/modules/object-panel/contexts/ObjectPanelStateContext';
 import {
   captureClusterTableState,
   restoreClusterTableState,
@@ -26,6 +24,8 @@ import {
 } from './index';
 import { usePanelLifecycleGuardRegistry } from './panelLifecycleGuards';
 import { samePanelTab } from './tabTransfer';
+import { useRemoveWorkspacePanels } from './useRemoveWorkspacePanels';
+import { useRestoreWorkspacePanels } from './useRestoreWorkspacePanels';
 import { usePanelWorkspaceSync } from './WorkspacePanelSync';
 
 type PendingTarget = {
@@ -52,9 +52,9 @@ export function ClusterTabTransferCoordinator() {
   const { getClusterNavigationState, restoreClusterNavigationState } = useViewState();
   const { getClusterSidebarSelection, setSidebarSelectionForCluster } = useSidebarState();
   const { getClusterNamespace, setSelectedNamespace } = useNamespace();
-  const { upsertOwnedPanel, removeOwnedPanel } = useObjectPanelState();
-  const { tabGroups, dockPanelGroup, detachPanelGroup, discardPanelLayouts } =
-    useDockablePanelContext();
+  const restoreWorkspacePanels = useRestoreWorkspacePanels();
+  const { tabGroups } = useDockablePanelContext();
+  const removeWorkspacePanels = useRemoveWorkspacePanels();
   const pending = useRef(new Map<string, PendingTarget>());
   const cancelled = useRef(new Set<string>());
   const [revision, setRevision] = useState(0);
@@ -192,24 +192,18 @@ export function ClusterTabTransferCoordinator() {
 
   const mountTarget = useCallback(
     (target: PendingTarget) => {
-      const { request, snapshot, targetAlreadyOpen } = target.event;
+      const { snapshot, targetAlreadyOpen } = target.event;
       if (!targetAlreadyOpen) {
         restoreTargetView(target);
       }
       for (const group of snapshot.groups ?? []) {
         const edge = group.groupId === 'bottom' ? 'bottom' : 'right';
-        for (const tab of group.tabs ?? []) {
-          upsertOwnedPanel({ ...tab.objectRef }, tab.activeView as ViewType, {
-            kind: 'docked',
-            edge,
-          });
-        }
-        dockPanelGroup(request.clusterId, panelIds([group]), group.activePanelId, edge);
+        restoreWorkspacePanels(group, edge);
       }
       target.mounted = true;
       setRevision((value) => value + 1);
     },
-    [upsertOwnedPanel, dockPanelGroup, restoreTargetView]
+    [restoreWorkspacePanels, restoreTargetView]
   );
 
   const activateTargetCluster = useCallback(
@@ -266,17 +260,6 @@ export function ClusterTabTransferCoordinator() {
     }
   }, [revision, tabGroups, advanceTarget]);
 
-  const removeGroups = useCallback(
-    (clusterId: string, groups: panelwindow.WorkspaceGroup[]) => {
-      const ids = panelIds(groups);
-      detachPanelGroup(clusterId, ids);
-      discardPanelLayouts(clusterId, ids);
-      for (const id of ids) {
-        removeOwnedPanel(clusterId, id);
-      }
-    },
-    [detachPanelGroup, discardPanelLayouts, removeOwnedPanel]
-  );
   const settle = useCallback(
     (event: panelwindow.ClusterTabTransferEvent, committed: boolean) => {
       const { request, snapshot } = event;
@@ -287,14 +270,14 @@ export function ClusterTabTransferCoordinator() {
       cancelled.current.add(request.transferId);
       sync.settle(request.transferId);
       if ((committed && request.sourceWindowName === windowName) || (!committed && wasTarget)) {
-        removeGroups(request.clusterId, snapshot.groups ?? []);
+        removeWorkspacePanels(request.clusterId, panelIds(snapshot.groups ?? []));
       }
       void loadKubeconfigs(true)
         .catch((error) => report(error, 'refresh-cluster-views'))
         .finally(() => guards.releaseTransfer(request.transferId));
       setRevision((value) => value + 1);
     },
-    [windowName, sync, removeGroups, loadKubeconfigs, report, guards]
+    [windowName, sync, removeWorkspacePanels, loadKubeconfigs, report, guards]
   );
   useEffect(() => onClusterTabTransferCommitted((event) => settle(event, true)), [settle]);
   useEffect(() => onClusterTabTransferFailed((event) => settle(event, false)), [settle]);

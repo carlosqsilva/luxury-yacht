@@ -9,6 +9,7 @@ const preferenceMocks = vi.hoisted(() => ({
   setKubernetesClientBurst: vi.fn(),
   setKubernetesClientQPS: vi.fn(),
   setPermissionSSRRFetchConcurrency: vi.fn(),
+  setSuppressNetworkErrorNotifications: vi.fn(),
 }));
 
 const refreshMocks = vi.hoisted(() => ({
@@ -50,12 +51,15 @@ vi.mock('@/core/settings/appPreferences', () => ({
   getKubernetesClientBurst: () => 200,
   getKubernetesClientQPS: () => 100,
   getPermissionSSRRFetchConcurrency: () => 8,
+  getSuppressNetworkErrorNotifications: () => false,
   hydrateAppPreferences: (...args: unknown[]) => preferenceMocks.hydrateAppPreferences(...args),
   setKubernetesClientBurst: (...args: unknown[]) =>
     preferenceMocks.setKubernetesClientBurst(...args),
   setKubernetesClientQPS: (...args: unknown[]) => preferenceMocks.setKubernetesClientQPS(...args),
   setPermissionSSRRFetchConcurrency: (...args: unknown[]) =>
     preferenceMocks.setPermissionSSRRFetchConcurrency(...args),
+  setSuppressNetworkErrorNotifications: (...args: unknown[]) =>
+    preferenceMocks.setSuppressNetworkErrorNotifications(...args),
 }));
 
 vi.mock('@shared/components/tables/persistence/gridTablePersistenceReset', () => ({
@@ -114,6 +118,7 @@ describe('AdvancedSection', () => {
       kubernetesClientQPS: 100,
       kubernetesClientBurst: 200,
       permissionSSRRFetchConcurrency: 8,
+      suppressNetworkErrorNotifications: false,
       gridTablePersistenceMode: 'shared',
     });
     container = document.createElement('div');
@@ -166,7 +171,7 @@ describe('AdvancedSection', () => {
     ).toBe(false);
   });
 
-  it('commits edited Kubernetes API preferences on blur', () => {
+  it.each(['blur', 'Enter'])('commits edited Kubernetes API preferences on %s', (commit) => {
     const inputs = [
       {
         suffix: 'settings-kubernetes-client-qps',
@@ -193,13 +198,34 @@ describe('AdvancedSection', () => {
 
       act(() => {
         input.focus();
-        input.value = value;
-        input.blur();
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        setter?.call(input, value);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        if (commit === 'Enter') {
+          input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        } else {
+          input.blur();
+        }
       });
 
       expect(input.value).toBe(value);
       expect(persist).toHaveBeenCalledWith(Number(value));
     }
+  });
+
+  it('persists the suppress network error notifications preference on toggle', async () => {
+    const suppressSwitch = requireValue(
+      container.querySelector<HTMLButtonElement>(
+        '[aria-label="Suppress network error notifications"]'
+      ),
+      'expected suppress network errors switch'
+    );
+
+    await act(async () => {
+      suppressSwitch.click();
+    });
+
+    expect(preferenceMocks.setSuppressNetworkErrorNotifications).toHaveBeenCalledWith(true);
   });
 
   it('clears app and browser state when factory reset is confirmed', async () => {

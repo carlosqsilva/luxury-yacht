@@ -12,11 +12,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/luxury-yacht/app/backend/refresh"
 	"github.com/luxury-yacht/app/backend/refresh/ingest"
 	"github.com/luxury-yacht/app/backend/resourcemodel"
 	"github.com/luxury-yacht/app/backend/resources/common"
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apiextensionsfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
+	apiextinformers "k8s.io/apiextensions-apiserver/pkg/client/informers/externalversions"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -24,8 +29,14 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	fakediscovery "k8s.io/client-go/discovery/fake"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	clientfeatures "k8s.io/client-go/features"
+	clientfeaturestesting "k8s.io/client-go/features/testing"
+	"k8s.io/client-go/informers"
 	kubernetesfake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gatewayfake "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned/fake"
+	gatewayinformers "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions"
 )
 
 func TestServiceSyncCollectsResources(t *testing.T) {
@@ -70,8 +81,8 @@ func TestServiceSyncCollectsResources(t *testing.T) {
 	}
 
 	svc := NewService(deps, &Options{ResyncInterval: time.Minute, PageSize: 200, ListWorkers: 2})
-	desc := resourceDescriptor{
-		GVR:        gvr,
+	desc := Descriptor{
+
 		Namespaced: true,
 		Kind:       "Deployment",
 		Group:      "apps",
@@ -79,7 +90,7 @@ func TestServiceSyncCollectsResources(t *testing.T) {
 		Resource:   "deployments",
 		Scope:      ScopeNamespace,
 	}
-	summaries, err := svc.collectResource(context.Background(), 0, desc, nil, nil)
+	summaries, err := svc.collectResource(context.Background(), desc, nil, nil)
 	if err != nil {
 		t.Fatalf("collectResource failed: %v", err)
 	}
@@ -127,8 +138,6 @@ func (f *fakeCatalogIngestSource) RegisterDynamicCatalogReflector(schema.GroupVe
 	return false
 }
 
-func (f *fakeCatalogIngestSource) StopReflectorFor(schema.GroupVersionResource) {}
-
 func (f *fakeCatalogIngestSource) HasSyncedFor(gvr schema.GroupVersionResource) bool {
 	if f.synced == nil {
 		return true
@@ -149,9 +158,9 @@ func TestIngestCatalogSinkBulkReplaceScopesGVR(t *testing.T) {
 	svc := NewService(Dependencies{Now: func() time.Time { return now }}, nil)
 	cmGVR := schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}
 	secGVR := schema.GroupVersionResource{Version: "v1", Resource: "secrets"}
-	cmDesc := resourceDescriptor{GVR: cmGVR, Version: "v1", Kind: "ConfigMap", Resource: "configmaps", Namespaced: true, Scope: ScopeNamespace}
-	secDesc := resourceDescriptor{GVR: secGVR, Version: "v1", Kind: "Secret", Resource: "secrets", Namespaced: true, Scope: ScopeNamespace}
-	svc.resources = map[string]resourceDescriptor{
+	cmDesc := Descriptor{Group: cmGVR.Group, Version: "v1", Kind: "ConfigMap", Resource: "configmaps", Namespaced: true, Scope: ScopeNamespace}
+	secDesc := Descriptor{Group: secGVR.Group, Version: "v1", Kind: "Secret", Resource: "secrets", Namespaced: true, Scope: ScopeNamespace}
+	svc.resources = map[string]Descriptor{
 		cmGVR.String():  cmDesc,
 		secGVR.String(): secDesc,
 	}
@@ -221,7 +230,7 @@ func TestCollectViaIngestServesCutKindSummaries(t *testing.T) {
 	svc := NewService(Dependencies{IngestSource: source, ClusterID: "c1"}, nil)
 
 	// Namespace-scoped request to team-a returns only the team-a summary, byte-identical.
-	summaries, handled, err := svc.collectViaIngest(0, desc, []string{"team-a"}, nil)
+	summaries, handled, err := svc.collectViaIngest(desc, []string{"team-a"}, nil)
 	if err != nil || !handled {
 		t.Fatalf("collectViaIngest handled=%v err=%v, want handled=true err=nil", handled, err)
 	}
@@ -233,7 +242,7 @@ func TestCollectViaIngestServesCutKindSummaries(t *testing.T) {
 	}
 
 	// An all-namespaces request returns both, proving no scoping when none requested.
-	all, handled, err := svc.collectViaIngest(0, desc, nil, nil)
+	all, handled, err := svc.collectViaIngest(desc, nil, nil)
 	if err != nil || !handled || len(all) != 2 {
 		t.Fatalf("all-namespaces collectViaIngest handled=%v err=%v len=%d, want true/nil/2", handled, err, len(all))
 	}
@@ -256,7 +265,7 @@ func TestCollectViaIngestAlwaysHandlesCutKind(t *testing.T) {
 		rows: map[schema.GroupVersionResource][]interface{}{cutGVR: {}},
 	}
 	svc := NewService(Dependencies{IngestSource: source}, nil)
-	if summaries, handled, err := svc.collectViaIngest(0, cutDesc, nil, nil); !handled || err != nil || len(summaries) != 0 {
+	if summaries, handled, err := svc.collectViaIngest(cutDesc, nil, nil); !handled || err != nil || len(summaries) != 0 {
 		t.Fatalf("cut kind collectViaIngest handled=%v err=%v len=%d, want true/nil/0", handled, err, len(summaries))
 	}
 
@@ -264,7 +273,7 @@ func TestCollectViaIngestAlwaysHandlesCutKind(t *testing.T) {
 	// for the ingest path), so its collect must NOT be handled by ingest — the factory/list
 	// path still serves it.
 	uncutDesc := builtinDescriptor("autoscaling", "v2", "HorizontalPodAutoscaler", "horizontalpodautoscalers", false)
-	if _, handled, _ := svc.collectViaIngest(0, uncutDesc, nil, nil); handled {
+	if _, handled, _ := svc.collectViaIngest(uncutDesc, nil, nil); handled {
 		t.Fatal("uncut kind must not be handled by ingest")
 	}
 }
@@ -283,7 +292,7 @@ func TestCollectViaIngestReportsUnsyncedStaticCutKind(t *testing.T) {
 	}
 	svc := NewService(Dependencies{IngestSource: source}, nil)
 
-	summaries, handled, err := svc.collectViaIngest(0, cutDesc, nil, nil)
+	summaries, handled, err := svc.collectViaIngest(cutDesc, nil, nil)
 	if !handled {
 		t.Fatal("unsynced static cut kind must still be handled by ingest")
 	}
@@ -320,8 +329,8 @@ func TestLabelsDigestEmpty(t *testing.T) {
 
 func TestCollectResourceWithoutDynamicClient(t *testing.T) {
 	svc := NewService(Dependencies{Common: common.Dependencies{}}, nil)
-	desc := resourceDescriptor{}
-	if _, err := svc.collectResource(context.Background(), 0, desc, nil, nil); err == nil {
+	desc := Descriptor{}
+	if _, err := svc.collectResource(context.Background(), desc, nil, nil); err == nil {
 		t.Fatalf("expected error when dynamic client missing")
 	}
 }
@@ -359,8 +368,8 @@ func TestCollectResourceHandlesPagination(t *testing.T) {
 	})
 
 	svc := NewService(Dependencies{Common: common.Dependencies{DynamicClient: dyn}}, &Options{PageSize: 1})
-	desc := resourceDescriptor{GVR: gvr, Namespaced: true, Scope: ScopeNamespace}
-	summaries, err := svc.collectResource(context.Background(), 0, desc, nil, nil)
+	desc := Descriptor{Group: gvr.Group, Version: gvr.Version, Resource: gvr.Resource, Namespaced: true, Scope: ScopeNamespace}
+	summaries, err := svc.collectResource(context.Background(), desc, nil, nil)
 	if err != nil {
 		t.Fatalf("collectResource failed: %v", err)
 	}
@@ -407,8 +416,8 @@ func TestListResourceParallelNamespaces(t *testing.T) {
 
 	svc := NewService(Dependencies{Common: common.Dependencies{KubernetesClient: client, DynamicClient: dyn}}, &Options{NamespaceWorkers: 4, PageSize: 10})
 
-	desc := resourceDescriptor{
-		GVR:        schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"},
+	desc := Descriptor{
+
 		Namespaced: true,
 		Kind:       "Deployment",
 		Group:      "apps",
@@ -417,7 +426,7 @@ func TestListResourceParallelNamespaces(t *testing.T) {
 		Scope:      ScopeNamespace,
 	}
 
-	items, err := svc.listResource(context.Background(), 0, desc, []string{"alpha", "beta"}, nil)
+	items, err := svc.listResource(context.Background(), desc, []string{"alpha", "beta"}, nil)
 	if err != nil {
 		t.Fatalf("listResource returned error: %v", err)
 	}
@@ -437,7 +446,7 @@ func TestListResourceParallelNamespaces(t *testing.T) {
 }
 
 func TestBuildSummaryNamespaced(t *testing.T) {
-	desc := resourceDescriptor{Kind: "Pod", Group: "", Version: "v1", Resource: "pods", Scope: ScopeNamespace}
+	desc := Descriptor{Kind: "Pod", Group: "", Version: "v1", Resource: "pods", Scope: ScopeNamespace}
 	obj := &unstructured.Unstructured{}
 	obj.SetNamespace("default")
 	obj.SetName("example")
@@ -458,7 +467,7 @@ func TestBuildSummaryNamespaced(t *testing.T) {
 }
 
 func TestBuildSummaryCapturesFinalizerBlockedForBackendConsumers(t *testing.T) {
-	desc := resourceDescriptor{Kind: "Pod", Group: "", Version: "v1", Resource: "pods", Scope: ScopeNamespace}
+	desc := Descriptor{Kind: "Pod", Group: "", Version: "v1", Resource: "pods", Scope: ScopeNamespace}
 	deletionTimestamp := metav1.NewTime(time.Date(2026, time.August, 10, 12, 0, 0, 0, time.UTC))
 	obj := &unstructured.Unstructured{}
 	obj.SetNamespace("default")
@@ -533,7 +542,7 @@ func TestBuildSummaryIncludesActionFactsFromUnstructured(t *testing.T) {
 	deploy.SetName("web")
 	deploy.SetNamespace("default")
 	deploySummary := svc.buildSummary(
-		resourceDescriptor{Kind: "Deployment", Group: "apps", Version: "v1", Resource: "deployments", Scope: ScopeNamespace},
+		Descriptor{Kind: "Deployment", Group: "apps", Version: "v1", Resource: "deployments", Scope: ScopeNamespace},
 		deploy,
 	)
 	if deploySummary.ActionFacts == nil || deploySummary.ActionFacts.DesiredReplicas == nil || *deploySummary.ActionFacts.DesiredReplicas != 3 {
@@ -547,7 +556,7 @@ func TestBuildSummaryIncludesActionFactsFromUnstructured(t *testing.T) {
 	cron.SetName("nightly")
 	cron.SetNamespace("default")
 	cronSummary := svc.buildSummary(
-		resourceDescriptor{Kind: "CronJob", Group: "batch", Version: "v1", Resource: "cronjobs", Scope: ScopeNamespace},
+		Descriptor{Kind: "CronJob", Group: "batch", Version: "v1", Resource: "cronjobs", Scope: ScopeNamespace},
 		cron,
 	)
 	if cronSummary.ActionFacts == nil || cronSummary.ActionFacts.Status != "Suspended" {
@@ -569,7 +578,7 @@ func TestEnrichCatalogActionFactsMarksHPAManagedWorkloads(t *testing.T) {
 		"managed":   {Ref: resourcemodel.ResourceRef{Group: "apps", Version: "v1", Kind: "Deployment", Resource: "deployments", Namespace: "default", Name: "web"}, ActionFacts: &ActionFacts{HPAManaged: &falseValue}},
 		"unmanaged": {Ref: resourcemodel.ResourceRef{Group: "apps", Version: "v1", Kind: "Deployment", Resource: "deployments", Namespace: "default", Name: "api"}},
 	}
-	allowed := map[string]resourceDescriptor{
+	allowed := map[string]Descriptor{
 		"autoscaling/v2/horizontalpodautoscalers": {
 			Group:    "autoscaling",
 			Version:  "v2",
@@ -588,7 +597,7 @@ func TestEnrichCatalogActionFactsMarksHPAManagedWorkloads(t *testing.T) {
 }
 
 func TestBuildSummaryClusterScope(t *testing.T) {
-	desc := resourceDescriptor{
+	desc := Descriptor{
 		Kind:     "CustomThing",
 		Group:    "custom.io",
 		Version:  "v1",
@@ -639,8 +648,8 @@ func TestListResourceSkipsForbiddenNamespaceTargets(t *testing.T) {
 
 	svc := NewService(Dependencies{Common: common.Dependencies{KubernetesClient: kubernetesfake.NewClientset(), DynamicClient: dyn}}, &Options{PageSize: 10})
 
-	desc := resourceDescriptor{
-		GVR:        schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"},
+	desc := Descriptor{
+
 		Namespaced: true,
 		Kind:       "Deployment",
 		Group:      "apps",
@@ -649,7 +658,7 @@ func TestListResourceSkipsForbiddenNamespaceTargets(t *testing.T) {
 		Scope:      ScopeNamespace,
 	}
 
-	items, err := svc.listResource(context.Background(), 0, desc, []string{"alpha", "beta"}, nil)
+	items, err := svc.listResource(context.Background(), desc, []string{"alpha", "beta"}, nil)
 	if err != nil {
 		t.Fatalf("a forbidden namespace must be skipped, not fail the kind: %v", err)
 	}
@@ -669,4 +678,236 @@ func TestServiceScopeNamespacesComeFromDependencies(t *testing.T) {
 	if ns := unscoped.scopeNamespaces(); ns != nil {
 		t.Fatalf("unscoped service must report nil scope, got %#v", ns)
 	}
+}
+
+// Catalog action availability must agree for Service ports and container ports,
+// including malformed entries returned through dynamic discovery.
+func TestCatalogPortForwardFactsPreserveProtocolEligibility(t *testing.T) {
+	for _, kind := range []string{"Pod", "Service", "Deployment", "DaemonSet", "CronJob"} {
+		for _, test := range []struct {
+			name  string
+			ports []any
+			want  bool
+		}{
+			{name: "no ports"},
+			{name: "UDP only", ports: []any{map[string]any{"protocol": "UDP"}}},
+			{name: "malformed entry", ports: []any{"invalid"}},
+			{name: "TCP after invalid and UDP", ports: []any{"invalid", map[string]any{"protocol": "UDP"}, map[string]any{"protocol": "TCP"}}, want: true},
+			{name: "default protocol", ports: []any{map[string]any{}}, want: true},
+			{name: "case insensitive TCP", ports: []any{map[string]any{"protocol": "tcp"}}, want: true},
+		} {
+			t.Run(kind+"/"+test.name, func(t *testing.T) {
+				desc := Descriptor{Version: "v1", Kind: kind, Scope: ScopeNamespace, Namespaced: true}
+				portOwner := map[string]any{"ports": test.ports}
+				spec := map[string]any{"containers": []any{"invalid", portOwner}}
+				switch kind {
+				case "Service":
+					spec = portOwner
+				case "Deployment", "DaemonSet":
+					desc.Group = "apps"
+					spec = map[string]any{"template": map[string]any{"spec": spec}}
+				case "CronJob":
+					desc.Group = "batch"
+					spec = map[string]any{"jobTemplate": map[string]any{"spec": map[string]any{"template": map[string]any{"spec": spec}}}}
+				}
+				object := &unstructured.Unstructured{Object: map[string]any{"spec": spec}}
+				object.SetName("forwardable")
+				object.SetNamespace("team")
+				summary := summaryFromObject("cluster-a", desc, object)
+				require.NotNil(t, summary.ActionFacts)
+				require.NotNil(t, summary.ActionFacts.PortForwardAvailable)
+				require.Equal(t, test.want, *summary.ActionFacts.PortForwardAvailable)
+			})
+		}
+	}
+}
+
+func (*fakeCatalogIngestSource) ReadDynamicCatalogSource(schema.GroupResource) (ingest.DynamicCatalogSnapshot, bool) {
+	return ingest.DynamicCatalogSnapshot{}, false
+}
+func (*fakeCatalogIngestSource) SubscribeDynamicCatalogChanges(func(ingest.DynamicCatalogChange)) func() {
+	return func() {}
+}
+
+func (*fakeCatalogIngestSource) IsDynamicCatalogGeneration(schema.GroupResource, uint64) bool {
+	return false
+}
+
+func (*fakeCatalogIngestSource) ReconcileDiscoveredResource(schema.GroupVersionResource) bool {
+	return false
+}
+
+func (source *fakeCatalogIngestSource) SubscribeCatalogSink(gvr schema.GroupVersionResource, sink ingest.Sink) func() {
+	source.AddCatalogSink(gvr, sink)
+	return func() {}
+}
+
+func (*fakeCatalogIngestSource) PartitionReadinessFor(schema.GroupVersionResource) []ingest.PartitionReadiness {
+	return nil
+}
+
+// An informer can stop blocking startup before its initial LIST finishes: it
+// passed the factory's sync deadline and is still retrying. Its empty cache does
+// not prove the objects are gone, so the kind must fail and keep its published
+// rows, like an unsynced ingest store, until a retry can read the synced cache.
+func TestCatalogFailsKindWhileInformerIsStillSyncing(t *testing.T) {
+	tests := []struct {
+		name     string
+		desc     Descriptor
+		register func(*Dependencies)
+	}{{
+		name:     "shared informer",
+		desc:     Descriptor{Group: "apps", Version: "v1", Resource: "replicasets", Kind: "ReplicaSet", Scope: ScopeNamespace, Namespaced: true},
+		register: registerUnsyncedReplicaSetInformer,
+	}, {
+		name: "CRD informer",
+		desc: Descriptor{Group: "apiextensions.k8s.io", Version: "v1", Resource: "customresourcedefinitions", Kind: "CustomResourceDefinition", Scope: ScopeCluster},
+		register: func(deps *Dependencies) {
+			factory := apiextinformers.NewSharedInformerFactory(apiextensionsfake.NewClientset(), 0)
+			factory.Apiextensions().V1().CustomResourceDefinitions().Informer()
+			deps.APIExtensionsInformerFactory = factory
+		},
+	}}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			// The API holds no objects, so listing it instead would also delete the row.
+			deps := Dependencies{
+				ClusterID: "c1",
+				Common: common.Dependencies{DynamicClient: dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+					map[schema.GroupVersionResource]string{test.desc.GVR(): test.desc.Kind + "List"})},
+				InformerReadiness: informerReadinessStub{readiness: refresh.ResourceReadinessDegraded},
+			}
+			test.register(&deps)
+			svc := newSingleKindCatalog(deps, test.desc)
+			object := &unstructured.Unstructured{}
+			object.SetGroupVersionKind(schema.GroupVersionKind{Group: test.desc.Group, Version: test.desc.Version, Kind: test.desc.Kind})
+			if test.desc.Namespaced {
+				object.SetNamespace("default")
+			}
+			object.SetName("retained")
+			old := summaryFromObject("c1", test.desc, object)
+			svc.items[catalogKey(test.desc, object.GetNamespace(), object.GetName())] = old
+			svc.catalogIndex.rebuildCacheFromItems(svc.items, []Descriptor{test.desc})
+
+			err := svc.sync(t.Context())
+
+			var partial *PartialSyncError
+			require.ErrorAs(t, err, &partial)
+			require.Equal(t, []string{test.desc.GVR().String()}, partial.FailedDescriptors)
+			require.Equal(t, []Summary{old}, svc.Query(QueryOptions{Kinds: []string{test.desc.Kind}}).Items,
+				"a still-syncing informer's empty cache must not delete the kind's published rows")
+		})
+	}
+}
+
+// An informer the factory reports unavailable will never sync: the API refused
+// its watch after the permission check passed, or it was created after the
+// factory started (for example Gateway API installed while connected). The kind
+// is collected from the API, as when the permission check denies the informer.
+func TestCatalogListsLiveWhenInformerIsUnavailable(t *testing.T) {
+	desc := Descriptor{Group: "apps", Version: "v1", Resource: "replicasets", Kind: "ReplicaSet", Scope: ScopeNamespace, Namespaced: true}
+	live := &unstructured.Unstructured{}
+	live.SetGroupVersionKind(schema.GroupVersionKind{Group: desc.Group, Version: desc.Version, Kind: desc.Kind})
+	live.SetNamespace("default")
+	live.SetName("live")
+	live.SetUID("live-uid")
+	deps := Dependencies{
+		ClusterID: "c1",
+		Common: common.Dependencies{DynamicClient: dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+			map[schema.GroupVersionResource]string{desc.GVR(): "ReplicaSetList"}, live)},
+		InformerReadiness: informerReadinessStub{readiness: refresh.ResourceReadinessUnavailable},
+	}
+	registerUnsyncedReplicaSetInformer(&deps)
+	svc := newSingleKindCatalog(deps, desc)
+
+	require.NoError(t, svc.sync(t.Context()))
+
+	rows := svc.Query(QueryOptions{Kinds: []string{desc.Kind}}).Items
+	require.Len(t, rows, 1, "an unavailable informer's empty cache must not be published as the kind's membership")
+	require.Equal(t, "live", rows[0].Ref.Name)
+	require.Equal(t, "c1", rows[0].Ref.ClusterID)
+}
+
+// A synced informer is the kind's authoritative source: collection publishes its
+// cache without an API LIST. Each informer factory the catalog reads is covered.
+func TestCatalogReadsSyncedInformerWithoutListingAPI(t *testing.T) {
+	clientfeaturestesting.SetFeatureDuringTest(t, clientfeatures.WatchListClient, false)
+	cached := metav1.ObjectMeta{Name: "cached", UID: "cached-uid"}
+	namespacedCached := metav1.ObjectMeta{Name: "cached", Namespace: "default", UID: "cached-uid"}
+	tests := []struct {
+		name     string
+		desc     Descriptor
+		register func(ctx context.Context, deps *Dependencies)
+	}{{
+		name: "shared informer",
+		desc: Descriptor{Group: "apps", Version: "v1", Resource: "replicasets", Kind: "ReplicaSet", Scope: ScopeNamespace, Namespaced: true},
+		register: func(ctx context.Context, deps *Dependencies) {
+			factory := informers.NewSharedInformerFactory(kubernetesfake.NewClientset(&appsv1.ReplicaSet{ObjectMeta: namespacedCached}), 0)
+			factory.Apps().V1().ReplicaSets().Informer()
+			factory.Start(ctx.Done())
+			factory.WaitForCacheSync(ctx.Done())
+			deps.InformerFactory = factory
+		},
+	}, {
+		name: "CRD informer",
+		desc: Descriptor{Group: "apiextensions.k8s.io", Version: "v1", Resource: "customresourcedefinitions", Kind: "CustomResourceDefinition", Scope: ScopeCluster},
+		register: func(ctx context.Context, deps *Dependencies) {
+			factory := apiextinformers.NewSharedInformerFactory(apiextensionsfake.NewClientset(&apiextensionsv1.CustomResourceDefinition{ObjectMeta: cached}), 0)
+			factory.Apiextensions().V1().CustomResourceDefinitions().Informer()
+			factory.Start(ctx.Done())
+			factory.WaitForCacheSync(ctx.Done())
+			deps.APIExtensionsInformerFactory = factory
+		},
+	}, {
+		name: "Gateway API informer",
+		desc: Descriptor{Group: "gateway.networking.k8s.io", Version: "v1", Resource: "gatewayclasses", Kind: "GatewayClass", Scope: ScopeCluster},
+		register: func(ctx context.Context, deps *Dependencies) {
+			factory := gatewayinformers.NewSharedInformerFactory(gatewayfake.NewSimpleClientset(&gatewayv1.GatewayClass{ObjectMeta: cached}), 0)
+			factory.Gateway().V1().GatewayClasses().Informer()
+			factory.Start(ctx.Done())
+			factory.WaitForCacheSync(ctx.Done())
+			deps.GatewayInformerFactory = factory
+		},
+	}}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme())
+			listed := false
+			dynamicClient.PrependReactor("list", "*", func(k8stesting.Action) (bool, runtime.Object, error) {
+				listed = true
+				return true, nil, errors.New("collection must read the synced informer")
+			})
+			deps := Dependencies{
+				ClusterID:         "c1",
+				Common:            common.Dependencies{DynamicClient: dynamicClient},
+				InformerReadiness: informerReadinessStub{readiness: refresh.ResourceReadinessReady},
+			}
+			test.register(t.Context(), &deps)
+			svc := newSingleKindCatalog(deps, test.desc)
+
+			require.NoError(t, svc.sync(t.Context()))
+
+			rows := svc.Query(QueryOptions{Kinds: []string{test.desc.Kind}}).Items
+			require.Len(t, rows, 1)
+			require.Equal(t, "cached", rows[0].Ref.Name)
+			require.False(t, listed, "a synced informer must serve the kind without an API LIST")
+		})
+	}
+}
+
+// registerUnsyncedReplicaSetInformer registers a ReplicaSet informer that is never
+// started, so its cache stays empty and unsynced.
+func registerUnsyncedReplicaSetInformer(deps *Dependencies) {
+	factory := informers.NewSharedInformerFactory(kubernetesfake.NewClientset(), 0)
+	factory.Apps().V1().ReplicaSets().Informer()
+	deps.InformerFactory = factory
+}
+
+func newSingleKindCatalog(deps Dependencies, desc Descriptor) *Service {
+	svc := NewService(deps, nil)
+	svc.discoveryClient = &stubDiscovery{lists: []*metav1.APIResourceList{{
+		GroupVersion: desc.Group + "/" + desc.Version,
+		APIResources: []metav1.APIResource{{Name: desc.Resource, Kind: desc.Kind, Namespaced: desc.Namespaced, Verbs: []string{"list", "watch"}}},
+	}}}
+	return svc
 }

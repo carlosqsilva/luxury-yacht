@@ -2,8 +2,10 @@ package backend
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 
 	"github.com/luxury-yacht/app/backend/internal/authstate"
 	appconfig "github.com/luxury-yacht/app/backend/internal/config"
@@ -15,7 +17,6 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 	metricsclient "k8s.io/metrics/pkg/client/clientset/versioned"
 	gatewayversioned "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
 	gatewayinformers "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions"
@@ -211,11 +212,26 @@ func (a *ClusterRuntimeManager) clusterClientCreateTasks(desired map[string]kube
 func (a *ClusterRuntimeManager) createClusterClients(ctx context.Context, tasks []clusterClientCreateTask, build clusterClientBuilder) error {
 	a.markClusterClientTasksConnecting(tasks)
 	limit := clusterClientBuildConcurrencyLimit(len(tasks))
-	return parallel.ForEach(ctx, tasks, limit, func(taskCtx context.Context, task clusterClientCreateTask) error {
-		return a.runClusterOperation(taskCtx, task.meta.ID, func(opCtx context.Context) error {
-			return a.buildAndInstallClusterClient(opCtx, task, build)
+	var failures []error
+	var failuresMu sync.Mutex
+	// Client failures belong to a cluster. Only selection cancellation may stop
+	// sibling builds; retain every failure for the selection diagnostics.
+	_ = parallel.ForEach(ctx, tasks, limit, func(taskCtx context.Context, task clusterClientCreateTask) error {
+		err := a.runClusterOperation(taskCtx, task.meta.ID, func(opCtx context.Context) error {
+			buildErr := a.buildAndInstallClusterClient(opCtx, task, build)
+			if buildErr != nil && !errors.Is(opCtx.Err(), context.Canceled) {
+				a.setClusterLifecycleState(task.meta.ID, ClusterStateDisconnected)
+			}
+			return buildErr
 		})
+		if err != nil {
+			failuresMu.Lock()
+			failures = append(failures, fmt.Errorf("cluster %s: %w", task.meta.ID, err))
+			failuresMu.Unlock()
+		}
+		return nil
 	})
+	return errors.Join(failures...)
 }
 
 func (a *ClusterRuntimeManager) markClusterClientTasksConnecting(tasks []clusterClientCreateTask) {
@@ -331,17 +347,12 @@ func (m *ClusterRuntimeManager) applyKubernetesClientRateLimits(qps, burst int) 
 	m.kubernetesBurst = burst
 	m.rateLimitMu.Unlock()
 
-	m.clusterClientsMu.Lock()
-	clients := make([]*clusterClients, 0, len(m.clusterClients))
-	for _, item := range m.clusterClients {
-		if item != nil {
-			clients = append(clients, item)
-		}
-	}
-	m.clusterClientsMu.Unlock()
-
+	clients := m.snapshotClusterClients()
 	registry := m.ensureKubernetesAPIMetricsRegistry()
 	for _, item := range clients {
+		if item == nil {
+			continue
+		}
 		if item.rateLimiter != nil {
 			item.rateLimiter.Set(qps, burst)
 		}
@@ -417,7 +428,6 @@ func (a *ClusterRuntimeManager) buildClusterClientsWithManager(
 		gatewayClient:          dependencies.gatewayClient,
 		gatewayInformerFactory: dependencies.gatewayInformerFactory,
 		gatewayAPIPresence:     dependencies.gatewayAPIPresence,
-		gatewayVersionResolver: dependencies.gatewayAPIPresence,
 		apiextensionsClient:    dependencies.apiextensionsClient,
 		dynamicClient:          dependencies.dynamicClient,
 		metricsClient:          dependencies.metricsClient,
@@ -566,17 +576,10 @@ func (m *ClusterRuntimeManager) createClusterAuthManager(meta ClusterMeta) *auth
 	})
 }
 
-// the transport for auth state tracking.
+// buildRestConfigForSelection loads the selected config and attaches the cluster's
+// rate limiter, diagnostics, and auth-aware transport.
 func (a *ClusterRuntimeManager) buildRestConfigForSelection(selection kubeconfigSelection, meta ClusterMeta, clusterAuthMgr *authstate.Manager) (*rest.Config, error) {
-	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
-	loadingRules.ExplicitPath = selection.Path
-	overrides := &clientcmd.ConfigOverrides{}
-	if selection.Context != "" {
-		overrides.CurrentContext = selection.Context
-	}
-
-	clientConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, overrides)
-	config, err := clientConfig.ClientConfig()
+	config, err := loadSelectionRESTConfig(selection)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build config from %s: %w", selection.Path, err)
 	}

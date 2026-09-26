@@ -13,11 +13,11 @@ import {
   useObjectPanelState,
 } from '@modules/object-panel/contexts/ObjectPanelStateContext';
 import { ErrorNotificationSystem } from '@shared/components/errors/ErrorNotificationSystem';
-import { DockablePanelProvider } from '@ui/dockable';
+import { DockablePanelLayer, DockablePanelProvider } from '@ui/dockable';
 import type { TabGroupState } from '@ui/dockable/tabGroupTypes';
 import { AppErrorBoundary, PanelErrorBoundary } from '@ui/errors';
-import AppHeader from '@ui/layout/AppHeader';
 import { AppRegionNavigation } from '@ui/layout/AppRegionNavigation';
+import WindowHeader from '@ui/layout/WindowHeader';
 import { KeyboardProvider } from '@ui/shortcuts';
 import TextContextMenu from '@ui/shortcuts/components/TextContextMenu';
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -32,6 +32,7 @@ import {
   requestPanelTabClose,
   requestPanelTabTransfer,
 } from '@/core/panel-windows';
+import { PanelLayoutLifecycle } from '@/core/panel-windows/PanelLayoutLifecycle';
 import { PanelWindowRoleProvider } from '@/core/panel-windows/PanelWindowRoleContext';
 import {
   PanelLifecycleGuardProvider,
@@ -126,58 +127,6 @@ function PanelWindowSurface({
     void acknowledgeReady();
   }, [descriptor]);
 
-  const handleGroupMove = useCallback(
-    (
-      group: { tabs: string[]; activeTab: string | null },
-      targetPosition: 'right' | 'bottom' | 'floating'
-    ): undefined => {
-      if (targetPosition !== 'floating') {
-        const blocker = guards.firstBlocker(group.tabs);
-        if (blocker) {
-          blocker.focus();
-        } else {
-          const snapshot: panelwindow.GroupSnapshot = {
-            schemaVersion: 1,
-            transferId: createTransferId(),
-            sourceWindowName: descriptor.windowName,
-            clusterId: descriptor.clusterId,
-            groupId: descriptor.groupId,
-            tabs: group.tabs.flatMap((panelId) => {
-              const objectRef = openPanels.get(panelId);
-              return objectRef
-                ? [
-                    {
-                      kind: 'object' as panelwindow.TabKind,
-                      panelId,
-                      objectRef: {
-                        clusterId: objectRef.clusterId,
-                        group: objectRef.group,
-                        version: objectRef.version,
-                        kind: objectRef.kind,
-                        namespace: objectRef.namespace ?? '',
-                        name: objectRef.name,
-                      },
-                      activeView: activeTabs.get(panelId) ?? 'details',
-                    },
-                  ]
-                : [];
-            }),
-            activePanelId: group.activeTab ?? group.tabs[0] ?? '',
-          };
-          guards.freeze(snapshot.transferId, group.tabs);
-          void nativePanelPublication
-            .flush()
-            .then(() => beginPanelWindowDock(descriptor.windowName, targetPosition, snapshot))
-            .catch((error) => {
-              guards.releaseTransfer(snapshot.transferId);
-              reportOperationalError(error, { source: 'PanelWindowApp', action: 'dock-group' });
-            });
-        }
-      }
-    },
-    [activeTabs, descriptor, guards, openPanels]
-  );
-
   const getTabSnapshot = useCallback(
     (panelId: string) => {
       const objectRef = openPanels.get(panelId);
@@ -186,6 +135,43 @@ function PanelWindowSurface({
         : undefined;
     },
     [activeTabs, openPanels]
+  );
+
+  const handleGroupMove = useCallback(
+    (
+      group: { tabs: string[]; activeTab: string | null },
+      targetPosition: 'right' | 'bottom' | 'floating'
+    ): undefined => {
+      if (targetPosition === 'floating') {
+        return;
+      }
+      const blocker = guards.firstBlocker(group.tabs);
+      if (blocker) {
+        blocker.focus();
+        return;
+      }
+      const snapshot: panelwindow.GroupSnapshot = {
+        schemaVersion: 1,
+        transferId: createTransferId(),
+        sourceWindowName: descriptor.windowName,
+        clusterId: descriptor.clusterId,
+        groupId: descriptor.groupId,
+        tabs: group.tabs.flatMap((panelId) => {
+          const tab = getTabSnapshot(panelId);
+          return tab ? [tab] : [];
+        }),
+        activePanelId: group.activeTab ?? group.tabs[0] ?? '',
+      };
+      guards.freeze(snapshot.transferId, group.tabs);
+      void nativePanelPublication
+        .flush()
+        .then(() => beginPanelWindowDock(descriptor.windowName, targetPosition, snapshot))
+        .catch((error) => {
+          guards.releaseTransfer(snapshot.transferId);
+          reportOperationalError(error, { source: 'PanelWindowApp', action: 'dock-group' });
+        });
+    },
+    [descriptor, guards, getTabSnapshot]
   );
 
   const tabDragIdentity = useMemo(
@@ -277,12 +263,14 @@ function PanelWindowSurface({
       onTabTearOff={handleTabTearOff}
       canStartTabDrag={canStartTabDrag}
     >
+      <PanelLayoutLifecycle />
       <PanelWindowShortcuts descriptor={descriptor} ready={ready} />
       <AppRegionNavigation />
       <TextContextMenu />
-      <AppHeader mode="panel" clusterName={clusterName} />
+      <WindowHeader clusterName={clusterName} />
       <ErrorNotificationSystem />
       <div className="panel-window-content content">
+        <DockablePanelLayer />
         {Array.from(openPanels.entries()).map(([panelId, objectRef]) => (
           <PanelErrorBoundary
             key={panelId}

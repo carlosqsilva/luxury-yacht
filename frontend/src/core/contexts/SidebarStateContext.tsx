@@ -52,10 +52,8 @@ const DEFAULT_SIDEBAR_SELECTION: SidebarSelectionType = {
   value: 'overview',
 };
 
-const canUpdateSidebarVisible = () => desktopRuntimeAvailable();
-
 export const SidebarStateProvider: React.FC<SidebarStateProviderProps> = ({ children }) => {
-  const { selectedClusterId, selectedClusterIds } = useKubeconfig();
+  const { selectedClusterId, managedClusterIds } = useKubeconfig();
   const [isSidebarVisible, setIsSidebarVisible] = useState(true);
   const [sidebarWidth, setSidebarWidth] = useState(250);
   const [isResizing, setIsResizing] = useState(false);
@@ -70,28 +68,22 @@ export const SidebarStateProvider: React.FC<SidebarStateProviderProps> = ({ chil
 
   // Sync sidebar state with backend on mount and changes
   useEffect(() => {
-    if (!canUpdateSidebarVisible()) {
+    if (!desktopRuntimeAvailable()) {
       return;
     }
     void SetSidebarVisible(isSidebarVisible);
   }, [isSidebarVisible]);
 
   const toggleSidebar = useCallback(() => {
-    setIsSidebarVisible((prev) => {
-      const newState = !prev;
-      if (canUpdateSidebarVisible()) {
-        void SetSidebarVisible(newState);
-      }
-      return newState;
-    });
+    setIsSidebarVisible((prev) => !prev);
   }, []);
 
   useEffect(() => {
     setSidebarSelections((prev) => {
-      if (selectedClusterIds.length === 0) {
+      if (managedClusterIds.length === 0) {
         return prev.__default__ ? { __default__: prev.__default__ } : {};
       }
-      const allowed = new Set(selectedClusterIds);
+      const allowed = new Set(managedClusterIds);
       const next: Record<string, SidebarSelectionType> = {};
       Object.entries(prev).forEach(([key, storedValue]) => {
         if (key === '__default__' || allowed.has(key)) {
@@ -100,7 +92,7 @@ export const SidebarStateProvider: React.FC<SidebarStateProviderProps> = ({ chil
       });
       return next;
     });
-  }, [selectedClusterIds]);
+  }, [managedClusterIds]);
 
   const setSidebarSelectionForCluster = useCallback(
     (clusterId: string, selection: SidebarSelectionType) => {

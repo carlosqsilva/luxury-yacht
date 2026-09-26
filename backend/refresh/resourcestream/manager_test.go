@@ -13,12 +13,7 @@ import (
 	storagev1 "k8s.io/api/storage/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	dynamicfake "k8s.io/client-go/dynamic/fake"
-	appslisters "k8s.io/client-go/listers/apps/v1"
-	"k8s.io/client-go/tools/cache"
 
 	"github.com/stretchr/testify/require"
 
@@ -82,19 +77,37 @@ func resumeForTest(t *testing.T, manager *Manager, domain, scope string, since u
 	return manager.ResumeSelector(selector, since)
 }
 
-type scopedListWatchStub struct {
-	allowed map[string]bool
-	checked []string
-}
-
-func (s *scopedListWatchStub) CanListWatch(group, resource string) bool {
-	return s.CanListWatchInNamespace(group, resource, "")
-}
-
-func (s *scopedListWatchStub) CanListWatchInNamespace(group, resource, namespace string) bool {
-	key := group + "/" + resource + "|" + namespace
-	s.checked = append(s.checked, key)
-	return s.allowed[key]
+func TestManagerRejectsUnscopedAndForeignSubscriptionIdentity(t *testing.T) {
+	manager := NewManager(nil, nil, nil, snapshot.ClusterMeta{ClusterID: "c1"}, nil)
+	t.Cleanup(manager.Stop)
+	selector, err := ParseStreamSelector("c1", domainPods, "namespace:default")
+	require.NoError(t, err)
+	sub, err := manager.SubscribeSelector(selector)
+	require.NoError(t, err)
+	for _, version := range []string{"1", "2"} {
+		manager.broadcast(domainPods, []string{selector.CanonicalScope()}, Update{
+			Type: MessageTypeModified, Domain: domainPods, ClusterID: "c1",
+			ResourceVersion: version,
+			Ref:             refPtr(resourcemodel.ResourceRef{ClusterID: "c1", Version: "v1", Kind: "Pod", Namespace: "default", Name: "pod-a"}),
+		})
+		require.Equal(t, version, requireNextUpdate(t, sub).Sequence)
+	}
+	for _, clusterID := range []string{"", " ", "c2"} {
+		t.Run("cluster="+clusterID, func(t *testing.T) {
+			invalid := selector
+			invalid.ClusterID = clusterID
+			foreignSub, err := manager.SubscribeSelector(invalid)
+			require.Error(t, err)
+			require.Nil(t, foreignSub)
+			updates, ok := manager.ResumeSelector(invalid, 1)
+			require.False(t, ok)
+			require.Empty(t, updates)
+		})
+	}
+	updates, ok := manager.ResumeSelector(selector, 1)
+	require.True(t, ok)
+	require.Len(t, updates, 1)
+	require.Equal(t, "2", updates[0].Sequence)
 }
 
 func TestManagerBroadcastsEventAndCatalogDoorbellSources(t *testing.T) {
@@ -340,7 +353,7 @@ func TestManagerRBACUpdateBroadcasts(t *testing.T) {
 		},
 	}
 
-	manager.streamObjectRowFromDescriptor(role, MessageTypeAdded, rolepkg.StreamDescriptor)
+	manager.broadcastObjectFromDescriptor(role, MessageTypeAdded, rolepkg.StreamDescriptor)
 
 	select {
 	case update := <-sub.Updates:
@@ -463,6 +476,13 @@ func TestManagerEvictsResumeBufferWhenLastSubscriberCancels(t *testing.T) {
 
 	require.NotContains(t, manager.buffers, key)
 	require.NotContains(t, manager.sequences, key)
+
+	replacement, err := subscribeForTest(t, manager, domainPods, "namespace:default")
+	require.NoError(t, err)
+	t.Cleanup(replacement.Cancel)
+	sub.Cancel()
+	manager.broadcast(domainPods, []string{"namespace:default"}, update)
+	require.Equal(t, "1", requireNextUpdate(t, replacement).Sequence)
 }
 
 func TestManagerClusterRBACUpdateBroadcasts(t *testing.T) {
@@ -483,7 +503,7 @@ func TestManagerClusterRBACUpdateBroadcasts(t *testing.T) {
 		},
 	}
 
-	manager.streamObjectRowFromDescriptor(role, MessageTypeAdded, clusterrole.StreamDescriptor)
+	manager.broadcastObjectFromDescriptor(role, MessageTypeAdded, clusterrole.StreamDescriptor)
 
 	select {
 	case update := <-sub.Updates:
@@ -515,7 +535,7 @@ func TestManagerQuotasUpdateBroadcasts(t *testing.T) {
 		},
 	}
 
-	manager.streamObjectRowFromDescriptor(quota, MessageTypeAdded, resourcequota.StreamDescriptor)
+	manager.broadcastObjectFromDescriptor(quota, MessageTypeAdded, resourcequota.StreamDescriptor)
 
 	select {
 	case update := <-sub.Updates:
@@ -547,7 +567,7 @@ func TestManagerClusterConfigUpdateBroadcasts(t *testing.T) {
 		Provisioner: "kubernetes.io/no-provisioner",
 	}
 
-	manager.streamObjectRowFromDescriptor(storageClass, MessageTypeAdded, storageclass.StreamDescriptor)
+	manager.broadcastObjectFromDescriptor(storageClass, MessageTypeAdded, storageclass.StreamDescriptor)
 
 	select {
 	case update := <-sub.Updates:
@@ -585,7 +605,7 @@ func TestManagerStorageUpdateBroadcasts(t *testing.T) {
 		},
 	}
 
-	manager.streamObjectRowFromDescriptor(pvc, MessageTypeAdded, persistentvolumeclaim.StreamDescriptor)
+	manager.broadcastObjectFromDescriptor(pvc, MessageTypeAdded, persistentvolumeclaim.StreamDescriptor)
 
 	select {
 	case update := <-sub.Updates:
@@ -619,7 +639,7 @@ func TestManagerClusterStorageUpdateBroadcasts(t *testing.T) {
 		},
 	}
 
-	manager.streamObjectRowFromDescriptor(pv, MessageTypeAdded, persistentvolume.StreamDescriptor)
+	manager.broadcastObjectFromDescriptor(pv, MessageTypeAdded, persistentvolume.StreamDescriptor)
 
 	select {
 	case update := <-sub.Updates:
@@ -632,408 +652,13 @@ func TestManagerClusterStorageUpdateBroadcasts(t *testing.T) {
 	}
 }
 
-func TestManagerCustomInformerEventHandlerBroadcasts(t *testing.T) {
+func TestManagerCRDChangesNotifyCRDTable(t *testing.T) {
 	manager := &Manager{
 		clusterMeta: snapshot.ClusterMeta{ClusterID: "c1", ClusterName: "cluster"},
 		logger:      applog.Noop,
 		subscribers: make(map[string]map[string]map[uint64]*subscription),
 	}
-
-	sub, err := subscribeForTest(t, manager, domainNamespaceCustom, "namespace:default")
-	require.NoError(t, err)
-
-	resource := &unstructured.Unstructured{}
-	resource.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "example.com",
-		Version: "v1",
-		Kind:    "Widget",
-	})
-	resource.SetName("widget-1")
-	resource.SetNamespace("default")
-	resource.SetUID("widget-uid")
-	resource.SetResourceVersion("2")
-	resource.SetCreationTimestamp(metav1.NewTime(time.Now().Add(-time.Minute)))
-
-	info := &customResourceInformer{
-		gvr:  schema.GroupVersionResource{Group: "example.com", Version: "v1", Resource: "widgets"},
-		kind: "Widget",
-	}
-	handler := customResourceStreamEventHandler(manager, info)
-
-	handler.AddFunc(resource)
-	update := requireNextUpdate(t, sub)
-	require.Equal(t, MessageTypeAdded, update.Type)
-	require.Equal(t, domainNamespaceCustom, update.Domain)
-	require.Equal(t, "namespace:default", update.Scope)
-	require.Equal(t, "widget-1", update.Ref.Name)
-	require.Equal(t, "default", update.Ref.Namespace)
-	require.Equal(t, "Widget", update.Ref.Kind)
-	require.Equal(t, "example.com", update.Ref.Group)
-	require.Equal(t, "v1", update.Ref.Version)
-
-	updated := resource.DeepCopy()
-	updated.SetResourceVersion("3")
-	handler.UpdateFunc(resource, updated)
-	update = requireNextUpdate(t, sub)
-	require.Equal(t, MessageTypeModified, update.Type)
-	require.Equal(t, "3", update.ResourceVersion)
-
-	handler.DeleteFunc(updated)
-	update = requireNextUpdate(t, sub)
-	require.Equal(t, MessageTypeDeleted, update.Type)
-	require.Equal(t, "3", update.ResourceVersion)
-}
-
-func TestManagerCustomUpdateInvalidatesCache(t *testing.T) {
-	manager := &Manager{
-		clusterMeta: snapshot.ClusterMeta{ClusterID: "c1", ClusterName: "cluster"},
-		logger:      applog.Noop,
-		subscribers: make(map[string]map[string]map[uint64]*subscription),
-	}
-
-	_, err := subscribeForTest(t, manager, domainNamespaceCustom, "namespace:default")
-	require.NoError(t, err)
-
-	var called bool
-	var gotRef resourcemodel.ResourceRef
-	manager.SetCustomResourceCacheInvalidator(func(ref resourcemodel.ResourceRef) {
-		called = true
-		gotRef = ref
-	})
-
-	resource := &unstructured.Unstructured{}
-	resource.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "example.com",
-		Version: "v1",
-		Kind:    "Widget",
-	})
-	resource.SetName("widget-1")
-	resource.SetNamespace("default")
-
-	info := &customResourceInformer{
-		gvr:  schema.GroupVersionResource{Group: "example.com", Version: "v1", Resource: "widgets"},
-		kind: "Widget",
-	}
-
-	manager.handleCustomResource(resource, MessageTypeModified, info)
-
-	require.True(t, called)
-	require.Equal(t, resourcemodel.NewResourceRef(resourcemodel.ResourceRef{ClusterID: "c1", Group: "example.com", Version: "v1", Kind: "Widget", Resource: "widgets", Namespace: "default", Name: "widget-1", UID: ""}),
-
-		gotRef)
-}
-
-func TestManagerSkipsCustomInformerForFirstClassGatewayCRD(t *testing.T) {
-	existingStopCh := make(chan struct{})
-	manager := &Manager{
-		clusterMeta:     snapshot.ClusterMeta{ClusterID: "c1", ClusterName: "cluster"},
-		logger:          applog.Noop,
-		dynamicClient:   newWidgetDynamicClient(),
-		customInformers: make(map[string]*customResourceInformer),
-		subscribers:     make(map[string]map[string]map[uint64]*subscription),
-	}
-	manager.customInformers["gateways.gateway.networking.k8s.io"] = &customResourceInformer{
-		stopCh: existingStopCh,
-	}
-
-	crd := &apiextensionsv1.CustomResourceDefinition{
-		ObjectMeta: metav1.ObjectMeta{Name: "gateways.gateway.networking.k8s.io"},
-		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
-			Group: "gateway.networking.k8s.io",
-			Scope: apiextensionsv1.NamespaceScoped,
-			Names: apiextensionsv1.CustomResourceDefinitionNames{
-				Plural: "gateways",
-				Kind:   "Gateway",
-			},
-			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{{
-				Name:    "v1",
-				Served:  true,
-				Storage: true,
-			}},
-		},
-	}
-
-	manager.handleCustomResourceDefinition(crd, MessageTypeModified)
-
-	require.Empty(t, manager.customInformers)
-	select {
-	case <-existingStopCh:
-	default:
-		t.Fatal("expected stale custom informer to be stopped")
-	}
-}
-
-func TestManagerCustomInformerGuardsMissingDependencies(t *testing.T) {
-	crd := customResourceDefinition("widgets.example.com", "example.com", "widgets", "Widget", apiextensionsv1.NamespaceScoped, "1")
-	var nilManager *Manager
-	nilManager.ensureCustomInformer(crd)
-	nilManager.removeCustomInformer(crd.Name)
-
-	manager := &Manager{}
-	manager.ensureCustomInformer(crd)
-	manager.removeCustomInformer("")
-
-	manager.dynamicClient = newWidgetDynamicClient()
-	manager.ensureCustomInformer(nil)
-}
-
-func TestManagerStartsCustomInformersOnlyInPermittedNamespaces(t *testing.T) {
-	permissionChecks := &scopedListWatchStub{allowed: map[string]bool{
-		"example.com/widgets|allowed": true,
-	}}
-	manager := &Manager{
-		clusterMeta:       snapshot.ClusterMeta{ClusterID: "c1", ClusterName: "cluster"},
-		logger:            applog.Noop,
-		permissions:       permissionChecks,
-		dynamicClient:     newWidgetDynamicClient(),
-		allowedNamespaces: []string{"allowed", "denied"},
-		customInformers:   make(map[string]*customResourceInformer),
-		subscribers:       make(map[string]map[string]map[uint64]*subscription),
-	}
-	t.Cleanup(manager.Stop)
-	crd := customResourceDefinition("widgets.example.com", "example.com", "widgets", "Widget", apiextensionsv1.NamespaceScoped, "1")
-
-	manager.ensureCustomInformer(crd)
-
-	info := manager.customInformers[crd.Name]
-	require.NotNil(t, info)
-	require.Equal(t, []string{"allowed"}, info.namespaces)
-	require.Len(t, info.informers, 1, "denied namespaces must not get dynamic informers")
-	require.Equal(t, []string{
-		"example.com/widgets|allowed",
-		"example.com/widgets|denied",
-	}, permissionChecks.checked)
-}
-
-func TestManagerDoesNotStartCustomInformerWhenListWatchIsDenied(t *testing.T) {
-	permissionChecks := &scopedListWatchStub{allowed: map[string]bool{}}
-	crd := customResourceDefinition("widgets.example.com", "example.com", "widgets", "Widget", apiextensionsv1.NamespaceScoped, "1")
-	staleStopCh := make(chan struct{})
-	manager := &Manager{
-		clusterMeta:       snapshot.ClusterMeta{ClusterID: "c1", ClusterName: "cluster"},
-		logger:            applog.Noop,
-		permissions:       permissionChecks,
-		dynamicClient:     newWidgetDynamicClient(),
-		allowedNamespaces: []string{"denied"},
-		customInformers: map[string]*customResourceInformer{
-			crd.Name: {stopCh: staleStopCh},
-		},
-		subscribers: make(map[string]map[string]map[uint64]*subscription),
-	}
-
-	manager.ensureCustomInformer(crd)
-
-	require.NotContains(t, manager.customInformers, crd.Name)
-	require.Equal(t, []string{"example.com/widgets|denied"}, permissionChecks.checked)
-	select {
-	case <-staleStopCh:
-	default:
-		t.Fatal("expected an existing informer to stop when every namespace is denied")
-	}
-}
-
-func TestManagerRemovesCustomInformerForUnknownCRDScope(t *testing.T) {
-	crd := customResourceDefinition("widgets.example.com", "example.com", "widgets", "Widget", apiextensionsv1.ResourceScope("Unknown"), "1")
-	staleStopCh := make(chan struct{})
-	manager := &Manager{
-		clusterMeta:   snapshot.ClusterMeta{ClusterID: "c1", ClusterName: "cluster"},
-		logger:        applog.Noop,
-		dynamicClient: newWidgetDynamicClient(),
-		customInformers: map[string]*customResourceInformer{
-			crd.Name: {stopCh: staleStopCh},
-		},
-		subscribers: make(map[string]map[string]map[uint64]*subscription),
-	}
-
-	manager.ensureCustomInformer(crd)
-
-	require.NotContains(t, manager.customInformers, crd.Name)
-	select {
-	case <-staleStopCh:
-	default:
-		t.Fatal("expected an informer with an unknown CRD scope to be stopped")
-	}
-}
-
-func TestManagerRetainsCustomInformerForIncompleteCRDDefinition(t *testing.T) {
-	crd := customResourceDefinition("widgets.example.com", "example.com", "widgets", "Widget", apiextensionsv1.NamespaceScoped, "1")
-	crd.Spec.Versions = nil
-	existing := &customResourceInformer{stopCh: make(chan struct{})}
-	manager := &Manager{
-		clusterMeta:   snapshot.ClusterMeta{ClusterID: "c1", ClusterName: "cluster"},
-		logger:        applog.Noop,
-		dynamicClient: newWidgetDynamicClient(),
-		customInformers: map[string]*customResourceInformer{
-			crd.Name: existing,
-		},
-		subscribers: make(map[string]map[string]map[uint64]*subscription),
-	}
-	t.Cleanup(manager.Stop)
-
-	manager.ensureCustomInformer(crd)
-
-	require.Same(t, existing, manager.customInformers[crd.Name])
-	select {
-	case <-existing.stopCh:
-		t.Fatal("incomplete CRD definition unexpectedly stopped the existing informer")
-	default:
-	}
-}
-
-func TestManagerChecksClusterScopedCustomInformerAtClusterScope(t *testing.T) {
-	permissionChecks := &scopedListWatchStub{allowed: map[string]bool{
-		"example.com/widgets|": true,
-	}}
-	manager := &Manager{
-		clusterMeta:     snapshot.ClusterMeta{ClusterID: "c1", ClusterName: "cluster"},
-		logger:          applog.Noop,
-		permissions:     permissionChecks,
-		dynamicClient:   newWidgetDynamicClient(),
-		customInformers: make(map[string]*customResourceInformer),
-		subscribers:     make(map[string]map[string]map[uint64]*subscription),
-	}
-	t.Cleanup(manager.Stop)
-	crd := customResourceDefinition("widgets.example.com", "example.com", "widgets", "Widget", apiextensionsv1.ClusterScoped, "1")
-
-	manager.ensureCustomInformer(crd)
-
-	info := manager.customInformers[crd.Name]
-	require.NotNil(t, info)
-	require.Equal(t, []string{""}, info.namespaces)
-	require.Len(t, info.informers, 1)
-	require.Equal(t, []string{"example.com/widgets|"}, permissionChecks.checked)
-}
-
-func TestManagerChecksUnscopedNamespacedCustomInformerAtAllNamespaces(t *testing.T) {
-	permissionChecks := &scopedListWatchStub{allowed: map[string]bool{
-		"example.com/widgets|": true,
-	}}
-	manager := &Manager{
-		clusterMeta:     snapshot.ClusterMeta{ClusterID: "c1", ClusterName: "cluster"},
-		logger:          applog.Noop,
-		permissions:     permissionChecks,
-		dynamicClient:   newWidgetDynamicClient(),
-		customInformers: make(map[string]*customResourceInformer),
-		subscribers:     make(map[string]map[string]map[uint64]*subscription),
-	}
-	t.Cleanup(manager.Stop)
-	crd := customResourceDefinition("widgets.example.com", "example.com", "widgets", "Widget", apiextensionsv1.NamespaceScoped, "1")
-
-	manager.ensureCustomInformer(crd)
-
-	info := manager.customInformers[crd.Name]
-	require.NotNil(t, info)
-	require.Equal(t, domainNamespaceCustom, info.domain)
-	require.Equal(t, []string{metav1.NamespaceAll}, info.namespaces)
-	require.Len(t, info.informers, 1)
-	require.Equal(t, []string{"example.com/widgets|"}, permissionChecks.checked)
-}
-
-func TestManagerReusesMatchingCustomInformerWithoutDuplicates(t *testing.T) {
-	manager := &Manager{
-		clusterMeta:     snapshot.ClusterMeta{ClusterID: "c1", ClusterName: "cluster"},
-		logger:          applog.Noop,
-		dynamicClient:   newWidgetDynamicClient(),
-		customInformers: make(map[string]*customResourceInformer),
-		subscribers:     make(map[string]map[string]map[uint64]*subscription),
-	}
-	t.Cleanup(manager.Stop)
-	crd := customResourceDefinition("widgets.example.com", "example.com", "widgets", "Widget", apiextensionsv1.NamespaceScoped, "1")
-
-	manager.ensureCustomInformer(crd)
-	first := manager.customInformers[crd.Name]
-	manager.ensureCustomInformer(crd.DeepCopy())
-
-	require.Same(t, first, manager.customInformers[crd.Name])
-	require.Len(t, first.informers, 1)
-	select {
-	case <-first.stopCh:
-		t.Fatal("matching informer was unexpectedly stopped")
-	default:
-	}
-}
-
-func TestManagerReplacesChangedCustomInformerAndStopsPrevious(t *testing.T) {
-	manager := &Manager{
-		clusterMeta:     snapshot.ClusterMeta{ClusterID: "c1", ClusterName: "cluster"},
-		logger:          applog.Noop,
-		dynamicClient:   newWidgetDynamicClient(),
-		customInformers: make(map[string]*customResourceInformer),
-		subscribers:     make(map[string]map[string]map[uint64]*subscription),
-	}
-	t.Cleanup(manager.Stop)
-	crd := customResourceDefinition("widgets.example.com", "example.com", "widgets", "Widget", apiextensionsv1.NamespaceScoped, "1")
-	manager.ensureCustomInformer(crd)
-	previous := manager.customInformers[crd.Name]
-
-	changed := crd.DeepCopy()
-	changed.Spec.Names.Kind = "RenamedWidget"
-	manager.ensureCustomInformer(changed)
-
-	current := manager.customInformers[crd.Name]
-	require.NotSame(t, previous, current)
-	require.Equal(t, "RenamedWidget", current.kind)
-	require.Len(t, current.informers, 1)
-	select {
-	case <-previous.stopCh:
-	default:
-		t.Fatal("expected replaced informer to be stopped")
-	}
-}
-
-func TestManagerStopCleansCustomInformers(t *testing.T) {
-	manager := &Manager{
-		clusterMeta:     snapshot.ClusterMeta{ClusterID: "c1", ClusterName: "cluster"},
-		logger:          applog.Noop,
-		dynamicClient:   newWidgetDynamicClient(),
-		customInformers: make(map[string]*customResourceInformer),
-		subscribers:     make(map[string]map[string]map[uint64]*subscription),
-	}
-	crd := customResourceDefinition("widgets.example.com", "example.com", "widgets", "Widget", apiextensionsv1.NamespaceScoped, "1")
-	manager.ensureCustomInformer(crd)
-	info := manager.customInformers[crd.Name]
-
-	manager.Stop()
-	manager.Stop()
-
-	require.Empty(t, manager.customInformers)
-	select {
-	case <-info.stopCh:
-	default:
-		t.Fatal("expected Stop to close the custom informer channel")
-	}
-}
-
-func TestManagerDoesNotRecreateCustomInformerAfterStop(t *testing.T) {
-	manager := &Manager{
-		clusterMeta:     snapshot.ClusterMeta{ClusterID: "c1", ClusterName: "cluster"},
-		logger:          applog.Noop,
-		dynamicClient:   newWidgetDynamicClient(),
-		customInformers: make(map[string]*customResourceInformer),
-		subscribers:     make(map[string]map[string]map[uint64]*subscription),
-	}
-
-	// Teardown drains the custom informers and marks the manager stopped.
-	manager.Stop()
-
-	// A CRD event arriving after Stop (e.g. an informer resync firing during the
-	// teardown window, before the shared CRD informer is shut down) must not
-	// resurrect a custom informer. Re-creating one here would spawn a goroutine
-	// and a dynamic watch on a stopCh that nothing will ever close — a permanent
-	// goroutine + watch leak.
-	crd := customResourceDefinition("widgets.example.com", "example.com", "widgets", "Widget", apiextensionsv1.NamespaceScoped, "1")
-	manager.handleCustomResourceDefinition(crd, MessageTypeAdded)
-
-	require.Empty(t, manager.customInformers, "stopped manager must not re-create custom informers")
-}
-
-func TestManagerCRDSignatureChangeCompletesCustomDomain(t *testing.T) {
-	manager := &Manager{
-		clusterMeta: snapshot.ClusterMeta{ClusterID: "c1", ClusterName: "cluster"},
-		logger:      applog.Noop,
-		subscribers: make(map[string]map[string]map[uint64]*subscription),
-	}
-	sub, err := subscribeForTest(t, manager, domainNamespaceCustom, "namespace:default")
+	sub, err := subscribeForTest(t, manager, domainClusterCRDs, "")
 	require.NoError(t, err)
 
 	oldCRD := customResourceDefinition("widgets.example.com", "example.com", "widgets", "Widget", apiextensionsv1.NamespaceScoped, "10")
@@ -1041,40 +666,11 @@ func TestManagerCRDSignatureChangeCompletesCustomDomain(t *testing.T) {
 	newCRD.ResourceVersion = "11"
 	newCRD.Spec.Names.Kind = "RenamedWidget"
 
-	manager.handleCustomResourceDefinitionEvent(oldCRD, newCRD, MessageTypeModified)
+	manager.handleClusterCRD(newCRD, MessageTypeModified)
 
 	update := requireNextUpdate(t, sub)
-	require.Equal(t, MessageTypeComplete, update.Type)
-	require.Equal(t, domainNamespaceCustom, update.Domain)
-	require.Equal(t, "namespace:default", update.Scope)
-	require.Equal(t, "11", update.ResourceVersion)
-	require.NotNil(t, update.Ref)
-	require.Equal(t, "c1", update.Ref.ClusterID)
-	require.Equal(t, "apiextensions.k8s.io", update.Ref.Group)
-	require.Equal(t, "v1", update.Ref.Version)
-	require.Equal(t, "CustomResourceDefinition", update.Ref.Kind)
-	require.Equal(t, "widgets.example.com", update.Ref.Name)
-}
-
-func TestManagerClusterCustomCRDSignatureChangeCompletesCustomDomain(t *testing.T) {
-	manager := &Manager{
-		clusterMeta: snapshot.ClusterMeta{ClusterID: "c1", ClusterName: "cluster"},
-		logger:      applog.Noop,
-		subscribers: make(map[string]map[string]map[uint64]*subscription),
-	}
-	sub, err := subscribeForTest(t, manager, domainClusterCustom, "")
-	require.NoError(t, err)
-
-	oldCRD := customResourceDefinition("clusterwidgets.example.com", "example.com", "clusterwidgets", "ClusterWidget", apiextensionsv1.ClusterScoped, "10")
-	newCRD := oldCRD.DeepCopy()
-	newCRD.ResourceVersion = "11"
-	newCRD.Spec.Names.Plural = "renamedclusterwidgets"
-
-	manager.handleCustomResourceDefinitionEvent(oldCRD, newCRD, MessageTypeModified)
-
-	update := requireNextUpdate(t, sub)
-	require.Equal(t, MessageTypeComplete, update.Type)
-	require.Equal(t, domainClusterCustom, update.Domain)
+	require.Equal(t, MessageTypeModified, update.Type)
+	require.Equal(t, domainClusterCRDs, update.Domain)
 	require.Equal(t, "", update.Scope)
 	require.Equal(t, "11", update.ResourceVersion)
 	require.NotNil(t, update.Ref)
@@ -1082,50 +678,7 @@ func TestManagerClusterCustomCRDSignatureChangeCompletesCustomDomain(t *testing.
 	require.Equal(t, "apiextensions.k8s.io", update.Ref.Group)
 	require.Equal(t, "v1", update.Ref.Version)
 	require.Equal(t, "CustomResourceDefinition", update.Ref.Kind)
-	require.Equal(t, "clusterwidgets.example.com", update.Ref.Name)
-}
-
-func TestManagerClusterCustomUpdateBroadcasts(t *testing.T) {
-	manager := &Manager{
-		clusterMeta: snapshot.ClusterMeta{ClusterID: "c1", ClusterName: "cluster"},
-		logger:      applog.Noop,
-		subscribers: make(map[string]map[string]map[uint64]*subscription),
-	}
-
-	sub, err := subscribeForTest(t, manager, domainClusterCustom, "")
-	require.NoError(t, err)
-
-	resource := &unstructured.Unstructured{}
-	resource.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "example.com",
-		Version: "v1",
-		Kind:    "Widget",
-	})
-	resource.SetName("widget-cluster")
-	resource.SetUID("widget-cluster-uid")
-	resource.SetResourceVersion("2")
-	resource.SetCreationTimestamp(metav1.NewTime(time.Now().Add(-time.Minute)))
-
-	info := &customResourceInformer{
-		gvr:    schema.GroupVersionResource{Group: "example.com", Version: "v1", Resource: "widgets"},
-		kind:   "Widget",
-		domain: domainClusterCustom,
-	}
-
-	manager.handleCustomResource(resource, MessageTypeAdded, info)
-
-	select {
-	case update := <-sub.Updates:
-		require.Equal(t, MessageTypeAdded, update.Type)
-		require.Equal(t, domainClusterCustom, update.Domain)
-		require.Equal(t, "", update.Scope)
-		require.Equal(t, "widget-cluster", update.Ref.Name)
-		require.Equal(t, "Widget", update.Ref.Kind)
-		require.Equal(t, "example.com", update.Ref.Group)
-		require.Equal(t, "v1", update.Ref.Version)
-	default:
-		t.Fatal("expected cluster custom update to be delivered")
-	}
+	require.Equal(t, "widgets.example.com", update.Ref.Name)
 }
 
 func TestManagerClusterCRDUpdateBroadcasts(t *testing.T) {
@@ -1348,10 +901,10 @@ func TestManagerHPADeleteRefreshesTargetWorkloadRow(t *testing.T) {
 		},
 	}
 	manager := &Manager{
-		clusterMeta:      snapshot.ClusterMeta{ClusterID: "c1", ClusterName: "cluster"},
-		logger:           applog.Noop,
-		deploymentLister: testsupport.NewDeploymentLister(t, deployment),
-		subscribers:      make(map[string]map[string]map[uint64]*subscription),
+		clusterMeta:    snapshot.ClusterMeta{ClusterID: "c1", ClusterName: "cluster"},
+		logger:         applog.Noop,
+		workloadIngest: deploymentIngestWith(t, deployment),
+		subscribers:    make(map[string]map[string]map[uint64]*subscription),
 	}
 	sub, err := subscribeForTest(t, manager, domainWorkloads, "namespace:default")
 	require.NoError(t, err)
@@ -1384,10 +937,10 @@ func TestManagerHPAUpdateRefreshesOldAndNewTargets(t *testing.T) {
 	newHPA.ResourceVersion = "11"
 	newHPA.Spec.ScaleTargetRef.Name = "web-new"
 	manager := &Manager{
-		clusterMeta:      snapshot.ClusterMeta{ClusterID: "c1", ClusterName: "cluster"},
-		logger:           applog.Noop,
-		deploymentLister: testsupport.NewDeploymentLister(t, oldDeployment, newDeployment),
-		subscribers:      make(map[string]map[string]map[uint64]*subscription),
+		clusterMeta:    snapshot.ClusterMeta{ClusterID: "c1", ClusterName: "cluster"},
+		logger:         applog.Noop,
+		workloadIngest: deploymentIngestWith(t, oldDeployment, newDeployment),
+		subscribers:    make(map[string]map[string]map[uint64]*subscription),
 	}
 	sub, err := subscribeForTest(t, manager, domainWorkloads, "namespace:default")
 	require.NoError(t, err)
@@ -1735,10 +1288,10 @@ func TestManagerWorkloadUpdateFromPod(t *testing.T) {
 	}
 
 	manager := &Manager{
-		clusterMeta:      snapshot.ClusterMeta{ClusterID: "c1", ClusterName: "cluster"},
-		logger:           applog.Noop,
-		deploymentLister: deploymentListerWith(deployment),
-		subscribers:      make(map[string]map[string]map[uint64]*subscription),
+		clusterMeta:    snapshot.ClusterMeta{ClusterID: "c1", ClusterName: "cluster"},
+		logger:         applog.Noop,
+		workloadIngest: deploymentIngestWith(t, deployment),
+		subscribers:    make(map[string]map[string]map[uint64]*subscription),
 	}
 
 	sub, err := subscribeForTest(t, manager, domainWorkloads, "namespace:default")
@@ -1771,10 +1324,10 @@ func TestManagerWorkloadUpdateFromCompletedOwnedPod(t *testing.T) {
 	}
 
 	manager := &Manager{
-		clusterMeta:      snapshot.ClusterMeta{ClusterID: "c1", ClusterName: "cluster"},
-		logger:           applog.Noop,
-		deploymentLister: deploymentListerWith(deployment),
-		subscribers:      make(map[string]map[string]map[uint64]*subscription),
+		clusterMeta:    snapshot.ClusterMeta{ClusterID: "c1", ClusterName: "cluster"},
+		logger:         applog.Noop,
+		workloadIngest: deploymentIngestWith(t, deployment),
+		subscribers:    make(map[string]map[string]map[uint64]*subscription),
 	}
 
 	sub, err := subscribeForTest(t, manager, domainWorkloads, "namespace:default")
@@ -1825,21 +1378,26 @@ func TestManagerDeletesStandaloneWorkloadRowWhenPodCompletes(t *testing.T) {
 	}
 }
 
-func deploymentListerWith(items ...*appsv1.Deployment) appslisters.DeploymentLister {
-	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{
-		cache.NamespaceIndex: cache.MetaNamespaceIndexFunc,
-	})
-	for _, item := range items {
-		_ = indexer.Add(item)
-	}
-	return appslisters.NewDeploymentLister(indexer)
+type deploymentIngestReader struct {
+	store *ingest.ProjectingStore
 }
 
-// Informer tests may start their LIST before cleanup closes the watch.
-func newWidgetDynamicClient() *dynamicfake.FakeDynamicClient {
-	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
-		{Group: "example.com", Version: "v1", Resource: "widgets"}: "WidgetList",
-	})
+func (r deploymentIngestReader) Rows(gvr schema.GroupVersionResource) []interface{} {
+	if gvr != snapshot.DeploymentGVR {
+		return nil
+	}
+	return r.store.List()
+}
+
+func deploymentIngestWith(t *testing.T, items ...*appsv1.Deployment) workloadBundleReader {
+	t.Helper()
+	store := ingest.NewProjectingStore(snapshot.NewDeploymentIngestProjector(
+		snapshot.ClusterMeta{ClusterID: "c1", ClusterName: "cluster"},
+	))
+	for _, item := range items {
+		require.NoError(t, store.Add(item))
+	}
+	return deploymentIngestReader{store: store}
 }
 
 func customResourceDefinition(
@@ -1873,7 +1431,7 @@ func ptrBool(value bool) *bool {
 }
 
 func TestStoppedManagerCompletesSubscribersAndRejectsNewOnes(t *testing.T) {
-	manager := NewManager(nil, nil, nil, snapshot.ClusterMeta{ClusterID: "cluster-a"}, nil, nil)
+	manager := NewManager(nil, nil, nil, snapshot.ClusterMeta{ClusterID: "cluster-a"}, nil)
 	sub, err := subscribeForTest(t, manager, "pods", "namespace:default")
 	require.NoError(t, err)
 	manager.Stop()
@@ -1890,7 +1448,7 @@ func TestStoppedManagerCompletesSubscribersAndRejectsNewOnes(t *testing.T) {
 }
 
 func TestSubscriptionCloseSerializesWithDelivery(t *testing.T) {
-	manager := NewManager(nil, nil, nil, snapshot.ClusterMeta{ClusterID: "cluster-a"}, nil, nil)
+	manager := NewManager(nil, nil, nil, snapshot.ClusterMeta{ClusterID: "cluster-a"}, nil)
 	for range 100 {
 		sub := &subscription{ch: make(chan Update, 1), drops: make(chan DropReason, 1)}
 		started := make(chan struct{})

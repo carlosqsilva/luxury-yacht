@@ -220,6 +220,11 @@ export interface AppSettings {
      * Saved theme library
      */
     "themes": Theme[] | null;
+
+    /**
+     * Hide network error notifications
+     */
+    "suppressNetworkErrorNotifications": boolean;
 }
 
 /**

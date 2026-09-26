@@ -71,7 +71,6 @@ type Config struct {
 	DynamicClient                dynamic.Interface                        // Dynamic client for interacting with Kubernetes resources.
 	ObjectDetailsProvider        snapshot.ObjectDetailProvider            // Provider for detailed object information.
 	Logger                       containerlogsstream.Logger               // Logger for recording refresh operations.
-	ObjectCatalogEnabled         func() bool                              // Function to check if the object catalog is enabled.
 	ObjectCatalogService         func() *objectcatalog.Service            // Function to get the object catalog service.
 	ObjectCatalogNamespaces      func() []snapshot.CatalogNamespaceGroup  // Function to get the object catalog namespaces.
 	ContainerLogsTargetLimiter   *containerlogsstream.GlobalTargetLimiter // Shared global limiter for container logs stream targets.
@@ -276,6 +275,7 @@ func newIngestInfrastructure(cfg Config, factory *informer.Factory, runtimePerms
 	registerNetworkReflectors(manager, clusterMeta)
 	registerNodeReflector(manager, clusterMeta)
 	manager.SetPermissionFilter(ingestPermissionFilter(runtimePerms))
+	registerCustomResourceIngest(manager, factory, cfg.ClusterID)
 	return manager, nil
 }
 
@@ -307,7 +307,7 @@ func newMetricsServices(cfg Config, gate *permissionGate, recorder *telemetry.Re
 		return newEnabledMetricsServices(cfg, recorder)
 	}
 	logPermissionSkip("metrics-poller", metricsAPIGroup, "nodes/pods")
-	return newDisabledMetricsServices(cfg, gate, results, recorder)
+	return newDisabledMetricsServices(cfg, gate, results)
 }
 
 func newEnabledMetricsServices(cfg Config, recorder *telemetry.Recorder) (refresh.MetricsPoller, metrics.Provider) {
@@ -318,12 +318,12 @@ func newEnabledMetricsServices(cfg Config, recorder *telemetry.Recorder) (refres
 	return demandPoller, demandPoller
 }
 
-func newDisabledMetricsServices(cfg Config, gate *permissionGate, results []listCheckResult, recorder *telemetry.Recorder) (refresh.MetricsPoller, metrics.Provider) {
+func newDisabledMetricsServices(cfg Config, gate *permissionGate, results []listCheckResult) (refresh.MetricsPoller, metrics.Provider) {
 	nodesErr := gate.listErrFor(results, metricsAPIGroup, "nodes")
 	podsErr := gate.listErrFor(results, metricsAPIGroup, "pods")
 	reason, detail := disabledMetricsReason(gate.listAllowedByKey(results), nodesErr, podsErr)
 	applog.Warn(cfg.Logger, detail, "Metrics")
-	disabled := metrics.NewDisabledPoller(recorder, reason)
+	disabled := metrics.NewDisabledPoller(reason)
 	return disabled, disabled
 }
 
@@ -431,7 +431,6 @@ func NewSubsystemWithServices(cfg Config) (*Subsystem, error) {
 		ingestManager:   ingestManager,
 		metricsProvider: metricsProvider,
 		cfg:             cfg,
-		gate:            gate,
 		serverHost:      restServerHost(cfg.RestConfig),
 		noteNamespaceNotifier: func(notifier *snapshot.NamespaceChangeNotifier) {
 			namespaceNotifier = notifier
@@ -475,8 +474,6 @@ func NewSubsystemWithServices(cfg Config) (*Subsystem, error) {
 	containerLogsHandler, eventManager, resourceManager, err := registerStreamHandlers(streamDeps{
 		informerFactory: informerFactory,
 		ingestManager:   ingestManager,
-		snapshotService: snapshotService,
-		metricsProvider: metricsProvider,
 		cfg:             cfg,
 		telemetry:       telemetryRecorder,
 		clusterMeta:     clusterMeta,

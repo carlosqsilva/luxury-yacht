@@ -9,6 +9,26 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestParseStreamSelectorRequiresClusterIdentity(t *testing.T) {
+	for _, clusterID := range []string{"", " "} {
+		_, err := ParseStreamSelector(clusterID, domainPods, "namespace:default")
+		require.Error(t, err)
+	}
+}
+
+func TestCustomTablesSubscribeThroughCatalogOnly(t *testing.T) {
+	for _, legacy := range []struct{ domain, scope string }{
+		{"namespace-custom", "namespace:default"},
+		{"cluster-custom", ""},
+	} {
+		_, err := ParseStreamSelector("c1", legacy.domain, legacy.scope)
+		require.Error(t, err, "retired full-list domains must not accept subscriptions")
+	}
+	selector, err := ParseStreamSelector("c1", "catalog", "")
+	require.NoError(t, err)
+	require.Equal(t, StreamScopeCluster, selector.ScopeKind)
+}
+
 func TestParseStreamSelectorRoundTrips(t *testing.T) {
 	cases := []struct {
 		name   string

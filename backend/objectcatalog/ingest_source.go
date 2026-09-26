@@ -18,7 +18,6 @@ package objectcatalog
 
 import (
 	"fmt"
-	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -69,48 +68,42 @@ func isIngestOwned(gr schema.GroupResource) bool {
 // when the kind is not ingest-owned or no ingest source is configured. For a cut
 // kind it ALWAYS handles the collect, so the catalog never falls through to the
 // shared factory for a GVR the factory no longer registers. Static cut kinds
-// report an incomplete collect until their own ingest store has synced/settled;
-// dynamic cuts still fall through to LIST until their on-demand reflector syncs.
+// report an incomplete collect until their own ingest store has synced/settled.
 // Summaries for a namespaced kind are filtered to the requested namespaces,
 // matching the lister path's per-namespace scope.
-func (s *Service) collectViaIngest(index int, desc resourceDescriptor, namespaces []string, agg *streamingAggregator) ([]Summary, bool, error) {
+func (s *Service) collectViaIngest(desc Descriptor, namespaces []string, agg *streamingAggregator) ([]Summary, bool, error) {
 	source := s.deps.IngestSource
 	if source == nil {
 		return nil, false, nil
 	}
-	gvr := desc.GVR
+	gvr := desc.GVR()
 	_, staticCut := catalogIngestOwnedGVRs[gvr]
-	dynamicCut := s.isDynamicallyIngested(gvr)
-	if !staticCut && !dynamicCut {
+	if !staticCut {
 		return nil, false, nil
 	}
-	// A dynamic (on-demand promoted) kind serves from the ingest store only once its
-	// reflector's initial relist has landed; until then return handled=false so the caller
-	// falls through to LIST (no empty flash), exactly as the former promotion path served
-	// from the informer only after HasSynced. Static cut kinds have no fallback informer,
-	// so they remain handled but make the sync incomplete until their own store settles.
-	if dynamicCut && !staticCut && !source.HasSyncedFor(gvr) {
-		return nil, false, nil
-	}
-	if staticCut && !source.HasSyncedFor(gvr) {
+	if !source.HasSyncedFor(gvr) {
 		return nil, true, fmt.Errorf("catalog ingest store for %s is not synced", gvr)
 	}
-	rows := source.CatalogRows(gvr)
-	allowed := requestedNamespaceSet(desc, namespaces)
+	summaries := catalogSummaries(source.CatalogRows(gvr), requestedNamespaceSet(desc, namespaces))
+	return emitSummaries(agg, summaries, nil, true)
+}
+
+// catalogSummaries keeps only catalog projections in the requested namespace set.
+// A nil set includes every namespace; an empty set includes none.
+func catalogSummaries(rows []interface{}, allowed map[string]struct{}) []Summary {
 	summaries := make([]Summary, 0, len(rows))
 	for _, row := range rows {
 		summary, ok := row.(Summary)
 		if !ok {
 			continue
 		}
-		if allowed != nil {
-			if _, ok := allowed[summary.Ref.Namespace]; !ok {
-				continue
-			}
+		_, included := allowed[summary.Ref.Namespace]
+		if allowed != nil && !included {
+			continue
 		}
 		summaries = append(summaries, summary)
 	}
-	return emitSummaries(index, agg, summaries, nil, true)
+	return summaries
 }
 
 // requestedNamespaceSet returns the set of namespaces a namespaced cut kind's
@@ -118,7 +111,7 @@ func (s *Service) collectViaIngest(index int, desc resourceDescriptor, namespace
 // cluster-scoped kind, or a namespaced request with no namespace filter — the
 // all-namespaces case). It mirrors listTargets' scoping so the ingest collect path
 // returns the same set the lister path would.
-func requestedNamespaceSet(desc resourceDescriptor, namespaces []string) map[string]struct{} {
+func requestedNamespaceSet(desc Descriptor, namespaces []string) map[string]struct{} {
 	if !desc.Namespaced || len(namespaces) == 0 {
 		return nil
 	}
@@ -130,9 +123,8 @@ func requestedNamespaceSet(desc resourceDescriptor, namespaces []string) map[str
 }
 
 // applyIngestCatalogSummary applies one incremental Catalog-half update from the
-// ingest sink to the live catalog index, set or delete, then rebuilds the published
-// cache and broadcasts — the same effect the shared-informer watch handler had for
-// this kind. It serializes against full syncs the same way watchNotifier.flush does.
+// ingest sink to the published catalog indexes before broadcasting. It serializes
+// against full syncs the same way watchNotifier.flush does.
 func (s *Service) applyIngestCatalogSummary(gvr schema.GroupVersionResource, summary Summary, deleted bool) {
 	if !s.syncMu.TryLock() {
 		s.queueIngestReconciliation(gvr)
@@ -147,31 +139,34 @@ func (s *Service) applyIngestCatalogSummary(gvr schema.GroupVersionResource, sum
 	if !ok {
 		return
 	}
+	s.publishIngestSummary(desc, summary, deleted)
+}
+
+// The caller owns syncMu; both static and dynamic updates use this publication boundary.
+func (s *Service) publishIngestSummary(desc Descriptor, summary Summary, deleted bool) {
 	key := catalogKey(desc, summary.Ref.Namespace, summary.Ref.Name)
 
 	s.mu.Lock()
-	changed := false
+	var change catalogChange
+	changed := true
 	if deleted {
-		changed = s.catalogIndex.deleteItem(key)
+		if existing, ok := s.catalogIndex.items[key]; ok && existing.Ref.UID != summary.Ref.UID {
+			s.mu.Unlock()
+			return
+		}
+		change, changed = s.catalogIndex.deleteItem(key)
 	} else {
-		s.catalogIndex.setItem(key, summary, s.now())
-		changed = true
+		change = s.catalogIndex.setItem(key, summary, s.now())
 	}
 	if !changed {
 		s.mu.Unlock()
 		return
 	}
-	itemsCopy := cloneSummaryMap(s.items)
+	published := s.publishCatalogChangesLocked([]catalogChange{change})
 	s.mu.Unlock()
-
-	// Batched sink registration rebuilds once for all kinds (see
-	// registerIngestCatalogSinks); the index mutation above is still visible to it.
-	if s.suspendCacheRebuilds.Load() {
-		return
+	if published {
+		s.broadcastStreaming(true)
 	}
-	descriptors := s.Descriptors()
-	s.rebuildCacheFromItems(itemsCopy, descriptors)
-	s.broadcastStreaming(true)
 }
 
 func (s *Service) replaceIngestCatalogSummaries(gvr schema.GroupVersionResource, rows []Summary) {
@@ -191,47 +186,30 @@ func (s *Service) replaceIngestCatalogSummariesLocked(gvr schema.GroupVersionRes
 	now := s.now()
 
 	s.mu.Lock()
-	if s.catalogIndex.items == nil {
-		s.catalogIndex.items = make(map[string]Summary)
-	}
-	if s.catalogIndex.lastSeen == nil {
-		s.catalogIndex.lastSeen = make(map[string]time.Time)
-	}
-	changed := false
+	changes := make([]catalogChange, 0, len(rows))
 	for key, existing := range s.catalogIndex.items {
 		if !summaryMatchesDescriptor(existing, desc) {
 			continue
 		}
-		delete(s.catalogIndex.items, key)
-		delete(s.catalogIndex.lastSeen, key)
-		changed = true
+		change, _ := s.catalogIndex.deleteItem(key)
+		changes = append(changes, change)
 	}
 	for _, summary := range rows {
 		key := catalogKey(desc, summary.Ref.Namespace, summary.Ref.Name)
-		s.catalogIndex.items[key] = summary
-		s.catalogIndex.lastSeen[key] = now
-		changed = true
+		changes = append(changes, s.catalogIndex.setItem(key, summary, now))
 	}
-	if changed {
-		s.catalogIndex.rebuildLookupIndexes()
+	if len(changes) == 0 {
+		s.mu.Unlock()
+		return
 	}
-	itemsCopy := cloneSummaryMap(s.items)
+	published := s.publishCatalogChangesLocked(changes)
 	s.mu.Unlock()
-
-	if !changed {
-		return
+	if published {
+		s.broadcastStreaming(true)
 	}
-	// Batched sink registration rebuilds once for all kinds (see
-	// registerIngestCatalogSinks); the index mutation above is still visible to it.
-	if s.suspendCacheRebuilds.Load() {
-		return
-	}
-	descriptors := s.Descriptors()
-	s.rebuildCacheFromItems(itemsCopy, descriptors)
-	s.broadcastStreaming(true)
 }
 
-func summaryMatchesDescriptor(summary Summary, desc resourceDescriptor) bool {
+func summaryMatchesDescriptor(summary Summary, desc Descriptor) bool {
 	return summary.Ref.Group == desc.Group &&
 		summary.Ref.Version == desc.Version &&
 		summary.Ref.Resource == desc.Resource &&
@@ -241,12 +219,12 @@ func summaryMatchesDescriptor(summary Summary, desc resourceDescriptor) bool {
 // resolveIngestDescriptor resolves a cut kind's GVR to its catalog descriptor from
 // the index, so an incremental sink update keys its summary the same way the collect
 // path does.
-func (s *Service) resolveIngestDescriptor(gvr schema.GroupVersionResource) (resourceDescriptor, bool) {
+func (s *Service) resolveIngestDescriptor(gvr schema.GroupVersionResource) (Descriptor, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	_, desc := s.catalogIndex.resourceForGroupResource(gvr.Group, gvr.Resource)
 	if desc == nil {
-		return resourceDescriptor{}, false
+		return Descriptor{}, false
 	}
 	return *desc, true
 }
@@ -277,15 +255,7 @@ func (s ingestCatalogSink) Delete(row interface{}) {
 }
 
 func (s ingestCatalogSink) Replace(rows []interface{}) {
-	summaries := make([]Summary, 0, len(rows))
-	for _, row := range rows {
-		summary, ok := row.(Summary)
-		if !ok {
-			continue
-		}
-		summaries = append(summaries, summary)
-	}
-	s.service.replaceIngestCatalogSummaries(s.gvr, summaries)
+	s.service.replaceIngestCatalogSummaries(s.gvr, catalogSummaries(rows, nil))
 }
 
 // Coalesce contention by kind, then reread its authoritative store after the
@@ -327,14 +297,7 @@ func (s *Service) drainIngestReconciliation(done chan struct{}) {
 		s.ingestPendingMu.Unlock()
 
 		s.syncMu.Lock()
-		rows := s.deps.IngestSource.CatalogRows(gvr)
-		summaries := make([]Summary, 0, len(rows))
-		for _, row := range rows {
-			if summary, ok := row.(Summary); ok {
-				summaries = append(summaries, summary)
-			}
-		}
-		s.replaceIngestCatalogSummariesLocked(gvr, summaries)
+		s.reconcileCurrentIngestSource(gvr)
 		s.syncMu.Unlock()
 	}
 }

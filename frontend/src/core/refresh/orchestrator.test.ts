@@ -90,7 +90,6 @@ type RefreshOrchestratorInternals = {
   registeredRefreshers: Set<string>;
   coordinatorRuntime: TestClusterRefreshRuntime;
   clusterRuntimes: Map<string, TestClusterRefreshRuntime>;
-  suspendedDomains: Map<RefreshDomain, boolean>;
   lastNotifiedErrors: Map<string, unknown>;
   contextVersion: number;
   metricsDemandState:
@@ -246,7 +245,6 @@ describe('refreshOrchestrator', () => {
     orchestratorInternals.registeredRefreshers?.clear?.();
     orchestratorInternals.coordinatorRuntime?.resetAllState?.();
     orchestratorInternals.clusterRuntimes?.clear?.();
-    orchestratorInternals.suspendedDomains?.clear?.();
     orchestratorInternals.lastNotifiedErrors?.clear?.();
     orchestratorInternals.contextVersion = 0;
     if (orchestratorInternals.metricsDemandState.status === 'waiting-retry') {
@@ -573,6 +571,34 @@ describe('refreshOrchestrator', () => {
     clusterReadiness.beginForegroundActivation(clusterId);
 
     expect(requestSignal?.aborted).toBe(true);
+  });
+
+  it('discards a late catalog failure after cluster close and leaves the other cluster usable', async () => {
+    registerCatalogDomain();
+    const clusterId = 'closing';
+    const scope = buildClusterScope(clusterId, 'limit=1');
+    setRuntimeScopeEnabled('catalog', scope, true);
+    eventBus.emit('cluster:lifecycle', { clusterId, state: 'ready' });
+    eventBus.emit('cluster:lifecycle', { clusterId: 'retained', state: 'ready' });
+    let rejectSnapshot!: (error: Error) => void;
+    let requestSignal: AbortSignal | undefined;
+    clientMocks.fetchSnapshotMock.mockImplementation((_domain, options) => {
+      requestSignal = options.signal;
+      return new Promise((_resolve, reject) => {
+        rejectSnapshot = reject;
+      });
+    });
+    const request = refreshOrchestrator.fetchScopedDomain('catalog', scope, { isManual: false });
+    await vi.waitFor(() => expect(requestSignal).toBeDefined());
+    const resume = clusterWorkspaceStore.holdClusterRequests(clusterId);
+    expect(requestSignal?.aborted).toBe(true);
+    expect(clusterReadiness.isServiceable('retained')).toBe(true);
+    refreshOrchestrator.updateContext({ allConnectedClusterIds: ['retained'] });
+    rejectSnapshot(new Error('object catalog service unavailable'));
+    await request;
+    resume();
+    expect(errorHandlerMock.handle).not.toHaveBeenCalled();
+    expect(getScopedDomainState('catalog', scope)?.status).not.toBe('error');
   });
 
   it("stops only the activating cluster's in-flight snapshots", async () => {
@@ -1061,20 +1087,25 @@ describe('refreshOrchestrator', () => {
       if (source === 'event') {
         eventBus.emit('cluster:lifecycle', { clusterId: 'cluster-new', state: 'loading' });
       } else {
-        clusterWorkspaceStore.applyWireState({
-          selectedKubeconfigs: [],
-          visibleClusterId: 'cluster-new',
-          clusters: {
-            'cluster-new': {
-              clusterId: 'cluster-new',
-              clusterName: 'New cluster',
-              lifecycle: 'loading',
-              auth: { state: 'valid' },
-              health: 'healthy',
-              scopeRevision: 0,
+        await clusterWorkspaceStore.reconcileCommand(
+          async () => ({
+            state: {
+              selectedKubeconfigs: [],
+              visibleClusterId: 'cluster-new',
+              clusters: {
+                'cluster-new': {
+                  clusterId: 'cluster-new',
+                  clusterName: 'New cluster',
+                  lifecycle: 'loading',
+                  auth: { state: 'valid' },
+                  health: 'healthy',
+                  scopeRevision: 0,
+                },
+              },
             },
-          },
-        });
+          }),
+          () => true
+        );
       }
       await vi.waitFor(() => expect(clientMocks.fetchSnapshotMock).toHaveBeenCalledOnce());
       expect(getScopedDomainState('cluster-config', scope).status).toBe('ready');
@@ -1397,6 +1428,66 @@ describe('refreshOrchestrator', () => {
     expect(eventScopes()).toContain(keptScope);
     expect(eventScopes()).not.toContain(removedScope);
   });
+
+  it('does not start a queued stream or recreate diagnostics after its cluster closes', async () => {
+    const start = vi.fn(async () => undefined);
+    refreshOrchestrator.registerDomain({
+      domain: 'namespaces',
+      refresherName: SYSTEM_REFRESHERS.namespaces,
+      category: 'system',
+      streaming: { start, snapshotless: true },
+    });
+    const scope = 'closing|';
+    eventBus.emit('cluster:lifecycle', { clusterId: 'closing', state: 'ready' });
+    refreshOrchestrator.setScopedDomainEnabled('namespaces', scope, true);
+    refreshOrchestrator.updateContext({ allConnectedClusterIds: ['retained'] });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(start).not.toHaveBeenCalled();
+    expect(orchestratorInternals.clusterRuntimes.has('closing')).toBe(false);
+    expect(getRefreshState().scopedDomainEntries.namespaces ?? []).toEqual([]);
+
+    // An explicit reopen owns a fresh runtime and may start its own stream.
+    refreshOrchestrator.updateContext({ allConnectedClusterIds: ['retained', 'closing'] });
+    refreshOrchestrator.setScopedDomainEnabled('namespaces', scope, true);
+    await vi.waitFor(() => expect(start).toHaveBeenCalledTimes(1));
+  });
+
+  it.each(['resolve', 'reject'] as const)(
+    'retires a pending stream that settles with %s after cluster close',
+    async (outcome) => {
+      let resolve!: (cleanup: () => void) => void;
+      let reject!: (error: Error) => void;
+      const cleanup = vi.fn();
+      const pending = new Promise<() => void>((done, fail) => {
+        resolve = done;
+        reject = fail;
+      });
+      const start = vi.fn(() => pending);
+      refreshOrchestrator.registerDomain({
+        domain: 'namespaces',
+        refresherName: SYSTEM_REFRESHERS.namespaces,
+        category: 'system',
+        streaming: { start, snapshotless: true },
+      });
+      eventBus.emit('cluster:lifecycle', { clusterId: 'closing', state: 'ready' });
+      refreshOrchestrator.setScopedDomainEnabled('namespaces', 'closing|', true);
+      await vi.waitFor(() => expect(start).toHaveBeenCalledTimes(1));
+      refreshOrchestrator.updateContext({ allConnectedClusterIds: ['retained'] });
+      if (outcome === 'resolve') {
+        resolve(cleanup);
+      } else {
+        reject(new Error('retired connection'));
+      }
+      await pending.catch(() => undefined);
+      await Promise.resolve();
+      expect(cleanup).toHaveBeenCalledTimes(outcome === 'resolve' ? 1 : 0);
+      expect(orchestratorInternals.clusterRuntimes.has('closing')).toBe(false);
+      expect(getRefreshState().scopedDomainEntries.namespaces ?? []).toEqual([]);
+      expect(errorHandlerMock.handle).not.toHaveBeenCalled();
+    }
+  );
 
   it('drops deferred refresh work when its cluster is removed', async () => {
     registerStreamingClusterConfigDomain();
@@ -1851,7 +1942,7 @@ describe('refreshOrchestrator', () => {
     disableSpy.mockRestore();
   });
 
-  it('clears suspended scoped enablement when kubeconfig changes', async () => {
+  it('discards old scoped enablement across kubeconfig changes', async () => {
     refreshOrchestrator.registerDomain({
       domain: 'namespace-events',
       refresherName: NAMESPACE_REFRESHERS.events,
@@ -1871,10 +1962,9 @@ describe('refreshOrchestrator', () => {
 
     orchestratorInternals.handleKubeconfigChanging();
     expect(orchestratorInternals.coordinatorRuntime.getKnownScopes('namespace-events')).toEqual([]);
-    expect(orchestratorInternals.suspendedDomains.get('namespace-events')).toBe(true);
 
     orchestratorInternals.handleKubeconfigChanged();
-    expect(orchestratorInternals.suspendedDomains.size).toBe(0);
+    expect(orchestratorInternals.coordinatorRuntime.getKnownScopes('namespace-events')).toEqual([]);
   });
 
   it('retains existing data when the backend responds with not-modified', async () => {
@@ -3456,6 +3546,31 @@ describe('refreshOrchestrator', () => {
     ).toBe(false);
   });
 
+  it('stops only the owning cluster stream when its identity contains the runtime key delimiter', async () => {
+    const clusterId = 'config::blue';
+    const scopeA = buildClusterScope(clusterId, '');
+    const scopeB = buildClusterScope('cluster-b', '');
+    const cleanupA = vi.fn();
+    const cleanupB = vi.fn();
+    eventBus.emit('cluster:lifecycle', { clusterId, state: 'ready' });
+    registerStreamingClusterConfigDomain();
+    clientMocks.fetchSnapshotMock.mockResolvedValue({ notModified: true });
+    resourceStreamMocks.start.mockImplementation((scope: string) =>
+      scope === scopeA ? cleanupA : cleanupB
+    );
+    refreshOrchestrator.startStreamingDomain('cluster-config', scopeA);
+    refreshOrchestrator.startStreamingDomain('cluster-config', scopeB);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    eventBus.emit('cluster:auth:failed', { clusterId });
+
+    expect(resourceStreamMocks.stop).toHaveBeenCalledWith(scopeA, { reset: false });
+    expect(cleanupA).toHaveBeenCalledTimes(1);
+    expect(cleanupB).not.toHaveBeenCalled();
+    expect(resourceStreamMocks.stop).not.toHaveBeenCalledWith(scopeB, expect.anything());
+  });
+
   it('clears cluster runtime transient state on auth failure and restarts after recovery', async () => {
     registerStreamingClusterConfigDomain();
     refreshOrchestrator.updateContext({
@@ -3793,10 +3908,18 @@ describe('refreshOrchestrator', () => {
     refreshOrchestrator.setScopedDomainEnabled('cluster-config', scope, true);
 
     orchestratorInternals.handleKubeconfigChanging();
-    expect(orchestratorInternals.suspendedDomains.get('cluster-config')).toBe(true);
+    expect(
+      orchestratorInternals
+        .getRuntimeForScope('cluster-config', scope)
+        .getKnownScopes('cluster-config')
+    ).toEqual([]);
 
     orchestratorInternals.handleKubeconfigChanged();
-    expect(orchestratorInternals.suspendedDomains.size).toBe(0);
+    expect(
+      orchestratorInternals
+        .getRuntimeForScope('cluster-config', scope)
+        .getKnownScopes('cluster-config')
+    ).toEqual([]);
 
     stopAllSpy.mockRestore();
     teardownSpy.mockRestore();

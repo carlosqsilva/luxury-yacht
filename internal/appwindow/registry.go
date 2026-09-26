@@ -30,8 +30,7 @@ type Registry struct {
 	clusterCloseMu         sync.Mutex
 	nextClusterClose       uint64
 	clusterPanelCloses     map[string]*clusterPanelClose
-	clusterTransfers       map[string]*clusterViewTransfer
-	usedClusterTransferIDs map[string]struct{}
+	clusterTransfers       transferLifecycle[clusterViewTransfer]
 	application            *application.App
 	backend                lifecycleBackend
 	lifecycle              *lifecycle
@@ -63,8 +62,7 @@ type Registry struct {
 	quitPreflightTimeout   time.Duration
 	panelTransferMu        sync.Mutex
 	tabTransferMu          sync.Mutex
-	pendingTabTransfers    map[string]*panelTabTransfer
-	usedTabTransferIDs     map[string]struct{}
+	tabTransfers           transferLifecycle[panelTabTransfer]
 	tabTransferTimeout     time.Duration
 }
 
@@ -202,8 +200,6 @@ func NewRegistry(
 		clusterTransferTimeout: 15 * time.Second,
 		clusterCloseTimeout:    15 * time.Second,
 		quitPreflightTimeout:   20 * time.Second,
-		pendingTabTransfers:    make(map[string]*panelTabTransfer),
-		usedTabTransferIDs:     make(map[string]struct{}),
 		tabTransferTimeout:     15 * time.Second,
 		configurePanelWindow:   configureNativePanelWindow,
 	}
@@ -292,11 +288,9 @@ func (r *Registry) createRetainedPanelWindow(descriptor PanelWindowDescriptor, r
 		r.configurePanelWindow(window)
 	}
 	r.registerPanelLifecycleHooks(window, descriptor.WindowName)
-	if r.panelOpenTimeout > 0 {
-		time.AfterFunc(r.panelOpenTimeout, func() {
-			r.expirePanelOpen(descriptor.WindowName, snapshot.TransferID)
-		})
-	}
+	r.panels.setTransferTimeout(descriptor.WindowName, snapshot.TransferID, r.panelOpenTimeout, func() {
+		r.expirePanelOpen(descriptor.WindowName, snapshot.TransferID)
+	})
 	return nil
 }
 
@@ -418,6 +412,17 @@ func (r *Registry) authorizeClose(name string) {
 	r.authorizedClose[name] = struct{}{}
 }
 
+// The native close hook can consume authorization synchronously. If no window
+// accepts the close, discard the unused authorization before returning.
+func (r *Registry) closeAuthorizedWindow(name string) bool {
+	r.authorizeClose(name)
+	if r.closeWindow(name) {
+		return true
+	}
+	r.consumeAuthorizedClose(name)
+	return false
+}
+
 func (r *Registry) consumeAuthorizedClose(name string) bool {
 	r.closeMu.Lock()
 	defer r.closeMu.Unlock()
@@ -501,8 +506,6 @@ func (r *Registry) WindowDescriptor(name string) (NativeWindowDescriptor, error)
 	return NativeWindowDescriptor{}, fmt.Errorf("native window %q is not registered", name)
 }
 
-// of one workspace.
-
 // AcknowledgePanelWindowReady commits an opening transfer and reveals the
 // hidden native target. A stale acknowledgement leaves the source transfer pending.
 func (r *Registry) AcknowledgePanelWindowReady(name, transferID string) (PanelWindowDescriptor, error) {
@@ -573,14 +576,12 @@ func (r *Registry) BeginPanelWindowDock(windowName, targetPosition string, snaps
 	if err := r.panels.BeginDock(windowName, snapshot, target, targetPosition); err != nil {
 		return err
 	}
-	if r.panelDockTimeout > 0 {
-		time.AfterFunc(r.panelDockTimeout, func() {
-			current, err := r.panels.Descriptor(windowName)
-			if err == nil && current.State == PanelWindowStateDocking && current.Snapshot.TransferID == snapshot.TransferID {
-				_ = r.FailPanelWindowTransfer(windowName, windowName, snapshot.TransferID)
-			}
-		})
-	}
+	r.panels.setTransferTimeout(windowName, snapshot.TransferID, r.panelDockTimeout, func() {
+		current, err := r.panels.Descriptor(windowName)
+		if err == nil && current.State == PanelWindowStateDocking && current.Snapshot.TransferID == snapshot.TransferID {
+			_ = r.FailPanelWindowTransfer(windowName, windowName, snapshot.TransferID)
+		}
+	})
 	if !r.queueWorkspaceEvent(target, panelwindow.WindowDockRequestedEventName, panelwindow.WindowDockRequestedEvent{WindowName: windowName, TransferID: snapshot.TransferID, TargetPosition: targetPosition, Snapshot: snapshot}) {
 		_ = r.panels.FailTransfer(windowName, snapshot.TransferID)
 		descriptor, _ := r.panels.Descriptor(windowName)
@@ -625,9 +626,7 @@ func (r *Registry) commitPanelWindowDock(targetWindow, windowName, transferID st
 	if err := r.workspace.TransferGroup(windowName, targetWindow, panelwindow.PanelLocationDocked, group); err != nil {
 		return PanelWindowDescriptor{}, err
 	}
-	r.authorizeClose(windowName)
-	if !r.closeWindow(windowName) {
-		r.consumeAuthorizedClose(windowName)
+	if !r.closeAuthorizedWindow(windowName) {
 		r.restoreFailedPanelOpen(targetWindow, previous)
 		_ = r.panels.FailTransfer(windowName, transferID)
 		r.emitDockFailure(descriptor)
@@ -659,10 +658,8 @@ func (r *Registry) FailPanelWindowTransfer(callerWindowName, windowName, transfe
 		return nil
 	}
 	r.failPanelTabTransfer(transferID, "new panel target failed before readiness")
-	r.authorizeClose(windowName)
 	var closeErr error
-	if !r.closeWindow(windowName) {
-		r.consumeAuthorizedClose(windowName)
+	if !r.closeAuthorizedWindow(windowName) {
 		closeErr = fmt.Errorf("panel window %q is not available", windowName)
 	}
 	releaseErr := r.releaseNativePanelReference(windowName)
@@ -739,9 +736,7 @@ func (r *Registry) AcknowledgePanelWindowClose(windowName string) error {
 	if err != nil {
 		return err
 	}
-	r.authorizeClose(windowName)
-	if !r.closeWindow(windowName) {
-		r.consumeAuthorizedClose(windowName)
+	if !r.closeAuthorizedWindow(windowName) {
 		return fmt.Errorf("panel window %q is not available", windowName)
 	}
 	r.failPanelTabTransfersForWindow(windowName, "panel window closed during tab transfer")
@@ -750,11 +745,8 @@ func (r *Registry) AcknowledgePanelWindowClose(windowName string) error {
 	r.workspace.RemoveWindow(windowName)
 	r.workspaceMu.Unlock()
 	r.releaseUnusedPanelWorkspace(descriptor.ClusterID)
-	if r.backend != nil {
-		r.backend.ReleaseWorkspaceWindow(windowName)
-		if err := r.backend.ReleasePanelCluster(windowName); err != nil {
-			return err
-		}
+	if err := r.releaseNativePanelReference(windowName); err != nil {
+		return err
 	}
 	r.emitPanelClosed(descriptor)
 	r.emitWorkspaceChanged(descriptor.ClusterID)
@@ -765,11 +757,9 @@ func (r *Registry) AcknowledgeWorkspaceWindowClose(windowName string) error {
 	if !r.lifecycle.Contains(windowName) {
 		return fmt.Errorf("app window %q is not live", windowName)
 	}
-	r.authorizeClose(windowName)
-	if r.closeWindow(windowName) {
+	if r.closeAuthorizedWindow(windowName) {
 		return nil
 	}
-	r.consumeAuthorizedClose(windowName)
 	return fmt.Errorf("app window %q is not available", windowName)
 }
 
@@ -908,16 +898,7 @@ func cascadedCoordinate(position, size, limit int) int {
 
 // FocusMostRecent shows and focuses the most recently active live peer.
 func (r *Registry) FocusMostRecent() {
-	name := r.lifecycle.MostRecent()
-	window, ok := r.application.Window.GetByName(name)
-	if !ok {
-		return
-	}
-	window.Show()
-	if window.IsMinimised() {
-		window.Restore()
-	}
-	window.Focus()
+	focusApplicationWindow(r.application, r.lifecycle.MostRecent())
 }
 
 func (r *Registry) readyWorkspaceNames() []string {
@@ -1065,40 +1046,17 @@ func panelWindowOptionsForPlatform(
 	goos string,
 	initialBounds *panelwindow.WindowBounds,
 ) application.WebviewWindowOptions {
-	backgroundType := application.BackgroundTypeTransparent
-	if goos == "windows" {
-		backgroundType = application.BackgroundTypeSolid
-	}
-	windowTitle := ""
+	options := sharedWindowOptions(name, goos)
 	if goos == "linux" {
 		// Wails substitutes Name when Title is empty on initial Linux creation.
 		// A space prevents that fallback until the native title is cleared.
-		windowTitle = " "
+		options.Title = " "
 	}
-
-	options := application.WebviewWindowOptions{
-		Name:             name,
-		Title:            windowTitle,
-		Width:            500,
-		Height:           400,
-		MinWidth:         450,
-		MinHeight:        200,
-		URL:              "/",
-		BackgroundColour: application.NewRGB(30, 30, 30),
-		BackgroundType:   backgroundType,
-		Frameless:        goos != "darwin",
-		Mac:              sharedMacWindowChrome(),
-		Windows: application.WindowsWindow{
-			Theme:       application.SystemDefault,
-			DisableMenu: goos == "windows",
-			// Keep pointer input in the DOM so Wails can resize before dragging.
-			NonClientRegionSupport: false,
-		},
-		UseApplicationMenu: goos == "darwin",
-		Zoom:               1,
-		ZoomControlEnabled: false,
-		Hidden:             true,
-	}
+	options.Width = 500
+	options.Height = 400
+	options.MinWidth = 450
+	options.MinHeight = 200
+	options.Hidden = true
 	if initialBounds != nil {
 		options.Width = max(initialBounds.Width, options.MinWidth)
 		options.Height = max(initialBounds.Height, options.MinHeight)
@@ -1134,18 +1092,23 @@ func positionPanelWindowOptions(options *application.WebviewWindowOptions, owner
 }
 
 func windowOptionsForPlatform(name, goos string) application.WebviewWindowOptions {
+	options := sharedWindowOptions(name, goos)
+	options.Title = "Luxury Yacht"
+	options.Width = 1200
+	options.Height = 800
+	options.MinWidth = 1100
+	options.MinHeight = 600
+	options.Hidden = goos != "linux"
+	return options
+}
+
+func sharedWindowOptions(name, goos string) application.WebviewWindowOptions {
 	backgroundType := application.BackgroundTypeTransparent
 	if goos == "windows" {
 		backgroundType = application.BackgroundTypeSolid
 	}
-
 	return application.WebviewWindowOptions{
 		Name:             name,
-		Title:            "Luxury Yacht",
-		Width:            1200,
-		Height:           800,
-		MinWidth:         1100,
-		MinHeight:        600,
 		URL:              "/",
 		BackgroundColour: application.NewRGB(30, 30, 30),
 		BackgroundType:   backgroundType,
@@ -1160,7 +1123,6 @@ func windowOptionsForPlatform(name, goos string) application.WebviewWindowOption
 		UseApplicationMenu: goos == "darwin",
 		Zoom:               1,
 		ZoomControlEnabled: false,
-		Hidden:             goos != "linux",
 	}
 }
 

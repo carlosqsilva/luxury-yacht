@@ -34,7 +34,7 @@ type workspaceClusterRuntime interface {
 	ensureClusterClientsForSelections(context.Context, []kubeconfigSelection) error
 	ensureKubernetesAPIMetricsRegistry() *kubernetesAPIMetricsRegistry
 	getTransportState(string) *transportFailureState
-	normalizeKubeconfigSelection(string) (kubeconfigSelection, error)
+	resolveKubeconfigSelection(string) (kubeconfigSelection, error)
 	refreshKubeconfigDiscoveryAndWatch() error
 	removeClusterClients([]string) []removedClusterClient
 	removeClusterLifecycleState(string)
@@ -64,10 +64,10 @@ type workspaceRefresh interface {
 	SetVisibleCluster(string)
 	SetWindowVisibleCluster(string, string)
 	currentTelemetryRecorder() *telemetry.Recorder
+	ensureObjectCatalogForCluster(string) error
 	rebuildClusterSubsystem(string)
 	releaseWorkspaceWindowForeground(string)
 	setupRefreshSubsystemForSelections([]kubeconfigSelection) error
-	startObjectCatalogForTarget(catalogTarget) error
 	stopObjectCatalog()
 	teardownClusterSubsystem(string)
 	teardownRefreshSubsystem()

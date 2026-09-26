@@ -25,6 +25,16 @@ interface DockablePanelDragResizeOptions {
 }
 
 const KEYBOARD_RESIZE_STEP = 16;
+const RANGE_RESIZE_KEYS = new Set([
+  'ArrowLeft',
+  'ArrowRight',
+  'ArrowUp',
+  'ArrowDown',
+  'Home',
+  'End',
+  'PageUp',
+  'PageDown',
+]);
 type DockedPosition = 'right' | 'bottom';
 type DockedResizeAction = number | 'minimum' | 'maximum';
 
@@ -66,8 +76,8 @@ const calculateDockedKeyboardSize = (
 export function useDockablePanelDragResize(options: DockablePanelDragResizeOptions) {
   const { panelState, safeMinWidth, safeMinHeight, isMaximized } = options;
   const panelStateRef = useRef(panelState);
-  const [isResizing, setIsResizing] = useState(false);
   const [resizeDirection, setResizeDirection] = useState<'n' | 'w' | ''>('');
+  const isResizing = resizeDirection !== '';
   const resizeStartRef = useRef({ width: 0, height: 0, pointer: 0 });
 
   useEffect(() => {
@@ -81,7 +91,6 @@ export function useDockablePanelDragResize(options: DockablePanelDragResizeOptio
       }
       event.stopPropagation();
       event.preventDefault();
-      setIsResizing(true);
       setResizeDirection(direction);
       resizeStartRef.current = {
         width: panelState.size.width,
@@ -94,27 +103,28 @@ export function useDockablePanelDragResize(options: DockablePanelDragResizeOptio
 
   const handleDockedKeyboardResize = useCallback(
     (event: ReactKeyboardEvent<HTMLElement>, position: DockedPosition) => {
+      if (!RANGE_RESIZE_KEYS.has(event.key)) {
+        return;
+      }
+      // Own native range keys even when this dock assigns them no resize action.
+      event.preventDefault();
+      event.stopPropagation();
       const content = getContentBounds();
-      const isRight = position === 'right';
-      const minimum = isRight ? safeMinWidth : safeMinHeight;
-      const maximum = Math.max(minimum, isRight ? content.width : content.height);
-      const current = isRight ? panelState.size.width : panelState.size.height;
+      const dimension = position === 'right' ? 'width' : 'height';
+      const minimum = position === 'right' ? safeMinWidth : safeMinHeight;
+      const maximum = Math.max(minimum, content[dimension]);
+      const current = panelState.size[dimension];
       const next = calculateDockedKeyboardSize(event.key, position, current, minimum, maximum);
       if (next === null) {
         return;
       }
-      event.preventDefault();
-      event.stopPropagation();
-      panelState.setSize({
-        width: isRight ? next : panelState.size.width,
-        height: isRight ? panelState.size.height : next,
-      });
+      panelState.setSize({ ...panelState.size, [dimension]: next });
     },
     [panelState, safeMinHeight, safeMinWidth]
   );
 
   useEffect(() => {
-    if (!isResizing || !resizeDirection) {
+    if (!resizeDirection) {
       return;
     }
 
@@ -142,7 +152,6 @@ export function useDockablePanelDragResize(options: DockablePanelDragResizeOptio
     };
 
     const stopResize = () => {
-      setIsResizing(false);
       setResizeDirection('');
     };
 
@@ -161,11 +170,10 @@ export function useDockablePanelDragResize(options: DockablePanelDragResizeOptio
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', stopResize);
     };
-  }, [isResizing, resizeDirection, safeMinHeight, safeMinWidth]);
+  }, [resizeDirection, safeMinHeight, safeMinWidth]);
 
   useEffect(() => {
     if (!panelState.isOpen && isResizing) {
-      setIsResizing(false);
       setResizeDirection('');
     }
   }, [isResizing, panelState.isOpen]);

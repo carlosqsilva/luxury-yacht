@@ -78,19 +78,9 @@ type Service struct {
 	discoveryInvalidate func()
 	discoveryStale      atomic.Bool
 
-	// dynamicIngested is the set of dynamic (CRD-backed) kinds the catalog has promoted
-	// onto the ingest path on demand (see maybePromote). collectViaIngest serves these from
-	// the ingest manager's CatalogRows once their reflector has synced; stopDynamicReflectors
-	// tears them down with the catalog.
-	dynamicMu       sync.RWMutex
-	dynamicIngested map[schema.GroupVersionResource]struct{}
-
-	// suspendCacheRebuilds batches the per-kind published-cache rebuild during
-	// registerIngestCatalogSinks: each sink registration replays a whole store, and
-	// rebuilding once per kind means 7+ full O(items) rebuilds back-to-back at
-	// startup. While set, the incremental appliers mutate the index but skip the
-	// rebuild+broadcast; the registration loop publishes once at the end.
-	suspendCacheRebuilds atomic.Bool
+	// suspendPublication lets source registration replay every kind before query
+	// rows, facets, finalizer findings, and streaming signals publish together.
+	suspendPublication atomic.Bool
 	// cacheRebuilds counts published-cache rebuilds; it exists so the batched
 	// registration behavior is pinned by test rather than assumed.
 	cacheRebuilds atomic.Int64
@@ -107,9 +97,9 @@ type Service struct {
 
 	startOnce sync.Once
 	doneCh    chan struct{}
-	// ingestSyncTimeoutWarnOnce prevents a permanently unavailable ingest manager
-	// from repeating the same startup warning on every catalog resync.
-	ingestSyncTimeoutWarnOnce sync.Once
+	// sourceSyncTimeoutWarnOnce prevents a permanently unsettled informer factory
+	// or ingest manager from repeating the same warning on every catalog resync.
+	sourceSyncTimeoutWarnOnce sync.Once
 
 	now func() time.Time
 
@@ -122,23 +112,6 @@ type Service struct {
 	finalizerRevision    uint64
 	finalizerSubscribers map[int]chan FinalizerBlockerUpdate
 	nextFinalizerSubID   int
-}
-
-type resourceDescriptor struct {
-	GVR        schema.GroupVersionResource
-	Namespaced bool
-	Kind       string
-	Group      string
-	Version    string
-	Resource   string
-	Scope      Scope
-}
-
-// summaryChunk holds one published batch of summaries. Chunks are IMMUTABLE
-// once published: items are never mutated in place — emit and cache rebuilds
-// always create fresh chunks. Snapshots therefore share chunk pointers.
-type summaryChunk struct {
-	items []Summary
 }
 
 // NewService constructs a catalog service with the provided dependencies and options.
@@ -156,7 +129,6 @@ func NewService(deps Dependencies, opts *Options) *Service {
 		clusterID:            deps.ClusterID,
 		catalogIndex:         newCatalogIndex(),
 		identity:             newResourceIdentityResolver(deps.Common, deps.Logger),
-		dynamicIngested:      make(map[schema.GroupVersionResource]struct{}),
 		health:               healthStatus{State: HealthStateUnknown},
 		doneCh:               make(chan struct{}),
 		now:                  nowFn,
@@ -175,7 +147,8 @@ func defaultServiceOptions() Options {
 	return Options{
 		ResyncInterval:             config.ObjectCatalogResyncInterval,
 		FailedSyncRetryInterval:    config.ObjectCatalogFailedSyncRetryInterval,
-		IngestSyncWaitTimeout:      config.RefreshInformerSyncDeadline,
+		SourceSyncWaitTimeout:      config.RefreshInformerSyncDeadline,
+		ListRequestTimeout:         config.ResourceFetchCallTimeout,
 		PageSize:                   config.ObjectCatalogPageSize,
 		ListWorkers:                adjustedListWorkers(),
 		NamespaceWorkers:           config.ObjectCatalogNamespaceWorkers,
@@ -193,7 +166,8 @@ func applyServiceOptions(target, source *Options) {
 	}
 	applyPositiveDuration(&target.ResyncInterval, source.ResyncInterval)
 	applyPositiveDuration(&target.FailedSyncRetryInterval, source.FailedSyncRetryInterval)
-	applyPositiveDuration(&target.IngestSyncWaitTimeout, source.IngestSyncWaitTimeout)
+	applyPositiveDuration(&target.SourceSyncWaitTimeout, source.SourceSyncWaitTimeout)
+	applyPositiveDuration(&target.ListRequestTimeout, source.ListRequestTimeout)
 	applyPositiveInt(&target.PageSize, source.PageSize)
 	applyPositiveInt(&target.ListWorkers, source.ListWorkers)
 	applyPositiveInt(&target.NamespaceWorkers, source.NamespaceWorkers)

@@ -2,6 +2,7 @@ package snapshot
 
 import (
 	"context"
+	"encoding/json"
 	"reflect"
 	"sort"
 	"strconv"
@@ -11,7 +12,47 @@ import (
 
 	"github.com/luxury-yacht/app/backend/objectcatalog"
 	"github.com/luxury-yacht/app/backend/resourcemodel"
+	"github.com/stretchr/testify/require"
 )
+
+func TestCatalogSnapshotOwnsItsRowAndFacetSlices(t *testing.T) {
+	result := objectcatalog.QueryResult{
+		Items: []objectcatalog.Summary{{Ref: resourcemodel.ResourceRef{
+			ClusterID: "cluster-a", Version: "v1", Kind: "Pod", Resource: "pods", Namespace: "team-a", Name: "web",
+		}}},
+		Kinds:          []objectcatalog.KindInfo{{Kind: "Pod", Namespaced: true}},
+		Namespaces:     []string{"team-a"},
+		Groups:         []string{"(core)"},
+		ResourceScopes: []objectcatalog.Scope{objectcatalog.ScopeNamespace},
+	}
+	payload, _ := buildCatalogSnapshot(result, objectcatalog.QueryOptions{}, objectcatalog.HealthStatus{}, true, false)
+	result.Items[0].Ref.Name = "replaced"
+	result.Kinds[0].Kind = "Replaced"
+	result.Namespaces[0] = "replaced"
+	result.Groups[0] = "replaced"
+	result.ResourceScopes[0] = objectcatalog.ScopeCluster
+	if payload.Items[0].Ref.Name != "web" || payload.Kinds[0].Kind != "Pod" ||
+		payload.Namespaces[0] != "team-a" || payload.Groups[0] != "(core)" ||
+		payload.ResourceScopes[0] != objectcatalog.ScopeNamespace {
+		t.Fatalf("query result mutation changed published snapshot: %+v", payload)
+	}
+}
+
+func TestEmptyCatalogSnapshotEncodesRowsAsAnArray(t *testing.T) {
+	payload, _ := buildCatalogSnapshot(objectcatalog.QueryResult{}, objectcatalog.QueryOptions{}, objectcatalog.HealthStatus{}, true, false)
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	rows, ok := decoded["items"].([]any)
+	if !ok || len(rows) != 0 {
+		t.Fatalf("empty catalog items = %#v, want an empty array", decoded["items"])
+	}
+}
 
 func TestParseBrowseScope(t *testing.T) {
 	opts, err := parseBrowseScope("kind=Pod&namespace=default&namespace=cluster&apiGroup=%28core%29&apiGroup=apps&resourceScopeFilter=Namespace&search=nginx&limit=50&continue=10")
@@ -46,7 +87,7 @@ func TestParseBrowseScopePreservesMatchNone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseBrowseScope returned error: %v", err)
 	}
-	if !opts.MatchNone || !opts.toQueryOptions().MatchNone {
+	if !opts.MatchNone {
 		t.Fatal("expected matchNone to reach object catalog query options")
 	}
 }
@@ -58,7 +99,7 @@ func TestBuildCatalogSnapshotCarriesInventoryFacets(t *testing.T) {
 			ResourceScopes: []objectcatalog.Scope{objectcatalog.ScopeCluster, objectcatalog.ScopeNamespace},
 			FacetsExact:    true,
 		},
-		browseQueryOptions{Limit: 50},
+		objectcatalog.QueryOptions{Limit: 50},
 		objectcatalog.HealthStatus{},
 		true,
 		false,
@@ -80,7 +121,7 @@ func TestParseBrowseScopePreservesStructuralBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseBrowseScope returned error: %v", err)
 	}
-	query := opts.toQueryOptions()
+	query := opts
 	if query.Scope != objectcatalog.ScopeNamespace {
 		t.Fatalf("expected namespace structural scope, got %q", query.Scope)
 	}
@@ -231,7 +272,7 @@ func TestCatalogSnapshotMetadataUsesKeysetSemantics(t *testing.T) {
 			TotalIsExact:  true,
 			FacetsExact:   true,
 		},
-		browseQueryOptions{Limit: 1, Continue: "previous-keyset"},
+		objectcatalog.QueryOptions{Limit: 1, Continue: "previous-keyset"},
 		objectcatalog.HealthStatus{},
 		true,
 		false,
@@ -259,7 +300,7 @@ func TestCatalogSnapshotIssuesDescribeApproximateAndDegradedResults(t *testing.T
 			FacetsExact:   false,
 			CursorInvalid: true,
 		},
-		browseQueryOptions{Limit: 1},
+		objectcatalog.QueryOptions{Limit: 1},
 		objectcatalog.HealthStatus{
 			Status:          objectcatalog.HealthStateDegraded,
 			Stale:           true,
@@ -315,7 +356,7 @@ func TestCatalogDegradedSyncKeepsKeysetPagination(t *testing.T) {
 			TotalIsExact:  true,
 			FacetsExact:   true,
 		},
-		browseQueryOptions{Limit: 50},
+		objectcatalog.QueryOptions{Limit: 50},
 		objectcatalog.HealthStatus{
 			Status:          objectcatalog.HealthStateDegraded,
 			Stale:           true,
@@ -344,7 +385,7 @@ func TestCatalogDegradedSyncKeepsKeysetPagination(t *testing.T) {
 func TestCatalogSnapshotIssuesReportDeniedResources(t *testing.T) {
 	payload, _ := buildCatalogSnapshot(
 		objectcatalog.QueryResult{TotalIsExact: true, FacetsExact: true},
-		browseQueryOptions{Limit: 1},
+		objectcatalog.QueryOptions{Limit: 1},
 		objectcatalog.HealthStatus{
 			Status: objectcatalog.HealthStateOK,
 			DeniedResources: []string{
@@ -371,6 +412,21 @@ func TestCatalogSnapshotIssuesReportDeniedResources(t *testing.T) {
 			t.Fatalf("expected %q in permissions issue %q", expected, permissions)
 		}
 	}
+}
+
+func TestWatchDenialWarnsWithoutDiscardingCompleteListRows(t *testing.T) {
+	payload, _ := buildCatalogSnapshot(
+		objectcatalog.QueryResult{TotalIsExact: true, FacetsExact: true, TotalItems: 2},
+		objectcatalog.QueryOptions{Limit: 1},
+		objectcatalog.HealthStatus{Status: objectcatalog.HealthStateOK, WatchUnavailable: []string{"widgets.example.com (namespace team-a)"}},
+		true, true,
+	)
+	require.Equal(t, ResourceQueryComplete, payload.Completeness)
+	require.Equal(t, 2, payload.Total)
+	require.Len(t, payload.Issues, 1)
+	require.Contains(t, payload.Issues[0].Message, "widgets.example.com (namespace team-a)")
+	stats := buildCatalogSnapshotStats(payload, false)
+	require.Equal(t, []string{payload.Issues[0].Message}, stats.Warnings, "the existing diagnostics warning channel must receive the watch limitation")
 }
 
 func TestCatalogBuildPreservesContinueWhenCachesReady(t *testing.T) {
@@ -463,7 +519,7 @@ func TestCatalogSnapshotAndStreamUseSameCatalogQueryContract(t *testing.T) {
 
 }
 
-func TestCatalogRefreshAdapterBuildsSnapshotFromSharedAssembly(t *testing.T) {
+func TestCatalogBuildKeepsStatsAlignedWithPayloadAndNamespaceGroups(t *testing.T) {
 	summaries := []objectcatalog.Summary{
 		{Ref: resourcemodel.ResourceRef{Group: "apps", Version: "v1", Kind: "Deployment", Resource: "deployments", Namespace: "default", Name: "alpha", UID: "uid-alpha"}, ResourceVersion: "1",
 			Scope: objectcatalog.ScopeNamespace,
@@ -480,15 +536,15 @@ func TestCatalogRefreshAdapterBuildsSnapshotFromSharedAssembly(t *testing.T) {
 		ClusterMeta: meta,
 		Namespaces:  []string{"default", "kube-system"},
 	}}
-	adapter := newCatalogRefreshAdapter(svc, meta, func() []CatalogNamespaceGroup {
-		return groups
-	})
-	opts, err := parseBrowseScope("cluster-a|kind=Deployment&namespace=default&limit=1")
-	if err != nil {
-		t.Fatalf("parseBrowseScope returned error: %v", err)
+	builder := &catalogBuilder{
+		domain:          catalogDomain,
+		catalogService:  func() *objectcatalog.Service { return svc },
+		namespaceGroups: func() []CatalogNamespaceGroup { return groups },
 	}
-
-	snap := adapter.BuildSnapshot(catalogDomain, "cluster-a|kind=Deployment&namespace=default&limit=1", opts)
+	snap, err := builder.Build(WithClusterMeta(context.Background(), meta), "cluster-a|kind=Deployment&namespace=default&limit=1")
+	if err != nil {
+		t.Fatalf("Build returned error: %v", err)
+	}
 	payload, ok := snap.Payload.(CatalogSnapshot)
 	if !ok {
 		t.Fatalf("unexpected payload type: %T", snap.Payload)

@@ -37,16 +37,15 @@ func newTestWatchService() *Service {
 		now:               time.Now,
 		catalogIndex:      newCatalogIndex(),
 		streamSubscribers: make(map[int]chan StreamingUpdate),
-		dynamicIngested:   make(map[schema.GroupVersionResource]struct{}),
 		health:            healthStatus{State: HealthStateUnknown},
 		doneCh:            make(chan struct{}),
 		clusterID:         "test-cluster",
 	}
 }
 
-func testDeploymentDescriptor() resourceDescriptor {
-	return resourceDescriptor{
-		GVR:        schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"},
+func testDeploymentDescriptor() Descriptor {
+	return Descriptor{
+
 		Namespaced: true,
 		Kind:       "Deployment",
 		Group:      "apps",
@@ -56,9 +55,9 @@ func testDeploymentDescriptor() resourceDescriptor {
 	}
 }
 
-func testNodeDescriptor() resourceDescriptor {
-	return resourceDescriptor{
-		GVR:        schema.GroupVersionResource{Group: "", Version: "v1", Resource: "nodes"},
+func testNodeDescriptor() Descriptor {
+	return Descriptor{
+
 		Namespaced: false,
 		Kind:       "Node",
 		Group:      "",
@@ -68,8 +67,8 @@ func testNodeDescriptor() resourceDescriptor {
 	}
 }
 
-func registerDesc(svc *Service, desc resourceDescriptor) {
-	svc.resources[desc.GVR.String()] = desc
+func registerDesc(svc *Service, desc Descriptor) {
+	svc.resources[desc.GVR().String()] = desc
 }
 
 func TestFlushAddEvent(t *testing.T) {
@@ -85,7 +84,7 @@ func TestFlushAddEvent(t *testing.T) {
 	notifier := newWatchNotifier(svc)
 	notifier.flush([]watchEvent{{
 		eventType: watchEventAdd,
-		gvr:       desc.GVR.String(),
+		gvr:       desc.GVR().String(),
 		key:       catalogKey(desc, "default", "my-deploy"),
 		obj:       obj,
 	}})
@@ -107,7 +106,7 @@ func TestFlushUpdateEvent(t *testing.T) {
 	key := catalogKey(desc, "default", "my-deploy")
 	svc.items[key] = Summary{Ref: resourcemodel.ResourceRef{Kind: "Deployment", Namespace: "default", Name: "my-deploy"}, ResourceVersion: "1"}
 	svc.lastSeen[key] = time.Now()
-	svc.rebuildCacheFromItems(cloneSummaryMap(svc.items), svc.Descriptors())
+	svc.catalogIndex.rebuildCacheFromItems(cloneSummaryMap(svc.items), svc.Descriptors())
 
 	obj := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 		Name: "my-deploy", Namespace: "default",
@@ -117,7 +116,7 @@ func TestFlushUpdateEvent(t *testing.T) {
 	notifier := newWatchNotifier(svc)
 	notifier.flush([]watchEvent{{
 		eventType: watchEventUpdate,
-		gvr:       desc.GVR.String(),
+		gvr:       desc.GVR().String(),
 		key:       key,
 		obj:       obj,
 	}})
@@ -139,12 +138,12 @@ func TestFlushDeleteEvent(t *testing.T) {
 	key := catalogKey(desc, "default", "my-deploy")
 	svc.items[key] = Summary{Ref: resourcemodel.ResourceRef{Kind: "Deployment", Namespace: "default", Name: "my-deploy"}}
 	svc.lastSeen[key] = time.Now()
-	svc.rebuildCacheFromItems(cloneSummaryMap(svc.items), svc.Descriptors())
+	svc.catalogIndex.rebuildCacheFromItems(cloneSummaryMap(svc.items), svc.Descriptors())
 
 	notifier := newWatchNotifier(svc)
 	notifier.flush([]watchEvent{{
 		eventType: watchEventDelete,
-		gvr:       desc.GVR.String(),
+		gvr:       desc.GVR().String(),
 		key:       key,
 	}})
 
@@ -181,7 +180,7 @@ func TestFlushSkipsDuringSyncInProgress(t *testing.T) {
 	notifier := newWatchNotifier(svc)
 	notifier.flush([]watchEvent{{
 		eventType: watchEventAdd,
-		gvr:       desc.GVR.String(),
+		gvr:       desc.GVR().String(),
 		key:       catalogKey(desc, "default", "blocked"),
 		obj:       obj,
 	}})
@@ -206,7 +205,7 @@ func TestFlushClusterScopedResource(t *testing.T) {
 	notifier := newWatchNotifier(svc)
 	notifier.flush([]watchEvent{{
 		eventType: watchEventAdd,
-		gvr:       desc.GVR.String(),
+		gvr:       desc.GVR().String(),
 		key:       catalogKey(desc, "", "node-1"),
 		obj:       obj,
 	}})
@@ -231,7 +230,7 @@ func TestFlushBroadcastsToSubscribers(t *testing.T) {
 	notifier := newWatchNotifier(svc)
 	notifier.flush([]watchEvent{{
 		eventType: watchEventAdd,
-		gvr:       desc.GVR.String(),
+		gvr:       desc.GVR().String(),
 		key:       catalogKey(desc, "default", "x"),
 		obj:       obj,
 	}})
@@ -263,7 +262,7 @@ func TestWatchNotifierDebouncesBatch(t *testing.T) {
 		}}
 		notifier.send(watchEvent{
 			eventType: watchEventAdd,
-			gvr:       desc.GVR.String(),
+			gvr:       desc.GVR().String(),
 			key:       catalogKey(desc, "default", name),
 			obj:       obj,
 		})
@@ -292,7 +291,7 @@ func TestWatchNotifierFlushesDuringContinuousEvents(t *testing.T) {
 		}}
 		notifier.send(watchEvent{
 			eventType: watchEventAdd,
-			gvr:       desc.GVR.String(),
+			gvr:       desc.GVR().String(),
 			key:       catalogKey(desc, "default", name),
 			obj:       obj,
 		})
@@ -426,7 +425,7 @@ func TestReactiveUpdateEndToEnd(t *testing.T) {
 	}}
 	notifier.send(watchEvent{
 		eventType: watchEventAdd,
-		gvr:       desc.GVR.String(),
+		gvr:       desc.GVR().String(),
 		key:       catalogKey(desc, "prod", "e2e-pod"),
 		obj:       obj,
 	})
@@ -439,7 +438,7 @@ func TestReactiveUpdateEndToEnd(t *testing.T) {
 
 	notifier.send(watchEvent{
 		eventType: watchEventDelete,
-		gvr:       desc.GVR.String(),
+		gvr:       desc.GVR().String(),
 		key:       catalogKey(desc, "prod", "e2e-pod"),
 	})
 

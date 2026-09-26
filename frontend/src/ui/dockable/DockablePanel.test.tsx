@@ -1,3 +1,4 @@
+import { DockablePanelTestHost } from '@/test-utils/DockablePanelTestHost';
 /**
  * frontend/src/components/dockable/DockablePanel.test.tsx
  *
@@ -16,6 +17,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { requireValue } from '@/test-utils/requireValue';
 import DockablePanel from './DockablePanel';
 import { DockablePanelProvider, useDockablePanelContext } from './DockablePanelProvider';
+import type { PanelLayoutStore } from './panelLayoutStore';
+import { usePanelLayoutStoreContext } from './panelLayoutStoreContext';
 
 vi.mock('@core/backend-api', () => ({
   GetZoomLevel: vi.fn().mockResolvedValue(100),
@@ -25,7 +28,7 @@ vi.mock('@core/backend-api', () => ({
 vi.mock('@modules/kubernetes/config/KubeconfigContext', () => ({
   useKubeconfig: vi.fn(() => ({
     selectedClusterId: 'cluster-a',
-    selectedClusterIds: ['cluster-a'],
+    managedClusterIds: ['cluster-a'],
   })),
 }));
 
@@ -45,7 +48,7 @@ const ensureContentElement = () => {
   }
 };
 
-const renderPanel = async (ui: React.ReactElement) => {
+const renderPanel = async (ui: React.ReactElement<{ children?: React.ReactNode }>) => {
   ensureContentElement();
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -55,12 +58,24 @@ const renderPanel = async (ui: React.ReactElement) => {
     const wrapped =
       ui.type === DockablePanelProvider ? (
         <KeyboardProvider>
-          <ZoomProvider>{ui}</ZoomProvider>
+          <ZoomProvider>
+            {React.cloneElement(
+              ui,
+              undefined,
+              <>
+                <DockablePanelTestHost />
+                {ui.props.children}
+              </>
+            )}
+          </ZoomProvider>
         </KeyboardProvider>
       ) : (
         <KeyboardProvider>
           <DockablePanelProvider>
-            <ZoomProvider>{ui}</ZoomProvider>
+            <ZoomProvider>
+              <DockablePanelTestHost />
+              {ui}
+            </ZoomProvider>
           </DockablePanelProvider>
         </KeyboardProvider>
       );
@@ -90,6 +105,51 @@ describe('DockablePanel', () => {
     document.querySelectorAll('.dockable-panel-layer').forEach((node) => {
       node.remove();
     });
+  });
+
+  it('does not reinitialize an evicted layout before the initialized panel unmounts', async () => {
+    let store: PanelLayoutStore | undefined;
+    let setVisit: React.Dispatch<React.SetStateAction<number>> | undefined;
+    const Flow = () => {
+      store = usePanelLayoutStoreContext();
+      const [visit, updateVisit] = React.useState(0);
+      setVisit = updateVisit;
+      return visit === 2 ? null : (
+        <DockablePanel
+          panelId="closing"
+          title={`Visit ${visit}`}
+          defaultPosition={visit === 3 ? 'right' : 'bottom'}
+          isOpen
+        >
+          <button type="button">Panel action</button>
+        </DockablePanel>
+      );
+    };
+    const { unmount } = await renderPanel(<Flow />);
+    const layoutStore = requireValue(store, 'layout store');
+    const updateVisit = requireValue(setVisit, 'visit setter');
+    try {
+      expect(layoutStore.getState('closing')).toMatchObject({
+        isInitialized: true,
+        isOpen: true,
+      });
+      expect(layoutStore.getTabGroups().bottom.tabs).toContain('closing');
+      await act(async () => {
+        layoutStore.clearPanelState('closing');
+        updateVisit(1);
+      });
+      expect(layoutStore.getState('closing')).toBeUndefined();
+      await act(async () => updateVisit(2));
+      await act(async () => updateVisit(3));
+      expect(layoutStore.getState('closing')).toMatchObject({
+        isInitialized: true,
+        isOpen: true,
+      });
+      expect(layoutStore.getTabGroups().right.tabs).toContain('closing');
+      expect(document.querySelector('[role="tab"][data-panel-id="closing"]')).not.toBeNull();
+    } finally {
+      unmount();
+    }
   });
 
   it('keeps a new-panel focus request when its initiating content unmounts before registration', async () => {
@@ -834,6 +894,24 @@ describe('DockablePanel', () => {
     expect((document.activeElement as HTMLElement | null)?.getAttribute('aria-label')).toBe(
       'Dock panel to bottom'
     );
+
+    const lastPanelControl = document.querySelector<HTMLElement>(
+      '.dockable-panel__controls .dockable-panel__control-btn:last-child'
+    );
+    await act(async () => {
+      lastPanelControl?.focus();
+      lastPanelControl?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })
+      );
+    });
+    expect(document.activeElement?.getAttribute('aria-label')).toBe('Resize panel width');
+
+    await act(async () => {
+      document.activeElement?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })
+      );
+    });
+    expect(document.activeElement).toBe(groupedTabs[0]);
 
     unmount();
   });

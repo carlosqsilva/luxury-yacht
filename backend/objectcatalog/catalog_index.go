@@ -17,7 +17,7 @@ import (
 type catalogIndex struct {
 	items     map[string]Summary
 	lastSeen  map[string]time.Time
-	resources map[string]resourceDescriptor
+	resources map[string]Descriptor
 
 	exact map[catalogObjectIdentity]string
 	uid   map[string]string
@@ -28,11 +28,12 @@ type catalogIndex struct {
 	cachedNamespaces  []string
 	cachedDescriptors []Descriptor
 	cachesReady       bool
+	kindCounts        map[KindInfo]int
+	namespaceCounts   map[string]int
 
 	// queryEngineStore is the shared querypage engine view of the catalog. It is the
-	// authoritative query state: rebuilt wholesale from the published summaries in
-	// publishStreamingState and maintained for Browse/object-catalog queries via
-	// queryViaEngine. (Named distinctly from the Service.queryStore Querier
+	// authoritative query state: replaced at full publication and updated in place
+	// for live changes. (Named distinctly from the Service.queryStore Querier
 	// to avoid an embedded-field ambiguity.)
 	queryEngineStore *querypage.Store[Summary]
 
@@ -51,7 +52,7 @@ func newCatalogIndex() catalogIndex {
 	return catalogIndex{
 		items:     make(map[string]Summary),
 		lastSeen:  make(map[string]time.Time),
-		resources: make(map[string]resourceDescriptor),
+		resources: make(map[string]Descriptor),
 		exact:     make(map[catalogObjectIdentity]string),
 		uid:       make(map[string]string),
 	}
@@ -64,24 +65,6 @@ func (idx *catalogIndex) reset() {
 	// "no resources discovered" sync returns an empty page rather than rebuilding an
 	// ephemeral store from the (also empty) items snapshot.
 	idx.queryEngineStore = querypage.NewStore(newCatalogQueryStoreSchema())
-}
-
-// rebuildQueryStore replaces the maintained querypage store with one holding exactly
-// the items in the published chunks. A wholesale rebuild here keeps the engine view
-// equal to the published summary set at every publish. The store is keyed by the
-// catalog identity chain (schema UID), which is unique per published summary, so no
-// chunk item is dropped.
-func (idx *catalogIndex) rebuildQueryStore(chunks []*summaryChunk) {
-	store := querypage.NewStore(newCatalogQueryStoreSchema())
-	for _, chunk := range chunks {
-		if chunk == nil {
-			continue
-		}
-		for _, item := range chunk.items {
-			store.Upsert(item)
-		}
-	}
-	idx.queryEngineStore = store
 }
 
 // resetQueryStore replaces the maintained query store with a fresh empty one. The sync
@@ -129,7 +112,7 @@ func (idx *catalogIndex) descriptorCount() int {
 func (idx *catalogIndex) descriptors() []Descriptor {
 	result := make([]Descriptor, 0, len(idx.resources))
 	for _, desc := range idx.resources {
-		result = append(result, exportDescriptor(desc))
+		result = append(result, desc)
 	}
 	sortDescriptors(result)
 	return result
@@ -152,23 +135,23 @@ func (idx *catalogIndex) namespaces() []string {
 	return snapshotSortedKeys(namespaceSet)
 }
 
-func (idx *catalogIndex) replaceResources(resources map[string]resourceDescriptor) {
+func (idx *catalogIndex) replaceResources(resources map[string]Descriptor) {
 	idx.resources = cloneResourceDescriptorMap(resources)
 }
 
-func (idx *catalogIndex) setResource(gvr string, desc resourceDescriptor) {
+func (idx *catalogIndex) setResource(gvr string, desc Descriptor) {
 	if idx.resources == nil {
-		idx.resources = make(map[string]resourceDescriptor)
+		idx.resources = make(map[string]Descriptor)
 	}
 	idx.resources[gvr] = desc
 }
 
-func (idx *catalogIndex) resource(gvr string) (resourceDescriptor, bool) {
+func (idx *catalogIndex) resource(gvr string) (Descriptor, bool) {
 	desc, ok := idx.resources[gvr]
 	return desc, ok
 }
 
-func (idx *catalogIndex) resourceForGroupResource(group, resource string) (string, *resourceDescriptor) {
+func (idx *catalogIndex) resourceForGroupResource(group, resource string) (string, *Descriptor) {
 	for gvr, desc := range idx.resources {
 		if desc.Group == group && desc.Resource == resource {
 			copy := desc
@@ -217,7 +200,12 @@ func (idx *catalogIndex) findUID(uid string) (Summary, bool) {
 	return item, ok
 }
 
-func (idx *catalogIndex) setItem(key string, summary Summary, seen time.Time) {
+func (idx *catalogIndex) setItem(key string, summary Summary, seen time.Time) catalogChange {
+	change := catalogChange{next: &summary}
+	if previous, ok := idx.items[key]; ok {
+		change.previous = &previous
+		idx.unindexItem(key, previous)
+	}
 	if idx.items == nil {
 		idx.items = make(map[string]Summary)
 	}
@@ -227,28 +215,33 @@ func (idx *catalogIndex) setItem(key string, summary Summary, seen time.Time) {
 	idx.items[key] = summary
 	idx.lastSeen[key] = seen
 	idx.indexItem(key, summary)
+	return change
 }
 
-func (idx *catalogIndex) deleteItem(key string) bool {
-	if _, exists := idx.items[key]; !exists {
-		return false
+func (idx *catalogIndex) deleteItem(key string) (catalogChange, bool) {
+	previous, exists := idx.items[key]
+	if !exists {
+		return catalogChange{}, false
 	}
 	delete(idx.items, key)
 	delete(idx.lastSeen, key)
-	idx.rebuildLookupIndexes()
-	return true
+	idx.unindexItem(key, previous)
+	return catalogChange{previous: &previous}, true
 }
 
-func (idx *catalogIndex) publishStreamingState(
-	chunks []*summaryChunk,
+func (idx *catalogIndex) publishRows(
+	rows []Summary,
 	kindSet map[string]bool,
 	namespaceSet map[string]struct{},
 	descriptors []Descriptor,
 	ready bool,
 ) {
-	chunkSnapshot := make([]*summaryChunk, len(chunks))
-	copy(chunkSnapshot, chunks)
-	idx.rebuildQueryStore(chunkSnapshot)
+	idx.queryEngineStore = catalogQueryStoreFromRows(rows)
+	idx.kindCounts = make(map[KindInfo]int)
+	idx.namespaceCounts = make(map[string]int)
+	for _, row := range rows {
+		idx.countFacets(row, 1)
+	}
 	idx.cachedKinds = snapshotSortedKindInfos(kindSet)
 	idx.cachedNamespaces = snapshotSortedKeys(namespaceSet)
 	if descriptors != nil {
@@ -270,23 +263,17 @@ func catalogQueryNamespaceIndexKey(namespace string, scope Scope) string {
 func (idx *catalogIndex) rebuildCacheFromItems(items map[string]Summary, descriptors []Descriptor) {
 	kindSet := make(map[string]bool)
 	namespaceSet := make(map[string]struct{})
-	chunks := make([]*summaryChunk, 0, 1)
-
-	if len(items) > 0 {
-		summaries := make([]Summary, 0, len(items))
-		for _, summary := range items {
-			summaries = append(summaries, summary)
-			if summary.Ref.Kind != "" {
-				kindSet[summary.Ref.Kind] = summary.Scope == ScopeNamespace
-			}
-			if summary.Ref.Namespace != "" {
-				namespaceSet[summary.Ref.Namespace] = struct{}{}
-			}
+	summaries := make([]Summary, 0, len(items))
+	for _, summary := range items {
+		summaries = append(summaries, summary)
+		if summary.Ref.Kind != "" {
+			kindSet[summary.Ref.Kind] = summary.Scope == ScopeNamespace
 		}
-		chunks = append(chunks, &summaryChunk{items: summaries})
+		if summary.Ref.Namespace != "" {
+			namespaceSet[summary.Ref.Namespace] = struct{}{}
+		}
 	}
-
-	idx.publishStreamingState(chunks, kindSet, namespaceSet, descriptors, true)
+	idx.publishRows(summaries, kindSet, namespaceSet, descriptors, true)
 	idx.rebuildLookupIndexes()
 }
 
@@ -324,6 +311,16 @@ func (idx *catalogIndex) indexItem(key string, item Summary) {
 	}
 }
 
+func (idx *catalogIndex) unindexItem(key string, item Summary) {
+	identity := catalogIdentityForSummary(item)
+	if idx.exact[identity] == key {
+		delete(idx.exact, identity)
+	}
+	if idx.uid[item.Ref.UID] == key {
+		delete(idx.uid, item.Ref.UID)
+	}
+}
+
 func catalogIdentityForSummary(item Summary) catalogObjectIdentity {
 	return catalogObjectIdentity{
 		namespace: normalizeLookupNamespace(item.Ref.Namespace),
@@ -349,11 +346,11 @@ func sortDescriptors(result []Descriptor) {
 	})
 }
 
-func cloneResourceDescriptorMap(source map[string]resourceDescriptor) map[string]resourceDescriptor {
+func cloneResourceDescriptorMap(source map[string]Descriptor) map[string]Descriptor {
 	if len(source) == 0 {
-		return make(map[string]resourceDescriptor)
+		return make(map[string]Descriptor)
 	}
-	result := make(map[string]resourceDescriptor, len(source))
+	result := make(map[string]Descriptor, len(source))
 	for key, value := range source {
 		result[key] = value
 	}

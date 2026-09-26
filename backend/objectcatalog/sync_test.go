@@ -9,6 +9,7 @@ package objectcatalog
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -16,6 +17,8 @@ import (
 
 	"github.com/luxury-yacht/app/backend/capabilities"
 	"github.com/luxury-yacht/app/backend/internal/applog"
+	"github.com/luxury-yacht/app/backend/internal/config"
+	"github.com/luxury-yacht/app/backend/refresh"
 	"github.com/luxury-yacht/app/backend/refresh/ingest"
 	"github.com/luxury-yacht/app/backend/resourcemodel"
 	"github.com/luxury-yacht/app/backend/resources/common"
@@ -32,6 +35,27 @@ import (
 	kubernetesfake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 )
+
+func TestCatalogReactiveResyncCadenceWithoutSharedFactory(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		reactive bool
+		interval time.Duration
+		want     time.Duration
+	}{
+		{name: "polling", interval: time.Second, want: time.Second},
+		{name: "custom watches", reactive: true, interval: time.Second, want: config.ObjectCatalogReactiveMinResyncInterval},
+		{name: "longer safety net", reactive: true, interval: time.Hour, want: time.Hour},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			svc := newTestWatchService()
+			svc.opts.EnableReactiveUpdates = test.reactive
+			svc.opts.ResyncInterval = test.interval
+			svc.deps.IngestSource = &fakeCatalogIngestSource{}
+			require.Equal(t, test.want, svc.fullResyncInterval(), "custom-only reactive catalogs use the same safety-net cadence")
+		})
+	}
+}
 
 type recordingTelemetryEntry struct {
 	enabled       bool
@@ -177,7 +201,7 @@ func TestSyncCancellationDoesNotPublishSuccess(t *testing.T) {
 
 func TestEvaluateDescriptorNilService(t *testing.T) {
 	svc := NewService(Dependencies{Common: common.Dependencies{}}, nil)
-	desc := resourceDescriptor{Kind: "Deployment"}
+	desc := Descriptor{Kind: "Deployment"}
 	allowed, err := svc.evaluateDescriptor(context.Background(), nil, desc)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -221,7 +245,7 @@ func TestEvaluateDescriptorRespectsCapabilityResults(t *testing.T) {
 	svc := NewService(deps, nil)
 	capSvc := factory()
 
-	deployDesc := resourceDescriptor{Resource: "deployments", Group: "apps", Version: "v1", GVR: schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}}
+	deployDesc := Descriptor{Resource: "deployments", Group: "apps", Version: "v1"}
 	allowed, err := svc.evaluateDescriptor(context.Background(), capSvc, deployDesc)
 	if err != nil {
 		t.Fatalf("unexpected error evaluating deployments: %v", err)
@@ -230,7 +254,7 @@ func TestEvaluateDescriptorRespectsCapabilityResults(t *testing.T) {
 		t.Fatalf("expected deployments to be allowed")
 	}
 
-	statefulDesc := resourceDescriptor{Resource: "statefulsets", Group: "apps", Version: "v1", GVR: schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "statefulsets"}}
+	statefulDesc := Descriptor{Resource: "statefulsets", Group: "apps", Version: "v1"}
 	allowed, err = svc.evaluateDescriptor(context.Background(), capSvc, statefulDesc)
 	if err != nil {
 		t.Fatalf("unexpected error evaluating statefulsets: %v", err)
@@ -239,7 +263,7 @@ func TestEvaluateDescriptorRespectsCapabilityResults(t *testing.T) {
 		t.Fatalf("expected statefulsets to be denied")
 	}
 
-	batchAllowed, batchErrors, err := svc.evaluateDescriptorsBatch(context.Background(), capSvc, []resourceDescriptor{deployDesc, statefulDesc})
+	batchAllowed, batchErrors, err := svc.evaluateDescriptorsBatch(context.Background(), capSvc, []Descriptor{deployDesc, statefulDesc})
 	if err != nil {
 		t.Fatalf("batch evaluation failed: %v", err)
 	}
@@ -276,9 +300,9 @@ func TestEvaluateDescriptorPropagatesErrors(t *testing.T) {
 
 	svc := NewService(Dependencies{CapabilityFactory: factory}, nil)
 	capSvc := factory()
-	allowed, err := svc.evaluateDescriptor(context.Background(), capSvc, resourceDescriptor{
+	allowed, err := svc.evaluateDescriptor(context.Background(), capSvc, Descriptor{
 		Resource: "deployments",
-		GVR:      schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"},
+		Group:    "apps", Version: "v1",
 	})
 	if err == nil {
 		t.Fatalf("expected evaluation error when SAR call fails")
@@ -287,8 +311,8 @@ func TestEvaluateDescriptorPropagatesErrors(t *testing.T) {
 		t.Fatalf("expected descriptor to be denied when SAR errors")
 	}
 
-	_, batchErrors, batchErr := svc.evaluateDescriptorsBatch(context.Background(), capSvc, []resourceDescriptor{
-		{Resource: "deployments", GVR: schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}},
+	_, batchErrors, batchErr := svc.evaluateDescriptorsBatch(context.Background(), capSvc, []Descriptor{
+		{Resource: "deployments", Group: "apps", Version: "v1"},
 	})
 	if batchErr == nil {
 		t.Fatalf("expected batch evaluation to return error when SAR fails")
@@ -306,7 +330,7 @@ func TestEvaluateDescriptorsBatchEmptyAndNilServiceContracts(t *testing.T) {
 	require.Empty(t, allowed)
 	require.Nil(t, batchErrors)
 
-	descriptors := []resourceDescriptor{
+	descriptors := []Descriptor{
 		{Resource: "deployments"},
 		{Resource: "nodes"},
 	}
@@ -350,10 +374,10 @@ func TestEvaluateDescriptorsBatchKeepsStableDescriptorIndexesAcrossNamespaceFano
 		Logger:            applog.Noop,
 		AllowedNamespaces: []string{"prod", "dev"},
 	}, nil)
-	descriptors := []resourceDescriptor{
-		{Resource: "deployments", Group: "apps", Version: "v1", Namespaced: true, GVR: schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}},
-		{Resource: "statefulsets", Group: "apps", Version: "v1", Namespaced: true, GVR: schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "statefulsets"}},
-		{Resource: "nodes", Version: "v1", GVR: schema.GroupVersionResource{Version: "v1", Resource: "nodes"}},
+	descriptors := []Descriptor{
+		{Resource: "deployments", Group: "apps", Version: "v1", Namespaced: true},
+		{Resource: "statefulsets", Group: "apps", Version: "v1", Namespaced: true},
+		{Resource: "nodes", Version: "v1"},
 	}
 
 	allowed, batchErrors, err := svc.evaluateDescriptorsBatch(context.Background(), capSvc, descriptors)
@@ -362,6 +386,12 @@ func TestEvaluateDescriptorsBatchKeepsStableDescriptorIndexesAcrossNamespaceFano
 	require.True(t, allowed[0], "a later namespace answer must stay associated with deployments")
 	require.False(t, allowed[1], "a definitive denial must stay associated with statefulsets")
 	require.True(t, allowed[2], "the cluster-scoped answer must stay associated with nodes")
+
+	for index, desc := range descriptors {
+		singleAllowed, singleErr := svc.evaluateDescriptor(context.Background(), capSvc, desc)
+		require.NoError(t, singleErr, "an answered namespace must override its sibling's evaluation error")
+		require.Equal(t, allowed[index], singleAllowed, "batch and fallback preflight must make the same collection decision")
+	}
 }
 
 func TestEvaluateDescriptorsBatchReturnsAllowedPartialResultsWithWorkerFailure(t *testing.T) {
@@ -383,9 +413,9 @@ func TestEvaluateDescriptorsBatchReturnsAllowedPartialResultsWithWorkerFailure(t
 		Logger:            applog.Noop,
 		AllowedNamespaces: []string{"prod", "dev"},
 	}, nil)
-	descriptors := []resourceDescriptor{
-		{Resource: "deployments", Group: "apps", Version: "v1", Namespaced: true, GVR: schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}},
-		{Resource: "secrets", Version: "v1", Namespaced: true, GVR: schema.GroupVersionResource{Version: "v1", Resource: "secrets"}},
+	descriptors := []Descriptor{
+		{Resource: "deployments", Group: "apps", Version: "v1", Namespaced: true},
+		{Resource: "secrets", Version: "v1", Namespaced: true},
 	}
 
 	allowed, batchErrors, err := svc.evaluateDescriptorsBatch(context.Background(), capSvc, descriptors)
@@ -396,9 +426,8 @@ func TestEvaluateDescriptorsBatchReturnsAllowedPartialResultsWithWorkerFailure(t
 }
 
 func TestEvaluateDescriptorsBatchCancellationAndPermissionClientRecovery(t *testing.T) {
-	desc := resourceDescriptor{
+	desc := Descriptor{
 		Resource: "deployments", Group: "apps", Version: "v1",
-		GVR: schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"},
 	}
 
 	t.Run("cancellation", func(t *testing.T) {
@@ -414,7 +443,7 @@ func TestEvaluateDescriptorsBatchCancellationAndPermissionClientRecovery(t *test
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 
-		_, _, err := svc.evaluateDescriptorsBatch(ctx, capSvc, []resourceDescriptor{desc})
+		_, _, err := svc.evaluateDescriptorsBatch(ctx, capSvc, []Descriptor{desc})
 		require.ErrorIs(t, err, context.Canceled)
 	})
 
@@ -439,10 +468,10 @@ func TestEvaluateDescriptorsBatchCancellationAndPermissionClientRecovery(t *test
 		}})
 		svc := NewService(Dependencies{}, nil)
 
-		_, _, err := svc.evaluateDescriptorsBatch(context.Background(), capSvc, []resourceDescriptor{desc})
+		_, _, err := svc.evaluateDescriptorsBatch(context.Background(), capSvc, []Descriptor{desc})
 		require.ErrorContains(t, err, "permission client unavailable")
 
-		allowed, batchErrors, err := svc.evaluateDescriptorsBatch(context.Background(), capSvc, []resourceDescriptor{desc})
+		allowed, batchErrors, err := svc.evaluateDescriptorsBatch(context.Background(), capSvc, []Descriptor{desc})
 		require.NoError(t, err)
 		require.Empty(t, batchErrors)
 		require.True(t, allowed[0])
@@ -458,17 +487,16 @@ func TestCatalogSyncCapabilityAndBatchDeniedSeams(t *testing.T) {
 		result.Status.Allowed = true
 		return true, result, nil
 	})
-	desc := resourceDescriptor{
+	desc := Descriptor{
 		Group: "apps", Version: "v1", Kind: "Deployment", Resource: "deployments",
-		GVR: schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"},
 	}
 	svc := NewService(Dependencies{Logger: applog.Noop}, nil)
 	run := &catalogSync{
-		service: svc, descriptors: []resourceDescriptor{desc},
+		service: svc, descriptors: []Descriptor{desc},
 		capabilityService: capabilities.NewService(capabilities.Dependencies{
 			Common: common.Dependencies{KubernetesClient: client},
 		}),
-		allowedIndices: make(map[int]resourceDescriptor), allowedSet: make(map[string]resourceDescriptor),
+		allowedIndices: make(map[int]Descriptor), allowedSet: make(map[string]Descriptor),
 		failed: make(map[string]error), succeeded: make(map[string][]Summary),
 	}
 	run.evaluateCapabilities(context.Background())
@@ -481,7 +509,7 @@ func TestCatalogSyncCapabilityAndBatchDeniedSeams(t *testing.T) {
 	require.False(t, run.batchEvaluated)
 
 	run.batchEvaluated = true
-	run.allowedSet = make(map[string]resourceDescriptor)
+	run.allowedSet = make(map[string]Descriptor)
 	require.NoError(t, run.collectDescriptor(context.Background(), 0, desc))
 	require.Empty(t, run.succeeded)
 }
@@ -489,14 +517,14 @@ func TestCatalogSyncCapabilityAndBatchDeniedSeams(t *testing.T) {
 func TestSortResourceDescriptorsUsesEveryStableTieBreaker(t *testing.T) {
 	tests := []struct {
 		name  string
-		input []resourceDescriptor
+		input []Descriptor
 		want  string
 	}{
-		{"priority", []resourceDescriptor{{Resource: "widgets"}, {Resource: "pods"}}, "pods"},
-		{"kind", []resourceDescriptor{{Resource: "widgets", Kind: "Zulu"}, {Resource: "widgets", Kind: "Alpha"}}, "Alpha"},
-		{"group", []resourceDescriptor{{Resource: "widgets", Kind: "Widget", Group: "z.io"}, {Resource: "widgets", Kind: "Widget", Group: "a.io"}}, "a.io"},
-		{"version", []resourceDescriptor{{Resource: "widgets", Kind: "Widget", Group: "a.io", Version: "v2"}, {Resource: "widgets", Kind: "Widget", Group: "a.io", Version: "v1"}}, "v1"},
-		{"resource", []resourceDescriptor{{Resource: "zz", Kind: "Widget", Group: "a.io", Version: "v1"}, {Resource: "aa", Kind: "Widget", Group: "a.io", Version: "v1"}}, "aa"},
+		{"priority", []Descriptor{{Resource: "widgets"}, {Resource: "pods"}}, "pods"},
+		{"kind", []Descriptor{{Resource: "widgets", Kind: "Zulu"}, {Resource: "widgets", Kind: "Alpha"}}, "Alpha"},
+		{"group", []Descriptor{{Resource: "widgets", Kind: "Widget", Group: "z.io"}, {Resource: "widgets", Kind: "Widget", Group: "a.io"}}, "a.io"},
+		{"version", []Descriptor{{Resource: "widgets", Kind: "Widget", Group: "a.io", Version: "v2"}, {Resource: "widgets", Kind: "Widget", Group: "a.io", Version: "v1"}}, "v1"},
+		{"resource", []Descriptor{{Resource: "zz", Kind: "Widget", Group: "a.io", Version: "v1"}, {Resource: "aa", Kind: "Widget", Group: "a.io", Version: "v1"}}, "aa"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -517,14 +545,14 @@ func TestSortResourceDescriptorsUsesEveryStableTieBreaker(t *testing.T) {
 }
 
 func TestCatalogSyncRestoreFailedDescriptorsPreservesPriorTimestamps(t *testing.T) {
-	failedDesc := resourceDescriptor{GVR: schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}}
-	otherDesc := resourceDescriptor{GVR: schema.GroupVersionResource{Version: "v1", Resource: "nodes"}}
+	failedDesc := Descriptor{Group: "apps", Version: "v1", Resource: "deployments"}
+	otherDesc := Descriptor{Version: "v1", Resource: "nodes"}
 	failedKey := catalogKey(failedDesc, "default", "api")
 	otherKey := catalogKey(otherDesc, "", "node-a")
 	untimedKey := catalogKey(otherDesc, "", "node-b")
 	timestamp := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
 	run := &catalogSync{
-		failed:      map[string]error{failedDesc.GVR.String(): errors.New("list failed")},
+		failed:      map[string]error{failedDesc.GVR().String(): errors.New("list failed")},
 		newItems:    map[string]Summary{otherKey: {Ref: resourcemodel.ResourceRef{Name: "current"}}},
 		newLastSeen: map[string]time.Time{},
 		previousItems: map[string]Summary{
@@ -768,7 +796,6 @@ func (b *blockingIngestSource) AddCatalogSink(schema.GroupVersionResource, inges
 func (b *blockingIngestSource) RegisterDynamicCatalogReflector(schema.GroupVersionResource, schema.GroupVersionKind, ingest.CatalogProjector, bool) bool {
 	return false
 }
-func (b *blockingIngestSource) StopReflectorFor(schema.GroupVersionResource)  {}
 func (b *blockingIngestSource) HasSyncedFor(schema.GroupVersionResource) bool { return false }
 func (b *blockingIngestSource) Tracks(schema.GroupVersionResource) bool       { return false }
 
@@ -785,7 +812,6 @@ func (*controlledIngestSource) AddCatalogSink(schema.GroupVersionResource, inges
 func (*controlledIngestSource) RegisterDynamicCatalogReflector(schema.GroupVersionResource, schema.GroupVersionKind, ingest.CatalogProjector, bool) bool {
 	return false
 }
-func (*controlledIngestSource) StopReflectorFor(schema.GroupVersionResource) {}
 func (s *controlledIngestSource) HasSyncedFor(schema.GroupVersionResource) bool {
 	return s.synced.Load()
 }
@@ -815,7 +841,7 @@ func newControlledIngestCatalogService(source IngestSource, waitTimeout time.Dur
 		Telemetry:    recorder,
 		IngestSource: source,
 	}, &Options{
-		IngestSyncWaitTimeout: waitTimeout,
+		SourceSyncWaitTimeout: waitTimeout,
 		ResyncInterval:        time.Hour,
 	}), recorder
 }
@@ -828,12 +854,11 @@ func (r *recordingTelemetry) count() int {
 
 // TestSyncWaitsForCachesBetweenPreflightAndCollect pins the catalog startup overlap:
 // discovery and the RBAC preflight are pure API calls and must run BEFORE the
-// informer-cache wait (so they overlap the factory's ~10s initial sync); only the
-// collect — which reads listers — runs after the wait. A wait failure must abort the
-// sync: collecting from unsynced listers would publish an incomplete catalog as
-// authoritative.
+// informer settle wait (so they overlap the factory's ~10s initial sync); only the
+// collect — which reads listers — runs after the wait. Cancellation during the
+// wait aborts the sync before any collect.
 func TestSyncWaitsForCachesBetweenPreflightAndCollect(t *testing.T) {
-	newFixture := func(waitForCaches func(context.Context) error, order *[]string, mu *sync.Mutex) *Service {
+	newFixture := func(readiness InformerReadiness, order *[]string, mu *sync.Mutex) *Service {
 		record := func(step string) {
 			mu.Lock()
 			*order = append(*order, step)
@@ -841,13 +866,13 @@ func TestSyncWaitsForCachesBetweenPreflightAndCollect(t *testing.T) {
 		}
 
 		scheme := runtime.NewScheme()
-		deployGVK := schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"}
-		scheme.AddKnownTypeWithName(deployGVK, &unstructured.Unstructured{})
-		scheme.AddKnownTypeWithName(deployGVK.GroupVersion().WithKind("DeploymentList"), &unstructured.UnstructuredList{})
+		replicaSetGVK := schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "ReplicaSet"}
+		scheme.AddKnownTypeWithName(replicaSetGVK, &unstructured.Unstructured{})
+		scheme.AddKnownTypeWithName(replicaSetGVK.GroupVersion().WithKind("ReplicaSetList"), &unstructured.UnstructuredList{})
 		dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, map[schema.GroupVersionResource]string{
-			{Group: "apps", Version: "v1", Resource: "deployments"}: "DeploymentList",
+			{Group: "apps", Version: "v1", Resource: "replicasets"}: "ReplicaSetList",
 		})
-		dyn.PrependReactor("list", "deployments", func(k8stesting.Action) (bool, runtime.Object, error) {
+		dyn.PrependReactor("list", "replicasets", func(k8stesting.Action) (bool, runtime.Object, error) {
 			record("collect")
 			return false, nil, nil
 		})
@@ -857,7 +882,7 @@ func TestSyncWaitsForCachesBetweenPreflightAndCollect(t *testing.T) {
 		hooked := &hookedPreferredDiscovery{
 			preferredDiscovery: &preferredDiscovery{FakeDiscovery: baseDiscovery, resources: []*metav1.APIResourceList{{
 				GroupVersion: "apps/v1",
-				APIResources: []metav1.APIResource{{Name: "deployments", Namespaced: true, Kind: "Deployment", Verbs: []string{"list"}}},
+				APIResources: []metav1.APIResource{{Name: "replicasets", Namespaced: true, Kind: "ReplicaSet", Verbs: []string{"list"}}},
 			}}},
 			onDiscover: func() { record("discover") },
 		}
@@ -867,19 +892,21 @@ func TestSyncWaitsForCachesBetweenPreflightAndCollect(t *testing.T) {
 				KubernetesClient: &discoveryOverrideClient{Clientset: client, discovery: hooked},
 				DynamicClient:    dyn,
 			},
-			WaitForCaches: waitForCaches,
+			InformerReadiness: readiness,
 		}, nil)
 	}
 
 	t.Run("wait sits between discovery and collect", func(t *testing.T) {
 		var mu sync.Mutex
 		var order []string
-		svc := newFixture(func(context.Context) error {
+		var requested [][]string
+		svc := newFixture(informerReadinessStub{settled: func(keys []string) bool {
 			mu.Lock()
 			order = append(order, "wait")
+			requested = append(requested, keys)
 			mu.Unlock()
-			return nil
-		}, &order, &mu)
+			return true
+		}}, &order, &mu)
 
 		if err := svc.sync(context.Background()); err != nil {
 			t.Fatalf("sync failed: %v", err)
@@ -910,26 +937,51 @@ func TestSyncWaitsForCachesBetweenPreflightAndCollect(t *testing.T) {
 		if !(index("collect") >= 0 && index("wait") < index("collect")) {
 			t.Fatalf("the collect must run AFTER the cache wait, order %v", order)
 		}
+		require.Equal(t, [][]string{{"apps/replicasets"}}, requested,
+			"the wait must ask the factory only about the informers collection reads")
 	})
 
-	t.Run("wait failure aborts the sync before any collect", func(t *testing.T) {
+	t.Run("canceled wait aborts the sync before any collect", func(t *testing.T) {
 		var mu sync.Mutex
 		var order []string
-		waitErr := errors.New("caches unavailable")
-		svc := newFixture(func(context.Context) error { return waitErr }, &order, &mu)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		svc := newFixture(informerReadinessStub{settled: func([]string) bool {
+			cancel()
+			return false
+		}}, &order, &mu)
 
-		err := svc.sync(context.Background())
-		if err == nil || !errors.Is(err, waitErr) {
-			t.Fatalf("expected sync to fail with the cache-wait error, got %v", err)
+		err := svc.sync(ctx)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected sync to stop with the wait's cancellation, got %v", err)
 		}
 		mu.Lock()
 		defer mu.Unlock()
 		for _, s := range order {
 			if s == "collect" {
-				t.Fatalf("no collect may run when the cache wait failed, order %v", order)
+				t.Fatalf("no collect may run when the cache wait was canceled, order %v", order)
 			}
 		}
 	})
+}
+
+// informerReadinessStub reports every requested informer with one readiness
+// state and, when settled is set, delegates the settle check to it.
+type informerReadinessStub struct {
+	settled   func(keys []string) bool
+	readiness refresh.ResourceReadiness
+}
+
+func (s informerReadinessStub) ResourcesSettled(keys []string) bool {
+	return s.settled == nil || s.settled(keys)
+}
+
+func (s informerReadinessStub) ResourceReadiness(keys []string) map[string]refresh.ResourceReadiness {
+	states := make(map[string]refresh.ResourceReadiness, len(keys))
+	for _, key := range keys {
+		states[key] = s.readiness
+	}
+	return states
 }
 
 func TestCatalogContinuesWithPartialSyncWhenTrackedIngestNeverStarts(t *testing.T) {
@@ -956,13 +1008,13 @@ func TestCatalogIngestTimeoutWarningEmittedOncePerService(t *testing.T) {
 	svc, _ := newControlledIngestCatalogService(source, 5*time.Millisecond)
 	logger := &recordingWatchLogger{}
 	svc.deps.Logger = logger
-	descriptors := []resourceDescriptor{{
-		GVR: schema.GroupVersionResource{Version: "v1", Resource: "configmaps"},
+	descriptors := []Descriptor{{
+		Version: "v1", Resource: "configmaps",
 	}}
 
 	for range 2 {
 		run := &catalogSync{service: svc, descriptors: descriptors}
-		require.NoError(t, run.waitForIngest(context.Background()))
+		require.NoError(t, run.waitForCaches(context.Background()))
 	}
 
 	require.Len(t, logger.warnings, 1,
@@ -1090,16 +1142,14 @@ func TestCatalogPreflightEvaluatesNamespacedKindsPerScopeNamespace(t *testing.T)
 	}, nil)
 	capSvc := factory()
 
-	deployDesc := resourceDescriptor{
+	deployDesc := Descriptor{
 		Resource: "deployments", Group: "apps", Version: "v1", Namespaced: true,
-		GVR: schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"},
 	}
-	nodesDesc := resourceDescriptor{
+	nodesDesc := Descriptor{
 		Resource: "nodes", Version: "v1", Namespaced: false,
-		GVR: schema.GroupVersionResource{Version: "v1", Resource: "nodes"},
 	}
 
-	batchAllowed, batchErrors, err := svc.evaluateDescriptorsBatch(context.Background(), capSvc, []resourceDescriptor{deployDesc, nodesDesc})
+	batchAllowed, batchErrors, err := svc.evaluateDescriptorsBatch(context.Background(), capSvc, []Descriptor{deployDesc, nodesDesc})
 	if err != nil || len(batchErrors) != 0 {
 		t.Fatalf("batch evaluation failed: err=%v batchErrors=%+v", err, batchErrors)
 	}
@@ -1183,4 +1233,80 @@ func TestSyncKeepsPublishedFamilyUntilRecollectionFinishes(t *testing.T) {
 	require.Len(t, final.Items, 1)
 	require.Equal(t, "AppProject", final.Items[0].Ref.Kind)
 	require.Equal(t, "cluster-1", final.Items[0].Ref.ClusterID)
+}
+
+// Readers must see the last publication while the replacement is assembled,
+// including when an empty query store falls back to the items snapshot.
+func TestCatalogReplacementStaysPrivateUntilPublication(t *testing.T) {
+	for _, cold := range []bool{true, false} {
+		t.Run(fmt.Sprintf("cold=%t", cold), func(t *testing.T) {
+			svc := NewService(Dependencies{ClusterID: "c1"}, nil)
+			desc := widgetDesc()
+			old := summaryFromObject("c1", desc, widgetObject("default", "old", "1"))
+			key := catalogKey(desc, "default", "old")
+			svc.items[key] = old
+			svc.lastSeen[key] = time.Now()
+			svc.catalogIndex.rebuildCacheFromItems(svc.items, []Descriptor{desc})
+			svc.catalogIndex.cachesReady = !cold
+			run := newCatalogSync(svc, svc.now())
+			run.descriptors = []Descriptor{desc}
+			run.prepare(t.Context())
+			next := summaryFromObject("c1", desc, widgetObject("default", "new", "2"))
+			run.succeeded[desc.GVR().String()] = []Summary{next}
+			descriptors := run.applyCollectionResults()
+			require.Equal(t, []Summary{old}, svc.Snapshot(), "unfinished replacement must not mutate the published snapshot")
+			require.Equal(t, []Summary{old}, svc.Query(QueryOptions{}).Items)
+			run.publish(descriptors, nil)
+			require.Equal(t, []Summary{next}, svc.Snapshot())
+			require.Equal(t, []Summary{next}, svc.Query(QueryOptions{}).Items)
+		})
+	}
+}
+
+func (*blockingIngestSource) ReadDynamicCatalogSource(schema.GroupResource) (ingest.DynamicCatalogSnapshot, bool) {
+	return ingest.DynamicCatalogSnapshot{}, false
+}
+func (*blockingIngestSource) SubscribeDynamicCatalogChanges(func(ingest.DynamicCatalogChange)) func() {
+	return func() {}
+}
+
+func (*controlledIngestSource) ReadDynamicCatalogSource(schema.GroupResource) (ingest.DynamicCatalogSnapshot, bool) {
+	return ingest.DynamicCatalogSnapshot{}, false
+}
+func (*controlledIngestSource) SubscribeDynamicCatalogChanges(func(ingest.DynamicCatalogChange)) func() {
+	return func() {}
+}
+
+func (*blockingIngestSource) IsDynamicCatalogGeneration(schema.GroupResource, uint64) bool {
+	return false
+}
+
+func (*controlledIngestSource) IsDynamicCatalogGeneration(schema.GroupResource, uint64) bool {
+	return false
+}
+
+func (*blockingIngestSource) ReconcileDiscoveredResource(schema.GroupVersionResource) bool {
+	return false
+}
+
+func (*controlledIngestSource) ReconcileDiscoveredResource(schema.GroupVersionResource) bool {
+	return false
+}
+
+func (source *blockingIngestSource) SubscribeCatalogSink(gvr schema.GroupVersionResource, sink ingest.Sink) func() {
+	source.AddCatalogSink(gvr, sink)
+	return func() {}
+}
+
+func (source *controlledIngestSource) SubscribeCatalogSink(gvr schema.GroupVersionResource, sink ingest.Sink) func() {
+	source.AddCatalogSink(gvr, sink)
+	return func() {}
+}
+
+func (*blockingIngestSource) PartitionReadinessFor(schema.GroupVersionResource) []ingest.PartitionReadiness {
+	return nil
+}
+
+func (*controlledIngestSource) PartitionReadinessFor(schema.GroupVersionResource) []ingest.PartitionReadiness {
+	return nil
 }

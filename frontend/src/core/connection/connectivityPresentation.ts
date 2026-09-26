@@ -43,7 +43,7 @@ const buildInactivePresentation: ConnectivityPresentationStage = (
   { isPaused, lifecycleState },
   clusterLabel
 ) => {
-  if (isPaused) {
+  if (isPaused && lifecycleState !== 'disconnected') {
     return {
       status: 'inactive',
       summary: 'Auto-refresh paused',
@@ -108,8 +108,7 @@ const buildLifecyclePresentation: ConnectivityPresentationStage = (
       return {
         status: 'unhealthy',
         summary: 'Cluster disconnected',
-        detail: `The app lost its connection to ${clusterLabel}. Refresh to try again.`,
-        actionLabel: 'Refresh Now',
+        detail: `The app is disconnected from ${clusterLabel}. Close and reopen the cluster tab to reconnect.`,
       };
     case 'reconnecting':
       return {
@@ -195,17 +194,8 @@ const buildSettledPresentation = (
     };
   }
 
-  if (isRefreshing) {
-    return {
-      status: 'refreshing',
-      summary: 'Ready',
-      detail: `${clusterLabel} is connected is ready to use.`,
-      actionLabel: 'Refresh Now',
-    };
-  }
-
   return {
-    status: 'healthy',
+    status: isRefreshing ? 'refreshing' : 'healthy',
     summary: 'Ready',
     detail: `${clusterLabel} is connected is ready to use.`,
     actionLabel: 'Refresh Now',

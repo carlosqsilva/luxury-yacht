@@ -1,7 +1,11 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eventBus } from '@/core/events';
 import { createWailsRuntimeHarness } from '@/test-utils/wailsRuntimeHarness';
-import { ClusterWorkspaceStore, type ClusterWorkspaceWireState } from './clusterWorkspaceStore';
+import {
+  ClusterWorkspaceStore,
+  type ClusterWorkspaceWireState,
+  isConfirmedAuthFailure,
+} from './clusterWorkspaceStore';
 
 const emptyState = (): ClusterWorkspaceWireState => ({
   selectedKubeconfigs: [],
@@ -14,6 +18,149 @@ afterEach(() => {
 });
 
 describe('ClusterWorkspaceStore', () => {
+  it('preserves only fields changed during each overlapping read, including newly seen clusters', async () => {
+    const runtime = createWailsRuntimeHarness();
+    const replies: Array<(state: ClusterWorkspaceWireState) => void> = [];
+    const store = new ClusterWorkspaceStore({
+      read: () => new Promise((resolve) => replies.push(resolve)),
+      onEvent: runtime.onEvent,
+    });
+    const release = store.acquire();
+    try {
+      const initial = store.hydrate();
+      runtime.emit('cluster:auth:failed', { clusterId: 'cluster-a', reason: 'expired' });
+      const later = store.refresh();
+      runtime.emit('cluster:health:degraded', { clusterId: 'cluster-b' });
+      runtime.emit('cluster:scope:changed', { clusterId: 'new-cluster' });
+      const wire: ClusterWorkspaceWireState = {
+        ...emptyState(),
+        clusters: Object.fromEntries(
+          ['cluster-a', 'cluster-b'].map((clusterId) => [
+            clusterId,
+            {
+              clusterId,
+              clusterName: clusterId,
+              lifecycle: 'ready',
+              auth: { state: 'valid' },
+              health: 'healthy',
+              scopeRevision: 4,
+            },
+          ])
+        ),
+      };
+
+      replies[0](wire);
+      await initial;
+      expect(store.getCluster('cluster-a')).toMatchObject({
+        auth: { hasError: true, reason: 'expired' },
+        health: 'healthy',
+        scopeRevision: 4,
+      });
+      expect(store.getCluster('cluster-b')).toMatchObject({
+        auth: { hasError: false },
+        health: 'degraded',
+        scopeRevision: 4,
+      });
+      expect(store.getCluster('new-cluster')?.scopeRevision).toBe(1);
+
+      replies[1](wire);
+      await later;
+      expect(store.getAuth('cluster-a').hasError).toBe(false);
+      expect(store.getHealth('cluster-b')).toBe('degraded');
+      expect(store.getCluster('new-cluster')?.scopeRevision).toBe(1);
+    } finally {
+      release();
+    }
+  });
+
+  it('merges command membership without overwriting live lifecycle and auth events', async () => {
+    const runtime = createWailsRuntimeHarness();
+    const store = new ClusterWorkspaceStore({
+      read: async () => emptyState(),
+      onEvent: runtime.onEvent,
+    });
+    const release = store.acquire();
+    try {
+      await store.hydrate();
+      let finish!: (value: { state: ClusterWorkspaceWireState }) => void;
+      const command = store.reconcileCommand(
+        () =>
+          new Promise<{ state: ClusterWorkspaceWireState }>((resolve) => {
+            finish = resolve;
+          }),
+        () => true
+      );
+      runtime.emit('cluster:lifecycle', { clusterId: 'cluster-a', state: 'ready' });
+      runtime.emit('cluster:auth:failed', { clusterId: 'cluster-a', reason: 'expired' });
+      finish({
+        state: {
+          selectedKubeconfigs: ['alpha:dev'],
+          visibleClusterId: 'cluster-a',
+          clusters: {
+            'cluster-a': {
+              clusterId: 'cluster-a',
+              clusterName: 'Alpha',
+              lifecycle: 'connecting',
+              auth: { state: 'valid' },
+              health: 'healthy',
+              scopeRevision: 3,
+            },
+          },
+        },
+      });
+      await command;
+      expect(store.getSnapshot().selectedKubeconfigs).toEqual(['alpha:dev']);
+      expect(store.getSnapshot().visibleClusterId).toBe('cluster-a');
+      expect(store.getCluster('cluster-a')).toMatchObject({
+        lifecycle: 'ready',
+        auth: { hasError: true, reason: 'expired' },
+        health: 'healthy',
+        scopeRevision: 3,
+      });
+    } finally {
+      release();
+    }
+  });
+
+  it.each(['superseded', 'released', 'rejected'] as const)(
+    'ignores a %s command result and continues accepting later commands',
+    async (cause) => {
+      const store = new ClusterWorkspaceStore({
+        read: async () => emptyState(),
+        onEvent: () => () => undefined,
+      });
+      const release = store.acquire();
+      await store.hydrate();
+      let finish!: (value: { state: ClusterWorkspaceWireState }) => void;
+      let fail!: (error: Error) => void;
+      const command = store.reconcileCommand(
+        () =>
+          new Promise<{ state: ClusterWorkspaceWireState }>((resolve, reject) => {
+            finish = resolve;
+            fail = reject;
+          }),
+        () => cause !== 'superseded'
+      );
+      if (cause === 'released') {
+        release();
+      }
+      if (cause === 'rejected') {
+        fail(new Error('RPC failed'));
+        await expect(command).rejects.toThrow('RPC failed');
+      } else {
+        finish({ state: { ...emptyState(), selectedKubeconfigs: ['stale:dev'] } });
+        await command;
+      }
+      expect(store.getSnapshot().selectedKubeconfigs).toEqual([]);
+      await store.reconcileCommand(
+        async () => ({ state: { ...emptyState(), selectedKubeconfigs: ['current:dev'] } }),
+        () => true
+      );
+      expect(store.getSnapshot().selectedKubeconfigs).toEqual(['current:dev']);
+      release();
+    }
+  );
+
   it('bridges permission recovery without changing namespace scope revisions', async () => {
     const runtime = createWailsRuntimeHarness();
     const store = new ClusterWorkspaceStore({
@@ -76,7 +223,7 @@ describe('ClusterWorkspaceStore', () => {
     unsubscribe();
   });
 
-  it('continues notifying subscribers after one subscriber throws', () => {
+  it('continues notifying subscribers after one subscriber throws', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const store = new ClusterWorkspaceStore({
       read: async () => emptyState(),
@@ -88,7 +235,12 @@ describe('ClusterWorkspaceStore', () => {
     const laterSubscriber = vi.fn();
     store.subscribe(laterSubscriber);
 
-    expect(() => store.applyWireState(emptyState())).not.toThrow();
+    await expect(
+      store.reconcileCommand(
+        async () => ({ state: emptyState() }),
+        () => true
+      )
+    ).resolves.toBeDefined();
     expect(laterSubscriber).toHaveBeenCalledOnce();
   });
 
@@ -355,7 +507,10 @@ describe('ClusterWorkspaceStore', () => {
     runtime.emit('cluster:auth:failed', { clusterId: 'cluster-a', reason: 'stale token' });
     runtime.emit('cluster:health:degraded', { clusterId: 'cluster-a' });
     runtime.emit('cluster:scope:changed', { clusterId: 'cluster-a' });
-    store.applyWireState(emptyState());
+    await store.reconcileCommand(
+      async () => ({ state: emptyState() }),
+      () => true
+    );
     await store.refresh();
 
     expect(store.getCluster('cluster-a')).toMatchObject({
@@ -379,7 +534,10 @@ describe('ClusterWorkspaceStore', () => {
 
     const release = store.acquire();
     const hydration = store.hydrate();
-    store.applyWireState(emptyState());
+    await store.reconcileCommand(
+      async () => ({ state: emptyState() }),
+      () => true
+    );
     resolveHydration({
       ...emptyState(),
       clusters: {
@@ -424,19 +582,24 @@ describe('ClusterWorkspaceStore', () => {
       read: async () => emptyState(),
       onEvent: () => () => undefined,
     });
-    store.applyWireState({
-      ...emptyState(),
-      clusters: {
-        'cluster-a': {
-          clusterId: 'cluster-a',
-          clusterName: 'Alpha',
-          lifecycle: 'ready',
-          auth: { state: 'valid' },
-          health: 'healthy',
-          scopeRevision: 0,
+    await store.reconcileCommand(
+      async () => ({
+        state: {
+          ...emptyState(),
+          clusters: {
+            'cluster-a': {
+              clusterId: 'cluster-a',
+              clusterName: 'Alpha',
+              lifecycle: 'ready',
+              auth: { state: 'valid' },
+              health: 'healthy',
+              scopeRevision: 0,
+            },
+          },
         },
-      },
-    });
+      }),
+      () => true
+    );
 
     expect(store.isServiceable('cluster-a')).toBe(true);
     store.beginForegroundActivation('cluster-a');
@@ -463,7 +626,10 @@ it('keeps a confirmed cluster-view close ahead of an older workspace read', asyn
   const release = store.acquire();
   try {
     const loading = store.hydrate();
-    store.applyWireState(stale);
+    await store.reconcileCommand(
+      async () => ({ state: stale }),
+      () => true
+    );
     store.confirmClosedSelection('alpha:dev', 'alpha');
     finish(stale);
     await loading;
@@ -472,4 +638,172 @@ it('keeps a confirmed cluster-view close ahead of an older workspace read', asyn
   } finally {
     release();
   }
+});
+
+/**
+ * The per-cluster error class (verdict) must be sticky — set by terminal
+ * failures and probe results, never cleared by a recovering transition alone —
+ * so the failure surface stays stable across automatic retries.
+ */
+describe('auth error state transitions', () => {
+  let runtime: ReturnType<typeof createWailsRuntimeHarness>;
+  let store: ClusterWorkspaceStore;
+  let release: () => void;
+
+  beforeEach(async () => {
+    runtime = createWailsRuntimeHarness();
+    store = new ClusterWorkspaceStore({ read: async () => emptyState(), onEvent: runtime.onEvent });
+    release = store.acquire();
+    await store.hydrate();
+  });
+
+  afterEach(() => release());
+
+  const requireClusterState = () => store.getAuth('c1');
+
+  it('marks a terminal failure as a confirmed auth verdict', () => {
+    runtime.emit('cluster:auth:failed', {
+      clusterId: 'c1',
+      clusterName: 'alpha',
+      reason: 'token expired',
+    });
+
+    const state = requireClusterState();
+    expect(state.hasError).toBe(true);
+    expect(state.errorClass).toBe('auth');
+    expect(isConfirmedAuthFailure(state)).toBe(true);
+  });
+
+  it('does not confirm a fresh recovering cluster before any probe verdict', () => {
+    runtime.emit('cluster:auth:recovering', {
+      clusterId: 'c1',
+      clusterName: 'alpha',
+      reason: '401 Unauthorized',
+    });
+
+    const state = requireClusterState();
+    expect(state.hasError).toBe(true);
+    expect(state.isRecovering).toBe(true);
+    expect(state.errorClass).toBe('');
+    expect(isConfirmedAuthFailure(state)).toBe(false);
+  });
+
+  it('keeps a connectivity verdict unconfirmed (cluster unreachable, waiting)', () => {
+    runtime.emit('cluster:auth:recovering', { clusterId: 'c1', reason: '401' });
+    runtime.emit('cluster:auth:progress', {
+      clusterId: 'c1',
+      secondsUntilRetry: 15,
+      errorClass: 'connectivity',
+    });
+
+    const state = requireClusterState();
+    expect(state.errorClass).toBe('connectivity');
+    expect(isConfirmedAuthFailure(state)).toBe(false);
+  });
+
+  it('confirms an auth verdict reported by a probe', () => {
+    runtime.emit('cluster:auth:recovering', { clusterId: 'c1', reason: '401' });
+    runtime.emit('cluster:auth:progress', {
+      clusterId: 'c1',
+      secondsUntilRetry: 5,
+      errorClass: 'auth',
+    });
+
+    expect(isConfirmedAuthFailure(requireClusterState())).toBe(true);
+  });
+
+  it('carries the exec command, kind, and summary from a failed event', () => {
+    runtime.emit('cluster:auth:failed', {
+      clusterId: 'c1',
+      reason: 'exec: executable gke-gcloud-auth-plugin not found',
+      kind: 'missing-helper',
+      summary: "The kubeconfig's credential helper could not be found.",
+      execCommand: 'gke-gcloud-auth-plugin',
+    });
+
+    const state = requireClusterState();
+    expect(state.execCommand).toBe('gke-gcloud-auth-plugin');
+    expect(state.diagnosticKind).toBe('missing-helper');
+    expect(state.diagnosticSummary).toBe("The kubeconfig's credential helper could not be found.");
+  });
+
+  it('carries the exec command from a recovering event', () => {
+    runtime.emit('cluster:auth:recovering', {
+      clusterId: 'c1',
+      reason: 'exec: executable aws not found',
+      execCommand: 'aws',
+    });
+
+    expect(requireClusterState().execCommand).toBe('aws');
+  });
+
+  it('keeps the exec command sticky across a progress event without one', () => {
+    runtime.emit('cluster:auth:recovering', {
+      clusterId: 'c1',
+      reason: 'missing helper',
+      execCommand: 'gke-gcloud-auth-plugin',
+    });
+    runtime.emit('cluster:auth:progress', { clusterId: 'c1', secondsUntilRetry: 5 });
+
+    expect(requireClusterState().execCommand).toBe('gke-gcloud-auth-plugin');
+  });
+
+  it('adopts the exec command from a progress event that carries one', () => {
+    runtime.emit('cluster:auth:recovering', { clusterId: 'c1', reason: 'x' });
+    runtime.emit('cluster:auth:progress', {
+      clusterId: 'c1',
+      secondsUntilRetry: 5,
+      execCommand: 'aws',
+    });
+
+    expect(requireClusterState().execCommand).toBe('aws');
+  });
+
+  it('keeps the previous verdict when a progress event has no verdict yet', () => {
+    runtime.emit('cluster:auth:failed', { clusterId: 'c1', reason: 'expired' });
+    runtime.emit('cluster:auth:recovering', { clusterId: 'c1' });
+    runtime.emit('cluster:auth:progress', {
+      clusterId: 'c1',
+      secondsUntilRetry: 0,
+      errorClass: '',
+    });
+
+    const state = requireClusterState();
+    expect(state.errorClass).toBe('auth');
+    expect(isConfirmedAuthFailure(state)).toBe(true);
+  });
+
+  it('keeps the auth verdict across an automatic retry (no overlay flicker)', () => {
+    runtime.emit('cluster:auth:failed', { clusterId: 'c1', reason: 'expired' });
+    runtime.emit('cluster:auth:recovering', { clusterId: 'c1', reason: 'expired' });
+
+    const state = requireClusterState();
+    expect(state.isRecovering).toBe(true);
+    expect(state.errorClass).toBe('auth');
+    expect(isConfirmedAuthFailure(state)).toBe(true);
+  });
+
+  it('lets a connectivity probe verdict supersede an auth verdict', () => {
+    // Credentials were bad, then the cluster became unreachable before they
+    // were fixed: unreachable is a waiting state, not a confirmed failure.
+    runtime.emit('cluster:auth:failed', { clusterId: 'c1', reason: 'expired' });
+    runtime.emit('cluster:auth:recovering', { clusterId: 'c1' });
+    runtime.emit('cluster:auth:progress', {
+      clusterId: 'c1',
+      secondsUntilRetry: 15,
+      errorClass: 'connectivity',
+    });
+
+    expect(isConfirmedAuthFailure(requireClusterState())).toBe(false);
+  });
+
+  it('ignores progress for clusters without an active error', () => {
+    runtime.emit('cluster:auth:progress', {
+      clusterId: 'c1',
+      secondsUntilRetry: 0,
+      errorClass: 'auth',
+    });
+
+    expect(store.getSnapshot().clusters.size).toBe(0);
+  });
 });

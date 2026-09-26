@@ -1,3 +1,4 @@
+import { DockablePanelTestHost } from '@/test-utils/DockablePanelTestHost';
 /**
  * frontend/src/ui/dockable/DockablePanelProvider.test.tsx
  *
@@ -15,7 +16,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { requireValue } from '@/test-utils/requireValue';
 import { resolveObjectPanelMountTarget } from '@/ui/layout/objectPanelMountTarget';
 import { DockablePanelProvider, useDockablePanelContext } from './DockablePanelProvider';
-import { clearPanelState } from './useDockablePanelState';
 
 type DockablePanelContextValue = ReturnType<typeof useDockablePanelContext>;
 
@@ -34,7 +34,7 @@ const requireDockableContext = (
 vi.mock('@modules/kubernetes/config/KubeconfigContext', () => ({
   useKubeconfig: vi.fn(() => ({
     selectedClusterId: 'cluster-a',
-    selectedClusterIds: ['cluster-a'],
+    managedClusterIds: ['cluster-a'],
     // Other useKubeconfig fields aren't read by DockablePanelProvider,
     // so we leave them undefined. Add stubs only if a future test
     // needs them.
@@ -43,11 +43,11 @@ vi.mock('@modules/kubernetes/config/KubeconfigContext', () => ({
 
 // Helper to satisfy TypeScript: vi.mocked(useKubeconfig).mockReturnValue
 // expects the full KubeconfigContextType, but DockablePanelProvider only
-// reads selectedClusterId and selectedClusterIds. Cast through unknown
+// reads selectedClusterId and managedClusterIds. Cast through unknown
 // at one place rather than 12 inline `as unknown as ...` casts.
 function setMockedKubeconfig(partial: {
   selectedClusterId: string;
-  selectedClusterIds: string[];
+  managedClusterIds: string[];
 }): void {
   vi.mocked(useKubeconfig).mockReturnValue(partial as unknown as ReturnType<typeof useKubeconfig>);
 }
@@ -101,6 +101,7 @@ describe('DockablePanelProvider', () => {
   it('creates a shared host layer inside .content', async () => {
     const { unmount } = await render(
       <DockablePanelProvider>
+        <DockablePanelTestHost />
         <div data-testid="child">content</div>
       </DockablePanelProvider>
     );
@@ -331,7 +332,7 @@ describe('DockablePanelProvider', () => {
 
     setMockedKubeconfig({
       selectedClusterId: 'cluster-a',
-      selectedClusterIds: ['cluster-a', 'cluster-b'],
+      managedClusterIds: ['cluster-a', 'cluster-b'],
     });
     const renderProvider = () => (
       <DockablePanelProvider>
@@ -347,7 +348,7 @@ describe('DockablePanelProvider', () => {
 
     setMockedKubeconfig({
       selectedClusterId: 'cluster-b',
-      selectedClusterIds: ['cluster-a', 'cluster-b'],
+      managedClusterIds: ['cluster-a', 'cluster-b'],
     });
     await rerender(renderProvider());
 
@@ -360,7 +361,7 @@ describe('DockablePanelProvider', () => {
 
     setMockedKubeconfig({
       selectedClusterId: 'cluster-a',
-      selectedClusterIds: ['cluster-a', 'cluster-b'],
+      managedClusterIds: ['cluster-a', 'cluster-b'],
     });
     await rerender(renderProvider());
     expect(requireDockableContext(contextRef.current).tabGroups.right.tabs).toEqual([]);
@@ -802,7 +803,9 @@ describe('DockablePanelProvider', () => {
         contextRef.current,
         'expected test value in DockablePanelProvider.test.tsx'
       ).setLastFocusedGroupKey('floating-1');
-      clearPanelState('floating-panel');
+      requireDockableContext(contextRef.current).discardPanelLayouts('cluster-a', [
+        'floating-panel',
+      ]);
       await Promise.resolve();
     });
 
@@ -1094,7 +1097,7 @@ describe('DockablePanelProvider — per-cluster panel state', () => {
     // Reset useKubeconfig mock to cluster-a between tests.
     setMockedKubeconfig({
       selectedClusterId: 'cluster-a',
-      selectedClusterIds: ['cluster-a', 'cluster-b'],
+      managedClusterIds: ['cluster-a', 'cluster-b'],
     });
   });
 
@@ -1162,13 +1165,13 @@ describe('DockablePanelProvider — per-cluster panel state', () => {
       } else {
         setMockedKubeconfig({
           selectedClusterId: 'cluster-b',
-          selectedClusterIds: ['cluster-a', 'cluster-b'],
+          managedClusterIds: ['cluster-a', 'cluster-b'],
         });
         await act(async () => draw());
         if (scenario === 'stale cluster') {
           setMockedKubeconfig({
             selectedClusterId: 'cluster-a',
-            selectedClusterIds: ['cluster-a', 'cluster-b'],
+            managedClusterIds: ['cluster-a', 'cluster-b'],
           });
           await act(async () => draw());
         }
@@ -1216,7 +1219,7 @@ describe('DockablePanelProvider — per-cluster panel state', () => {
     // Switch to cluster-b.
     setMockedKubeconfig({
       selectedClusterId: 'cluster-b',
-      selectedClusterIds: ['cluster-a', 'cluster-b'],
+      managedClusterIds: ['cluster-a', 'cluster-b'],
     });
     act(() => {
       root.render(
@@ -1230,7 +1233,7 @@ describe('DockablePanelProvider — per-cluster panel state', () => {
     // Switch back to cluster-a.
     setMockedKubeconfig({
       selectedClusterId: 'cluster-a',
-      selectedClusterIds: ['cluster-a', 'cluster-b'],
+      managedClusterIds: ['cluster-a', 'cluster-b'],
     });
     act(() => {
       root.render(
@@ -1269,7 +1272,7 @@ describe('DockablePanelProvider — per-cluster panel state', () => {
 
     setMockedKubeconfig({
       selectedClusterId: 'cluster-b',
-      selectedClusterIds: ['cluster-b'],
+      managedClusterIds: ['cluster-b'],
     });
     act(() => {
       root.render(
@@ -1283,7 +1286,7 @@ describe('DockablePanelProvider — per-cluster panel state', () => {
     // Re-open cluster-a — fresh state expected.
     setMockedKubeconfig({
       selectedClusterId: 'cluster-a',
-      selectedClusterIds: ['cluster-a', 'cluster-b'],
+      managedClusterIds: ['cluster-a', 'cluster-b'],
     });
     act(() => {
       root.render(
@@ -1306,7 +1309,7 @@ describe('DockablePanelProvider — per-cluster panel state', () => {
     // Cluster-a: dock 'diagnostics' to the right.
     setMockedKubeconfig({
       selectedClusterId: 'cluster-a',
-      selectedClusterIds: ['cluster-a', 'cluster-b'],
+      managedClusterIds: ['cluster-a', 'cluster-b'],
     });
     act(() => {
       root.render(
@@ -1328,7 +1331,7 @@ describe('DockablePanelProvider — per-cluster panel state', () => {
     // Cluster-b: empty.
     setMockedKubeconfig({
       selectedClusterId: 'cluster-b',
-      selectedClusterIds: ['cluster-a', 'cluster-b'],
+      managedClusterIds: ['cluster-a', 'cluster-b'],
     });
     act(() => {
       root.render(
@@ -1354,7 +1357,7 @@ describe('DockablePanelProvider — per-cluster panel state', () => {
     // Switch back to cluster-a.
     setMockedKubeconfig({
       selectedClusterId: 'cluster-a',
-      selectedClusterIds: ['cluster-a', 'cluster-b'],
+      managedClusterIds: ['cluster-a', 'cluster-b'],
     });
     act(() => {
       root.render(
@@ -1369,7 +1372,7 @@ describe('DockablePanelProvider — per-cluster panel state', () => {
     // And cluster-b still has it in the bottom dock.
     setMockedKubeconfig({
       selectedClusterId: 'cluster-b',
-      selectedClusterIds: ['cluster-a', 'cluster-b'],
+      managedClusterIds: ['cluster-a', 'cluster-b'],
     });
     act(() => {
       root.render(
@@ -1426,7 +1429,7 @@ describe('DockablePanelProvider — per-cluster panel state', () => {
 
     setMockedKubeconfig({
       selectedClusterId: 'cluster-a',
-      selectedClusterIds: ['cluster-a', 'cluster-b'],
+      managedClusterIds: ['cluster-a', 'cluster-b'],
     });
 
     act(() => {
@@ -1475,7 +1478,7 @@ describe('DockablePanelProvider — per-cluster panel state', () => {
     // Switch to cluster-b and back.
     setMockedKubeconfig({
       selectedClusterId: 'cluster-b',
-      selectedClusterIds: ['cluster-a', 'cluster-b'],
+      managedClusterIds: ['cluster-a', 'cluster-b'],
     });
     act(() => {
       root.render(
@@ -1486,7 +1489,7 @@ describe('DockablePanelProvider — per-cluster panel state', () => {
     });
     setMockedKubeconfig({
       selectedClusterId: 'cluster-a',
-      selectedClusterIds: ['cluster-a', 'cluster-b'],
+      managedClusterIds: ['cluster-a', 'cluster-b'],
     });
     act(() => {
       root.render(

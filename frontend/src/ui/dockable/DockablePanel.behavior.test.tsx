@@ -1,4 +1,5 @@
 import { ZoomProvider } from '@core/contexts/ZoomContext';
+import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
 import { KeyboardProvider } from '@ui/shortcuts/context';
 import type React from 'react';
 import { act } from 'react';
@@ -8,11 +9,23 @@ import {
   PanelLifecycleGuardProvider,
   usePanelLifecycleGuard,
 } from '@/core/panel-windows/panelLifecycleGuards';
+import { DockablePanelTestHost } from '@/test-utils/DockablePanelTestHost';
+import { requireValue } from '@/test-utils/requireValue';
 import DockablePanel from './DockablePanel';
-import { DockablePanelProvider } from './DockablePanelProvider';
-import { createPanelLayoutStore, setActivePanelLayoutStore } from './panelLayoutStore';
-import { getAllPanelStates } from './useDockablePanelState';
+import {
+  DockablePanelLayer,
+  DockablePanelProvider,
+  useDockablePanelContext,
+} from './DockablePanelProvider';
+import { createPanelLayoutStore } from './panelLayoutStore';
+import { usePanelLayoutStoreContext } from './panelLayoutStoreContext';
+import { getGroupForPanel, getPanelPosition } from './tabGroupState';
 
+let layoutStore = createPanelLayoutStore();
+const LayoutProbe = () => {
+  layoutStore = usePanelLayoutStoreContext();
+  return null;
+};
 vi.mock('@core/backend-api', () => ({
   GetZoomLevel: vi.fn().mockResolvedValue(100),
   SetZoomLevel: vi.fn().mockResolvedValue(undefined),
@@ -28,7 +41,7 @@ function UnsavedPanel({ panelId }: Readonly<{ panelId: string }>) {
 vi.mock('@modules/kubernetes/config/KubeconfigContext', () => ({
   useKubeconfig: vi.fn(() => ({
     selectedClusterId: 'cluster-a',
-    selectedClusterIds: ['cluster-a'],
+    managedClusterIds: ['cluster-a'],
   })),
 }));
 
@@ -62,7 +75,11 @@ const renderPanel = async (
       <KeyboardProvider>
         <PanelLifecycleGuardProvider>
           <DockablePanelProvider {...providerProps}>
-            <ZoomProvider>{element}</ZoomProvider>
+            <ZoomProvider>
+              <DockablePanelTestHost />
+              <LayoutProbe />
+              {element}
+            </ZoomProvider>
           </DockablePanelProvider>
         </PanelLifecycleGuardProvider>
       </KeyboardProvider>
@@ -77,22 +94,158 @@ const renderPanel = async (
 };
 
 const panelState = (panelId: string) => {
-  const state = getAllPanelStates()[panelId];
+  const state = layoutStore.getState(panelId);
   if (!state) {
     throw new Error(`missing panel state for ${panelId}`);
   }
-  return state;
+  const group = getGroupForPanel(layoutStore.getTabGroups(), panelId);
+  return {
+    ...state,
+    ...layoutStore.getGroupLayout(group ?? 'right'),
+    position: getPanelPosition(layoutStore.getTabGroups(), panelId),
+  };
 };
 
 describe('DockablePanel docked behaviour', () => {
   beforeEach(() => {
-    setActivePanelLayoutStore(createPanelLayoutStore());
+    layoutStore = createPanelLayoutStore();
   });
 
   afterEach(() => {
     document.body.replaceChildren();
     document.body.className = '';
-    setActivePanelLayoutStore(createPanelLayoutStore());
+    layoutStore = createPanelLayoutStore();
+  });
+
+  it('keeps panels visible when workspace content is replaced during reconstruction', async () => {
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = ReactDOM.createRoot(host);
+    const renderContent = async (generation: string) =>
+      act(async () =>
+        root.render(
+          <KeyboardProvider>
+            <DockablePanelProvider>
+              <ZoomProvider>
+                <div key={generation} className="content">
+                  <DockablePanelLayer />
+                  <div className="content-body" />
+                </div>
+                <DockablePanel panelId="restored-panel" isOpen title="Restored panel">
+                  <div data-testid="restored-panel-body">Restored object content</div>
+                </DockablePanel>
+              </ZoomProvider>
+            </DockablePanelProvider>
+          </KeyboardProvider>
+        )
+      );
+    try {
+      await renderContent('loading');
+      expect(document.querySelector('[data-testid="restored-panel-body"]')).not.toBeNull();
+      await renderContent('ready');
+      expect(document.querySelector('[data-testid="restored-panel-body"]')).not.toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it('keeps restored bottom membership while controlled panels initialize', async () => {
+    const Projection = () => {
+      const { tabGroups } = useDockablePanelContext();
+      return ['restored-a', 'restored-b'].map((panelId) => (
+        <DockablePanel
+          key={panelId}
+          panelId={panelId}
+          isOpen
+          defaultPosition={getPanelPosition(tabGroups, panelId) ?? 'right'}
+          defaultGroupKey={getGroupForPanel(tabGroups, panelId) ?? undefined}
+        >
+          <div>{panelId}</div>
+        </DockablePanel>
+      ));
+    };
+    const rendered = await renderPanel(<Projection />, {
+      initialTabGroups: {
+        right: { tabs: [], activeTab: null },
+        bottom: { tabs: ['restored-a', 'restored-b'], activeTab: 'restored-b' },
+        floating: [],
+      },
+    });
+    try {
+      expect(layoutStore.getTabGroups().bottom).toEqual({
+        tabs: ['restored-a', 'restored-b'],
+        activeTab: 'restored-b',
+      });
+      expect(layoutStore.getTabGroups().right.tabs).toEqual([]);
+    } finally {
+      await rendered();
+    }
+  });
+
+  it('retains group geometry after reordering across a cluster round trip', async () => {
+    ensureContentElement();
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = ReactDOM.createRoot(host);
+    let context: ReturnType<typeof useDockablePanelContext> | undefined;
+    const Capture = () => {
+      context = useDockablePanelContext();
+      return null;
+    };
+    const renderCluster = async (clusterId: string) => {
+      vi.mocked(useKubeconfig).mockReturnValue({
+        selectedClusterId: clusterId,
+        managedClusterIds: ['cluster-a', 'cluster-b'],
+      } as ReturnType<typeof useKubeconfig>);
+      await act(async () =>
+        root.render(
+          <KeyboardProvider>
+            <PanelLifecycleGuardProvider>
+              <DockablePanelProvider>
+                <ZoomProvider>
+                  <DockablePanelTestHost />
+                  <Capture />
+                  {clusterId === 'cluster-a' ? (
+                    <>
+                      <DockablePanel key="a1" panelId="a1" defaultSize={{ width: 540 }} isOpen>
+                        <div>A1</div>
+                      </DockablePanel>
+                      <DockablePanel key="a2" panelId="a2" defaultSize={{ width: 680 }} isOpen>
+                        <div>A2</div>
+                      </DockablePanel>
+                    </>
+                  ) : (
+                    <DockablePanel key="b1" panelId="b1" defaultSize={{ width: 900 }} isOpen>
+                      <div>B1</div>
+                    </DockablePanel>
+                  )}
+                </ZoomProvider>
+              </DockablePanelProvider>
+            </PanelLifecycleGuardProvider>
+          </KeyboardProvider>
+        )
+      );
+    };
+    const leaderWidth = () =>
+      document.querySelector<HTMLElement>('.dockable-panel:has(.dockable-panel__header)')?.style
+        .width;
+    try {
+      await renderCluster('cluster-a');
+      expect(leaderWidth()).toBe('540px');
+      await act(async () => context?.reorderTabInGroup('right', 'a2', 0));
+      expect(leaderWidth()).toBe('540px');
+      await renderCluster('cluster-b');
+      await renderCluster('cluster-a');
+      expect(leaderWidth()).toBe('540px');
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      vi.mocked(useKubeconfig).mockReturnValue({
+        selectedClusterId: 'cluster-a',
+        managedClusterIds: ['cluster-a'],
+      } as ReturnType<typeof useKubeconfig>);
+    }
   });
 
   it('initializes bottom-docked geometry from the provided size', async () => {
@@ -116,7 +269,39 @@ describe('DockablePanel docked behaviour', () => {
     await unmount();
   });
 
-  it('resizes a right-docked panel from its separator', async () => {
+  it.each(['right', 'bottom'] as const)(
+    'accepts an accessible size-control change for a %s dock',
+    async (position) => {
+      const unmount = await renderPanel(
+        <DockablePanel panelId="sized" defaultPosition={position} isOpen>
+          <div>panel</div>
+        </DockablePanel>
+      );
+      try {
+        const dimension = position === 'right' ? 'width' : 'height';
+        const control = requireValue(
+          document.querySelector<HTMLInputElement>(`input[aria-label="Resize panel ${dimension}"]`),
+          'accessible panel size control'
+        );
+        const initial = Number(control.value);
+        const next = initial - 20;
+        await act(async () => {
+          Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(
+            control,
+            String(next)
+          );
+          control.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+        const state = panelState('sized');
+        expect(position === 'right' ? state.rightSize.width : state.bottomSize.height).toBe(next);
+        expect(control.value).toBe(String(next));
+      } finally {
+        await unmount();
+      }
+    }
+  );
+
+  it('resizes a right-docked panel from its resize control', async () => {
     Object.defineProperty(window, 'innerWidth', {
       configurable: true,
       value: 1200,
@@ -158,33 +343,97 @@ describe('DockablePanel docked behaviour', () => {
     await unmount();
   });
 
-  it('supports keyboard resizing for a bottom-docked separator', async () => {
-    Object.defineProperty(window, 'innerHeight', {
-      configurable: true,
-      value: 1000,
-    });
-    const unmount = await renderPanel(
-      <DockablePanel panelId="panel-bottom" defaultPosition="bottom" isOpen>
-        <div>panel</div>
-      </DockablePanel>
-    );
-    const initialHeight = panelState('panel-bottom').bottomSize.height;
-    const handle = document.querySelector<HTMLElement>('[aria-label="Resize panel height"]');
-
-    await act(async () => {
-      handle?.dispatchEvent(
-        new KeyboardEvent('keydown', {
-          key: 'ArrowUp',
-          bubbles: true,
-          cancelable: true,
-        })
+  it.each(['right', 'bottom'] as const)(
+    'resizes the %s dock with directional arrows and Home/End',
+    async (position) => {
+      const unmount = await renderPanel(
+        <DockablePanel panelId="keyboard-resize" defaultPosition={position} isOpen>
+          <div>panel</div>
+        </DockablePanel>
       );
-      await Promise.resolve();
-    });
+      try {
+        const dimension = position === 'right' ? 'width' : 'height';
+        const control = requireValue(
+          document.querySelector<HTMLInputElement>(`[aria-label="Resize panel ${dimension}"]`),
+          'panel resize control'
+        );
+        const initial = Number(control.value);
+        const grow = position === 'right' ? 'ArrowLeft' : 'ArrowUp';
+        const shrink = position === 'right' ? 'ArrowRight' : 'ArrowDown';
+        const cases = [
+          [grow, initial + 16],
+          [shrink, initial],
+          ['Home', Number(control.min)],
+          [shrink, Number(control.min)],
+          ['End', Number(control.max)],
+          [grow, Number(control.max)],
+        ] as const;
+        for (const [key, expected] of cases) {
+          const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+          await act(async () => control.dispatchEvent(event));
+          const state = panelState('keyboard-resize');
+          const size = position === 'right' ? state.rightSize : state.bottomSize;
+          expect(size[dimension], key).toBe(expected);
+          expect(Number(control.value), key).toBe(expected);
+          expect(event.defaultPrevented, key).toBe(true);
+        }
+      } finally {
+        await unmount();
+      }
+    }
+  );
 
-    expect(panelState('panel-bottom').bottomSize.height).toBeGreaterThan(initialHeight);
-    await unmount();
-  });
+  it.each(['right', 'bottom'] as const)(
+    'blocks native slider resizing on unused keys in the %s dock',
+    async (position) => {
+      const unmount = await renderPanel(
+        <DockablePanel
+          panelId="keyboard-resize"
+          defaultPosition={position}
+          closeActiveTabOnEscape
+          isOpen
+        >
+          <div>panel</div>
+        </DockablePanel>
+      );
+      try {
+        const dimension = position === 'right' ? 'width' : 'height';
+        const control = requireValue(
+          document.querySelector<HTMLInputElement>(`[aria-label="Resize panel ${dimension}"]`),
+          'panel resize control'
+        );
+        const initial = panelState('keyboard-resize');
+        const crossAxisKeys =
+          position === 'right' ? ['ArrowUp', 'ArrowDown'] : ['ArrowLeft', 'ArrowRight'];
+        for (const key of [...crossAxisKeys, 'PageUp', 'PageDown']) {
+          const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+          await act(async () => control.dispatchEvent(event));
+          // jsdom does not perform native range key actions; cancellation is the contract.
+          expect(event.defaultPrevented, key).toBe(true);
+          expect(panelState('keyboard-resize'), key).toEqual(initial);
+        }
+
+        await act(async () => {
+          control.focus();
+          control.dispatchEvent(
+            new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })
+          );
+        });
+        expect(document.activeElement).not.toBe(control);
+        expect(panelState('keyboard-resize')).toEqual(initial);
+
+        await act(async () => {
+          control.focus();
+          control.dispatchEvent(
+            new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+          );
+        });
+        expect(control.isConnected).toBe(false);
+      } finally {
+        await unmount();
+      }
+    }
+  );
 
   it('maximizes docked content and restores its prior edge and size', async () => {
     const unmount = await renderPanel(
@@ -273,19 +522,15 @@ describe('DockablePanel docked behaviour', () => {
         </DockablePanel>
       </>
     );
-    const before = getAllPanelStates();
-    expect(before['panel-target-bottom']?.zIndex).toBeLessThan(
-      before['panel-source-a']?.zIndex ?? Number.NEGATIVE_INFINITY
-    );
+    const beforeTargetZ = layoutStore.getGroupLayout('bottom').zIndex;
 
     const dockBottom = document.querySelector<HTMLButtonElement>(
       '.dockable-panel--right [aria-label="Dock panel to bottom"]'
     );
     await act(async () => dockBottom?.click());
 
-    const after = getAllPanelStates();
-    expect(after['panel-source-a']?.position).toBe('bottom');
-    expect(after['panel-source-b']?.position).toBe('bottom');
+    expect(panelState('panel-source-a').position).toBe('bottom');
+    expect(panelState('panel-source-b').position).toBe('bottom');
     expect(document.querySelector('.dockable-panel--right')).toBeNull();
     expect(
       Array.from(document.querySelectorAll('.dockable-panel--bottom [role="tab"]')).map((tab) =>
@@ -297,9 +542,7 @@ describe('DockablePanel docked behaviour', () => {
         .querySelector('.dockable-panel--bottom [aria-selected="true"]')
         ?.getAttribute('data-panel-id')
     ).toBe('panel-source-b');
-    expect(after['panel-target-bottom']?.zIndex).toBeGreaterThan(
-      after['panel-source-a']?.zIndex ?? Number.POSITIVE_INFINITY
-    );
+    expect(layoutStore.getGroupLayout('bottom').zIndex).toBeGreaterThan(beforeTargetZ);
     await unmount();
   });
 

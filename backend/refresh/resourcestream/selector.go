@@ -98,6 +98,9 @@ func ParseStreamSelector(clusterID, domain, scope string) (StreamSelector, error
 		ClusterID: strings.TrimSpace(clusterID),
 		Domain:    domain,
 	}
+	if selector.ClusterID == "" {
+		return StreamSelector{}, fmt.Errorf("cluster id is required")
+	}
 
 	switch domain {
 	case domainNodes,
@@ -105,7 +108,6 @@ func ParseStreamSelector(clusterID, domain, scope string) (StreamSelector, error
 		domainClusterStorage,
 		domainClusterConfig,
 		domainClusterCRDs,
-		domainClusterCustom,
 		domainCatalog,
 		domainClusterEvents,
 		domainNamespaces,
@@ -136,7 +138,6 @@ func ParseStreamSelector(clusterID, domain, scope string) (StreamSelector, error
 		domainNamespaceConfig,
 		domainNamespaceNetwork,
 		domainNamespaceRBAC,
-		domainNamespaceCustom,
 		domainNamespaceHelm,
 		domainNamespaceAutoscaling,
 		domainNamespaceQuotas,

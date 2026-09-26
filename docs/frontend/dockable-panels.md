@@ -23,9 +23,9 @@ maximize and restore.
 - Native panel windows reuse the workspace window chrome: macOS uses the
   transparent full-size titlebar with native traffic-light controls. Windows
   and Linux use a frameless window with minimize, maximize/restore, and close
-  controls in the outer `AppHeader`; Windows also enables WebView2 non-client
-  drag regions while retaining Wails' standard frameless decorations. Linux
-  clears the framework's initial internal-name title. The outer `AppHeader`
+  controls in the shared `WindowHeader`. Windows keeps WebView2 non-client
+  regions disabled so Wails can handle DOM resizing before dragging. Linux
+  clears the framework's initial internal-name title. The shared `WindowHeader`
   remains the drag/maximize surface, while the inner
   `DockablePanelHeader` remains tab and panel controls only. Workspace status,
   favorites, and command-palette controls do not render in the panel window.
@@ -56,6 +56,32 @@ maximize and restore.
 
 ## Placement and Uniqueness
 
+- Within each renderer, its cluster-scoped tab groups are the single writable
+  placement projection. Each group owns its size, maximize, and stacking order;
+  tabs own open state. Object state contains local references, active views, and
+  pending native opens. Neither keeps a second dock edge or native-window location index.
+- `useRestoreWorkspacePanels` installs group membership before restoring object
+  content for retained panels, dock-back, panel-tab insertion, and cluster-view
+  insertion. A mounting `DockablePanel` preserves that membership while its
+  open state initializes; the initial closed state must not remove the group.
+- `PanelLayoutLifecycle` releases tab state and membership after committed
+  object removal in both renderer roles. Dock geometry stays with its group
+  through sibling closes, reorders, and cluster switches. An empty dock retains
+  its size but releases maximize. Applying object-panel size settings updates
+  empty docks and groups containing object tabs; occupied utility-only groups
+  retain their size. Removed floating groups release their layout state.
+  Focus and debug readers use their provider's group state; there is no globally
+  selected layout store.
+- Each renderer mounts `DockablePanelLayer` inside its content surface. It
+  renders one `DockablePanelGroup` per visible group, owning chrome, geometry,
+  and a keyed DOM slot per tab. `DockablePanel` portals its own children into
+  that slot, retaining its originating context and error boundary. There is no
+  tab leader, captured-children registry, or content-change notification channel.
+  Sibling opens/closes and reorders retain existing slots and editing state.
+  Moving a tab or a whole group to another dock remounts the moved content,
+  including shell and log views, and must respect lifecycle guards.
+  React owns host replacement during reconstruction or suspension; the provider
+  must not append a one-time DOM container.
 - Prefer the active compatible docked group when opening a new object.
 - A new panel whose default is Floating creates a uniquely isolated, transient,
   hidden one-tab source group, then asks the native coordinator to transfer it.
@@ -76,6 +102,18 @@ maximize and restore.
 - Dragging within a tab bar reorders one tab. Dragging between compatible tab
   bars moves that one tab, including workspace-to-native, native-to-workspace,
   and native-to-native moves within the same cluster. Cross-cluster drops are rejected.
+- An empty workspace dock offers a right or bottom edge target during a compatible
+  tab drag, including an incoming drag from another window. Only docks without
+  visible tabs offer edge targets; occupied docks use their tab strips. Subtle
+  edge rails reveal a placement preview when hovered. The preview uses the
+  destination's saved size (or the incoming local utility tab's first-use size),
+  with the same size clamp as the dock renderer. It does not initialize or resize
+  the dock. A right preview reserves bottom space only when visible tabs will
+  remain in the bottom dock after the move and that dock is not maximized.
+  The preview is pointer-transparent; the drop hit area stays at the
+  edge so the preview cannot intercept other tabs or destinations. These
+  targets use the same local move and acknowledged native transfer path as tab
+  strips, and disappear when the drag leaves the window, ends, or drops.
 - Rejected cluster combinations show no insertion indicator. Panel drag
   scope is available during protected dragover; drop-time and backend checks
   still authorize the actual transfer.
@@ -94,8 +132,24 @@ maximize and restore.
 
 ## Acknowledged Handoffs
 
+`internal/appwindow/transfer_lifecycle.go` owns admission/replay rejection,
+source/target acknowledgement phases, deadline replacement, and terminal cleanup
+for group, panel-tab, and cluster-view transfers. Each protocol uses a typed
+instance and retains its existing ID namespace: a tab opening a native window
+deliberately shares its ID with the group opening acknowledgement. Protocol
+adapters own preparation, authenticated callers, placement commits, and rollback.
+Their existing locks cover lifecycle and directory changes; the lifecycle adds
+no mutex or backend dependency. Timeout callbacks re-enter the adapter's failure
+path. Cluster transfers release their locks before native window closure.
+Live native snapshots are separate from pending group operations; the registry
+binds each pending operation to its window independently of published content.
+
 Float, dock-back, panel-tab moves, and cluster-tab moves are acknowledged
 transactions. Check source guards and flush its latest snapshot before transfer.
+Directory reads started before a target stages or settles a transfer must not
+remove the target's reconstructed panels. Invalidate those reads per cluster and
+fetch a current snapshot; once settled, later authoritative moves still evict
+the old renderer's copy.
 The source stays mounted while the target reconstructs the panels. The shared
 backend directory commits physical placement only after destination readiness.
 Opening an already-open object focuses the existing placement. Every app window
@@ -195,6 +249,9 @@ reconstruction while its freeze is active.
 7. On macOS and Windows, exercise cluster and panel tab moves with both one and
    multiple tabs, targeting new and existing windows. Verify object identity,
    active view, drop placement, phantom animation, and empty-source closure.
+   Cover occupied and empty right/bottom docks; confirm preview bounds match
+   final placement and previews clear after dropping or cancelling. Verify
+   cross-cluster rejection, including empty destination docks.
    Cancelled or failed transfers must preserve the source content. On Linux,
    record drag-out as deferred; still test reordering, moves between existing
    compatible panels, Float, and dock-back.
@@ -213,7 +270,23 @@ automation delivers only hover, use a manual drop and inspect content retention
 and empty-source closure, following the
 [completion evidence gate](../workflows/completion.md).
 
+The recorded PR #361 checks on 2026-09-21 did not establish successful native
+tab reordering or drops between occupied docks, into empty docks, or between
+windows. Automation reported `noWindowsAvailable` or left placement unchanged;
+the cause remains undetermined. Windows and Linux UI checks were not run.
+Record the tested revision and platform when these gaps are resolved.
+
 ### Programmatic keyboard focus
+
+Group roots are open, nonmodal dialogs; opening a panel must leave the rest of
+the workspace interactive. Dock resize handles use native range inputs for the
+panel dimension and expose their size bounds. Left/Right move the right dock's
+edge by 16px; Up/Down move the bottom dock's edge by 16px. Home/End select the
+minimum/maximum size. The resize handler cancels native range behavior for all
+arrows, Home/End, and PageUp/PageDown; arrows on the other axis and PageUp/PageDown
+leave the size unchanged. Other keys retain their existing handling.
+Object-panel Tab order reaches the resize control after the header
+controls, then wraps to the first tab. Reset native dialog geometry in panel CSS.
 
 `DockablePanelProvider.focusPanel(panelId, clusterId)` owns deferred focus for
 new and existing panels. Callers pass the owning cluster when activating another

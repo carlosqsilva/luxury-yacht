@@ -2,16 +2,15 @@
  * backend/refresh/ingest/manager.go
  *
  * IngestManager owns the owned-reflector ingestion path for one cluster: a
- * ProjectingStore + ProjectingReflector per built-in streamed kind, replacing
+ * ProjectingStore + client-go reflector per built-in streamed kind, replacing
  * what the typed SharedInformerFactory does today — but holding ONLY projected
  * stream Summaries, never the typed object. It is generic over the kind registry:
  * it loops kindregistry.StreamDescriptors(), and the only per-group code is the
  * finite group/version -> RESTClient mapping every typed informer needs anyway.
  *
- * Beyond the descriptor reflectors it also hosts the on-demand dynamic (CRD-backed)
- * reflectors the catalog promotes at runtime (RegisterDynamicCatalogReflector), which use
- * the dynamic client and are excluded from the readiness gate — so the one ingest path
- * serves both built-in cut kinds and dynamically-discovered custom resources.
+ * Runtime-discovered sources use the same projected stores and permission-filtered
+ * partitions. CRD reconciliation and threshold admission for other dynamic APIs
+ * supply their source specifications; these sources do not gate global readiness.
  */
 
 package ingest
@@ -21,6 +20,7 @@ import (
 	"encoding/gob"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -38,7 +38,6 @@ import (
 
 	apiextensionsclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	unstructuredv1 "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/fields"
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -50,7 +49,6 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 
-	"github.com/luxury-yacht/app/backend/internal/lifecycle"
 	gatewayversioned "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
 	gatewayscheme "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned/scheme"
 )
@@ -121,11 +119,8 @@ type entry struct {
 	// sync so the catalog can serve-when-synced-else-LIST.
 	onDemand atomic.Bool
 
-	// cancel stops just this entry's reflectors. It is set only for on-demand reflectors,
-	// which launch on a context derived from the manager's run context so StopReflectorFor
-	// can tear one down without stopping the rest. Descriptor reflectors run directly on
-	// the run context and leave this nil.
-	cancel context.CancelFunc
+	// dynamic is present only for sources admitted after startup.
+	dynamic *dynamicSource
 }
 
 type ingestLaunchEntry struct {
@@ -140,7 +135,7 @@ type ingestLaunchEntry struct {
 type ingestPart struct {
 	namespace string
 	lw        cache.ListerWatcher
-	reflector *ProjectingReflector
+	reflector *cache.Reflector
 	view      *StorePartitionView
 
 	// resumeRV, when set (RestoreStores, before Start), makes Start attempt a
@@ -170,7 +165,7 @@ func (e *entry) allPartsSkipped() bool {
 	return true
 }
 
-// IngestManager owns one ProjectingStore + ProjectingReflector per built-in
+// IngestManager owns one ProjectingStore + client-go reflector per built-in
 // streamed kind for a single cluster. The stores hold projected stream Summaries
 // (the StreamRow output), never the typed objects the reflector decodes.
 type IngestManager struct {
@@ -178,16 +173,22 @@ type IngestManager struct {
 	kube    kubernetes.Interface
 	apiext  apiextensionsclientset.Interface
 	gateway gatewayversioned.Interface
-	// dynamic serves the on-demand dynamic (CRD-backed) reflectors the catalog promotes at
-	// runtime (RegisterDynamicCatalogReflector). It is optional (SetDynamicClient) because
-	// only that path needs it — the descriptor reflectors use the typed group clients
-	// (restClientFor). nil leaves the on-demand path disabled.
+	// dynamic serves runtime-discovered resources. Registry sources use their typed
+	// group clients; a nil dynamic client disables admission of discovered sources.
 	dynamic dynamic.Interface
 
-	entries map[schema.GroupVersionResource]*entry
+	entries                map[schema.GroupVersionResource]*entry
+	dynamicAdmissions      map[schema.GroupResource]*dynamicAdmission
+	dynamicGeneration      uint64
+	dynamicListeners       map[uint64]*dynamicSubscription
+	nextDynamicListener    uint64
+	dynamicCatalogSink     Sink
+	definitions            *dynamicDefinitions
+	definitionRegistration cache.ResourceEventHandlerRegistration
 
-	mu     sync.Mutex
-	cancel context.CancelFunc
+	mu      sync.Mutex
+	cancel  context.CancelFunc
+	stopped bool
 	// runDone is the cancellation signal for the running reflectors, retained so a
 	// reflector registered AFTER Start (an on-demand dynamic reflector) can launch on the
 	// same lifetime — Stop or cancelling Start's ctx winds it down with the rest. nil
@@ -268,7 +269,7 @@ func (m *IngestManager) partitionNamespaces(gvr schema.GroupVersionResource) []s
 // whose GVK the scheme cannot instantiate, so a nil Gateway client or an unknown
 // kind never panics or blocks the rest.
 func (m *IngestManager) addDescriptor(desc streamspec.Descriptor) {
-	gvr := schema.GroupVersionResource{Group: desc.Group, Version: desc.Version, Resource: desc.Resource}
+	gvr := desc.GVR()
 	gvk := schema.GroupVersionKind{Group: desc.Group, Version: desc.Version, Kind: desc.Kind}
 
 	restClient, ok := m.restClientFor(desc.Group, desc.Version)
@@ -303,17 +304,7 @@ func (m *IngestManager) installReflector(e *entry, gvr schema.GroupVersionResour
 		// informers do. The process-wide startup transport policy currently disables
 		// WatchList before any reflector is constructed.
 		wrapped := cache.ToListWatcherWithWatchListSemantics(lw, restClient)
-		name := gvk.String()
-		if namespace != "" {
-			name += " ns=" + namespace
-		}
-		view := e.store.PartitionView(namespace)
-		e.parts = append(e.parts, &ingestPart{
-			namespace: namespace,
-			lw:        wrapped,
-			reflector: NewProjectingReflector(name, wrapped, example, view, resyncDisabled),
-			view:      view,
-		})
+		e.addPartition(gvk, namespace, wrapped, example)
 	}
 	m.entries[gvr] = e
 }
@@ -353,73 +344,30 @@ func (m *IngestManager) RegisterReflector(gvr schema.GroupVersionResource, gvk s
 	return true
 }
 
-// RegisterDynamicCatalogReflector starts an on-demand reflector for a dynamic
-// (CRD-backed) kind: it LIST+WATCHes the kind's custom resources through the dynamic
-// client and projects each (decoded as *unstructured.Unstructured) to its object-catalog
-// row via project, wrapped as the Bundle's Catalog half so CatalogRows serves it. It is
-// the consolidation of the catalog's former on-demand promotion informer into the one
-// ingest path: the catalog calls it when a CR kind crosses its promotion threshold.
-// Unlike the descriptor reflectors it launches immediately on the manager's run context
-// (it is registered after Start) and is EXCLUDED from the whole-manager readiness gate
-// (see entry.onDemand). It returns false when no dynamic client is set, the manager is not
-// started, or an entry for gvr already exists.
+// RegisterDynamicCatalogReflector admits a discovered source whose CRD definition
+// is unavailable, including non-CRD APIs. Catalog retains threshold selection for
+// these sources; ingest owns their permissions, workers and generation lifetime.
 func (m *IngestManager) RegisterDynamicCatalogReflector(gvr schema.GroupVersionResource, gvk schema.GroupVersionKind, project CatalogProjector, namespaced bool) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.dynamic == nil || m.runDone == nil {
-		return false
-	}
-	if _, exists := m.entries[gvr]; exists {
-		return false
-	}
-	e := &entry{gvr: gvr, store: newIngestProjectingStore(catalogProjectionFor(project))}
-	e.onDemand.Store(true)
-	example := &unstructuredv1.Unstructured{}
-	example.SetGroupVersionKind(gvk)
-	// A CRD-backed kind is not in the built-in registry, so its scope
-	// fan-out is decided by the caller-supplied namespaced flag.
-	namespaces := []string{""}
-	if namespaced && len(m.scope) > 0 {
-		namespaces = append([]string(nil), m.scope...)
-	}
-	for _, namespace := range namespaces {
-		name := gvk.String()
-		if namespace != "" {
-			name += " ns=" + namespace
-		}
-		view := e.store.PartitionView(namespace)
-		lw := dynamicListWatch(m.dynamic, gvr, namespace)
-		e.parts = append(e.parts, &ingestPart{
-			namespace: namespace,
-			lw:        lw,
-			reflector: NewProjectingReflector(name, lw, example, view, resyncDisabled),
-			view:      view,
-		})
-	}
-	e.store.SetExpectedPartitions(namespaces)
-	m.entries[gvr] = e
-	ctx, cancel := context.WithCancel(lifecycle.Context(m.runDone))
-	e.cancel = cancel
-	for _, part := range e.parts {
-		go part.reflector.Run(ctx)
-	}
-	return true
+	return m.ReconcileDynamicCatalogSource(DynamicCatalogSpec{GVR: gvr, GVK: gvk, Namespaced: namespaced}, project)
 }
 
-// StopReflectorFor stops and evicts the reflector for gvr — the teardown half of the
-// on-demand dynamic path (the catalog drops a promoted CR kind on shutdown). It cancels
-// only that entry's reflector (on-demand entries carry their own cancel) and removes it,
-// so the manager no longer serves or reports the gvr. It is a no-op when no entry exists.
-func (m *IngestManager) StopReflectorFor(gvr schema.GroupVersionResource) {
-	m.mu.Lock()
-	e, ok := m.entries[gvr]
-	if ok {
-		delete(m.entries, gvr)
+// addPartition gives typed and dynamic reflectors the same partition-local store view.
+func (e *entry) addPartition(gvk schema.GroupVersionKind, namespace string, lw cache.ListerWatcher, example apiruntime.Object, afterChange ...func(interface{}, bool)) {
+	name := gvk.String()
+	if namespace != "" {
+		name += " ns=" + namespace
 	}
-	m.mu.Unlock()
-	if ok && e.cancel != nil {
-		e.cancel()
+	view := e.store.PartitionView(namespace)
+	var target cache.Store = view
+	if len(afterChange) > 0 {
+		target = dynamicStore{Store: view, changed: afterChange[0]}
 	}
+	e.parts = append(e.parts, &ingestPart{
+		namespace: namespace,
+		lw:        lw,
+		reflector: cache.NewNamedReflector(name, lw, example, target, resyncDisabled),
+		view:      view,
+	})
 }
 
 // dynamicListWatch builds a ListerWatcher over the dynamic client for gvr in
@@ -503,15 +451,9 @@ func projectionFor(meta streamrows.ClusterMeta, e *entry) ProjectFunc {
 func metaObjectOf(obj interface{}) (metav1.Object, error) {
 	m, ok := obj.(metav1.Object)
 	if !ok {
-		return nil, &notMetaObjectError{obj: obj}
+		return nil, errors.New("ingest: reflector decoded an object that is not a metav1.Object")
 	}
 	return m, nil
-}
-
-type notMetaObjectError struct{ obj interface{} }
-
-func (e *notMetaObjectError) Error() string {
-	return "ingest: reflector decoded an object that is not a metav1.Object"
 }
 
 // restClientFor maps a descriptor's API group/version to the matching typed group
@@ -586,7 +528,7 @@ func (m *IngestManager) SetPermissionFilter(fn func(group, resource, namespace s
 	m.mu.Unlock()
 }
 
-// SetDynamicClient installs the dynamic client used for on-demand dynamic (CRD-backed)
+// SetDynamicClient installs the dynamic client used for runtime-discovered
 // reflectors (RegisterDynamicCatalogReflector). It must be set before the first such
 // registration. A nil client (the default) leaves the on-demand path disabled, so
 // RegisterDynamicCatalogReflector returns false and the catalog keeps listing the kind.
@@ -611,6 +553,8 @@ func (m *IngestManager) Start(ctx context.Context) {
 		launchIngestEntry(runCtx, launch, filter)
 	}
 
+	m.startDynamicDefinitions()
+
 	// One log line when the initial syncs settle, naming the slowest kinds — the
 	// per-kind cold-start telemetry (see InitialSyncDurations).
 	go m.logInitialSyncSummary(runCtx)
@@ -619,7 +563,7 @@ func (m *IngestManager) Start(ctx context.Context) {
 func (m *IngestManager) beginRun(ctx context.Context) (context.Context, []ingestLaunchEntry, func(string, string, string) bool, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.cancel != nil {
+	if m.cancel != nil || m.stopped {
 		return nil, nil, nil, false
 	}
 	runCtx, cancel := context.WithCancel(ctx)
@@ -646,24 +590,27 @@ func launchIngestEntry(runCtx context.Context, launch ingestLaunchEntry, filter 
 	// Expected partitions must be declared BEFORE any reflector of the entry
 	// runs, so the store's sync gate counts exactly the launched set.
 	launch.e.store.SetExpectedPartitions(launched)
-	for _, part := range launch.e.parts {
+	launchIngestPartitions(runCtx, launch.e)
+}
+
+func launchIngestPartitions(runCtx context.Context, e *entry) {
+	for _, part := range e.parts {
 		if part.skipped.Load() {
 			continue
 		}
-		part := part
-		// Resume from a persisted resourceVersion when one was set (the store was
-		// restored full from disk); otherwise — the default — this is exactly
-		// part.reflector.Run.
-		go runWithResume(runCtx, part.lw, part.view, part.resumeRV, func() { part.reflector.Run(runCtx) })
+		go runIngestPartition(runCtx, part)
 	}
+}
+
+func runIngestPartition(ctx context.Context, part *ingestPart) {
+	runWithResume(ctx, part.lw, part.view, part.resumeRV, func() { part.reflector.Run(ctx.Done()) })
 }
 
 func permittedIngestPartitions(launch ingestLaunchEntry, filter func(string, string, string) bool) []string {
 	launched := make([]string, 0, len(launch.e.parts))
 	for _, part := range launch.e.parts {
-		if filter != nil && !filter(launch.gvr.Group, launch.gvr.Resource, part.namespace) {
+		if !ingestNamespacePermitted(launch.gvr, part.namespace, filter) {
 			part.skipped.Store(true)
-			logSkippedIngestPart(launch.gvr, part.namespace)
 			continue
 		}
 		launched = append(launched, part.namespace)
@@ -671,12 +618,20 @@ func permittedIngestPartitions(launch ingestLaunchEntry, filter func(string, str
 	return launched
 }
 
+func ingestNamespacePermitted(gvr schema.GroupVersionResource, namespace string, filter func(string, string, string) bool) bool {
+	if filter == nil || filter(gvr.Group, gvr.Resource, namespace) {
+		return true
+	}
+	logSkippedIngestPart(gvr, namespace)
+	return false
+}
+
 func logSkippedIngestPart(gvr schema.GroupVersionResource, namespace string) {
 	if namespace == "" {
-		klog.V(2).Infof("ingest: skipping %s — identity cannot list/watch it (logged once)", gvr)
+		klog.V(2).Infof("ingest: skipping %s — identity cannot list/watch it", gvr)
 		return
 	}
-	klog.V(2).Infof("ingest: skipping %s in %q — identity cannot list/watch it there (logged once)", gvr, namespace)
+	klog.V(2).Infof("ingest: skipping %s in %q — identity cannot list/watch it there", gvr, namespace)
 }
 
 // SetResumeResourceVersion records the resourceVersion gvr's reflector should resume its
@@ -705,6 +660,14 @@ func (m *IngestManager) SetResumeResourceVersion(gvr schema.GroupVersionResource
 	return false
 }
 
+// Snapshot entry ownership before calling stores or projectors: those calls must
+// run outside the manager's leaf lock. Store pointers never change after registration.
+func (m *IngestManager) entriesSnapshot() map[schema.GroupVersionResource]*entry {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return maps.Clone(m.entries)
+}
+
 // registerGobTypes gob-registers the concrete Bundle-half types every entry projects, by
 // projecting each entry's example object through its store projection and registering each
 // non-nil half. The ingest package cannot import those types (they live in consumer packages
@@ -713,13 +676,7 @@ func (m *IngestManager) SetResumeResourceVersion(gvr schema.GroupVersionResource
 // zero-object projection panics or whose type conflicts is simply left unregistered, so its
 // SpillBundles fails and it falls back to a full sync — never a crash.
 func (m *IngestManager) registerGobTypes() {
-	m.mu.Lock()
-	entries := make([]*entry, 0, len(m.entries))
-	for _, e := range m.entries {
-		entries = append(entries, e)
-	}
-	m.mu.Unlock()
-	for _, e := range entries {
+	for _, e := range m.entriesSnapshot() {
 		registerEntryGobTypes(e)
 	}
 }
@@ -761,23 +718,13 @@ func (m *IngestManager) SpillStores(dir string) error {
 		return fmt.Errorf("ingest: spill mkdir %q: %w", dir, err)
 	}
 	m.registerGobTypes()
-	m.mu.Lock()
-	type gvrEntry struct {
-		gvr schema.GroupVersionResource
-		e   *entry
-	}
-	entries := make([]gvrEntry, 0, len(m.entries))
-	for gvr, e := range m.entries {
-		entries = append(entries, gvrEntry{gvr: gvr, e: e})
-	}
-	m.mu.Unlock()
 	var errs []error
-	for _, ge := range entries {
-		if ge.e.onDemand.Load() {
+	for gvr, e := range m.entriesSnapshot() {
+		if e.onDemand.Load() {
 			continue
 		}
-		if err := ge.e.store.SpillBundles(filepath.Join(dir, ingestSpillFileName(ge.gvr))); err != nil {
-			errs = append(errs, fmt.Errorf("spill %s: %w", ge.gvr, err))
+		if err := e.store.SpillBundles(filepath.Join(dir, ingestSpillFileName(gvr))); err != nil {
+			errs = append(errs, fmt.Errorf("spill %s: %w", gvr, err))
 		}
 	}
 	return errors.Join(errs...)
@@ -829,11 +776,37 @@ func (m *IngestManager) Stop() {
 	m.mu.Lock()
 	cancel := m.cancel
 	m.cancel = nil
+	m.stopped = true
 	m.runDone = nil
+	m.dynamicAdmissions = nil
+	m.dynamicListeners = nil
+	definitions, registration := m.definitions, m.definitionRegistration
+	m.definitionRegistration = nil
+	dynamicEntries := make([]*entry, 0)
+	for _, e := range m.entries {
+		if e.dynamic != nil {
+			e.dynamic.retired.Store(true)
+			dynamicEntries = append(dynamicEntries, e)
+		}
+	}
 	m.mu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
+	if definitions != nil && registration != nil {
+		_ = definitions.informer.RemoveEventHandler(registration)
+	}
+	for _, e := range dynamicEntries {
+		e.dynamic.cancel()
+		<-e.dynamic.done
+	}
+	m.mu.Lock()
+	for _, e := range dynamicEntries {
+		if m.entries[e.gvr] == e {
+			delete(m.entries, e.gvr)
+		}
+	}
+	m.mu.Unlock()
 }
 
 // HasSynced reports whether every kind's store has SETTLED — synced or degraded past
@@ -843,13 +816,7 @@ func (m *IngestManager) Stop() {
 // blocks on it before starting the metrics poller, wedge metrics too. The deadline
 // degrade mirrors the informer factory's stateSettled (issue #225).
 func (m *IngestManager) HasSynced() bool {
-	m.mu.Lock()
-	entries := make([]*entry, 0, len(m.entries))
-	for _, e := range m.entries {
-		entries = append(entries, e)
-	}
-	m.mu.Unlock()
-	for _, e := range entries {
+	for _, e := range m.entriesSnapshot() {
 		if e.onDemand.Load() {
 			// On-demand dynamic reflectors are added after the cluster is already serving;
 			// they must not gate (or un-settle) the whole-manager readiness the metrics
@@ -961,10 +928,8 @@ func (m *IngestManager) RegisterObjectMapProjector(gvr schema.GroupVersionResour
 // manager has no entry for gvr. It must be called before Start so no mutation is
 // missed. Reports whether an entry was found.
 func (m *IngestManager) AddSink(gvr schema.GroupVersionResource, sink Sink) bool {
-	m.mu.Lock()
-	e, ok := m.entries[gvr]
-	m.mu.Unlock()
-	if !ok {
+	store := m.StoreFor(gvr)
+	if store == nil {
 		return false
 	}
 	// Outside the manager lock: the store call acquires the store's write lock, and a
@@ -972,9 +937,9 @@ func (m *IngestManager) AddSink(gvr schema.GroupVersionResource, sink Sink) bool
 	// sink does) — holding both wedged the whole ingest layer (ABBA deadlock, see
 	// TestSinkRegistrationDoesNotDeadlockWithSinkManagerCallback). The manager mutex
 	// is a leaf lock: it guards the entries map only and is never held across a store
-	// call. e.store is set once at entry construction and never reassigned, so the
+	// call. The store is set once at entry construction and never reassigned, so its
 	// pointer stays valid after unlock.
-	e.store.AddSink(sink)
+	store.AddSink(sink)
 	return true
 }
 
@@ -984,14 +949,12 @@ func (m *IngestManager) AddSink(gvr schema.GroupVersionResource, sink Sink) bool
 // entry for gvr. It must be called before Start so no mutation is missed. Reports whether
 // an entry was found.
 func (m *IngestManager) AddBundleSink(gvr schema.GroupVersionResource, sink BundleSink) bool {
-	m.mu.Lock()
-	e, ok := m.entries[gvr]
-	m.mu.Unlock()
-	if !ok {
+	store := m.StoreFor(gvr)
+	if store == nil {
 		return false
 	}
 	// Store call outside the manager lock — see AddSink for the leaf-lock rule.
-	e.store.AddBundleSink(sink)
+	store.AddBundleSink(sink)
 	return true
 }
 
@@ -1001,17 +964,15 @@ func (m *IngestManager) AddBundleSink(gvr schema.GroupVersionResource, sink Bund
 // It must be called before Start so no mutation is missed. Reports whether an entry
 // was found.
 func (m *IngestManager) AddCatalogSink(gvr schema.GroupVersionResource, sink Sink) bool {
-	m.mu.Lock()
-	e, ok := m.entries[gvr]
-	m.mu.Unlock()
-	if !ok {
+	store := m.StoreFor(gvr)
+	if store == nil {
 		return false
 	}
 	// Store call outside the manager lock — see AddSink for the leaf-lock rule. This
 	// is the wrapper that wedged production: the catalog registers its sinks right
 	// after a failed initial sync, racing the pods reflector's initial Replace whose
 	// bundle sink calls back into the manager (goroutines-20260701-152259 dump).
-	e.store.AddCatalogSink(sink)
+	store.AddCatalogSink(sink)
 	return true
 }
 
@@ -1209,7 +1170,7 @@ func (m *IngestManager) PermissionSkippedFor(gvr schema.GroupVersionResource) bo
 
 // resyncDisabled documents that ingest reflectors run with no periodic resync:
 // the store is always current, and a relist only happens on watch expiry/error.
-// It exists so the 0 passed to NewProjectingReflector reads as a deliberate
+// It exists so the 0 passed to cache.NewNamedReflector reads as a deliberate
 // choice rather than a magic number.
 const resyncDisabled = time.Duration(0)
 
@@ -1225,16 +1186,10 @@ func (m *IngestManager) InitialSyncDurations() map[schema.GroupVersionResource]t
 	if startedAt.IsZero() {
 		return nil
 	}
-	m.mu.Lock()
-	stores := make(map[schema.GroupVersionResource]*ProjectingStore, len(m.entries))
-	for gvr, e := range m.entries {
-		stores[gvr] = e.store
-	}
-	m.mu.Unlock()
-	// Leaf-lock rule: store reads happen outside m.mu.
-	out := make(map[schema.GroupVersionResource]time.Duration, len(stores))
-	for gvr, store := range stores {
-		if syncedAt := store.SyncedAt(); !syncedAt.IsZero() && syncedAt.After(startedAt) {
+	entries := m.entriesSnapshot()
+	out := make(map[schema.GroupVersionResource]time.Duration, len(entries))
+	for gvr, e := range entries {
+		if syncedAt := e.store.SyncedAt(); !syncedAt.IsZero() && syncedAt.After(startedAt) {
 			out[gvr] = syncedAt.Sub(startedAt)
 		}
 	}

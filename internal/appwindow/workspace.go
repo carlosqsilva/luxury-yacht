@@ -112,10 +112,7 @@ func (r *Registry) appWindowForCluster(clusterID, source string) (string, error)
 }
 
 func (r *Registry) abortReadyPanelWindow(descriptor PanelWindowDescriptor) error {
-	r.authorizeClose(descriptor.WindowName)
-	if !r.closeWindow(descriptor.WindowName) {
-		r.consumeAuthorizedClose(descriptor.WindowName)
-	}
+	r.closeAuthorizedWindow(descriptor.WindowName)
 	r.panels.Remove(descriptor.WindowName)
 	r.failPanelTabTransfer(descriptor.Snapshot.TransferID, "new panel target failed before readiness")
 	cleanup := r.releaseNativePanelReference(descriptor.WindowName)
@@ -342,8 +339,8 @@ func (r *Registry) reportPanelLifecycleError(err error, action string) {
 }
 
 func (r *Registry) addClusterTransferTabs(windowName string, tabs map[string]provisionalDockTab) {
-	for _, transfer := range r.clusterTransfers {
-		if !transfer.mounting || transfer.event.Request.TargetWindowName != windowName {
+	for id, transfer := range r.clusterTransfers.all() {
+		if !r.clusterTransfers.awaiting(id, transferAwaitingTarget) || transfer.event.Request.TargetWindowName != windowName {
 			continue
 		}
 		for _, group := range transfer.event.Snapshot.Groups {

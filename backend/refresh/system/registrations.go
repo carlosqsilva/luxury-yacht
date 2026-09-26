@@ -4,7 +4,6 @@ package system
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -27,7 +26,6 @@ type registrationDeps struct {
 	ingestManager   *ingest.IngestManager // Owned-reflector ingestion for cut kinds
 	metricsProvider metrics.Provider      // Provider for collecting metrics
 	cfg             Config                // Configuration settings
-	gate            *permissionGate       // Permission gate for access control
 	serverHost      string                // Hostname of the server
 	// noteNamespaceNotifier receives the namespaces change notifier created during
 	// registration, so the subsystem can wire its doorbell broadcast once the
@@ -48,7 +46,6 @@ type domainRegistration struct {
 	preflightListWatch []listWatchCheck       // Preflight checks for list-watch operations
 	direct             func() error           // Direct registration function
 	skipIf             func() bool            // Function to determine if registration should be skipped
-	require            func() error           // Function to determine if registration is required
 	// skipRuntimePolicy exempts the registration from the domain runtime
 	// permission policy. Set ONLY when the domain's data source needs no
 	// cluster permission for this configuration (the scoped namespaces
@@ -57,26 +54,9 @@ type domainRegistration struct {
 	skipRuntimePolicy bool
 }
 
-// domainMeta captures shared metadata for gated registrations that cannot use
-// the runtime permission contract directly.
-type domainMeta struct {
-	issueResource string
-	logGroup      string
-	logResource   string
-	deniedReason  string
-}
-
 // registerDomains registers refresh domains in a fixed order to preserve behavior.
 // The checker is used for a universal runtime permission check before each registration.
 func registerDomains(ctx context.Context, gate *permissionGate, checker *permissions.Checker, registrations []domainRegistration) error {
-	return runDomainRegistrations(ctx, gate, checker, registrations)
-}
-
-// runDomainRegistrations applies the registration table in-order.
-// Before each domain's gate logic, it checks runtime permissions through the
-// shared domain access adapter. If denied, a permission-denied placeholder is
-// registered instead of proceeding with the normal registration.
-func runDomainRegistrations(ctx context.Context, gate *permissionGate, checker *permissions.Checker, registrations []domainRegistration) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -102,11 +82,6 @@ type domainRegistrationRunner struct {
 func (r domainRegistrationRunner) run(ctx context.Context, registration domainRegistration) error {
 	if registration.skipIf != nil && registration.skipIf() {
 		return nil
-	}
-	if registration.require != nil {
-		if err := registration.require(); err != nil {
-			return err
-		}
 	}
 	denied, err := r.registerPermissionDenied(ctx, registration)
 	if err != nil || denied {
@@ -290,22 +265,11 @@ func (s readinessResourceSet) sorted() []string {
 // domainRegistrations binds executable registration callbacks by domain, then
 // applies the generated backend order from refresh-domain-contract.json.
 func domainRegistrations(deps registrationDeps) []domainRegistration {
+	clusterMeta := snapshot.ClusterMeta{ClusterID: deps.cfg.ClusterID, ClusterName: deps.cfg.ClusterName}
 	catalogConfig := snapshot.CatalogConfig{
 		CatalogService:  deps.cfg.ObjectCatalogService,
 		NamespaceGroups: deps.cfg.ObjectCatalogNamespaces,
-		Logger:          deps.cfg.Logger,
 	}
-
-	crdGroup := "apiextensions.k8s.io"
-	crdResource := "customresourcedefinitions"
-	crdIssue := crdGroup + "/" + crdResource
-	crdMeta := domainMeta{
-		issueResource: crdIssue,
-		logGroup:      crdGroup,
-		logResource:   crdResource,
-		deniedReason:  crdIssue,
-	}
-	crdListWatchCheck := listWatchCheck{group: crdGroup, resource: crdResource}
 
 	yamlProvider, yamlOK := deps.cfg.ObjectDetailsProvider.(snapshot.ObjectYAMLProvider)
 	helmProvider, helmOK := deps.cfg.ObjectDetailsProvider.(snapshot.HelmContentProvider)
@@ -390,7 +354,7 @@ func domainRegistrations(deps registrationDeps) []domainRegistration {
 				return snapshot.RegisterNodeDomain(
 					deps.registry,
 					deps.metricsProvider,
-					snapshot.ClusterMeta{ClusterID: deps.cfg.ClusterID, ClusterName: deps.cfg.ClusterName},
+					clusterMeta,
 					deps.ingestManager,
 				)
 			},
@@ -412,38 +376,32 @@ func domainRegistrations(deps registrationDeps) []domainRegistration {
 					deps.informerFactory.SharedInformerFactory(),
 					deps.informerFactory.GatewayInformerFactory(),
 					allowed,
-					snapshot.ClusterMeta{ClusterID: deps.cfg.ClusterID, ClusterName: deps.cfg.ClusterName},
+					clusterMeta,
 					deps.ingestManager,
 				)
 			},
 		}),
 
-		"cluster-crds": listWatchRegistration(applyListWatchMeta(listWatchDomainConfig{
-			name:   "cluster-crds",
-			checks: []listWatchCheck{crdListWatchCheck},
+		"cluster-crds": listWatchRegistration(listWatchDomainConfig{
+			name:          "cluster-crds",
+			issueResource: "apiextensions.k8s.io/customresourcedefinitions",
+			logGroup:      "apiextensions.k8s.io",
+			logResource:   "customresourcedefinitions",
+			deniedReason:  "apiextensions.k8s.io/customresourcedefinitions",
+			checks: []listWatchCheck{
+				{group: "apiextensions.k8s.io", resource: "customresourcedefinitions"},
+			},
 			registerInformer: func() error {
 				return snapshot.RegisterClusterCRDDomain(
 					deps.registry,
 					deps.informerFactory.APIExtensionsInformerFactory(),
-					snapshot.ClusterMeta{ClusterID: deps.cfg.ClusterID, ClusterName: deps.cfg.ClusterName},
-				)
-			},
-		}, crdMeta)),
-
-		"cluster-custom": accessListRegistration(runtimeAccess, listDomainConfig{
-			name: "cluster-custom",
-			register: func(_ domainpermissions.AllowedResources) error {
-				return snapshot.RegisterClusterCustomDomain(
-					deps.registry,
-					deps.informerFactory.APIExtensionsInformerFactory(),
-					deps.cfg.DynamicClient,
-					deps.cfg.Logger,
+					clusterMeta,
 				)
 			},
 		}),
 
 		"cluster-events": directRegistration("cluster-events", func() error {
-			return snapshot.RegisterClusterEventsDomain(deps.registry, deps.informerFactory.SharedInformerFactory(), snapshot.ClusterMeta{ClusterID: deps.cfg.ClusterID, ClusterName: deps.cfg.ClusterName})
+			return snapshot.RegisterClusterEventsDomain(deps.registry, deps.informerFactory.SharedInformerFactory(), clusterMeta)
 		}),
 
 		"cluster-rbac": accessListRegistration(runtimeAccess, listDomainConfig{
@@ -453,7 +411,7 @@ func domainRegistrations(deps registrationDeps) []domainRegistration {
 					deps.registry,
 					deps.informerFactory.SharedInformerFactory(),
 					allowed,
-					snapshot.ClusterMeta{ClusterID: deps.cfg.ClusterID, ClusterName: deps.cfg.ClusterName},
+					clusterMeta,
 					deps.ingestManager,
 				)
 			},
@@ -471,7 +429,7 @@ func domainRegistrations(deps registrationDeps) []domainRegistration {
 				return snapshot.RegisterClusterStorageDomain(
 					deps.registry,
 					deps.informerFactory.SharedInformerFactory(),
-					snapshot.ClusterMeta{ClusterID: deps.cfg.ClusterID, ClusterName: deps.cfg.ClusterName},
+					clusterMeta,
 					deps.ingestManager,
 				)
 			},
@@ -485,7 +443,6 @@ func domainRegistrations(deps registrationDeps) []domainRegistration {
 					deps.registry,
 					deps.informerFactory.SharedInformerFactory(),
 					deps.metricsProvider,
-					deps.cfg.Logger,
 					snapshot.NamespaceWorkloadsPermissions{
 						IncludePods:         allowed.Allows("", "pods"),
 						IncludeDeployments:  allowed.Allows("apps", "deployments"),
@@ -494,7 +451,7 @@ func domainRegistrations(deps registrationDeps) []domainRegistration {
 						IncludeJobs:         allowed.Allows("batch", "jobs"),
 						IncludeCronJobs:     allowed.Allows("batch", "cronjobs"),
 					},
-					snapshot.ClusterMeta{ClusterID: deps.cfg.ClusterID, ClusterName: deps.cfg.ClusterName},
+					clusterMeta,
 					deps.ingestManager,
 				)
 			},
@@ -503,7 +460,7 @@ func domainRegistrations(deps registrationDeps) []domainRegistration {
 			return snapshot.RegisterNamespaceAutoscalingDomain(
 				deps.registry,
 				deps.informerFactory.SharedInformerFactory(),
-				snapshot.ClusterMeta{ClusterID: deps.cfg.ClusterID, ClusterName: deps.cfg.ClusterName},
+				clusterMeta,
 			)
 		}),
 		"namespace-config": accessListRegistration(runtimeAccess, listDomainConfig{
@@ -513,35 +470,20 @@ func domainRegistrations(deps registrationDeps) []domainRegistration {
 					deps.registry,
 					deps.informerFactory.SharedInformerFactory(),
 					allowed,
-					snapshot.ClusterMeta{ClusterID: deps.cfg.ClusterID, ClusterName: deps.cfg.ClusterName},
+					clusterMeta,
 					deps.ingestManager,
 				)
 			},
 		}),
 
-		"namespace-custom": withRequire(accessListRegistration(runtimeAccess, listDomainConfig{
-			name: "namespace-custom",
-			register: func(_ domainpermissions.AllowedResources) error {
-				return snapshot.RegisterNamespaceCustomDomain(
-					deps.registry,
-					deps.informerFactory.APIExtensionsInformerFactory(),
-					deps.cfg.DynamicClient,
-					deps.cfg.Logger,
-					deps.cfg.AllowedNamespaces,
-				)
-			},
-		}), requireAvailable("dynamic client must be provided for namespace custom resources", func() bool {
-			return deps.cfg.DynamicClient != nil
-		})),
-
 		"namespace-events": directRegistration("namespace-events", func() error {
-			return snapshot.RegisterNamespaceEventsDomain(deps.registry, deps.informerFactory.SharedInformerFactory(), snapshot.ClusterMeta{ClusterID: deps.cfg.ClusterID, ClusterName: deps.cfg.ClusterName})
+			return snapshot.RegisterNamespaceEventsDomain(deps.registry, deps.informerFactory.SharedInformerFactory(), clusterMeta)
 		}),
 		"namespace-helm": directRegistration("namespace-helm", func() error {
 			return snapshot.RegisterNamespaceHelmDomain(
 				deps.registry,
 				deps.informerFactory.HelmStorage(),
-				snapshot.ClusterMeta{ClusterID: deps.cfg.ClusterID, ClusterName: deps.cfg.ClusterName},
+				clusterMeta,
 			)
 		}),
 		"namespace-network": accessListRegistration(runtimeAccess, listDomainConfig{
@@ -552,7 +494,7 @@ func domainRegistrations(deps registrationDeps) []domainRegistration {
 					deps.informerFactory.SharedInformerFactory(),
 					deps.informerFactory.GatewayInformerFactory(),
 					allowed,
-					snapshot.ClusterMeta{ClusterID: deps.cfg.ClusterID, ClusterName: deps.cfg.ClusterName},
+					clusterMeta,
 					deps.ingestManager,
 				)
 			},
@@ -564,7 +506,7 @@ func domainRegistrations(deps registrationDeps) []domainRegistration {
 					deps.registry,
 					deps.informerFactory.SharedInformerFactory(),
 					allowed,
-					snapshot.ClusterMeta{ClusterID: deps.cfg.ClusterID, ClusterName: deps.cfg.ClusterName},
+					clusterMeta,
 					deps.ingestManager,
 				)
 			},
@@ -577,7 +519,7 @@ func domainRegistrations(deps registrationDeps) []domainRegistration {
 					deps.registry,
 					deps.informerFactory.SharedInformerFactory(),
 					allowed,
-					snapshot.ClusterMeta{ClusterID: deps.cfg.ClusterID, ClusterName: deps.cfg.ClusterName},
+					clusterMeta,
 					deps.ingestManager,
 				)
 			},
@@ -587,7 +529,7 @@ func domainRegistrations(deps registrationDeps) []domainRegistration {
 			return snapshot.RegisterNamespaceStorageDomain(
 				deps.registry,
 				deps.informerFactory.SharedInformerFactory(),
-				snapshot.ClusterMeta{ClusterID: deps.cfg.ClusterID, ClusterName: deps.cfg.ClusterName},
+				clusterMeta,
 				deps.ingestManager,
 			)
 		}),
@@ -596,7 +538,7 @@ func domainRegistrations(deps registrationDeps) []domainRegistration {
 			return snapshot.RegisterPodDomain(
 				deps.registry,
 				deps.metricsProvider,
-				snapshot.ClusterMeta{ClusterID: deps.cfg.ClusterID, ClusterName: deps.cfg.ClusterName},
+				clusterMeta,
 				deps.ingestManager,
 			)
 		}),
@@ -726,8 +668,7 @@ func directRegistration(name string, register func() error) domainRegistration {
 }
 
 func listRegistration(cfg listDomainConfig) domainRegistration {
-	cfgCopy := cfg
-	return domainRegistration{name: cfgCopy.name, list: &cfgCopy}
+	return domainRegistration{name: cfg.name, list: &cfg}
 }
 
 func accessListRegistration(access domainpermissions.RuntimeAccess, cfg listDomainConfig) domainRegistration {
@@ -776,19 +717,14 @@ func permissionLogResource(reqs []permissions.ResourceRequirement) string {
 
 func permissionLogGroup(reqs []permissions.ResourceRequirement) string {
 	group := ""
-	hasGroup := false
 	for _, req := range reqs {
 		if req.Group == "" {
 			continue
 		}
-		if !hasGroup {
-			group = req.Group
-			hasGroup = true
-			continue
-		}
-		if req.Group != group {
+		if group != "" && req.Group != group {
 			return "*"
 		}
+		group = req.Group
 	}
 	return group
 }
@@ -863,40 +799,10 @@ func namespaceMetricsRegistration(deps registrationDeps) domainRegistration {
 }
 
 func listWatchRegistration(cfg listWatchDomainConfig) domainRegistration {
-	cfgCopy := cfg
-	return domainRegistration{name: cfgCopy.name, listWatch: &cfgCopy}
-}
-
-func withSkip(registration domainRegistration, skip func() bool) domainRegistration {
-	registration.skipIf = skip
-	return registration
+	return domainRegistration{name: cfg.name, listWatch: &cfg}
 }
 
 func withSkipUnless(registration domainRegistration, available func() bool) domainRegistration {
-	return withSkip(registration, func() bool {
-		return !available()
-	})
-}
-
-func withRequire(registration domainRegistration, require func() error) domainRegistration {
-	registration.require = require
+	registration.skipIf = func() bool { return !available() }
 	return registration
-}
-
-func requireAvailable(message string, available func() bool) func() error {
-	return func() error {
-		if !available() {
-			return errors.New(message)
-		}
-		return nil
-	}
-}
-
-// applyListWatchMeta copies shared metadata into a list/watch-gated registration config.
-func applyListWatchMeta(cfg listWatchDomainConfig, meta domainMeta) listWatchDomainConfig {
-	cfg.issueResource = meta.issueResource
-	cfg.logGroup = meta.logGroup
-	cfg.logResource = meta.logResource
-	cfg.deniedReason = meta.deniedReason
-	return cfg
 }

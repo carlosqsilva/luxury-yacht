@@ -25,11 +25,11 @@ import {
   getKubernetesClientBurst,
   getKubernetesClientQPS,
   getPermissionSSRRFetchConcurrency,
+  getSuppressNetworkErrorNotifications,
   hydrateAppPreferences,
   setKubernetesClientBurst,
   setKubernetesClientQPS,
   setPermissionSSRRFetchConcurrency,
-  getSuppressNetworkErrorNotifications,
   setSuppressNetworkErrorNotifications,
 } from '@/core/settings/appPreferences';
 import { PreferenceNumberInput, SettingRow } from './SettingsControls';
@@ -75,8 +75,6 @@ function AdvancedSection() {
       cancelled = true;
     };
   }, []);
-
-  const handleRefreshToggle = (enabled: boolean) => setAutoRefresh(enabled);
 
   const handleSuppressNetworkErrorsToggle = (checked: boolean) => {
     setSuppressNetworkErrors(checked);
@@ -166,7 +164,7 @@ function AdvancedSection() {
         <ToggleSwitch
           id={`${elementIdPrefix}-refresh-enabled`}
           checked={refreshEnabled}
-          onChange={handleRefreshToggle}
+          onChange={setAutoRefresh}
           ariaLabel="Auto-refresh"
         />
       </SettingRow>
@@ -186,22 +184,17 @@ function AdvancedSection() {
       <div className="settings-subgroup-label">Notifications</div>
       <hr className="settings-subgroup-divider" />
 
-      <div className="settings-row">
-        <div className="settings-row-label">
-          <div className="settings-row-label-title">Suppress network errors</div>
-          <div className="settings-row-label-help">
-            Hide toast notifications for network connectivity errors. Errors are still logged.
-          </div>
-        </div>
-        <div className="settings-row-control">
-          <ToggleSwitch
-            id="suppress-network-errors"
-            checked={suppressNetworkErrors}
-            onChange={handleSuppressNetworkErrorsToggle}
-            ariaLabel="Suppress network error notifications"
-          />
-        </div>
-      </div>
+      <SettingRow
+        title="Suppress network errors"
+        help="Hide toast notifications for network connectivity errors. Errors are still logged."
+      >
+        <ToggleSwitch
+          id={`${elementIdPrefix}-suppress-network-errors`}
+          checked={suppressNetworkErrors}
+          onChange={handleSuppressNetworkErrorsToggle}
+          ariaLabel="Suppress network error notifications"
+        />
+      </SettingRow>
 
       <div className="settings-subgroup-label">Kubernetes API</div>
       <hr className="settings-subgroup-divider" />

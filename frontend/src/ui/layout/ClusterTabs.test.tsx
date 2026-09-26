@@ -1,3 +1,4 @@
+import { PanelLayoutTestProvider } from '@/test-utils/PanelLayoutTestProvider';
 /**
  * frontend/src/ui/layout/ClusterTabs.test.tsx
  *
@@ -94,6 +95,7 @@ const viewState = {
 vi.mock('@modules/kubernetes/config/KubeconfigContext', () => ({
   useKubeconfig: () => ({
     ...mockState,
+    managedKubeconfigs: mockState.selectedKubeconfigs,
     selectedClusterIds: mockState.selectedKubeconfigs.map(
       (selection) => mockState.getClusterMeta(selection).id
     ),
@@ -158,15 +160,17 @@ describe('ClusterTabs', () => {
       mockState.selectedKubeconfig = 'b';
       await act(async () => {
         root.render(
-          <KeyboardProvider>
-            <AppRegionNavigation />
-            <TabDragProvider>
-              <ClusterTabs />
-            </TabDragProvider>
-            <aside data-app-region="sidebar">
-              <button type="button">Overview</button>
-            </aside>
-          </KeyboardProvider>
+          <PanelLayoutTestProvider>
+            <KeyboardProvider>
+              <AppRegionNavigation />
+              <TabDragProvider>
+                <ClusterTabs />
+              </TabDragProvider>
+              <aside data-app-region="sidebar">
+                <button type="button">Overview</button>
+              </aside>
+            </KeyboardProvider>
+          </PanelLayoutTestProvider>
         );
       });
       const [globalTab, firstTab, activeTab, lastTab] =

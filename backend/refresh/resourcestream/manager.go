@@ -1,7 +1,7 @@
 /*
  * backend/refresh/resourcestream/manager.go
  *
- * Wires Kubernetes informer events into resource-stream row updates. This file
+ * Wires Kubernetes informer events into resource-stream change notifications. This file
  * owns the domain-specific translation from Kubernetes objects into refresh
  * updates, while subscription fan-out lives in stream_hub.go.
  */
@@ -9,9 +9,7 @@
 package resourcestream
 
 import (
-	"errors"
 	"fmt"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,13 +20,7 @@ import (
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/client-go/dynamic"
-	dynamicinformer "k8s.io/client-go/dynamic/dynamicinformer"
-	appslisters "k8s.io/client-go/listers/apps/v1"
-	batchlisters "k8s.io/client-go/listers/batch/v1"
 	"k8s.io/client-go/tools/cache"
 
 	"github.com/luxury-yacht/app/backend/internal/applog"
@@ -42,9 +34,7 @@ import (
 	"github.com/luxury-yacht/app/backend/refresh/snapshot"
 	"github.com/luxury-yacht/app/backend/refresh/telemetry"
 	"github.com/luxury-yacht/app/backend/resourcemodel"
-	apiextensionspkg "github.com/luxury-yacht/app/backend/resources/apiextensions"
 	cronjobpkg "github.com/luxury-yacht/app/backend/resources/cronjob"
-	"github.com/luxury-yacht/app/backend/resources/customresource"
 	daemonsetpkg "github.com/luxury-yacht/app/backend/resources/daemonset"
 	deploymentpkg "github.com/luxury-yacht/app/backend/resources/deployment"
 	hpapkg "github.com/luxury-yacht/app/backend/resources/hpa"
@@ -60,7 +50,6 @@ const (
 	domainNamespaceConfig            = "namespace-config"
 	domainNamespaceNetwork           = "namespace-network"
 	domainNamespaceRBAC              = "namespace-rbac"
-	domainNamespaceCustom            = "namespace-custom"
 	domainNamespaceHelm              = "namespace-helm"
 	domainNamespaceAutoscaling       = "namespace-autoscaling"
 	domainNamespaceQuotas            = "namespace-quotas"
@@ -70,7 +59,6 @@ const (
 	domainClusterStorage  = "cluster-storage"
 	domainClusterConfig   = "cluster-config"
 	domainClusterCRDs     = "cluster-crds"
-	domainClusterCustom   = "cluster-custom"
 	domainNodes           = "nodes"
 	domainCatalog         = "catalog"
 	domainClusterEvents   = "cluster-events"
@@ -160,59 +148,6 @@ func (s *subscription) markResyncing() bool {
 	return atomic.CompareAndSwapUint32(&s.resyncing, 0, 1)
 }
 
-type customResourceInformer struct {
-	gvr    schema.GroupVersionResource
-	kind   string
-	domain string
-	// namespaces records the exact scopes whose list/watch checks passed.
-	namespaces []string
-	// informers are the CRD's dynamic informers: one cluster-wide (or one
-	// per configured scope namespace for a namespaced CRD under a namespace
-	// scope, docs/architecture/namespace-scope.md). All share stopCh.
-	informers []cache.SharedIndexInformer
-	stopCh    chan struct{}
-	stopOnce  sync.Once
-}
-
-type customInformerPlanAction uint8
-
-const (
-	customInformerPlanRetain customInformerPlanAction = iota
-	customInformerPlanRemove
-	customInformerPlanReconcile
-)
-
-type customInformerSpec struct {
-	gvr        schema.GroupVersionResource
-	kind       string
-	domain     string
-	namespaces []string
-}
-
-type customInformerPlan struct {
-	action  customInformerPlanAction
-	crdName string
-	spec    customInformerSpec
-}
-
-func (c *customResourceInformer) stop() {
-	if c == nil {
-		return
-	}
-	c.stopOnce.Do(func() {
-		close(c.stopCh)
-	})
-}
-
-func (c *customResourceInformer) start() {
-	if c == nil {
-		return
-	}
-	for _, resourceInformer := range c.informers {
-		go resourceInformer.Run(c.stopCh)
-	}
-}
-
 // Manager fans out informer updates to named-stream subscribers.
 type Manager struct {
 	clusterMeta snapshot.ClusterMeta
@@ -220,40 +155,12 @@ type Manager struct {
 	telemetry   *telemetry.Recorder
 	permissions permissions.ListWatchChecker
 
-	dynamicClient dynamic.Interface
+	podIngest      podBundleSource
+	workloadIngest workloadBundleReader
+	nodeIngest     nodeBundleReader
 
-	// The workload listers (deployment/stateful/daemon/job/cronJob) are wired only
-	// by unit tests: lookupWorkloadRef prefers a wired lister (lookupWorkloadObject),
-	// else the ingest store. Production reads pods, the workload kinds, and nodes
-	// from the ingest store (all cut), so those typed informers are never
-	// instantiated; podIngest / workloadIngest / nodeIngest are the production
-	// sources.
-	podIngest        podBundleSource
-	workloadIngest   workloadBundleReader
-	nodeIngest       nodeBundleReader
-	deploymentLister appslisters.DeploymentLister
-	statefulLister   appslisters.StatefulSetLister
-	daemonLister     appslisters.DaemonSetLister
-	jobLister        batchlisters.JobLister
-	cronJobLister    batchlisters.CronJobLister
-
-	// allowedNamespaces is the cluster's namespace scope
-	// (docs/architecture/namespace-scope.md); namespaced custom-resource informers
-	// fan out over it instead of watching cluster-wide.
-	allowedNamespaces []string
-
-	customInformerMu sync.Mutex
-	customInformers  map[string]*customResourceInformer
-	// stopped is set once Stop() runs. It is terminal: a torn-down manager is
-	// discarded and replaced by a fresh one. It gates ensureCustomInformer so a
-	// CRD event arriving after teardown (the shared CRD informer can still fire,
-	// including its resync, until the factory is shut down) cannot resurrect a
-	// custom informer whose stopCh nothing would ever close. Subscription admission
-	// uses the same atomic gate while holding the hub lock.
+	// Stop is terminal for this generation and rejects new subscriptions.
 	stopped atomic.Bool
-	// customInvalidator evicts cached YAML/details when custom resources change.
-	customInvalidatorMu sync.RWMutex
-	customInvalidator   func(ref resourcemodel.ResourceRef)
 	// snapshotDomainInvalidator evicts query snapshots before a change signal is
 	// delivered. A healthy stream suppresses polling, so serving the pre-change
 	// snapshot from cache after this one-shot signal would leave the query stale.
@@ -278,24 +185,19 @@ func NewManager(
 	logger containerlogsstream.Logger,
 	recorder *telemetry.Recorder,
 	meta snapshot.ClusterMeta,
-	dynamicClient dynamic.Interface,
 	ingestManager *ingest.IngestManager,
-	allowedNamespaces ...string,
 ) *Manager {
 	if logger == nil {
 		logger = applog.Noop
 	}
 	mgr := &Manager{
-		clusterMeta:       meta,
-		logger:            logger,
-		telemetry:         recorder,
-		permissions:       factory,
-		dynamicClient:     dynamicClient,
-		allowedNamespaces: append([]string(nil), allowedNamespaces...),
-		customInformers:   make(map[string]*customResourceInformer),
-		subscribers:       make(map[string]map[string]map[uint64]*subscription),
-		buffers:           make(map[string]*updateBuffer),
-		sequences:         make(map[string]uint64),
+		clusterMeta: meta,
+		logger:      logger,
+		telemetry:   recorder,
+		permissions: factory,
+		subscribers: make(map[string]map[string]map[uint64]*subscription),
+		buffers:     make(map[string]*updateBuffer),
+		sequences:   make(map[string]uint64),
 	}
 	if ingestManager != nil {
 		mgr.podIngest = ingestManager
@@ -324,12 +226,12 @@ func NewManager(
 	// change signal comes from the ingest reflector's Catalog-half Sink instead.
 	mgr.registerIngestNotifyStreams(ingestManager)
 
-	mgr.initCustomResourceInformers(factory)
+	mgr.registerCRDStream(factory)
 
 	return mgr
 }
 
-// Stop closes subscriptions and halts dynamically managed informers. It is terminal.
+// Stop closes subscriptions and owned delivery workers. It is terminal.
 func (m *Manager) Stop() {
 	if m == nil {
 		return
@@ -349,12 +251,6 @@ func (m *Manager) Stop() {
 	}
 	clear(m.subscribers)
 	m.mu.Unlock()
-	m.customInformerMu.Lock()
-	defer m.customInformerMu.Unlock()
-	for key, informer := range m.customInformers {
-		informer.stop()
-		delete(m.customInformers, key)
-	}
 }
 
 func (m *Manager) logWarn(message string) {
@@ -376,16 +272,6 @@ func (m *Manager) logDebug(message string) {
 		return
 	}
 	applog.Debug(m.logger, message, logsources.ResourceStream, m.clusterMeta.ClusterID, m.clusterMeta.ClusterName)
-}
-
-// SetCustomResourceCacheInvalidator registers a cache eviction callback for custom resources.
-func (m *Manager) SetCustomResourceCacheInvalidator(invalidator func(ref resourcemodel.ResourceRef)) {
-	if m == nil {
-		return
-	}
-	m.customInvalidatorMu.Lock()
-	m.customInvalidator = invalidator
-	m.customInvalidatorMu.Unlock()
 }
 
 // SetSnapshotDomainInvalidator installs the per-cluster snapshot-cache eviction
@@ -411,18 +297,8 @@ func (m *Manager) invalidateSnapshotDomain(domain string) {
 	}
 }
 
-func (m *Manager) invalidateCustomResourceCache(ref resourcemodel.ResourceRef) {
-	m.customInvalidatorMu.RLock()
-	invalidator := m.customInvalidator
-	m.customInvalidatorMu.RUnlock()
-	if invalidator == nil {
-		return
-	}
-	invalidator(ref)
-}
-
-func (m *Manager) initCustomResourceInformers(factory *informer.Factory) {
-	if m == nil || m.dynamicClient == nil || factory == nil {
+func (m *Manager) registerCRDStream(factory *informer.Factory) {
+	if m == nil || factory == nil {
 		return
 	}
 	// CustomResourceDefinitions are cluster-scoped — gate on permissions.
@@ -435,313 +311,14 @@ func (m *Manager) initCustomResourceInformers(factory *informer.Factory) {
 	}
 	crdInformer := apiextFactory.Apiextensions().V1().CustomResourceDefinitions()
 	crdInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) { m.handleCustomResourceDefinitionEvent(nil, obj, MessageTypeAdded) },
-		UpdateFunc: func(oldObj, newObj interface{}) {
-			m.handleCustomResourceDefinitionEvent(oldObj, newObj, MessageTypeModified)
+		AddFunc: func(obj interface{}) { m.handleClusterCRD(obj, MessageTypeAdded) },
+		UpdateFunc: func(_, newObj interface{}) {
+			m.handleClusterCRD(newObj, MessageTypeModified)
 		},
-		DeleteFunc: func(obj interface{}) { m.handleCustomResourceDefinitionEvent(obj, nil, MessageTypeDeleted) },
+		DeleteFunc: func(obj interface{}) { m.handleClusterCRD(obj, MessageTypeDeleted) },
 	})
 }
 
-func (m *Manager) handleCustomResourceDefinitionEvent(oldObj interface{}, newObj interface{}, updateType MessageType) {
-	switch updateType {
-	case MessageTypeAdded:
-		newCRD := customResourceDefinitionFromObject(newObj)
-		m.handleCustomResourceDefinition(newObj, updateType)
-		m.broadcastCustomDomainCompletes(nil, newCRD)
-	case MessageTypeDeleted:
-		oldCRD := customResourceDefinitionFromObject(oldObj)
-		m.handleCustomResourceDefinition(oldObj, updateType)
-		m.broadcastCustomDomainCompletes(oldCRD, nil)
-	case MessageTypeModified:
-		oldCRD := customResourceDefinitionFromObject(oldObj)
-		newCRD := customResourceDefinitionFromObject(newObj)
-		m.handleCustomResourceDefinition(newObj, updateType)
-		if customCRDStreamSignature(oldCRD) != customCRDStreamSignature(newCRD) {
-			m.broadcastCustomDomainCompletes(oldCRD, newCRD)
-		}
-	}
-}
-
-func (m *Manager) handleCustomResourceDefinition(obj interface{}, updateType MessageType) {
-	crd := customResourceDefinitionFromObject(obj)
-	if crd == nil {
-		return
-	}
-	// CRD updates feed both the cluster CRD stream and custom resource informers.
-	m.handleClusterCRD(obj, updateType)
-	if updateType == MessageTypeDeleted {
-		m.removeCustomInformer(crd.Name)
-		return
-	}
-	if snapshot.IsFirstClassCustomResourceDefinition(crd) {
-		m.removeCustomInformer(crd.Name)
-		return
-	}
-	m.ensureCustomInformer(crd)
-}
-
-func (m *Manager) broadcastCustomDomainCompletes(oldCRD, newCRD *apiextensionsv1.CustomResourceDefinition) {
-	type completeTarget struct {
-		resourceVersion string
-		ref             *resourcemodel.ResourceRef
-	}
-	targets := make(map[string]completeTarget, 2)
-	for _, crd := range []*apiextensionsv1.CustomResourceDefinition{oldCRD, newCRD} {
-		domain := customCRDDomain(crd)
-		if domain == "" {
-			continue
-		}
-		ref := m.resourceRefForObject(crd, customResourceDefinitionAPIGroup, "v1", "CustomResourceDefinition", "customresourcedefinitions")
-		targets[domain] = completeTarget{resourceVersion: crd.ResourceVersion, ref: &ref}
-	}
-	for domain, target := range targets {
-		m.broadcastCustomDomainComplete(domain, target.resourceVersion, target.ref)
-	}
-}
-
-func (m *Manager) broadcastCustomDomainComplete(domain, resourceVersion string, ref *resourcemodel.ResourceRef) {
-	scopes := m.activeScopesForDomain(domain)
-	if len(scopes) == 0 {
-		switch domain {
-		case domainClusterCustom:
-			scopes = scopesForCluster()
-		case domainNamespaceCustom:
-			scopes = []string{namespaceAllScope}
-		default:
-			return
-		}
-	}
-	// COMPLETE is scope-level resync. Ref is carried as diagnostic context
-	// so listeners and tooling can identify which CRD triggered the resync.
-	update := Update{
-		Type:            MessageTypeComplete,
-		Domain:          domain,
-		ClusterID:       m.clusterMeta.ClusterID,
-		ClusterName:     m.clusterMeta.ClusterName,
-		ResourceVersion: resourceVersion,
-		Ref:             ref,
-	}
-	m.broadcast(domain, scopes, update)
-}
-
-func (m *Manager) activeScopesForDomain(domain string) []string {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	domainSubs := m.subscribers[domain]
-	scopes := make([]string, 0, len(domainSubs))
-	for scope := range domainSubs {
-		scopes = append(scopes, scope)
-	}
-	return scopes
-}
-
-func (m *Manager) ensureCustomInformer(crd *apiextensionsv1.CustomResourceDefinition) {
-	if m == nil || m.dynamicClient == nil || crd == nil {
-		return
-	}
-	plan := desiredCustomInformerPlan(crd, m.allowedNamespaces)
-	plan = m.authorizeCustomInformerPlan(plan)
-	m.applyCustomInformerPlan(plan)
-}
-
-func desiredCustomInformerPlan(
-	crd *apiextensionsv1.CustomResourceDefinition,
-	allowedNamespaces []string,
-) customInformerPlan {
-	plan := customInformerPlan{action: customInformerPlanRetain, crdName: crd.Name}
-	domain, namespaces, ok := customInformerScopes(crd.Spec.Scope, allowedNamespaces)
-	if !ok {
-		plan.action = customInformerPlanRemove
-		return plan
-	}
-	version := preferredCustomCRDVersion(crd)
-	if version == "" || crd.Spec.Names.Plural == "" {
-		return plan
-	}
-	plan.action = customInformerPlanReconcile
-	plan.spec = customInformerSpec{
-		gvr: schema.GroupVersionResource{
-			Group:    crd.Spec.Group,
-			Version:  version,
-			Resource: crd.Spec.Names.Plural,
-		},
-		kind:       crd.Spec.Names.Kind,
-		domain:     domain,
-		namespaces: namespaces,
-	}
-	return plan
-}
-
-func customInformerScopes(
-	scope apiextensionsv1.ResourceScope,
-	allowedNamespaces []string,
-) (string, []string, bool) {
-	switch scope {
-	case apiextensionsv1.NamespaceScoped:
-		if len(allowedNamespaces) > 0 {
-			return domainNamespaceCustom, append([]string(nil), allowedNamespaces...), true
-		}
-		return domainNamespaceCustom, []string{metav1.NamespaceAll}, true
-	case apiextensionsv1.ClusterScoped:
-		return domainClusterCustom, []string{""}, true
-	default:
-		return "", nil, false
-	}
-}
-
-func (m *Manager) authorizeCustomInformerPlan(plan customInformerPlan) customInformerPlan {
-	if plan.action != customInformerPlanReconcile {
-		return plan
-	}
-	permitted := make([]string, 0, len(plan.spec.namespaces))
-	for _, namespace := range plan.spec.namespaces {
-		if m.canListWatchInNamespace(plan.spec.gvr.Group, plan.spec.gvr.Resource, namespace) {
-			permitted = append(permitted, namespace)
-		}
-	}
-	if len(permitted) == 0 {
-		plan.action = customInformerPlanRemove
-		plan.spec = customInformerSpec{}
-		return plan
-	}
-	plan.spec.namespaces = permitted
-	return plan
-}
-
-func (spec customInformerSpec) matches(info *customResourceInformer) bool {
-	return info != nil &&
-		info.gvr == spec.gvr &&
-		info.kind == spec.kind &&
-		info.domain == spec.domain &&
-		slices.Equal(info.namespaces, spec.namespaces)
-}
-
-func (m *Manager) applyCustomInformerPlan(plan customInformerPlan) {
-	if plan.action == customInformerPlanRetain {
-		return
-	}
-	m.customInformerMu.Lock()
-	info := m.reconcileCustomInformerLocked(plan)
-	m.customInformerMu.Unlock()
-	info.start()
-}
-
-func (m *Manager) reconcileCustomInformerLocked(plan customInformerPlan) *customResourceInformer {
-	// The stopped gate, replacement, and map insert share Stop's lock so an
-	// informer can never be published after terminal teardown.
-	if m.stopped.Load() {
-		return nil
-	}
-	if plan.action == customInformerPlanRemove {
-		m.removeCustomInformerLocked(plan.crdName)
-		return nil
-	}
-	existing := m.customInformers[plan.crdName]
-	if plan.spec.matches(existing) {
-		return nil
-	}
-	m.removeCustomInformerLocked(plan.crdName)
-	info := m.newCustomResourceInformer(plan.spec)
-	m.customInformers[plan.crdName] = info
-	return info
-}
-
-func (m *Manager) newCustomResourceInformer(spec customInformerSpec) *customResourceInformer {
-	info := &customResourceInformer{
-		gvr:        spec.gvr,
-		kind:       spec.kind,
-		domain:     spec.domain,
-		namespaces: append([]string(nil), spec.namespaces...),
-		stopCh:     make(chan struct{}),
-	}
-	for _, namespace := range spec.namespaces {
-		dynamicInformer := dynamicinformer.NewFilteredDynamicInformer(
-			m.dynamicClient,
-			spec.gvr,
-			namespace,
-			0,
-			cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
-			nil,
-		)
-		resourceInformer := dynamicInformer.Informer()
-		resourceInformer.AddEventHandler(customResourceStreamEventHandler(m, info))
-		info.informers = append(info.informers, resourceInformer)
-	}
-	return info
-}
-
-func customResourceStreamEventHandler(m *Manager, info *customResourceInformer) cache.ResourceEventHandlerFuncs {
-	return cache.ResourceEventHandlerFuncs{
-		AddFunc:    func(obj interface{}) { m.handleCustomResource(obj, MessageTypeAdded, info) },
-		UpdateFunc: func(_, newObj interface{}) { m.handleCustomResource(newObj, MessageTypeModified, info) },
-		DeleteFunc: func(obj interface{}) { m.handleCustomResource(obj, MessageTypeDeleted, info) },
-	}
-}
-
-func (m *Manager) removeCustomInformerLocked(crdName string) {
-	informer := m.customInformers[crdName]
-	if informer == nil {
-		return
-	}
-	informer.stop()
-	delete(m.customInformers, crdName)
-}
-
-func (m *Manager) removeCustomInformer(crdName string) {
-	if m == nil || crdName == "" {
-		return
-	}
-	m.customInformerMu.Lock()
-	defer m.customInformerMu.Unlock()
-	m.removeCustomInformerLocked(crdName)
-}
-
-func (m *Manager) handleCustomResource(obj interface{}, updateType MessageType, info *customResourceInformer) {
-	resource := customResourceFromObject(obj)
-	if resource == nil || info == nil {
-		return
-	}
-
-	kind := resource.GetKind()
-	if kind == "" {
-		kind = info.kind
-	}
-	domain := info.domain
-	if domain == "" {
-		domain = domainNamespaceCustom
-	}
-	ref := m.resourceRefForObject(resource, info.gvr.Group, info.gvr.Version, kind, info.gvr.Resource)
-	if ref.Kind != "" && ref.Name != "" {
-		// Invalidate cached YAML/details on custom resource updates.
-		m.invalidateCustomResourceCache(ref)
-	}
-
-	var row interface{}
-	if updateType != MessageTypeDeleted {
-		// The CRD name is the canonical Kubernetes form `<plural>.<group>`,
-		// computable from the GVR we're already watching. Same derivation
-		// for both the cluster-scoped and namespace-scoped paths.
-		crdName := info.gvr.Resource + "." + info.gvr.Group
-		if domain == domainClusterCustom {
-			row = customresource.BuildClusterStreamSummary(m.clusterMeta, resource, customresource.NewDescriptor(info.gvr.Group, info.gvr.Version, info.gvr.Resource, info.kind, crdName))
-		} else {
-			// The streaming path has no parent scope concept — fall back
-			// to the resource's own namespace (which is almost always
-			// set for anything that reaches an informer).
-			row = customresource.BuildNamespaceStreamSummary(m.clusterMeta, resource, customresource.NewDescriptor(info.gvr.Group, info.gvr.Version, info.gvr.Resource, info.kind, crdName), resource.GetNamespace())
-		}
-	}
-	update := m.newObjectRowUpdate(updateType, domain, resource, ref, row)
-
-	if domain == domainClusterCustom {
-		m.broadcast(domain, scopesForCluster(), update)
-		return
-	}
-	m.broadcast(domain, scopesForNamespace(resource.GetNamespace()), update)
-}
-
-// Cluster CRD updates keep the CRD list aligned with snapshot formatting.
 func (m *Manager) handleClusterCRD(obj interface{}, updateType MessageType) {
 	crd := customResourceDefinitionFromObject(obj)
 	if crd == nil {
@@ -749,61 +326,9 @@ func (m *Manager) handleClusterCRD(obj interface{}, updateType MessageType) {
 	}
 
 	ref := m.resourceRefForObject(crd, customResourceDefinitionAPIGroup, "v1", "CustomResourceDefinition", "customresourcedefinitions")
-	update := m.newObjectRowUpdate(updateType, domainClusterCRDs, crd, ref, apiextensionspkg.BuildStreamSummary(m.clusterMeta, crd))
+	update := m.newObjectUpdate(updateType, domainClusterCRDs, crd.ResourceVersion, ref)
 
 	m.broadcast(domainClusterCRDs, scopesForCluster(), update)
-}
-
-func preferredCustomCRDVersion(crd *apiextensionsv1.CustomResourceDefinition) string {
-	if crd == nil {
-		return ""
-	}
-	for _, version := range crd.Spec.Versions {
-		if version.Served && version.Storage {
-			return version.Name
-		}
-	}
-	if len(crd.Spec.Versions) > 0 {
-		return crd.Spec.Versions[0].Name
-	}
-	return ""
-}
-
-func customCRDStreamSignature(crd *apiextensionsv1.CustomResourceDefinition) string {
-	if crd == nil {
-		return ""
-	}
-	return strings.Join([]string{
-		customCRDDomain(crd),
-		crd.Spec.Group,
-		preferredCustomCRDVersion(crd),
-		crd.Spec.Names.Plural,
-		crd.Spec.Names.Kind,
-	}, "/")
-}
-
-func customCRDDomain(crd *apiextensionsv1.CustomResourceDefinition) string {
-	if crd == nil || snapshot.IsFirstClassCustomResourceDefinition(crd) {
-		return ""
-	}
-	switch crd.Spec.Scope {
-	case apiextensionsv1.NamespaceScoped:
-		return domainNamespaceCustom
-	case apiextensionsv1.ClusterScoped:
-		return domainClusterCustom
-	default:
-		return ""
-	}
-}
-
-// SubscribeSelector registers a new subscriber for the supplied typed selector.
-func (m *Manager) SubscribeSelector(selector StreamSelector) (*Subscription, error) {
-	return m.streamHub().subscribe(selector)
-}
-
-// ResumeSelector returns buffered updates after the provided sequence token.
-func (m *Manager) ResumeSelector(selector StreamSelector, since uint64) ([]Update, bool) {
-	return m.streamHub().resume(selector, since)
 }
 
 // handleConfigMap and handleSecret fire the Helm-release refresh signal for one
@@ -934,7 +459,7 @@ func (m *Manager) handleHPA(obj interface{}, updateType MessageType) {
 	}
 
 	ref := m.resourceRefForObject(hpa, hpapkg.IdentityV1.Group, hpapkg.IdentityV1.Version, hpapkg.IdentityV1.Kind, hpapkg.IdentityV1.Resource)
-	update := m.newObjectRowUpdate(updateType, domainNamespaceAutoscaling, hpa, ref, hpapkg.BuildStreamSummary(m.clusterMeta, hpa))
+	update := m.newObjectUpdate(updateType, domainNamespaceAutoscaling, hpa.ResourceVersion, ref)
 
 	m.broadcast(domainNamespaceAutoscaling, scopesForNamespace(hpa.Namespace), update)
 	m.handleWorkloadFromHPA(hpa)
@@ -1148,11 +673,6 @@ func (m *Manager) subscribedScopes(domain string) []string {
 	return scopes
 }
 
-func (m *Manager) broadcast(domain string, scopes []string, update Update) {
-	m.invalidateSnapshotDomain(domain)
-	m.streamHub().broadcast(domain, scopes, update)
-}
-
 func (m *Manager) prepareBroadcast(domain, scope string, update Update) (Update, []struct {
 	id  uint64
 	sub *subscription
@@ -1304,42 +824,6 @@ func (m *Manager) triggerResync(sub *subscription, update Update) bool {
 	}
 }
 
-// lookupWorkloadObject resolves a workload object via a typed lister. Production wires no
-// workload listers (the kinds are cut to ingest), so this returns an error there and the
-// caller falls back to the ingest catalog half (see lookupWorkloadRef); only the unit tests
-// that drive the typed handlers wire these listers.
-func (m *Manager) lookupWorkloadObject(kind, namespace, name string) (metav1.Object, error) {
-	switch strings.ToLower(kind) {
-	case "deployment":
-		if m.deploymentLister == nil {
-			return nil, errors.New("deployment lister unavailable")
-		}
-		return m.deploymentLister.Deployments(namespace).Get(name)
-	case "statefulset":
-		if m.statefulLister == nil {
-			return nil, errors.New("statefulset lister unavailable")
-		}
-		return m.statefulLister.StatefulSets(namespace).Get(name)
-	case "daemonset":
-		if m.daemonLister == nil {
-			return nil, errors.New("daemonset lister unavailable")
-		}
-		return m.daemonLister.DaemonSets(namespace).Get(name)
-	case "job":
-		if m.jobLister == nil {
-			return nil, errors.New("job lister unavailable")
-		}
-		return m.jobLister.Jobs(namespace).Get(name)
-	case "cronjob":
-		if m.cronJobLister == nil {
-			return nil, errors.New("cronjob lister unavailable")
-		}
-		return m.cronJobLister.CronJobs(namespace).Get(name)
-	default:
-		return nil, fmt.Errorf("unsupported workload kind %q", kind)
-	}
-}
-
 // The *FromObject decoders adapt the generic objectAs[T] (type assertion +
 // delete-tombstone unwrap) to the ergonomic nil-returning form their call sites
 // use — including dual-decode compares in the event/fanout handlers. The unwrap
@@ -1351,11 +835,6 @@ func replicaSetFromObject(obj interface{}) *appsv1.ReplicaSet {
 
 func customResourceDefinitionFromObject(obj interface{}) *apiextensionsv1.CustomResourceDefinition {
 	typed, _ := objectAs[*apiextensionsv1.CustomResourceDefinition](obj)
-	return typed
-}
-
-func customResourceFromObject(obj interface{}) *unstructured.Unstructured {
-	typed, _ := objectAs[*unstructured.Unstructured](obj)
 	return typed
 }
 
@@ -1439,9 +918,6 @@ func uniqueScopes(scopes []string) []string {
 	uniq := make([]string, 0, len(scopes))
 	for _, scope := range scopes {
 		key := strings.TrimSpace(scope)
-		if key == "" {
-			key = ""
-		}
 		if _, exists := seen[key]; exists {
 			continue
 		}

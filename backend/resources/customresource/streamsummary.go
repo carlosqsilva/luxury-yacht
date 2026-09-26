@@ -3,8 +3,8 @@
  *
  * Stream-summary builders for CRD-backed custom resources, owned by the
  * customresource package. They produce the neutral streamrows custom row types so
- * the snapshot namespace-custom / cluster-custom domains (and the dynamic stream
- * handlers) dispatch to them. No snapshot import.
+ * catalog-backed table hydration can reuse rich kind-specific summaries. No
+ * snapshot import.
  */
 
 package customresource
@@ -17,7 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
-// BuildNamespaceStreamSummary builds the namespace-custom row for one namespaced
+// BuildNamespaceStreamSummary builds a namespaced custom row for one namespaced
 // custom resource. defaultNamespace is used when the object carries no namespace.
 func BuildNamespaceStreamSummary(meta streamrows.ClusterMeta, resource *unstructured.Unstructured, descriptor Descriptor, defaultNamespace string) streamrows.NamespaceCustomSummary {
 	if resource == nil {
@@ -32,9 +32,8 @@ func BuildNamespaceStreamSummary(meta streamrows.ClusterMeta, resource *unstruct
 			CRDName: descriptor.CRDName,
 		}
 	}
-	gvr := descriptor.GVR
-	model := BuildResourceModel(meta.ClusterID, resource, descriptor, resourcemodel.ResourceScopeNamespaced, defaultNamespace)
-	facts := BuildFacts(meta.ClusterID, resource, gvr, descriptor.CRDName, resourcemodel.ResourceModelBuildOptions{})
+	facts := BuildFacts(resource)
+	model := buildResourceModel(meta.ClusterID, resource, descriptor, resourcemodel.ResourceScopeNamespaced, defaultNamespace, facts)
 	return streamrows.NamespaceCustomSummary{
 		CertManager:        certManagerSummary(meta.ClusterID, resource),
 		ExternalSecrets:    externalSecretsSummary(meta.ClusterID, resource),
@@ -54,7 +53,7 @@ func BuildNamespaceStreamSummary(meta streamrows.ClusterMeta, resource *unstruct
 	}
 }
 
-// BuildClusterStreamSummary builds the cluster-custom row for one cluster-scoped
+// BuildClusterStreamSummary builds a cluster-scoped custom row for one cluster-scoped
 // custom resource.
 func BuildClusterStreamSummary(meta streamrows.ClusterMeta, resource *unstructured.Unstructured, descriptor Descriptor) streamrows.ClusterCustomSummary {
 	if resource == nil {
@@ -69,9 +68,8 @@ func BuildClusterStreamSummary(meta streamrows.ClusterMeta, resource *unstructur
 			CRDName: descriptor.CRDName,
 		}
 	}
-	gvr := descriptor.GVR
-	model := BuildResourceModel(meta.ClusterID, resource, descriptor, resourcemodel.ResourceScopeCluster, "")
-	facts := BuildFacts(meta.ClusterID, resource, gvr, descriptor.CRDName, resourcemodel.ResourceModelBuildOptions{})
+	facts := BuildFacts(resource)
+	model := buildResourceModel(meta.ClusterID, resource, descriptor, resourcemodel.ResourceScopeCluster, "", facts)
 	return streamrows.ClusterCustomSummary{
 		CertManager:        certManagerSummary(meta.ClusterID, resource),
 		ExternalSecrets:    externalSecretsSummary(meta.ClusterID, resource),

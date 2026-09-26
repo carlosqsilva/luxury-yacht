@@ -84,9 +84,6 @@ function ObjectPanel({
   const groupInfo = groupKey ? getGroupTabs(tabGroups, groupKey) : null;
   const isActiveTab = groupInfo ? groupInfo.activeTab === panelId : true;
 
-  // This panel is always "open" while it exists in the render tree.
-  const isOpen = true;
-
   // Close handler removes this panel from the context.
   const close = useCallback(() => {
     closePanel(objectRef.clusterId, panelId);
@@ -119,19 +116,19 @@ function ObjectPanel({
     clusterScope: CLUSTER_SCOPE,
   });
 
-  const lastEvaluatedNamespaceRef = useRef<string | null>(null);
+  const lastPermissionScopeRef = useRef<string | null>(null);
   useEffect(() => {
     const namespace = objectData?.namespace?.trim();
     if (!namespace) {
       return;
     }
 
-    const normalized = namespace.toLowerCase();
-    if (lastEvaluatedNamespaceRef.current === normalized) {
+    const permissionScope = JSON.stringify([objectData.clusterId, namespace.toLowerCase()]);
+    if (lastPermissionScopeRef.current === permissionScope) {
       return;
     }
 
-    lastEvaluatedNamespaceRef.current = normalized;
+    lastPermissionScopeRef.current = permissionScope;
     queryNamespacePermissions(namespace, objectData?.clusterId ?? null);
   }, [objectData?.clusterId, objectData?.namespace]);
 
@@ -163,17 +160,13 @@ function ObjectPanel({
     objectKind,
     objectData,
     panelId,
-    isOpen: isOpen && isActiveTab,
+    isOpen: isActiveTab,
     resourceDeleted,
   });
 
-  const objectIdentityKey = useMemo(() => {
-    const clusterKey = objectData?.clusterId?.trim().toLowerCase() ?? '';
-    const name = objectData?.name?.trim().toLowerCase() ?? '';
-    const namespace = objectData?.namespace?.trim().toLowerCase() ?? '';
-    const kindKey = objectKind?.toLowerCase() ?? '';
-    return [clusterKey, kindKey, namespace, name].filter(Boolean).join('/');
-  }, [objectData?.clusterId, objectData?.name, objectData?.namespace, objectKind]);
+  // Both keys carry cluster + full GVK + namespace/name; keep the panel key
+  // when an unsupported resource has no detail scope.
+  const objectIdentityKey = detailScope ?? panelId;
 
   const previousIdentityRef = useRef<string | null>(null);
   useEffect(() => {
@@ -194,11 +187,7 @@ function ObjectPanel({
       return false;
     }
     const normalized = detailsError.toLowerCase();
-    return (
-      normalized.includes('not found') ||
-      normalized.includes('was not found') ||
-      normalized.includes('could not find')
-    );
+    return normalized.includes('not found') || normalized.includes('could not find');
   }, [detailsError]);
 
   useEffect(() => {
@@ -226,7 +215,7 @@ function ObjectPanel({
     objectData,
     isHelmRelease,
     isEvent,
-    isOpen,
+    isOpen: true,
     setActiveTab,
     currentTab: activeTab,
   });
@@ -238,7 +227,7 @@ function ObjectPanel({
   // Keep DetailsTab props derived from this memoized model, not from the
   // enclosing props object; ObjectPanelContent depends on that stability.
   const detailModel = useMemo(
-    () => buildObjectDetailModel(objectData ?? null, objectKind, detailPayload),
+    () => buildObjectDetailModel(objectData, objectKind, detailPayload),
     [detailPayload, objectData, objectKind]
   );
 
@@ -246,20 +235,9 @@ function ObjectPanel({
   // and owns its confirmation/scale/rollback/port-forward modals. The panel
   // only supplies lifecycle hooks: close after a delete, refetch after any
   // other mutating action.
-  const handleAfterDelete = useCallback(() => {
-    close();
-  }, [close]);
-
   const handleAfterAction = useCallback(() => {
     void fetchResourceDetails('user');
   }, [fetchResourceDetails]);
-
-  const handleTabSelect = useCallback(
-    (tab: ViewType) => {
-      setObjectPanelActiveTab(objectRef.clusterId, panelId, tab);
-    },
-    [objectRef.clusterId, panelId, setObjectPanelActiveTab]
-  );
 
   const applyRequestedTab = useCallback(
     (requestedTab?: ViewType) => {
@@ -271,11 +249,11 @@ function ObjectPanel({
         return;
       }
       if (activeTab !== requestedTab) {
-        setObjectPanelActiveTab(objectRef.clusterId, panelId, requestedTab);
+        setActiveTab(requestedTab);
       }
       clearRequestedObjectPanelTab(panelId);
     },
-    [availableTabs, panelId, activeTab, objectRef.clusterId, setObjectPanelActiveTab]
+    [availableTabs, panelId, activeTab, setActiveTab]
   );
 
   useEffect(() => {
@@ -294,7 +272,7 @@ function ObjectPanel({
   const detailTabProps: DetailsTabProps = {
     objectData,
     detailModel,
-    isActive: isOpen && visibleActiveTab === 'details',
+    isActive: visibleActiveTab === 'details',
     detailsLoading,
     detailsError,
     deletion,
@@ -304,11 +282,9 @@ function ObjectPanel({
     },
     resourceDeleted,
     deletedResourceName,
-    onAfterDelete: handleAfterDelete,
+    onAfterDelete: close,
     onAfterAction: handleAfterAction,
   };
-
-  const panelScopeRef = useRef<HTMLDivElement>(null);
 
   // Memoize the per-instance context value so child components get the correct objectData.
   // creationTimestamp (→ Age) and lastModified ride along so the shared
@@ -322,10 +298,9 @@ function ObjectPanel({
   return (
     <CurrentObjectPanelContext.Provider value={currentObjectPanelValue}>
       <DockablePanel
-        panelRef={panelScopeRef}
         panelId={panelId}
         title={tabTitle}
-        isOpen={isOpen}
+        isOpen
         defaultPosition={openTargetPosition}
         defaultGroupKey={openTargetGroupKey}
         suppressSurface={suppressWorkspaceSurface}
@@ -337,53 +312,43 @@ function ObjectPanel({
         onClose={close}
         contentClassName="object-panel-body"
       >
-        {/* The provider must wrap the CHILDREN handed to DockablePanel, not
-            just this component's subtree: in a tab group, the group LEADER
-            renders every tab's captured children inside the leader's own
-            React tree, and context resolves at the render site. Without this
-            inner provider, a tab's content would read the leader panel's
-            objectData (wrong GVK → wrong permission keys → gated actions
-            silently disappear from grouped panels). */}
-        <CurrentObjectPanelContext.Provider value={currentObjectPanelValue}>
-          <PanelLifecycleClusterSurface clusterId={objectRef.clusterId}>
-            {/* Kind badge + name toolbar */}
-            <div>
-              <ObjectPanelHeader
-                kind={objectData?.kind ?? null}
-                kindAlias={objectData?.kindAlias ?? null}
-                name={objectData?.name ?? null}
-              />
-            </div>
-
-            <ObjectPanelTabs
-              tabs={availableTabs}
-              activeTab={visibleActiveTab}
-              onSelect={handleTabSelect}
+        <PanelLifecycleClusterSurface clusterId={objectRef.clusterId}>
+          {/* Kind badge + name toolbar */}
+          <div>
+            <ObjectPanelHeader
+              kind={objectData?.kind ?? null}
+              kindAlias={objectData?.kindAlias ?? null}
+              name={objectData?.name ?? null}
             />
+          </div>
 
-            <ObjectPanelContent
-              activeTab={visibleActiveTab}
-              detailTabProps={detailTabProps}
-              isPanelOpen={isOpen && isActiveTab}
-              capabilities={capabilities}
-              capabilityReasons={capabilityReasons}
-              nodeLogsState={nodeLogsState}
-              nodeLogSources={nodeLogSources}
-              detailScope={detailScope}
-              eventsScope={eventsScope}
-              containerLogsScope={containerLogsScope}
-              mapScope={mapScope}
-              helmScope={helmScope}
-              objectData={objectData}
-              objectKind={objectKind}
-              resourceDeleted={resourceDeleted}
-              deletedResourceName={deletedResourceName}
-              onClosePanel={close}
-              onRefreshDetails={fetchResourceDetails}
-              panelId={panelId}
-            />
-          </PanelLifecycleClusterSurface>
-        </CurrentObjectPanelContext.Provider>
+          <ObjectPanelTabs
+            tabs={availableTabs}
+            activeTab={visibleActiveTab}
+            onSelect={setActiveTab}
+          />
+
+          <ObjectPanelContent
+            activeTab={visibleActiveTab}
+            detailTabProps={detailTabProps}
+            isPanelOpen={isActiveTab}
+            capabilities={capabilities}
+            capabilityReasons={capabilityReasons}
+            nodeLogsState={nodeLogsState}
+            nodeLogSources={nodeLogSources}
+            detailScope={detailScope}
+            eventsScope={eventsScope}
+            containerLogsScope={containerLogsScope}
+            mapScope={mapScope}
+            helmScope={helmScope}
+            objectData={objectData}
+            objectKind={objectKind}
+            resourceDeleted={resourceDeleted}
+            deletedResourceName={deletedResourceName}
+            onClosePanel={close}
+            panelId={panelId}
+          />
+        </PanelLifecycleClusterSurface>
       </DockablePanel>
     </CurrentObjectPanelContext.Provider>
   );
