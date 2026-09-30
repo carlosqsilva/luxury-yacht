@@ -3,6 +3,7 @@ package genrefreshcontracts
 import (
 	"reflect"
 
+	"github.com/luxury-yacht/app/backend/internal/containerlogs"
 	"github.com/luxury-yacht/app/backend/kind/objectmap"
 	"github.com/luxury-yacht/app/backend/kind/streamrows"
 	"github.com/luxury-yacht/app/backend/nodemaintenance"
@@ -217,11 +218,16 @@ var contractTypes = []typeSpec{
 	{name: "NamespaceHelmSummary", typeOf: typeOf[snapshot.NamespaceHelmSummary]()},
 	{name: "NamespaceHelmSnapshotPayload", typeOf: typeOf[snapshot.NamespaceHelmSnapshot]()},
 	{name: "ContainerLogsWireEntry", typeOf: typeOf[containerlogsstream.Entry]()},
+	{name: "ContainerLogsWarning", typeOf: typeOf[containerlogs.Warning]()},
+	{name: "ContainerLogsTargetIssue", typeOf: typeOf[containerlogs.TargetIssue]()},
 	{name: "ContainerLogsStreamEventPayload", typeOf: typeOf[containerlogsstream.EventPayload]()},
+	{name: "ContainerLogsResumePoint", typeOf: typeOf[containerlogsstream.ResumePoint]()},
+	{name: "ContainerLogsStreamRequest", typeOf: typeOf[containerlogsstream.Request]()},
 	{name: "ResourceStreamClientMessage", typeOf: typeOf[streammux.ClientMessage]()},
 	{name: "ResourceStreamServerMessage", typeOf: typeOf[streammux.ServerMessage]()},
 	{name: "TelemetrySnapshotStatus", typeOf: typeOf[telemetry.SnapshotStatus]()},
 	{name: "TelemetryMetricsStatus", typeOf: typeOf[telemetry.MetricsStatus]()},
+	{name: "TelemetryClusterMetricsStatus", typeOf: typeOf[telemetry.ClusterMetricsStatus]()},
 	{name: "TelemetryStreamStatus", typeOf: typeOf[telemetry.StreamStatus]()},
 	{name: "TelemetryCatalogStatus", typeOf: typeOf[telemetry.CatalogStatus]()},
 	{name: "TelemetryConnectionStats", typeOf: typeOf[telemetry.ConnectionStats]()},
@@ -248,6 +254,9 @@ var contractEnums = []enumSpec{
 	{name: "ResourceStreamMessageType", typeOf: typeOf[streammux.MessageType](), valuesName: "RESOURCE_STREAM_MESSAGE_TYPES"},
 	{name: "ResourceStreamSource", typeOf: typeOf[streammux.Source](), valuesName: "RESOURCE_STREAM_SOURCES"},
 	{name: "ResourceStreamSignal", typeOf: typeOf[streammux.Signal](), valuesName: "RESOURCE_STREAM_SIGNALS"},
+	{name: "ContainerLogsWarningKind", typeOf: typeOf[containerlogs.WarningKind]()},
+	{name: "ContainerLogsLimitScope", typeOf: typeOf[containerlogs.LimitScope]()},
+	{name: "ContainerLogsIssueState", typeOf: typeOf[containerlogs.IssueState]()},
 }
 
 var contractAliases = []aliasSpec{

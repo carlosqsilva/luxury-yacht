@@ -1,7 +1,8 @@
 /**
- * frontend/src/modules/object-panel/components/ObjectPanel/Logs/containerLogsStreamScopeParamsCache.ts
+ * frontend/src/core/refresh/streaming/containerLogsStreamScopeParams.ts
  *
- * Module-level cache of per-scope backend container logs stream filters.
+ * Per-scope source selection the container-logs stream sends when it opens.
+ * Container Logs writes it; the stream manager reads it for each request.
  *
  * This mirrors the panel-lifetime persistence used by logViewerPrefsCache:
  * scopes survive transient unmount/remount cycles caused by cluster
@@ -9,7 +10,6 @@
  */
 
 export interface ContainerLogsStreamScopeParams {
-  container?: string;
   selectedFilters?: string[];
   matchNone?: boolean;
 }
@@ -17,7 +17,6 @@ export interface ContainerLogsStreamScopeParams {
 const cache = new Map<string, ContainerLogsStreamScopeParams>();
 
 const normalize = (params: ContainerLogsStreamScopeParams): ContainerLogsStreamScopeParams => {
-  const container = params.container?.trim() ?? '';
   const selectedFilters = Array.from(
     new Set(
       (params.selectedFilters ?? [])
@@ -26,9 +25,6 @@ const normalize = (params: ContainerLogsStreamScopeParams): ContainerLogsStreamS
     )
   );
   const next: ContainerLogsStreamScopeParams = {};
-  if (container) {
-    next.container = container;
-  }
   if (selectedFilters.length > 0) {
     next.selectedFilters = selectedFilters;
   }
@@ -42,7 +38,6 @@ const areEqual = (
   left: ContainerLogsStreamScopeParams,
   right: ContainerLogsStreamScopeParams
 ): boolean =>
-  (left.container ?? '') === (right.container ?? '') &&
   JSON.stringify(left.selectedFilters ?? []) === JSON.stringify(right.selectedFilters ?? []) &&
   (left.matchNone ?? false) === (right.matchNone ?? false);
 
