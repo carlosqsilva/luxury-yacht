@@ -620,27 +620,24 @@ export interface ClusterNodeSnapshotEntry {
   version: string;
   internalIP?: string;
   externalIP?: string;
-  cpuCapacity: string;
-  cpuAllocatable: string;
-  cpuRequests: string;
-  cpuLimits: string;
-  cpuUsage: string;
-  memoryCapacity: string;
-  memoryAllocatable: string;
-  memRequests: string;
-  memLimits: string;
-  memoryUsage: string;
+  cpuCapacityMilli?: number;
+  cpuAllocatableMilli?: number;
+  cpuRequestsMilli?: number;
+  cpuLimitsMilli?: number;
+  cpuUsageMilli?: number;
+  memoryCapacityBytes?: number;
+  memoryAllocatableBytes?: number;
+  memoryRequestsBytes?: number;
+  memoryLimitsBytes?: number;
+  memoryUsageBytes?: number;
   pods: string;
   podsCapacity: string;
   podsAllocatable: string;
   restarts: number;
-  cpu: string;
-  memory: string;
   unschedulable: boolean;
   labels?: Record<string, string>;
   annotations?: Record<string, string>;
   taints?: Array<NodeTaint>;
-  podMetrics?: Array<NodePodMetric>;
 }
 
 export interface ClusterNodeSnapshotPayload {
@@ -683,14 +680,14 @@ export interface ClusterOverviewMetrics {
 export interface ClusterOverviewPayload {
   clusterType: string;
   clusterVersion: string;
-  cpuUsage: string;
-  cpuRequests: string;
-  cpuLimits: string;
-  cpuAllocatable: string;
-  memoryUsage: string;
-  memoryRequests: string;
-  memoryLimits: string;
-  memoryAllocatable: string;
+  cpuUsageMilli: number;
+  cpuRequestsMilli: number;
+  cpuLimitsMilli: number;
+  cpuAllocatableMilli: number;
+  memoryUsageBytes: number;
+  memoryRequestsBytes: number;
+  memoryLimitsBytes: number;
+  memoryAllocatableBytes: number;
   totalNodes: number;
   fargateNodes: number;
   regularNodes: number;
@@ -1499,12 +1496,12 @@ export interface NamespaceWorkloadSummary {
   restarts: number;
   age: string;
   ageTimestamp?: number;
-  cpuUsage?: string;
-  cpuRequest?: string;
-  cpuLimit?: string;
-  memUsage?: string;
-  memRequest?: string;
-  memLimit?: string;
+  cpuUsageMilli?: number;
+  cpuRequestMilli?: number;
+  cpuLimitMilli?: number;
+  memoryUsageBytes?: number;
+  memoryRequestBytes?: number;
+  memoryLimitBytes?: number;
   portForwardAvailable: boolean;
   desiredReplicas?: number;
   hpaManaged?: boolean;
@@ -1547,13 +1544,6 @@ export interface NodeMetricsInfo {
   consecutiveFailures?: number;
   successCount: number;
   failureCount: number;
-}
-
-export interface NodePodMetric {
-  namespace: string;
-  name: string;
-  cpuUsage: string;
-  memoryUsage: string;
 }
 
 export interface NodeTaint {
@@ -1724,12 +1714,12 @@ export interface PodSnapshotEntry {
   directOwnerKind?: string;
   directOwnerName?: string;
   directOwnerApiVersion?: string;
-  cpuRequest: string;
-  cpuLimit: string;
-  cpuUsage: string;
-  memRequest: string;
-  memLimit: string;
-  memUsage: string;
+  cpuRequestMilli?: number;
+  cpuLimitMilli?: number;
+  cpuUsageMilli?: number;
+  memoryRequestBytes?: number;
+  memoryLimitBytes?: number;
+  memoryUsageBytes?: number;
 }
 
 export interface PodSnapshotPayload {
@@ -2153,8 +2143,8 @@ export interface WorkloadResourceUsage {
 }
 
 export interface WorkloadTypeResourceUsage {
-  cpuUsage: string;
-  memoryUsage: string;
+  cpuUsageMilli: number;
+  memoryUsageBytes: number;
 }
 
 export interface CanonicalResourceRef extends ResourceRef {
