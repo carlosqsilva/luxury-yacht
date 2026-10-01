@@ -521,7 +521,8 @@
                 }
               },
               "object": "Node/node-wire",
-              "objectApiVersion": "v1",
+              "objectKind": "Node",
+              "objectName": "node-wire",
               "objectNamespace": "",
               "objectUid": "node-wire-uid",
               "reason": "NodePressure",
@@ -536,7 +537,7 @@
                 "version": "v1"
               },
               "resourceVersion": "7",
-              "source": "-",
+              "source": "",
               "type": "Warning"
             }
           ],
@@ -910,7 +911,6 @@
                   "version": "v1"
                 }
               },
-              "kind": "Pod",
               "message": "Node reports pressure",
               "metadata": {
                 "labels": {
@@ -918,7 +918,8 @@
                 }
               },
               "object": "Pod/pod-wire",
-              "objectApiVersion": "v1",
+              "objectKind": "Pod",
+              "objectName": "pod-wire",
               "objectNamespace": "default",
               "objectUid": "pod-wire-uid",
               "reason": "NodePressure",
@@ -1181,7 +1182,6 @@
                   "version": "v1"
                 }
               },
-              "involvedObjectApiVersion": "v1",
               "involvedObjectKind": "Pod",
               "involvedObjectName": "pod-wire",
               "involvedObjectNamespace": "default",
@@ -1205,7 +1205,7 @@
                 "version": "v1"
               },
               "resourceVersion": "7",
-              "source": "Unknown"
+              "source": ""
             }
           ]
         },
