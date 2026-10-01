@@ -7,6 +7,8 @@
  */
 
 import {
+  ALL_NAMESPACE_PERMISSIONS,
+  CLUSTER_PERMISSIONS,
   getPermissionKey,
   PERMISSION_FEATURES,
   type PermissionFeatureKey,
@@ -19,6 +21,7 @@ import type { KubernetesAPIClientDiagnostics, SelectionDiagnostics } from '../..
 import type { DomainSnapshotState } from '../../store';
 import type {
   CatalogSnapshotPayload,
+  TelemetryClusterMetricsStatus,
   TelemetryMetricsStatus,
   TelemetrySnapshotStatus,
   TelemetryStreamStatus,
@@ -157,47 +160,99 @@ export const selectDomainSnapshotTelemetry = (
       (entry.scope ?? '') === scope
   );
 
-// Catalog is a domain on the unified resources socket. Present its domain
-// deliveries together with the owning socket's session/connect state so the
-// summary cannot drift back to the retired standalone catalog stream.
-export const selectCatalogStreamTelemetry = (
-  streams: TelemetryStreamStatus[] | null | undefined
+// Combines a socket's own entries (sessions and connects) with the leaf
+// entries that carry its deliveries, into one status for a summary card.
+const combineSocketAndLeafTelemetry = (
+  identity: Pick<TelemetryStreamStatus, 'name' | 'leafKind' | 'leaf'>,
+  socketEntries: TelemetryStreamStatus[],
+  leafEntries: TelemetryStreamStatus[]
 ): TelemetryStreamStatus | undefined => {
-  const resourceEntries = (streams ?? []).filter((entry) => entry.name === 'resources');
-  const socketEntries = resourceEntries.filter((entry) => !entry.leafKind);
-  const catalogEntries = resourceEntries.filter(
-    (entry) => entry.leafKind === 'domain' && entry.leaf === 'catalog'
-  );
-  if (socketEntries.length === 0 && catalogEntries.length === 0) {
+  if (socketEntries.length === 0 && leafEntries.length === 0) {
     return undefined;
   }
-
-  const error = mostRecentError([...socketEntries, ...catalogEntries]);
-  const latestSkip = [...socketEntries, ...catalogEntries]
+  const allEntries = [...socketEntries, ...leafEntries];
+  const error = mostRecentError(allEntries);
+  const latestSkip = allEntries
     .filter((entry) => entry.lastSkipReason)
     .sort((left, right) => right.lastEvent - left.lastEvent)[0]?.lastSkipReason;
   return {
-    name: 'resources',
-    leafKind: 'domain',
-    leaf: 'catalog',
+    ...identity,
     activeSessions: sumStreamValue(socketEntries, (entry) => entry.activeSessions),
-    totalMessages: sumStreamValue(catalogEntries, (entry) => entry.totalMessages),
-    droppedMessages:
-      sumStreamValue(socketEntries, (entry) => entry.droppedMessages) +
-      sumStreamValue(catalogEntries, (entry) => entry.droppedMessages),
-    skippedTargets:
-      sumStreamValue(socketEntries, (entry) => entry.skippedTargets) +
-      sumStreamValue(catalogEntries, (entry) => entry.skippedTargets),
-    errorCount:
-      sumStreamValue(socketEntries, (entry) => entry.errorCount) +
-      sumStreamValue(catalogEntries, (entry) => entry.errorCount),
+    totalMessages: sumStreamValue(leafEntries, (entry) => entry.totalMessages),
+    droppedMessages: sumStreamValue(allEntries, (entry) => entry.droppedMessages),
+    skippedTargets: sumStreamValue(allEntries, (entry) => entry.skippedTargets),
+    errorCount: sumStreamValue(allEntries, (entry) => entry.errorCount),
     lastConnect: maxStreamValue(socketEntries, (entry) => entry.lastConnect),
-    lastEvent: maxStreamValue(catalogEntries, (entry) => entry.lastEvent),
+    lastEvent: maxStreamValue(leafEntries, (entry) => entry.lastEvent),
     ...(error.message !== '—' ? { lastError: error.message } : {}),
     ...(error.at !== undefined ? { lastErrorAt: error.at } : {}),
     ...(latestSkip ? { lastSkipReason: latestSkip } : {}),
   };
 };
+
+// Combines one cluster's entries for a stream: its socket entries and the leaf
+// entries that carry its deliveries.
+const selectClusterStreamTelemetry = (
+  streams: TelemetryStreamStatus[] | null | undefined,
+  clusterId: string,
+  identity: Pick<TelemetryStreamStatus, 'name' | 'leafKind' | 'leaf'>,
+  isDeliveryLeaf: (entry: TelemetryStreamStatus) => boolean
+): TelemetryStreamStatus | undefined => {
+  const entries = (streams ?? []).filter(
+    (entry) => entry.name === identity.name && (entry.clusterId ?? '') === clusterId
+  );
+  return combineSocketAndLeafTelemetry(
+    identity,
+    entries.filter((entry) => !entry.leafKind),
+    entries.filter(isDeliveryLeaf)
+  );
+};
+
+// Catalog is a domain on the unified resources socket. Present its domain
+// deliveries together with the owning socket's session/connect state so the
+// summary cannot drift back to the retired standalone catalog stream.
+export const selectCatalogStreamTelemetry = (
+  streams: TelemetryStreamStatus[] | null | undefined,
+  clusterId: string
+): TelemetryStreamStatus | undefined =>
+  selectClusterStreamTelemetry(
+    streams,
+    clusterId,
+    { name: 'resources', leafKind: 'domain', leaf: 'catalog' },
+    (entry) => entry.leafKind === 'domain' && entry.leaf === 'catalog'
+  );
+
+// Container logs record sessions on the socket and deliveries per log target
+// (the pod or workload a Logs tab reads).
+export const selectContainerLogsStreamTelemetry = (
+  streams: TelemetryStreamStatus[] | null | undefined,
+  clusterId: string
+): TelemetryStreamStatus | undefined =>
+  selectClusterStreamTelemetry(
+    streams,
+    clusterId,
+    { name: 'container-logs', leafKind: 'target' },
+    (entry) => entry.leafKind === 'target'
+  );
+
+// Events record sessions on the socket and deliveries per event scope.
+export const selectEventStreamTelemetry = (
+  streams: TelemetryStreamStatus[] | null | undefined,
+  clusterId: string
+): TelemetryStreamStatus | undefined =>
+  selectClusterStreamTelemetry(
+    streams,
+    clusterId,
+    { name: 'events', leafKind: 'scope' },
+    (entry) => entry.leafKind === 'scope'
+  );
+
+/** The cluster's metrics polling status. */
+export const selectClusterMetrics = (
+  clusterMetrics: TelemetryClusterMetricsStatus[] | null | undefined,
+  clusterId: string
+): TelemetryMetricsStatus | undefined =>
+  (clusterMetrics ?? []).find((entry) => entry.clusterId === clusterId)?.metrics;
 
 const formatQPS = (value: number): string => {
   if (!Number.isFinite(value) || value <= 0) {
@@ -536,11 +591,43 @@ const permissionActivityFields = (activity: CapabilityDescriptorActivityDetails 
   lastError: activity?.lastError ?? null,
 });
 
+const permissionFeatureForView = (
+  status: PermissionStatus,
+  scopedFeatureSet: Set<PermissionFeatureKey>
+): PermissionFeatureKey | undefined => {
+  if (scopedFeatureSet.size === 0 || (status.feature && scopedFeatureSet.has(status.feature))) {
+    return status.feature;
+  }
+  // Shared grants use the matching view feature for filtering and display;
+  // the cached status keeps the last query's feature as provenance.
+  const specLists = status.descriptor.namespace ? ALL_NAMESPACE_PERMISSIONS : CLUSTER_PERMISSIONS;
+  return (
+    specLists.find(
+      (list) =>
+        scopedFeatureSet.has(list.feature) &&
+        list.specs.some(
+          (spec) =>
+            getPermissionKey(
+              spec.kind,
+              spec.verb,
+              status.descriptor.namespace,
+              spec.subresource ?? null,
+              status.descriptor.clusterId,
+              spec.group,
+              spec.version
+            ) === status.id
+        )
+    )?.feature ?? status.feature
+  );
+};
+
 const buildPermissionRow = (
   status: PermissionStatus,
-  capabilityDescriptorIndex: Map<string, CapabilityDescriptorActivityDetails>
+  capabilityDescriptorIndex: Map<string, CapabilityDescriptorActivityDetails>,
+  scopedFeatureSet: Set<PermissionFeatureKey>
 ): PermissionRow => {
   const activity = capabilityDescriptorIndex.get(status.id);
+  const feature = permissionFeatureForView(status, scopedFeatureSet);
   return {
     clusterId: status.descriptor.clusterId,
     scope: activity?.scope ?? status.descriptor.namespace ?? 'Cluster',
@@ -551,8 +638,8 @@ const buildPermissionRow = (
     isDenied: !status.pending && !status.allowed,
     reason: status.reason ?? status.error ?? undefined,
     id: status.id,
-    feature: status.feature,
-    featureLabel: permissionFeatureLabel(status.feature) ?? undefined,
+    feature,
+    featureLabel: permissionFeatureLabel(feature) ?? undefined,
     descriptorNamespace: status.descriptor.namespace ?? null,
     ...permissionActivityFields(activity),
     descriptorKey: status.id,
@@ -567,17 +654,17 @@ interface PermissionRowFilter {
   selectedClusterId?: string | null;
 }
 
+const permissionRowMatchesFeature = (
+  row: PermissionRow,
+  scopedFeatureSet: Set<PermissionFeatureKey>
+): boolean => Boolean(row.feature && scopedFeatureSet.has(row.feature));
+
 const permissionRowMatchesClusterView = (
   row: PermissionRow,
   scopedFeatureSet: Set<PermissionFeatureKey>
 ): boolean =>
   row.scope === 'Cluster' ||
-  Boolean(
-    row.descriptorNamespace &&
-      row.feature !== null &&
-      row.feature !== undefined &&
-      scopedFeatureSet.has(row.feature)
-  );
+  Boolean(row.descriptorNamespace && permissionRowMatchesFeature(row, scopedFeatureSet));
 
 const permissionRowMatchesNamespaceView = (
   row: PermissionRow,
@@ -594,7 +681,7 @@ const permissionRowMatchesFilter = (row: PermissionRow, filter: PermissionRowFil
     return false;
   }
   const matchesFeature =
-    !filter.hasFeatureFilters || Boolean(row.feature && filter.scopedFeatureSet.has(row.feature));
+    !filter.hasFeatureFilters || permissionRowMatchesFeature(row, filter.scopedFeatureSet);
   if (!matchesFeature) {
     return false;
   }
@@ -631,7 +718,7 @@ export const buildPermissionRows = (params: {
       : null;
 
   const allPermissionRows = Array.from(permissionMap.values()).map((status) =>
-    buildPermissionRow(status, capabilityDescriptorIndex)
+    buildPermissionRow(status, capabilityDescriptorIndex, scopedFeatureSet)
   );
   const filter = {
     scopedFeatureSet,

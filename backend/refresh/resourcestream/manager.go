@@ -82,8 +82,9 @@ const (
 	// doorbell domains its POLLS STAY ON: the doorbell only rings on
 	// successful collections, so a metrics-less cluster would otherwise
 	// freeze the overview's object-derived counts.
-	domainClusterOverview  = "cluster-overview"
-	domainClusterAttention = "cluster-attention"
+	domainClusterOverview   = "cluster-overview"
+	domainClusterAttention  = "cluster-attention"
+	domainClusterIdentities = "cluster-identities"
 )
 
 const (
@@ -113,8 +114,8 @@ type bufferedUpdate struct {
 type updateBuffer = ringbuffer.Buffer[bufferedUpdate]
 
 // newUpdateBuffer allocates a resume buffer capped at the requested size.
-func newUpdateBuffer(max int) *updateBuffer {
-	return ringbuffer.New(max, func(u bufferedUpdate) uint64 { return u.sequence })
+func newUpdateBuffer(capacity int) *updateBuffer {
+	return ringbuffer.New(capacity, func(u bufferedUpdate) uint64 { return u.sequence })
 }
 
 func (s *subscription) close(reason DropReason) {

@@ -2,7 +2,7 @@
  * frontend/src/modules/browse/hooks/useBrowseColumns.tsx
  *
  * Hook for creating column definitions for the Browse table.
- * Supports both cluster-scoped (with namespace column) and namespace-scoped (without) views.
+ * All-namespaces scope adds a Namespace column after Name; cluster and namespace scopes omit it.
  */
 
 import * as cf from '@shared/components/tables/columnFactories';
@@ -10,7 +10,7 @@ import type { GridColumnDefinition } from '@shared/components/tables/GridTable';
 import { useNavigateToView } from '@shared/hooks/useNavigateToView';
 import { buildRequiredObjectReference } from '@shared/utils/objectIdentity';
 import { useMemo } from 'react';
-import type { CatalogItem } from '@/core/refresh/types';
+import type { CatalogActionFacts, CatalogItem } from '@/core/refresh/types';
 import { getDisplayKind } from '@/utils/kindAliasMap';
 
 /**
@@ -23,8 +23,8 @@ export type BrowseTableRow = {
   creationTimestamp: CatalogItem['creationTimestamp'];
   scope: CatalogItem['scope'];
   metadata: CatalogItem['metadata'];
-  labelsDigest?: CatalogItem['labelsDigest'];
-  actionFacts?: CatalogItem['actionFacts'];
+  labelsDigest?: string;
+  actionFacts?: CatalogActionFacts;
   kindDisplay: string;
   namespaceDisplay: string;
   apiDisplay: string;
@@ -102,30 +102,23 @@ export function useBrowseColumns({
       cf.createTextColumn<BrowseTableRow>('api', 'API', (row) => row.apiDisplay, {
         sortable: true,
       }),
+      ageColumn,
     ];
 
-    // Add namespace column for cluster-scoped and all-namespaces views
-    if (showNamespaceColumn) {
-      baseColumns.push(
-        cf.createTextColumn<BrowseTableRow>(
-          'namespace',
-          'Namespace',
-          (row) => row.namespaceDisplay,
-          {
-            sortable: true,
-            onClick: (row) =>
-              onNamespaceClick?.(row.ref.namespace ?? null, row.ref.clusterId ?? null),
-            isInteractive: (row) => Boolean(row.ref.namespace),
-            getTitle: (row) =>
-              row.ref.namespace ? `View ${row.ref.namespace} workloads` : undefined,
-            getClassName: () => 'object-panel-link',
-          }
-        )
-      );
-    }
+    const columns = showNamespaceColumn
+      ? cf.withNamespaceColumn(baseColumns, {
+          afterColumnKey: 'name',
+          accessor: (row) => row.namespaceDisplay,
+          sortable: true,
+          onClick: (row) =>
+            onNamespaceClick?.(row.ref.namespace ?? null, row.ref.clusterId ?? null),
+          isInteractive: (row) => Boolean(row.ref.namespace),
+          getTitle: (row) =>
+            row.ref.namespace ? `View ${row.ref.namespace} workloads` : undefined,
+          getClassName: () => 'object-panel-link',
+        })
+      : baseColumns;
 
-    baseColumns.push(ageColumn);
-
-    return cf.withAutoWidthColumns(baseColumns);
+    return cf.withAutoWidthColumns(columns);
   }, [showNamespaceColumn, onRowClick, onNamespaceClick, navigateToView]);
 }

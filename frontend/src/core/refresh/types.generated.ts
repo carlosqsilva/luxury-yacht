@@ -85,6 +85,12 @@ export const RESOURCE_STREAM_SIGNALS = ['changed', 'reset', 'error'] as const;
 
 export type ResourceStreamSignal = (typeof RESOURCE_STREAM_SIGNALS)[number];
 
+export type ContainerLogsWarningKind = 'targetLimit' | 'dropped';
+
+export type ContainerLogsLimitScope = 'perTab' | 'global';
+
+export type ContainerLogsIssueState = 'unavailable' | 'forbidden' | 'failed';
+
 export interface ArgoCDApplicationFacts {
   spec: ArgoCDApplicationSpec;
   sync?: string;
@@ -556,6 +562,52 @@ export interface ClusterExternalSecretFacts {
   template?: ExternalSecretFacts;
 }
 
+export interface ClusterIdentitiesSnapshot {
+  clusterId: string;
+  clusterName: string;
+  provider: ResourceQueryProvider;
+  table: string;
+  queryIdentity?: string;
+  continue?: string;
+  previous?: string;
+  self?: string;
+  cursorInvalid?: boolean;
+  anchor?: ResourceQueryAnchorResult;
+  pageStartRank?: number;
+  total: number;
+  unfilteredTotal: number;
+  totalIsExact: boolean;
+  kinds?: Array<string>;
+  namespaces?: Array<string>;
+  facetValues?: Array<ResourceQueryFacetValues>;
+  facetsExact: boolean;
+  completeness?: ResourceQueryCompleteness;
+  issues?: Array<ResourceQueryIssue>;
+  dynamic?: ResourceQueryDynamicRef;
+  capabilities: ResourceQueryCapabilities;
+  rows: Array<ClusterIdentity> | null;
+}
+
+export interface ClusterIdentity {
+  clusterId: string;
+  kind: string;
+  name: string;
+  bindings: Array<ClusterIdentityBinding> | null;
+  grantScopes: Array<string> | null;
+}
+
+export interface ClusterIdentityBinding {
+  clusterId: string;
+  group: string;
+  version: string;
+  kind: string;
+  resource?: string;
+  namespace?: string;
+  name?: string;
+  uid?: string;
+  role?: ResourceRef;
+}
+
 export interface ClusterNodeSnapshotEntry {
   ref: CanonicalResourceRef;
   status: string;
@@ -568,27 +620,24 @@ export interface ClusterNodeSnapshotEntry {
   version: string;
   internalIP?: string;
   externalIP?: string;
-  cpuCapacity: string;
-  cpuAllocatable: string;
-  cpuRequests: string;
-  cpuLimits: string;
-  cpuUsage: string;
-  memoryCapacity: string;
-  memoryAllocatable: string;
-  memRequests: string;
-  memLimits: string;
-  memoryUsage: string;
+  cpuCapacityMilli?: number;
+  cpuAllocatableMilli?: number;
+  cpuRequestsMilli?: number;
+  cpuLimitsMilli?: number;
+  cpuUsageMilli?: number;
+  memoryCapacityBytes?: number;
+  memoryAllocatableBytes?: number;
+  memoryRequestsBytes?: number;
+  memoryLimitsBytes?: number;
+  memoryUsageBytes?: number;
   pods: string;
   podsCapacity: string;
   podsAllocatable: string;
   restarts: number;
-  cpu: string;
-  memory: string;
   unschedulable: boolean;
   labels?: Record<string, string>;
   annotations?: Record<string, string>;
   taints?: Array<NodeTaint>;
-  podMetrics?: Array<NodePodMetric>;
 }
 
 export interface ClusterNodeSnapshotPayload {
@@ -631,14 +680,14 @@ export interface ClusterOverviewMetrics {
 export interface ClusterOverviewPayload {
   clusterType: string;
   clusterVersion: string;
-  cpuUsage: string;
-  cpuRequests: string;
-  cpuLimits: string;
-  cpuAllocatable: string;
-  memoryUsage: string;
-  memoryRequests: string;
-  memoryLimits: string;
-  memoryAllocatable: string;
+  cpuUsageMilli: number;
+  cpuRequestsMilli: number;
+  cpuLimitsMilli: number;
+  cpuAllocatableMilli: number;
+  memoryUsageBytes: number;
+  memoryRequestsBytes: number;
+  memoryLimitsBytes: number;
+  memoryAllocatableBytes: number;
   totalNodes: number;
   fargateNodes: number;
   regularNodes: number;
@@ -764,16 +813,57 @@ export interface ConditionFacts {
   lastTransitionTime: string | null;
 }
 
+export interface ContainerLogsResumePoint {
+  pod: string;
+  container: string;
+  isInit?: boolean;
+  isEphemeral?: boolean;
+  timestamp: string;
+  lines: Array<string> | null;
+}
+
 export interface ContainerLogsStreamEventPayload {
   domain: string;
   scope: string;
   sequence: number;
   generatedAt: number;
   reset?: boolean;
+  resumed?: boolean;
+  removedPods?: Array<string>;
+  snapshotComplete?: boolean;
+  trimmed?: number;
   entries?: Array<ContainerLogsWireEntry>;
-  warnings?: Array<string> | null;
+  warnings?: Array<ContainerLogsWarning> | null;
+  issues?: Array<ContainerLogsTargetIssue> | null;
   error?: string;
   errorDetails?: RefreshPermissionDeniedStatus;
+  retryable?: boolean;
+}
+
+export interface ContainerLogsStreamRequest {
+  scope: string;
+  selectedFilters?: Array<string>;
+  matchNone?: boolean;
+  maxEntries?: number;
+  maxBytes?: number;
+  resume?: Array<ContainerLogsResumePoint>;
+}
+
+export interface ContainerLogsTargetIssue {
+  pod: string;
+  container: string;
+  isInit?: boolean;
+  isEphemeral?: boolean;
+  state: ContainerLogsIssueState;
+  reason: string;
+}
+
+export interface ContainerLogsWarning {
+  kind: ContainerLogsWarningKind;
+  scope?: ContainerLogsLimitScope;
+  hidden?: number;
+  limit?: number;
+  count?: number;
 }
 
 export interface ContainerLogsWireEntry {
@@ -1406,12 +1496,12 @@ export interface NamespaceWorkloadSummary {
   restarts: number;
   age: string;
   ageTimestamp?: number;
-  cpuUsage?: string;
-  cpuRequest?: string;
-  cpuLimit?: string;
-  memUsage?: string;
-  memRequest?: string;
-  memLimit?: string;
+  cpuUsageMilli?: number;
+  cpuRequestMilli?: number;
+  cpuLimitMilli?: number;
+  memoryUsageBytes?: number;
+  memoryRequestBytes?: number;
+  memoryLimitBytes?: number;
   portForwardAvailable: boolean;
   desiredReplicas?: number;
   hpaManaged?: boolean;
@@ -1454,13 +1544,6 @@ export interface NodeMetricsInfo {
   consecutiveFailures?: number;
   successCount: number;
   failureCount: number;
-}
-
-export interface NodePodMetric {
-  namespace: string;
-  name: string;
-  cpuUsage: string;
-  memoryUsage: string;
 }
 
 export interface NodeTaint {
@@ -1631,12 +1714,12 @@ export interface PodSnapshotEntry {
   directOwnerKind?: string;
   directOwnerName?: string;
   directOwnerApiVersion?: string;
-  cpuRequest: string;
-  cpuLimit: string;
-  cpuUsage: string;
-  memRequest: string;
-  memLimit: string;
-  memUsage: string;
+  cpuRequestMilli?: number;
+  cpuLimitMilli?: number;
+  cpuUsageMilli?: number;
+  memoryRequestBytes?: number;
+  memoryLimitBytes?: number;
+  memoryUsageBytes?: number;
 }
 
 export interface PodSnapshotPayload {
@@ -1969,6 +2052,12 @@ export interface TelemetryCatalogStatus {
   failedResourceCount?: number;
 }
 
+export interface TelemetryClusterMetricsStatus {
+  clusterId: string;
+  clusterName?: string;
+  metrics: TelemetryMetricsStatus;
+}
+
 export interface TelemetryConnectionStats {
   retryAttempts: number;
   retrySuccesses: number;
@@ -2040,7 +2129,7 @@ export interface TelemetryStreamStatus {
 
 export interface TelemetrySummary {
   snapshots: Array<TelemetrySnapshotStatus> | null;
-  metrics: TelemetryMetricsStatus;
+  clusterMetrics: Array<TelemetryClusterMetricsStatus> | null;
   streams: Array<TelemetryStreamStatus> | null;
   catalog?: TelemetryCatalogStatus;
   connection: TelemetryConnectionStats;
@@ -2054,8 +2143,8 @@ export interface WorkloadResourceUsage {
 }
 
 export interface WorkloadTypeResourceUsage {
-  cpuUsage: string;
-  memoryUsage: string;
+  cpuUsageMilli: number;
+  memoryUsageBytes: number;
 }
 
 export interface CanonicalResourceRef extends ResourceRef {
@@ -2082,6 +2171,7 @@ export const REFRESH_DOMAINS = [
   'namespaces',
   'namespace-metrics',
   'cluster-overview',
+  'cluster-identities',
   'cluster-attention',
   'catalog',
   'catalog-diff',
@@ -2217,6 +2307,22 @@ export const REFRESH_DOMAIN_POLICIES = [
       timing: { interval: 10000, cooldown: 1000, timeout: 10 },
       priority: 3,
       registrationOrder: 3,
+      scheduled: true,
+    },
+  },
+  {
+    domain: 'cluster-identities',
+    category: 'cluster',
+    cachePolicy: 'snapshot-cache',
+    sourceClocks: ['object'],
+    backend: { registration: 'list', permission: 'runtime', resourceStream: false, bypassSingleflight: false },
+    frontend: {
+      refresherName: 'cluster-identities',
+      orchestrator: 'doorbell-snapshot',
+      diagnosticsStream: 'resources',
+      timing: { interval: 10000, cooldown: 1000, timeout: 10 },
+      priority: null,
+      registrationOrder: 30,
       scheduled: true,
     },
   },
@@ -2649,7 +2755,7 @@ export const REFRESH_DOMAIN_POLICIES = [
       timing: { interval: 5000, cooldown: 1000, timeout: 10 },
       priority: null,
       registrationOrder: 11,
-      scheduled: true,
+      scheduled: false,
     },
   },
 ] as const satisfies ReadonlyArray<GeneratedRefreshDomainPolicy>;
@@ -2810,15 +2916,19 @@ const telemetrySummarySchema: RefreshContractSchema = { kind: 'object', fields: 
     timeToFirstBatchMs: { optional: true, schema: { kind: 'number' } },
     maxInformerSyncWaitMs: { optional: true, schema: { kind: 'number' } },
   } }, nullable: true } },
-  metrics: { optional: false, schema: { kind: 'object', fields: {
-    lastCollected: { optional: false, schema: { kind: 'number' } },
-    lastDurationMs: { optional: false, schema: { kind: 'number' } },
-    consecutiveFailures: { optional: false, schema: { kind: 'number' } },
-    lastError: { optional: true, schema: { kind: 'string' } },
-    successCount: { optional: false, schema: { kind: 'number' } },
-    failureCount: { optional: false, schema: { kind: 'number' } },
-    active: { optional: false, schema: { kind: 'boolean' } },
-  } } },
+  clusterMetrics: { optional: false, schema: { kind: 'array', items: { kind: 'object', fields: {
+    clusterId: { optional: false, schema: { kind: 'string' } },
+    clusterName: { optional: true, schema: { kind: 'string' } },
+    metrics: { optional: false, schema: { kind: 'object', fields: {
+      lastCollected: { optional: false, schema: { kind: 'number' } },
+      lastDurationMs: { optional: false, schema: { kind: 'number' } },
+      consecutiveFailures: { optional: false, schema: { kind: 'number' } },
+      lastError: { optional: true, schema: { kind: 'string' } },
+      successCount: { optional: false, schema: { kind: 'number' } },
+      failureCount: { optional: false, schema: { kind: 'number' } },
+      active: { optional: false, schema: { kind: 'boolean' } },
+    } } },
+  } }, nullable: true } },
   streams: { optional: false, schema: { kind: 'array', items: { kind: 'object', fields: {
     name: { optional: false, schema: { kind: 'string' } },
     leaf: { optional: true, schema: { kind: 'string' } },
@@ -2881,6 +2991,7 @@ export interface BackendDomainPayloadMap {
   namespaces: NamespaceSnapshotPayload;
   'namespace-metrics': NamespaceMetricsSnapshotPayload;
   'cluster-overview': ClusterOverviewSnapshotPayload;
+  'cluster-identities': ClusterIdentitiesSnapshot;
   'cluster-attention': ClusterAttentionSnapshot;
   catalog: CatalogSnapshotPayload;
   'catalog-diff': CatalogSnapshotPayload;

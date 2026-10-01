@@ -44,6 +44,11 @@ vi.mock('@ui/settings/sections/ObjectPanelSection', () => ({
   default: vi.fn(() => <div data-testid="section-object-panel" />),
 }));
 
+vi.mock('@ui/settings/sections/LogsSection', () => ({
+  __esModule: true,
+  default: vi.fn(() => <div data-testid="section-logs" />),
+}));
+
 vi.mock('@ui/settings/sections/DataManagementSection', () => ({
   __esModule: true,
   default: vi.fn(() => <div data-testid="section-data-management" />),
@@ -116,7 +121,7 @@ describe('SettingsModal', () => {
   it('keeps categories at one Tab stop and moves their focus with arrows', async () => {
     const category = (label: string) =>
       requireValue(
-        Array.from(document.querySelectorAll<HTMLButtonElement>('.settings-modal-tab')).find(
+        Array.from(document.querySelectorAll<HTMLButtonElement>('.modal-sidebar-item')).find(
           (button) => button.textContent === label
         ),
         `expected ${label} category`
@@ -143,7 +148,7 @@ describe('SettingsModal', () => {
     };
     const expectFocusStop = (label: string) => {
       const stops = Array.from(
-        document.querySelectorAll<HTMLButtonElement>('.settings-modal-tab')
+        document.querySelectorAll<HTMLButtonElement>('.modal-sidebar-item')
       ).filter((button) => button.tabIndex === 0);
       expect(stops).toEqual([category(label)]);
     };
@@ -272,7 +277,7 @@ describe('SettingsModal', () => {
     expect(document.querySelector('[data-testid="section-kubeconfigs"]')).toBeNull();
 
     const tabs = Array.from(
-      document.querySelectorAll('.settings-modal-tab')
+      document.querySelectorAll('.modal-sidebar-item')
     ) as HTMLButtonElement[];
     const kubeconfigTab = tabs.find((t) => t.textContent?.includes('Kubeconfigs'));
     expect(kubeconfigTab).toBeTruthy();
@@ -286,8 +291,8 @@ describe('SettingsModal', () => {
     expect(document.querySelector('[data-testid="section-kubeconfigs"]')).toBeTruthy();
   });
 
-  it('places Data Management between Object Panel and Advanced in the sidebar', () => {
-    const labels = Array.from(document.querySelectorAll('.settings-modal-tab')).map((tab) =>
+  it('places Logs after Object Panel and Data Management before Advanced in the sidebar', () => {
+    const labels = Array.from(document.querySelectorAll('.modal-sidebar-item')).map((tab) =>
       tab.textContent?.trim()
     );
 
@@ -296,14 +301,29 @@ describe('SettingsModal', () => {
       'Kubeconfigs',
       'Display',
       'Object Panel',
+      'Logs',
       'Data Management',
       'Advanced',
     ]);
   });
 
+  it('opens the Logs section from its sidebar category', async () => {
+    const logsTab = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('.modal-sidebar-item')
+    ).find((tab) => tab.textContent?.trim() === 'Logs');
+
+    await act(async () => {
+      requireValue(logsTab, 'expected Logs settings tab').click();
+      await Promise.resolve();
+    });
+
+    expect(document.querySelector('[data-testid="section-logs"]')).toBeTruthy();
+    expect(localStorage.getItem('app-settings-last-tab')).toBe('logs');
+  });
+
   it('opens the Data Management section from its sidebar category', async () => {
     const dataManagementTab = Array.from(
-      document.querySelectorAll<HTMLButtonElement>('.settings-modal-tab')
+      document.querySelectorAll<HTMLButtonElement>('.modal-sidebar-item')
     ).find((tab) => tab.textContent?.includes('Data Management'));
 
     await act(async () => {
@@ -326,14 +346,14 @@ describe('SettingsModal', () => {
       await Promise.resolve();
     });
     expect(document.querySelector('[data-testid="section-advanced"]')).toBeTruthy();
-    expect(document.querySelector('.settings-modal-tab[tabindex="0"]')?.textContent).toBe(
+    expect(document.querySelector('.modal-sidebar-item[tabindex="0"]')?.textContent).toBe(
       'Advanced'
     );
   });
 
   it('persists the active tab across opens via localStorage', async () => {
     const tabs = Array.from(
-      document.querySelectorAll('.settings-modal-tab')
+      document.querySelectorAll('.modal-sidebar-item')
     ) as HTMLButtonElement[];
     const displayTab = tabs.find((t) => t.textContent?.includes('Display'));
     await act(async () => {
@@ -360,7 +380,7 @@ describe('SettingsModal', () => {
       await Promise.resolve();
     });
     expect(document.querySelector('[data-testid="section-display"]')).toBeTruthy();
-    expect(document.querySelector('.settings-modal-tab[tabindex="0"]')?.textContent).toBe(
+    expect(document.querySelector('.modal-sidebar-item[tabindex="0"]')?.textContent).toBe(
       'Display'
     );
   });

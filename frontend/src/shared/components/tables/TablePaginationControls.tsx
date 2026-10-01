@@ -143,9 +143,6 @@ const TablePaginationControls: React.FC<TablePaginationControlsProps> = ({
         <Dropdown
           id={`${idPrefix}-page-size`}
           name={`${idPrefix}-page-size`}
-          size="compact"
-          variant="outlined"
-          dropdownClassName="table-pagination-page-size-menu"
           ariaLabel="Rows per page"
           value={String(pageSize)}
           options={pageOptions}
@@ -166,9 +163,8 @@ const TablePaginationControls: React.FC<TablePaginationControlsProps> = ({
         <span className="table-pagination-range">
           {rangeLabel} of {totalLabel}
         </span>
-        <span
+        <output
           className="table-pagination-progress"
-          role="status"
           aria-label={loading ? 'Page request in progress' : undefined}
           aria-hidden={loading ? undefined : true}
         />

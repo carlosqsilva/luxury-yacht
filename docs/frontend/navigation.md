@@ -25,6 +25,16 @@ one retained workspace per open cluster.
 - Foreground-cluster blocking overlays must not cover Global views. Each Global
   row owns and presents its originating cluster's lifecycle/auth state.
 
+## Active View Title
+
+The workspace header shows the active view as `scope - view`, built by
+`core/navigation/activeViewTitle.ts`; the cluster tabs below it already name the
+cluster. The scope is the namespace on namespace views (the All Namespaces scope
+by its display name) and `Cluster` on cluster views, including Overview. Global
+views show only the view, and no title is shown while no cluster is open. Default names for new favorites
+add the cluster name (except on Global views) and join the parts with ` / `.
+Panel windows show their cluster name in the same header slot.
+
 ## Favorites
 
 `favoriteRoute.ts` owns persisted route and cluster-target interpretation. A
@@ -48,7 +58,9 @@ frontend cache follow the same rule.
 
 ## Cluster Sidebar Organization
 
-Overview, Attention, Browse, and Events are direct cluster links. The independently
+Overview, Attention, Browse, Events, and Identities are direct cluster links.
+Identities is an observed-subject view, not a Kubernetes resource category; it
+remains outside Resources. See [cluster identities](../architecture/cluster-identities.md). The independently
 collapsible Resources group contains Config, Namespaces, Nodes, RBAC, and Storage,
 in that order.
 The Extensions group contains CRDs and Custom Resources, followed by discovered

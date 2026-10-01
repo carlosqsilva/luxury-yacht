@@ -64,8 +64,11 @@ import {
   STREAM_MODE_BY_NAME,
   STREAM_ONLY_DOMAINS,
   selectCatalogStreamTelemetry,
+  selectClusterMetrics,
+  selectContainerLogsStreamTelemetry,
   selectDomainSnapshotTelemetry,
   selectDomainStreamTelemetry,
+  selectEventStreamTelemetry,
   selectStreamSocketTelemetry,
 } from './diagnostics';
 import {
@@ -579,6 +582,7 @@ const resolvePollingDetails = (params: {
 const ROW_COUNT_DOMAINS = new Set<RefreshDomain>([
   'nodes',
   'cluster-rbac',
+  'cluster-identities',
   'cluster-storage',
   'cluster-config',
   'cluster-crds',
@@ -1267,6 +1271,7 @@ const DOMAIN_DIAGNOSTIC_SCOPES: Array<{
   { domain: 'catalog', label: 'Browse Catalog' },
   { domain: 'catalog-diff', label: 'Diff Catalog' },
   { domain: 'cluster-rbac', label: 'Cluster RBAC' },
+  { domain: 'cluster-identities', label: 'Cluster Identities' },
   { domain: 'cluster-storage', label: 'Cluster Storage' },
   { domain: 'namespace-workloads', label: 'Workloads', hasMetrics: true },
   { domain: 'namespace-autoscaling', label: 'NS Autoscaling' },
@@ -1592,11 +1597,27 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
     selectedClusterId,
   ]);
 
-  const telemetryMetrics = telemetrySummary?.metrics;
-  const eventStreamTelemetry = telemetrySummary?.streams.find((entry) => entry.name === 'events');
-  const catalogStreamTelemetry = selectCatalogStreamTelemetry(telemetrySummary?.streams);
-  const containerLogsStreamTelemetry = telemetrySummary?.streams.find(
-    (entry) => entry.name === 'container-logs'
+  // Every summary card describes the active cluster only.
+  const telemetryMetrics = selectClusterMetrics(
+    telemetrySummary?.clusterMetrics,
+    selectedClusterId
+  );
+  const eventStreamTelemetry = selectEventStreamTelemetry(
+    telemetrySummary?.streams,
+    selectedClusterId
+  );
+  const catalogStreamTelemetry = selectCatalogStreamTelemetry(
+    telemetrySummary?.streams,
+    selectedClusterId
+  );
+  const containerLogsStreamTelemetry = selectContainerLogsStreamTelemetry(
+    telemetrySummary?.streams,
+    selectedClusterId
+  );
+  const activeClusterLogsScopeEntries = useMemo(
+    () =>
+      containerLogsScopeEntries.filter((entry) => entryMatchesCluster(entry, selectedClusterId)),
+    [containerLogsScopeEntries, selectedClusterId]
   );
   const orchestratorSummary = useMemo(() => {
     return buildOrchestratorSummary({
@@ -1632,10 +1653,10 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
 
   const logSummary = useMemo(() => {
     return buildContainerLogsSummary({
-      containerLogsScopeEntries,
+      containerLogsScopeEntries: activeClusterLogsScopeEntries,
       containerLogsStreamTelemetry,
     });
-  }, [containerLogsScopeEntries, containerLogsStreamTelemetry]);
+  }, [activeClusterLogsScopeEntries, containerLogsStreamTelemetry]);
 
   useShortcut({
     key: 'Escape',

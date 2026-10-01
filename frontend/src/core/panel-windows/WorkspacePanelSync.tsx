@@ -1,3 +1,4 @@
+import { panelTargetFromSnapshot } from '@modules/object-panel/panelTarget';
 import {
   createContext,
   type ReactNode,
@@ -149,18 +150,19 @@ export function WorkspacePanelSync({ children }: Readonly<{ children: ReactNode 
       },
       groupsForCluster: (clusterId) =>
         current.current.groups.filter((group) => group.clusterId === clusterId),
-      readCluster: async (clusterId) =>
+      readCluster: (clusterId) =>
         current.current.selectedClusterIds.includes(clusterId)
           ? activity.run(clusterId, () => readPanelWorkspace(windowName, clusterId))
-          : null,
+          : Promise.resolve(null),
       openPanel: async (tab) => {
-        if (!current.current.selectedClusterIds.includes(tab.objectRef.clusterId)) {
+        const { clusterId } = panelTargetFromSnapshot(tab);
+        if (!current.current.selectedClusterIds.includes(clusterId)) {
           return null;
         }
-        const result = await activity.run(tab.objectRef.clusterId, () =>
+        const result = await activity.run(clusterId, () =>
           openPanelWorkspaceObject(windowName, tab)
         );
-        return activity.isClosing(tab.objectRef.clusterId) ? null : result;
+        return activity.isClosing(clusterId) ? null : result;
       },
       quiesceCluster: async (clusterId) => {
         const settle = (closed: boolean) => {
