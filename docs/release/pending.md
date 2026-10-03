@@ -1,6 +1,6 @@
 ### Added
 
-- Nodes, Workloads, and Pods now have a Metrics tab with live CPU and memory usage graphs. Data on these graphs are ephemeral, and are cleared when the object is closed.
+- Nodes, Workloads, and Pods now have a Metrics tab with live CPU and memory usage graphs. Data on these graphs are ephemeral, and are cleared when the object is closed. Like other metrics data in the app, these graphs will only be populated if the metrics API is available.
 
 ### Changed
 
