@@ -131,14 +131,36 @@ filter state use stable finding type IDs.
 The backend owns the Attention finding set in a per-cluster maintained query
 store. Existing Pod, workload, and Node reflector bundles plus the shared Event
 informer update operational health incrementally. The object catalog publishes
-a coalesced, backend-only subset of objects whose deletion is waiting on a
-finalizer; Attention merges that lifecycle component with health causes for the
-same concrete UID. This keeps catalog scans off the render path and preserves
-the maintained-store spill/Cold-serving contract. A domain-owned timer advances
-grace periods and event expiry. The distinct `attention` stream clock remains
-the only change signal: catalog lifecycle changes update the Attention index,
-which rings that clock; the frontend refetches the current query page, with
-polling only as the stream-down fallback.
+two coalesced, backend-only subsets. The first holds objects whose deletion is
+waiting on a finalizer; Attention merges that lifecycle component with health
+causes for the same concrete UID. The second holds every object that reports a
+status about itself for Attention to classify. Today those are Argo CD
+Applications (sync, health, last sync operation phase, and active conditions),
+ApplicationSets (health and conditions whose status is True), and Karpenter
+NodePools (the resources whose usage is above the Karpenter limit threshold).
+They feed the `argocd-application-out-of-sync`, `argocd-application-degraded`,
+`argocd-application-missing`, `argocd-application-sync-failed`,
+`argocd-application-error`, `argocd-applicationset-error`, and
+`karpenter-nodepool-near-limit` findings. An aspect can hold several values; a
+rule matches when any of them does, and every matching rule adds its own cause.
+The NodePool threshold lives with the Karpenter facts, which also give the
+Karpenter table and NodePool details their usage and warning color, so all
+three flag the same pools. Reported statuses carry no transition time, so their
+findings have no grace period and appear as soon as the catalog sees the status.
+
+Neither subset publishes before the catalog's first full sync: until then the
+catalog holds a partial view, and an object missing from it would read as
+deleted. Even afterwards, an object missing from the catalog's view is not proof
+of deletion (its listing may have failed or been denied, or its CRD removed), so
+catalog-owned findings never prune a saved per-object ignore on absence. A
+recreated object (same name, new UID) drops the old object's ignores as soon as
+any source observes it, even when the index never saw the old object, because
+Kubernetes allows only one object per name at a time. Both subsets keep catalog scans off the
+render path and preserve the maintained-store spill/Cold-serving contract. A
+domain-owned timer advances grace periods and event expiry. The distinct
+`attention` stream clock remains the only change signal: catalog subset changes
+update the Attention index, which rings that clock; the frontend refetches the
+current query page, with polling only as the stream-down fallback.
 
 Attention severity is a closed `info`, `warning`, or `error` vocabulary. The
 ordered status rules, restart/replica signal policies, severity precedence, and

@@ -1,11 +1,18 @@
 ### Added
 
-- The metrics status popover now shows how long ago metrics were last collected.
+- Added items to the Attention view
+  - Warns when a Karpenter NodePool is using more than 80% of its CPU or memory limit.
+  - Flags Argo CD issues. Applications that are degraded, failed to sync, report an error, are out of sync, or are missing resources, and ApplicationSets that hit an error.
 
 ### Changed
 
-- Exported table data is easier to import into spreadsheets. CPU and memory metrics now export as numbers only, with no unit indicators. CPU is exported in millicores, and memory is exported in KiB.
+- The mouse wheel now zooms instead of scrolling in the Object Map.
+- NetworkPolicy, Ingress, route, Service, and EndpointSlice details now show traffic as a simple flow diagram.
+- The Argo CD view shows Sync and Health as colored status chips.
 
 ### Fixed
 
-- Action buttons in the connectivity and sessions status popovers are now readable in light mode, and have stronger contrast in dark mode.
+- Service IPs and ports no longer get cut off or overlap in the Network view. Long port lists are shortened, with the full list on hover.
+- Service endpoint counts are more accurate, and Service details show a warning only when something needs attention, such as a Service with no endpoints.
+- HTTP and gRPC route details now show all of a rule's match conditions and each backend's port and weight.
+- NetworkPolicy details now show every selector condition, and show an empty selector as matching everything instead of leaving it blank.

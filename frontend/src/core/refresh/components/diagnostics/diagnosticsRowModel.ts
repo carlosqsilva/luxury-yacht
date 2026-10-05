@@ -139,7 +139,7 @@ export const selectDomainStreamTelemetry = (
   const matchingStream = (streams ?? []).filter(
     (entry) => entry.name === streamName && (entry.clusterId ?? '') === clusterId
   );
-  // Only a `domain` leaf names a refresh domain; scope/target leaves key by
+  // Only a `domain` leaf names a refresh domain; target leaves key by
   // something else entirely and must never be matched here.
   return (
     matchingStream.find((entry) => entry.leafKind === 'domain' && entry.leaf === domain) ??
@@ -235,7 +235,11 @@ export const selectContainerLogsStreamTelemetry = (
     (entry) => entry.leafKind === 'target'
   );
 
-// Events record sessions on the socket and deliveries per event scope.
+// The Events tables' doorbells ride the unified resources socket. Present
+// their domain deliveries together with the owning socket's session/connect
+// state, as the catalog summary does.
+const EVENT_TABLE_DOMAINS = new Set(['cluster-events', 'namespace-events']);
+
 export const selectEventStreamTelemetry = (
   streams: TelemetryStreamStatus[] | null | undefined,
   clusterId: string
@@ -243,8 +247,8 @@ export const selectEventStreamTelemetry = (
   selectClusterStreamTelemetry(
     streams,
     clusterId,
-    { name: 'events', leafKind: 'scope' },
-    (entry) => entry.leafKind === 'scope'
+    { name: 'resources', leafKind: 'domain' },
+    (entry) => entry.leafKind === 'domain' && EVENT_TABLE_DOMAINS.has(entry.leaf ?? '')
   );
 
 /** The cluster's metrics polling status. */

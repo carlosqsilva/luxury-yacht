@@ -3321,11 +3321,12 @@ describe('refreshOrchestrator', () => {
 
             objectNamespace: 'default',
             objectUid: 'web-uid',
-            objectApiVersion: 'v1',
             type: 'Normal',
             source: 'kubelet',
             reason: 'Started',
             object: 'Pod/web',
+            objectKind: 'Pod',
+            objectName: 'web',
             message: 'still here',
             age: '1m',
             ageTimestamp: 1,

@@ -34,7 +34,18 @@ type registrationDeps struct {
 	// noteObjectEventsNotifier is the object-events doorbell counterpart of
 	// noteNamespaceNotifier; same wiring lifecycle.
 	noteObjectEventsNotifier func(*snapshot.ObjectEventsChangeNotifier)
-	noteAttentionIndex       func(*snapshot.ClusterAttentionIndex)
+	// noteEventTableNotifier receives the cluster-events and namespace-events
+	// doorbell notifiers; same wiring lifecycle.
+	noteEventTableNotifier func(*snapshot.EventTableChangeNotifier)
+	noteAttentionIndex     func(*snapshot.ClusterAttentionIndex)
+}
+
+// noteEventTable hands a registered event table's doorbell notifier to the
+// subsystem; nil (failed registration) and unwired test deps are ignored.
+func (deps registrationDeps) noteEventTable(notifier *snapshot.EventTableChangeNotifier) {
+	if notifier != nil && deps.noteEventTableNotifier != nil {
+		deps.noteEventTableNotifier(notifier)
+	}
 }
 
 // domainRegistration describes a single domain registration entry.
@@ -80,6 +91,9 @@ type domainRegistrationRunner struct {
 }
 
 func (r domainRegistrationRunner) run(ctx context.Context, registration domainRegistration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if registration.skipIf != nil && registration.skipIf() {
 		return nil
 	}
@@ -87,7 +101,13 @@ func (r domainRegistrationRunner) run(ctx context.Context, registration domainRe
 	if err != nil || denied {
 		return err
 	}
-	return r.register(registration)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := r.register(ctx, registration); err != nil {
+		return err
+	}
+	return ctx.Err()
 }
 
 func (r domainRegistrationRunner) registerPermissionDenied(ctx context.Context, registration domainRegistration) (bool, error) {
@@ -102,15 +122,15 @@ func (r domainRegistrationRunner) registerPermissionDenied(ctx context.Context, 
 	return true, err
 }
 
-func (r domainRegistrationRunner) register(registration domainRegistration) error {
+func (r domainRegistrationRunner) register(ctx context.Context, registration domainRegistration) error {
 	if registrationKindCount(registration) != 1 {
 		return fmt.Errorf("domain registration %q must provide exactly one registration kind", registration.name)
 	}
 	if registration.list != nil {
-		return r.gate.registerListDomain(*registration.list)
+		return r.gate.registerListDomain(ctx, *registration.list)
 	}
 	if registration.listWatch != nil {
-		return r.gate.registerListWatchDomain(*registration.listWatch)
+		return r.gate.registerListWatchDomain(ctx, *registration.listWatch)
 	}
 	return registration.direct()
 }
@@ -264,7 +284,7 @@ func (s readinessResourceSet) sorted() []string {
 
 // domainRegistrations binds executable registration callbacks by domain, then
 // applies the generated backend order from refresh-domain-contract.json.
-func domainRegistrations(deps registrationDeps) []domainRegistration {
+func domainRegistrations(ctx context.Context, deps registrationDeps) []domainRegistration {
 	clusterMeta := snapshot.ClusterMeta{ClusterID: deps.cfg.ClusterID, ClusterName: deps.cfg.ClusterName}
 	catalogConfig := snapshot.CatalogConfig{
 		CatalogService:  deps.cfg.ObjectCatalogService,
@@ -285,7 +305,7 @@ func domainRegistrations(deps registrationDeps) []domainRegistration {
 		// needs no cluster permission at all — it registers directly, with
 		// the runtime policy exempted to match its permissionless data
 		// source.
-		"namespaces":        namespacesRegistration(deps),
+		"namespaces":        namespacesRegistration(ctx, deps),
 		"namespace-metrics": namespaceMetricsRegistration(deps),
 
 		// Cluster overview degrades per resource (issue #244): the informer path
@@ -401,7 +421,9 @@ func domainRegistrations(deps registrationDeps) []domainRegistration {
 		}),
 
 		"cluster-events": directRegistration("cluster-events", func() error {
-			return snapshot.RegisterClusterEventsDomain(deps.registry, deps.informerFactory.SharedInformerFactory(), clusterMeta)
+			notifier, err := snapshot.RegisterClusterEventsDomain(deps.registry, deps.informerFactory.SharedInformerFactory(), clusterMeta)
+			deps.noteEventTable(notifier)
+			return err
 		}),
 
 		"cluster-identities": accessListRegistration(runtimeAccess, listDomainConfig{
@@ -484,7 +506,9 @@ func domainRegistrations(deps registrationDeps) []domainRegistration {
 		}),
 
 		"namespace-events": directRegistration("namespace-events", func() error {
-			return snapshot.RegisterNamespaceEventsDomain(deps.registry, deps.informerFactory.SharedInformerFactory(), clusterMeta)
+			notifier, err := snapshot.RegisterNamespaceEventsDomain(deps.registry, deps.informerFactory.SharedInformerFactory(), clusterMeta)
+			deps.noteEventTable(notifier)
+			return err
 		}),
 		"namespace-helm": directRegistration("namespace-helm", func() error {
 			return snapshot.RegisterNamespaceHelmDomain(
@@ -752,9 +776,9 @@ func listChecksFromRegistrationPlan(plan domainpermissions.RegistrationAccessPla
 // runtime policy: the rows are synthesized from configuration, so requiring
 // the cluster-wide namespaces LIST would deny exactly the restricted user
 // the scope exists for. Unscoped clusters keep the fail-fast list+watch gate.
-func namespacesRegistration(deps registrationDeps) domainRegistration {
+func namespacesRegistration(ctx context.Context, deps registrationDeps) domainRegistration {
 	registerScopedOrUnscoped := func() error {
-		eventsExpected := deps.informerFactory != nil && deps.informerFactory.CanListWatch("", "events")
+		eventsExpected := deps.informerFactory != nil && deps.informerFactory.CanListWatchWithContext(ctx, "", "events")
 		notifier, err := snapshot.RegisterNamespaceDomain(
 			deps.registry,
 			deps.informerFactory.SharedInformerFactory(),

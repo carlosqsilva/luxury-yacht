@@ -65,6 +65,9 @@ the snapshot package.
 
 ## Map Interactions
 
+- Every wheel gesture zooms around the pointer: a mouse wheel, a trackpad
+  scroll, and a pinch. Dragging the background pans. Both turn off auto-fit.
+  The map registers no G6 wheel behavior, so a wheel never pans as well.
 - Tab reaches the existing search field and toolbar controls. Enter in the search
   field centers a matching visible object; repeated presses cycle through matches.
 - Right-clicking an object opens its canvas menu, which uses the shared
