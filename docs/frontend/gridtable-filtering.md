@@ -14,11 +14,29 @@ placement and zoom follow [interaction boundaries](gridtable-interaction.md#inte
   order. Provider query facets participate in that order alongside structural
   filters, search, actions, and Columns; adding a facet must not create a
   keyboard focus trap.
-- A feature-owned structural action that must precede Namespace uses
-  `beforeNamespaceActions`; GridTable renders that IconBar after Kind and before
-  Namespace rather than forcing the action into the post-search action cluster.
-  A table without a Kind filter may use this as its leftmost filter-bar control;
-  the Workloads/Pods composite uses it for the expanded Pods collapse control.
+- Every table has one icon bar after the search box, in this order: Include
+  metadata, the view's own icons (`viewActions`, such as Clear selected workload
+  or Manage ignored findings), Favorite, a separator, and Download. Include
+  metadata shows on tables whose rows carry labels and annotations, except the
+  catalog-backed Browse and custom views; Favorite shows on main-window views
+  only. Query-backed tables search the metadata in the backend: per-build
+  domains through the typed matcher, maintained stores through the paged
+  store's `MetadataText`. The one
+  exception is a pane's structural control: it uses `beforeNamespaceActions`,
+  which GridTable renders as its own icon bar after Kind and before Namespace.
+  The Workloads/Pods composite uses it for the Pods pane's collapse control,
+  which the Pods pane (no Kind filter) shows as its leftmost control.
+- Search ignores letter case on every table, local and query-backed; there is
+  no case-sensitive option. Saved table state and favorites that still carry the
+  old `caseSensitive` flag load normally and drop it.
+- The Download button's menu (`useGridTableDownloadAction`, on the shared
+  `@shared/hooks/useDownloadMenu` that log views also use) copies the rows to
+  the clipboard as CSV or saves them to a CSV file. It is busy while a choice
+  runs, then flashes success or error; a canceled save changes nothing. Both take every matching row
+  when the view supplies `fetchAllRows`, and otherwise the local filtered rows.
+  Its label says "all matching rows" unless the rows are a backend page without
+  `fetchAllRows` or a partial window (`partialDataLabel`), which say "visible
+  rows".
 - Every multi-select Kinds dropdown exposes search plus `Select all` and
   `Select none`. GridTable owns this as an invariant of a visible Kind filter;
   views may decide whether the filter is present but cannot disable its controls.
@@ -110,6 +128,10 @@ placement and zoom follow [interaction boundaries](gridtable-interaction.md#inte
 
 ### Favorite snapshots
 
+- A favorite is a main-window route (cluster, view tab, namespace) plus its
+  tables' state. Every main-window table view offers exactly one favorite
+  action; tables inside an object panel offer none, in the main window as in a
+  panel window, because the route they would save is not theirs.
 - A favorite snapshots the complete `GridTableFilterState` and table display
   state as one named pane. Favorites code must compare, edit, save, and restore
   the state object as a whole; it must not maintain a separate allowlist of

@@ -27,11 +27,13 @@ Container and Node Logs share one viewer shell under
 `frontend/src/modules/object-panel/components/ObjectPanel/Logs`. Each viewer
 keeps its own source selection and transport.
 
-- `logOptionsReducer.ts`: search (text, highlight, invert, case, regex),
-  display (wrap, ANSI, raw/pretty/parsed), row expansion, copy feedback and
-  auto-refresh. The container reducer composes it with its source
-  fields. Highlighting is off while the filter is inverted; case sensitivity is
-  off in regex mode.
+- `logOptionsReducer.ts`: search (text, filter mode, case, regex), display
+  (wrap, ANSI, raw/pretty/parsed), row expansion and
+  auto-refresh. The container reducer composes it with its source fields. The
+  filter mode decides what the text does: All (the default) keeps every line,
+  Filtered keeps only matching lines, and Invert keeps only the others. Matches
+  are highlighted in All and Filtered, never in Invert. Case sensitivity is off
+  in regex mode.
 - `hooks/useLogPresentation.ts`: the deferred text filter (a viewer supplies the
   texts an entry matches; container search also matches pod and container
   names), JSON detection cached per line, the parsed JSON table (rows, columns
@@ -41,18 +43,48 @@ keeps its own source selection and transport.
   Container Logs builds its rows from the entries, so the pod, container and
   timestamp a row shows come from the entry and never from its message text. `useRawViewFallback` returns the JSON views to raw only when lines are
   shown and none is JSON; an empty log keeps the view.
-- `logToolbar.tsx`: the text filter box (`LogTextFilter`), the icon bar, and
-  the match count (`LogMatchCount`), shown only while a filter narrows the logs.
+- `logToolbar.tsx`: the icon bar, the search row (`LogSearchRow`), and the
+  log count (`renderLogCount`, "shown/total logs"), shown only while a filter hides
+  lines. It sits in the active-filters strip, left of Clear all.
+- `logSearchChips.ts`: the search chips both viewers show in that strip (the
+  text filter, flagged "(invalid expression)" for a bad regex, and Filtered or
+  Invert, Match case and Regex when on) and the search part of Clear all.
+  Container Logs adds its source and previous-logs chips.
+  The icon bar's search button opens the search row below the main controls:
+  the text filter box, the filter mode button (click cycles All → Filtered →
+  Invert; its menu picks one; `I` switches between Invert and All), and the
+  case and regex options. ⌘F /
+  Ctrl+F opens it and focuses the box. While it is open, Escape with focus in
+  the Logs tab closes it before the object panel's Escape can close the tab;
+  focus in the row moves to the search button first. Closing the row keeps its
+  filter applied, and the search button stays highlighted while a filter is
+  typed. Container
+  Logs remembers whether the row is open with the tab's other options; Node Logs
+  keeps it with its in-memory options, like its filter text. Search, timestamps
+  and wrap, and their shortcuts, are unavailable until a log line arrives; the
+  ANSI and format buttons are hidden until a line has color codes or JSON.
   Timestamps and previous logs are optional icon bar features; Node Logs
-  passes neither. The log settings both viewers share (buffer size, container
-  limits, API timestamps) live in Settings → Logs, not in the Logs tab.
+  passes neither. The timestamps button is a split toggle: the icon shows or
+  hides timestamps and is labeled with the zone in use (UTC or LOCAL), and its
+  caret menu picks UTC or local time. The time zone
+  is the app-wide Settings → Logs setting, so a choice applies to every Logs
+  tab; picking a zone also shows timestamps. When the logs contain JSON, the
+  format button cycles Raw → Pretty → Table on click, and its caret menu picks
+  one directly; `J` and `P` still toggle Pretty and Table. The other log settings both
+  viewers share (buffer size, container limits, timestamp format) live only in
+  Settings → Logs.
 - `hooks/useLogKeyboardShortcuts.ts`: shared shortcuts. `T` (timestamps) and
   `V` (previous logs) exist only when the viewer passes those features.
-- `hooks/useLogCopyAction.ts`: the copy action and selection copy; clipboard
-  failures are reported, never swallowed.
+- `@shared/hooks/useLogDownloadMenu.tsx`: the Download button of every log
+  view, App Logs included, on the shared `useDownloadMenu` that tables also use
+  (busy while a choice runs, then success or error feedback). Both choices take
+  the same text: CSV in Table view,
+  saved as a .csv file, and the shown lines otherwise, saved as a .log file.
+  `Shift+C` still copies in Container and Node Logs. Failures are reported, never
+  swallowed. `hooks/useLogSelectionCopy.ts` copies a text selection.
 - `LogStatus.tsx`: the error block, the warning bar and the buffer-full
-  indicator (a warning icon beside the icon bar whose tooltip says which logs
-  are shown). Both viewers show loading with the shared spinner and their empty
+  indicator (a warning icon at the start of the controls row whose tooltip says
+  which logs are shown). Both viewers show loading with the shared spinner and their empty
   messages as the log's only line; a failure that leaves lines keeps them and
   reports in the warning bar.
 

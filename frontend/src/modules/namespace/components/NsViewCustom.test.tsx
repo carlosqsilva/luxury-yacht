@@ -127,7 +127,7 @@ vi.mock('@modules/namespace/hooks/useNamespaceGridTablePersistence', () => ({
       setColumnWidths: vi.fn(),
       columnVisibility: null,
       setColumnVisibility: vi.fn(),
-      filters: { search: '', kinds: [], namespaces: [], caseSensitive: false },
+      filters: { search: '', kinds: [], namespaces: [] },
       setFilters: vi.fn(),
       pageSize: null,
       setPageSize: vi.fn(),
@@ -543,11 +543,6 @@ describe('NsViewCustom', () => {
     expect(gridProps.filters.options.showKindDropdown).toBe(true);
     // Export is now the unified frontend fetcher, not a server-side per-action catalog export.
     expect(typeof gridProps.fetchAllRows).toBe('function');
-    expect(
-      (gridProps.filters.options.postActions ?? []).some(
-        (item) => 'id' in item && item.id === 'copy-namespace-custom-query-csv'
-      )
-    ).toBe(false);
   });
 
   it('uses catalog facet metadata instead of deriving kinds from loaded rows', async () => {

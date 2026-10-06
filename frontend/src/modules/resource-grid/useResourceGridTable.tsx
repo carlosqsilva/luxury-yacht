@@ -336,9 +336,8 @@ function useResourceGridTableCommon<T extends ResourceGridTableRow>({
   availableKinds: kindOptions,
   diagnosticsLabel,
   filterAccessors,
-  leadingFilterActions = [],
+  viewActions = [],
   filterOptionOverrides,
-  metadataSearch,
   onTableStateChange,
   rowIdentity,
   keyExtractor,
@@ -348,7 +347,6 @@ function useResourceGridTableCommon<T extends ResourceGridTableRow>({
   namespace = '',
   showNamespaceFilters = false,
   showKindDropdown = false,
-  getTrailingFilterActions,
   transformSortedData,
   showFavoriteToggle = true,
   favoritePane,
@@ -441,33 +439,13 @@ function useResourceGridTableCommon<T extends ResourceGridTableRow>({
     persistenceHydrated,
   ]);
 
-  const useMetadata = Boolean(metadataSearch);
-  const getDefaultMetadataSearchValues = useCallback(
-    (row: T) => metadataSearch?.getDefaultValues(row) ?? [],
-    [metadataSearch]
-  );
-  const getMetadataSearchMaps = useCallback(
-    (row: T) => metadataSearch?.getMetadataMaps(row) ?? [],
-    [metadataSearch]
-  );
-  const metadata = useMetadataSearch<T>({
-    enabled: useMetadata,
-    getDefaultValues: getDefaultMetadataSearchValues,
-    getMetadataMaps: getMetadataSearchMaps,
+  // Rows that carry labels and annotations (the data behind custom metadata
+  // columns) can include them in the search.
+  const metadataToggle = useMetadataSearch({
+    enabled: supportsCustomMetadataColumns,
     filters: persistence.filters,
     onFiltersChange: persistence.setFilters,
   });
-  const metadataToggle = useMetadata ? metadata.metadataToggle : null;
-  const effectiveFilterAccessors = useMemo<GridTableFilterConfig<T>['accessors']>(
-    () =>
-      useMetadata
-        ? {
-            ...filterAccessors,
-            getSearchText: metadata.getSearchText,
-          }
-        : filterAccessors,
-    [filterAccessors, metadata.getSearchText, useMetadata]
-  );
 
   const favoriteFilterOptions = useMemo(
     () => ({
@@ -499,20 +477,15 @@ function useResourceGridTableCommon<T extends ResourceGridTableRow>({
     availableFilterNamespaces: showNamespaceFilters ? availableFilterNamespaces : undefined,
     filterOptions: favoriteFilterOptions,
   });
-  const trailingFilterActions = useMemo(
-    () => getTrailingFilterActions?.(sortedData) ?? [],
-    [getTrailingFilterActions, sortedData]
-  );
-  // Filter-related actions and the favorite (save) toggle all live on the left, separate
-  // from the right-side copy/export cluster (the scope toggle + Copy + Export).
+  // One icon bar: Include metadata, the view's own icons, then Favorite. The filter
+  // bar puts Download after a separator.
   const filterPreActions = useMemo(
     () => [
       ...(metadataToggle ? [metadataToggle] : []),
-      ...leadingFilterActions,
-      ...trailingFilterActions,
+      ...viewActions,
       ...(favToggle ? [favToggle] : []),
     ],
-    [favToggle, leadingFilterActions, metadataToggle, trailingFilterActions]
+    [favToggle, metadataToggle, viewActions]
   );
   const displayData = useMemo(
     () => (transformSortedData ? transformSortedData(sortedData) : sortedData),
@@ -523,7 +496,7 @@ function useResourceGridTableCommon<T extends ResourceGridTableRow>({
     () => ({
       enabled: true,
       value: filterValue,
-      accessors: effectiveFilterAccessors,
+      accessors: filterAccessors,
       onChange: handleFiltersChange,
       onReset: persistence.resetState,
       options: {
@@ -535,7 +508,7 @@ function useResourceGridTableCommon<T extends ResourceGridTableRow>({
       },
     }),
     [
-      effectiveFilterAccessors,
+      filterAccessors,
       filterValue,
       handleFiltersChange,
       favoriteFilterOptions,
