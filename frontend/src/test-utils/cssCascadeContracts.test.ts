@@ -100,6 +100,36 @@ describe('strict CSS cascade contracts', () => {
     }
   });
 
+  it('keeps a focused panel group root unfilled while its controls show keyboard focus', () => {
+    // WebKit focuses an open <dialog> with :focus-visible when its native
+    // window becomes key, so pointer-only users would see the whole panel fill.
+    const style = installStyles(
+      ...['styles/utilities/focus.css', 'src/ui/dockable/DockablePanel.css'].map((path) =>
+        resolveFocusColors(readProjectFile(path))
+      )
+    );
+    style.dataset.cssContract = 'panel-root-focus-background';
+    document.body.innerHTML = `
+      <dialog open class="dockable-panel" tabindex="-1">
+        <button class="dockable-panel__control-btn">Dock</button>
+      </dialog>
+    `;
+    const panel = requireValue(document.querySelector<HTMLElement>('.dockable-panel'), 'panel');
+    const control = requireValue(
+      document.querySelector<HTMLElement>('.dockable-panel__control-btn'),
+      'panel control'
+    );
+    const panelFill = getComputedStyle(panel).backgroundColor;
+    panel.classList.add('keyboard-programmatic-focus');
+    panel.focus();
+    expect(getComputedStyle(panel).backgroundColor).toBe(panelFill);
+
+    const controlFill = getComputedStyle(control).backgroundColor;
+    control.classList.add('keyboard-programmatic-focus');
+    control.focus();
+    expect(getComputedStyle(control).backgroundColor).not.toBe(controlFill);
+  });
+
   it('distinguishes the sidebar keyboard preview from an inactive item', () => {
     const style = installStyles(resolveFocusColors(readProjectFile('src/ui/layout/Sidebar.css')));
     style.dataset.cssContract = 'sidebar-focus-background';
