@@ -1,18 +1,22 @@
 ### Added
 
-- Added items to the Attention view
-  - Warns when a Karpenter NodePool is using more than 80% of its CPU or memory limit.
-  - Flags Argo CD issues. Applications that are degraded, failed to sync, report an error, are out of sync, or are missing resources, and ApplicationSets that hit an error.
+- Extended support for metadata search (labels and annotations) on the namespace and cluster resource tables.
 
 ### Changed
 
-- The mouse wheel now zooms instead of scrolling in the Object Map.
-- NetworkPolicy, Ingress, route, Service, and EndpointSlice details now show traffic as a simple flow diagram.
-- The Argo CD view shows Sync and Health as colored status chips.
+- Improvements to icon bar buttons in the Logs tab and/or table views.
+  - Search button opens search controls in its own row. Can also be invoked with ⌘F / Ctrl+F..
+  - Consolidated Filter button replaces the separate Highlight and Invert buttons when search is enabled. Click to cycle the filter modes or select from its dropdown.
+  - Consolidated download button in tables and log viewers, replacing the separate Copy and Export buttons. Click to select Copy to Clipboard or Save to File.
+  - Consolidated Format button cycles Raw, Pretty, and Table views, or you can pick from its menu.
+  - The Timestamp button has a UTC / local time menu and shows which is in use.
+  - Workload logs hide the container name unless there are multiple containers, to save space.
+  - Auto-refresh button now toggles between a red Stop button and a green Play button.
+  - Button styling updated. Dimmed only when unavailable, and filled when on. Buttons that cycle modes (format, filter mode, auto-refresh) are never filled. Hovering brightens the icon.
 
 ### Fixed
 
-- Service IPs and ports no longer get cut off or overlap in the Network view. Long port lists are shortened, with the full list on hover.
-- Service endpoint counts are more accurate, and Service details show a warning only when something needs attention, such as a Service with no endpoints.
-- HTTP and gRPC route details now show all of a rule's match conditions and each backend's port and weight.
-- NetworkPolicy details now show every selector condition, and show an empty selector as matching everything instead of leaving it blank.
+- Logs tab container that starts after the tab opens, such as a debug container, appears in the Containers dropdown and its lines are named
+- In the Workloads view, the collapsed Pods pane stays collapsed until you open it again. Previously, selecting a workload would reopen the pane.
+- The object panel's Pods tab no longer has a Favorite button, which saved the wrong view
+- Copying or saving the Jobs tab includes only the jobs that match its search
