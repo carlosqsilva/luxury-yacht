@@ -16,7 +16,8 @@ placement and zoom follow [interaction boundaries](gridtable-interaction.md#inte
   keyboard focus trap.
 - Every table has one icon bar after the search box, in this order: Include
   metadata, the view's own icons (`viewActions`, such as Clear selected workload
-  or Manage ignored findings), Favorite, a separator, and Download. Include
+  or Manage ignored findings), a separator, Favorite, a separator, and
+  Download. Favorite has no separator before it when it is the first icon. Include
   metadata shows on tables whose rows carry labels and annotations, except the
   catalog-backed Browse and custom views; Favorite shows on main-window views
   only. Query-backed tables search the metadata in the backend: per-build

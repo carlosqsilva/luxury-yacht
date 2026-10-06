@@ -6,6 +6,7 @@
 
 import { ALL_NAMESPACES_SCOPE } from '@modules/namespace/constants';
 import { useNamespaceFilterOptions } from '@modules/namespace/hooks/useNamespaceFilterOptions';
+import type { IconBarItem } from '@shared/components/IconBar/IconBar';
 import type { CustomMetadataColumnDefinition } from '@shared/components/tables/customMetadataColumns';
 import {
   GRIDTABLE_VIRTUALIZATION_DEFAULT,
@@ -247,6 +248,17 @@ export function useObjectPanelResourceGridTable<T extends ResourceGridTableRow>(
   };
 }
 
+// Favorite follows a table's other icons after a separator, and leads without one.
+const withFavorite = (
+  items: readonly IconBarItem[],
+  favorite: IconBarItem | null | undefined
+): IconBarItem[] => {
+  if (!favorite) {
+    return [...items];
+  }
+  return items.length > 0 ? [...items, { type: 'separator' }, favorite] : [favorite];
+};
+
 export function useQueryResourceGridTable<T extends ResourceGridTableRow>({
   tableMode,
   supportsCustomMetadataColumns,
@@ -302,7 +314,7 @@ export function useQueryResourceGridTable<T extends ResourceGridTableRow>({
           ? 'query'
           : (filterOptions.searchBehavior ?? 'local'),
         partialDataLabel: filterOptions.partialDataLabel ?? resourceGridPartialDataLabel(tableMode),
-        preActions: [...(filterOptions.preActions ?? []), ...(favToggle ? [favToggle] : [])],
+        preActions: withFavorite(filterOptions.preActions ?? [], favToggle),
       },
     }),
     [
@@ -477,14 +489,10 @@ function useResourceGridTableCommon<T extends ResourceGridTableRow>({
     availableFilterNamespaces: showNamespaceFilters ? availableFilterNamespaces : undefined,
     filterOptions: favoriteFilterOptions,
   });
-  // One icon bar: Include metadata, the view's own icons, then Favorite. The filter
-  // bar puts Download after a separator.
+  // One icon bar: Include metadata, the view's own icons, a separator, then
+  // Favorite. The filter bar puts Download after another separator.
   const filterPreActions = useMemo(
-    () => [
-      ...(metadataToggle ? [metadataToggle] : []),
-      ...viewActions,
-      ...(favToggle ? [favToggle] : []),
-    ],
+    () => withFavorite([...(metadataToggle ? [metadataToggle] : []), ...viewActions], favToggle),
     [favToggle, metadataToggle, viewActions]
   );
   const displayData = useMemo(

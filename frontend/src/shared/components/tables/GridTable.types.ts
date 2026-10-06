@@ -141,8 +141,8 @@ export interface GridTableFilterOptions {
   /** A pane's structural control (e.g. Collapse Pods), rendered immediately before Namespace. */
   beforeNamespaceActions?: IconBarItem[];
   /**
-   * IconBar items before Download: Include metadata, the view's own icons, and
-   * Favorite, in that order.
+   * IconBar items before Download: Include metadata, the view's own icons, a
+   * separator, and Favorite, in that order.
    */
   preActions?: IconBarItem[];
   /** Override the total item count shown in the filter bar (e.g. server-side total for paginated views). */
