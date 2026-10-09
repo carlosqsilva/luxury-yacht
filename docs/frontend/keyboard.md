@@ -46,7 +46,9 @@ Owners: `frontend/src/ui/shortcuts/{context.tsx,surfaces.ts,hooks.ts}`
   including programmatic focus after pointer use. Editable fields need the
   shared keyboard marker so clicking does not tint them; typing clears it until
   the next keyboard focus move. Dropdown/context-menu backgrounds and option
-  colors, YAML editors, and log output are excluded. Forced-color mode keeps a
+  colors, YAML editors, log output, and region roots (main content and panel
+  groups) are excluded; WebKit focuses an open panel `<dialog>` as
+  `:focus-visible` when its native window becomes key. Forced-color mode keeps a
   system outline.
 - The first Tab after pointer use and each region change briefly outline the
   destination region. `ui/shortcuts/regionFocusIndicator.ts` waits for the
