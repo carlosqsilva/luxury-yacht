@@ -266,8 +266,9 @@ disconnect, poller shutdown) is expected and never reported.
   carried by a URL or network operation is a connectivity outcome.
 - The known-only credential classifier keeps expected auth and connectivity
   outcomes in the local log: wrapped auth-state errors, raw 401s or helper
-  failures, API-server unavailable/timeouts, recognized DNS/TCP/TLS failures.
-  Unrecognized errors report. Structured 403s, refresh-domain permission
+  failures, API-server unavailable/timeouts, recognized DNS/TCP/TLS failures,
+  dropped HTTP/2 connections (lost, client-closed, GOAWAY), and an EOF inside a
+  request error (a bare EOF still reports). Unrecognized errors report. Structured 403s, refresh-domain permission
   denials, and NotFound stay local; permission decisions and returned errors
   are unchanged.
 - The auth recovery loop separately treats an unknown probe failure as

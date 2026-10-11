@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"sync"
 	"testing"
@@ -272,6 +273,41 @@ func TestLoggerKeepsExpectedClusterFailuresLocal(t *testing.T) {
 			name: "API server unavailable",
 			err:  apierrors.NewServiceUnavailable("cluster temporarily unavailable"),
 		},
+		{
+			name: "connection closed before response",
+			err:  &url.Error{Op: "Post", URL: "https://cluster.example.test", Err: io.EOF},
+		},
+		{
+			name: "HTTP/2 connection lost",
+			err: &url.Error{
+				Op:  "Post",
+				URL: "https://cluster.example.test",
+				Err: errors.New("http2: client connection lost"),
+			},
+		},
+		{
+			name: "HTTP/2 connection lost while reading response body",
+			err: fmt.Errorf(
+				"unexpected error when reading response body. Please retry. Original error: %w",
+				errors.New("http2: client connection lost"),
+			),
+		},
+		{
+			name: "HTTP/2 connection closed by client teardown",
+			err: &url.Error{
+				Op:  "Post",
+				URL: "https://cluster.example.test",
+				Err: errors.New("http2: client connection force closed via ClientConn.Close"),
+			},
+		},
+		{
+			name: "HTTP/2 server GOAWAY",
+			err: &url.Error{
+				Op:  "Post",
+				URL: "https://cluster.example.test",
+				Err: errors.New(`http2: server sent GOAWAY and closed the connection; LastStreamID=109, ErrCode=NO_ERROR, debug=""`),
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -300,6 +336,11 @@ func TestLoggerReportsDeadlineAndUnexpectedURLFailures(t *testing.T) {
 		err  error
 	}{
 		{name: "deadline exceeded", err: context.DeadlineExceeded},
+		{
+			// Only a transport EOF proves a dropped connection; a decoder EOF is a defect.
+			name: "EOF outside a transport request",
+			err:  fmt.Errorf("decode cached payload: %w", io.EOF),
+		},
 		{
 			name: "URL application failure",
 			err: &url.Error{
