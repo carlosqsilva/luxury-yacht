@@ -13,7 +13,7 @@ import {
 } from '@/core/app-state-access';
 import { readPodContainers, requestData } from '@/core/data-access';
 import '@xterm/xterm/css/xterm.css';
-import type { types } from '@core/backend-api/models';
+import { types } from '@core/backend-api/models';
 import {
   type DesktopEventPayload,
   onEvent,
@@ -30,6 +30,7 @@ import type { DropdownOption } from '@shared/components/dropdowns/Dropdown';
 import { ErrorSurface } from '@shared/components/errors/ErrorSurface';
 import { useVirtualScrollbar } from '@shared/scrollbars/useVirtualScrollbar';
 import { resolveTerminalTheme, toXtermThemeDefinition } from '@shared/terminal/terminalTheme';
+import { buildCanonicalObjectRowKey } from '@shared/utils/objectIdentity';
 import { useKeyboardSurface } from '@ui/shortcuts';
 import { errorHandler } from '@utils/errorHandler';
 import {
@@ -39,6 +40,7 @@ import {
   StartShellSession,
 } from '@/core/backend-api';
 import ShellConnectionControls from './ShellConnectionControls';
+import ShellSessionBar from './ShellSessionBar';
 import './ShellTab.css';
 
 interface ShellTabProps {
@@ -56,6 +58,16 @@ interface ShellTarget {
   namespace: string;
   resourceName: string;
 }
+
+// The Shell tab always targets one Pod; this is that Pod's complete identity.
+const shellTargetIdentity = (target: ShellTarget) => ({
+  clusterId: target.clusterId,
+  group: '',
+  version: 'v1',
+  kind: 'Pod',
+  namespace: target.namespace,
+  name: target.resourceName,
+});
 
 type ShellStatus = 'idle' | 'connecting' | 'open' | 'closed' | 'error';
 
@@ -116,11 +128,10 @@ function trimBacklogOverlap(backlog: string, bufferedOutput: string): string {
 }
 
 async function startTrackedShellSession(
-  clusterId: string,
-  request: Parameters<typeof StartShellSession>[1],
+  request: Parameters<typeof StartShellSession>[0],
   isCancelled: () => boolean
 ): Promise<types.ShellSession | null> {
-  const session = await StartShellSession(clusterId, request);
+  const session = await StartShellSession(request);
   if (!session) {
     throw new Error('Shell session was not created');
   }
@@ -136,17 +147,7 @@ async function createDebugShellContainer(
   options: Parameters<typeof runCreateDebugContainer>[1]
 ): Promise<types.DebugContainerResponse> {
   const response = await runCreateDebugContainer(
-    buildObjectActionTarget(
-      {
-        clusterId: target.clusterId,
-        group: '',
-        version: 'v1',
-        kind: 'Pod',
-        namespace: target.namespace,
-        name: target.resourceName,
-      },
-      'create debug container for'
-    ),
+    buildObjectActionTarget(shellTargetIdentity(target), 'create debug container for'),
     options
   );
   const debugContainer = response.debugContainer as types.DebugContainerResponse | undefined;
@@ -161,8 +162,7 @@ type TrackedShellSession = Awaited<ReturnType<typeof readShellSessions>>[number]
 function attachedShellSession(session: TrackedShellSession): types.ShellSession {
   return {
     sessionId: session.sessionId,
-    namespace: session.namespace,
-    podName: session.podName,
+    target: session.target,
     container: session.container,
     command: session.command ?? [],
     containers: [],
@@ -171,6 +171,11 @@ function attachedShellSession(session: TrackedShellSession): types.ShellSession 
 
 const resolveCustomOption = (selected: string, custom: string): string =>
   selected === '__custom__' ? custom.trim() : selected;
+
+// A close while connecting or right after opening usually means the shell never started.
+const isPrematureClose = (status: ShellStatus, openedAt: number | null): boolean =>
+  status === 'connecting' ||
+  (status === 'open' && openedAt !== null && Date.now() - openedAt < 1500);
 
 function handleShellClipboardKey(
   event: KeyboardEvent,
@@ -220,6 +225,7 @@ const ShellTab: React.FC<ShellTabProps> = ({
   const [reconnectToken, setReconnectToken] = useState(0);
   const [statusReason, setStatusReason] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<ShellContextMenuState | null>(null);
+  const [endingSession, setEndingSession] = useState(false);
   const sessionIdRef = useRef<string | null>(null);
   const statusRef = useRef<ShellStatus>('idle');
   const terminalRef = useRef<Xterm.Terminal | null>(null);
@@ -626,18 +632,13 @@ const ShellTab: React.FC<ShellTabProps> = ({
 
     let cancelled = false;
     const request = {
-      namespace,
-      podName: resourceName,
+      target: shellTargetIdentity({ clusterId: resolvedClusterId, namespace, resourceName }),
       container: containerOverride ?? undefined,
       command: resolvedShell ? [resolvedShell] : undefined,
     };
     const start = async () => {
       try {
-        const shellSession = await startTrackedShellSession(
-          resolvedClusterId,
-          request,
-          () => cancelled
-        );
+        const shellSession = await startTrackedShellSession(request, () => cancelled);
         if (!shellSession) {
           return;
         }
@@ -680,14 +681,10 @@ const ShellTab: React.FC<ShellTabProps> = ({
   ]);
 
   const handleSessionClosed = useCallback(
-    (reason?: string) => {
+    (reason?: string, endedByUser = false) => {
       pendingReplayRef.current = null;
-      const previousStatus = statusRef.current;
       const closedTooSoon =
-        previousStatus === 'connecting' ||
-        (previousStatus === 'open' &&
-          sessionOpenedAtRef.current !== null &&
-          Date.now() - sessionOpenedAtRef.current < 1500);
+        !endedByUser && isPrematureClose(statusRef.current, sessionOpenedAtRef.current);
       clearSession();
       disposeTerminal();
       if (statusRef.current === 'error') {
@@ -731,7 +728,7 @@ const ShellTab: React.FC<ShellTabProps> = ({
         return;
       }
       switch (evt.status) {
-        case 'error': {
+        case types.ShellSessionStatus.ShellSessionStatusError: {
           const details = errorHandler.handleInline(
             new Error(evt.reason || 'Shell session failed.'),
             {
@@ -749,11 +746,15 @@ const ShellTab: React.FC<ShellTabProps> = ({
           disposeTerminal();
           return;
         }
-        case 'closed':
-        case 'timeout':
+        case types.ShellSessionStatus.ShellSessionStatusEnded:
+          // A user ended it, from this tab or any other window; never a failed connection.
+          handleSessionClosed(evt.reason, true);
+          return;
+        case types.ShellSessionStatus.ShellSessionStatusClosed:
+        case types.ShellSessionStatus.ShellSessionStatusTimeout:
           handleSessionClosed(evt.reason);
           return;
-        case 'open':
+        case types.ShellSessionStatus.ShellSessionStatusOpen:
           sessionOpenedAtRef.current = Date.now();
           ensureTerminal();
           writeLine('\x1b[32mConnected\x1b[0m\r\n');
@@ -788,6 +789,22 @@ const ShellTab: React.FC<ShellTabProps> = ({
     initiateConnection();
   }, [initiateConnection]);
 
+  // The backend publishes the ended status; a failed request leaves the session attached.
+  const handleEndSession = useCallback(async () => {
+    const sessionId = sessionIdRef.current;
+    if (!sessionId) {
+      return;
+    }
+    setEndingSession(true);
+    try {
+      await CloseShellSession(sessionId);
+    } catch (error) {
+      errorHandler.handle(error, { action: 'closeShellSession', sessionId, source: 'ShellTab' });
+    } finally {
+      setEndingSession(false);
+    }
+  }, []);
+
   const refreshContainers = useCallback(async () => {
     const target = lastTargetRef.current;
     if (!target) {
@@ -798,7 +815,10 @@ const ShellTab: React.FC<ShellTabProps> = ({
       const result = await requestData({
         resource: 'pod-containers',
         reason: 'user',
-        read: () => readPodContainers(resolvedClusterId, namespace, resourceName),
+        read: () =>
+          readPodContainers(
+            shellTargetIdentity({ clusterId: resolvedClusterId, namespace, resourceName })
+          ),
       });
       if (lastTargetRef.current !== target) {
         return;
@@ -899,11 +919,9 @@ const ShellTab: React.FC<ShellTabProps> = ({
       if (lastTargetRef.current !== target) {
         return;
       }
+      const targetKey = buildCanonicalObjectRowKey(shellTargetIdentity(target));
       const matching = sessions.filter(
-        (tracked) =>
-          tracked.clusterId === resolvedClusterId &&
-          tracked.namespace === namespace &&
-          tracked.podName === resourceName
+        (tracked) => buildCanonicalObjectRowKey(tracked.target) === targetKey
       );
       if (matching.length === 0) {
         return;
@@ -1118,7 +1136,15 @@ const ShellTab: React.FC<ShellTabProps> = ({
 
   return (
     <div className="object-panel-shell-tab">
-      {!hasActiveSession && (
+      {hasActiveSession ? (
+        <ShellSessionBar
+          session={session}
+          container={activeContainer}
+          fallbackShell={resolvedShell}
+          ending={endingSession}
+          onEnd={handleEndSession}
+        />
+      ) : (
         <ShellConnectionControls
           startDebugContainer={startDebugContainer}
           setStartDebugContainer={setStartDebugContainer}

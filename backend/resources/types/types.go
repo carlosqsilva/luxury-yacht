@@ -214,34 +214,34 @@ type NodeLogFetchResponse struct {
 	Truncated  bool          `json:"truncated,omitempty"`
 }
 
-// ShellSessionRequest describes the namespace/pod/container to exec into.
+// ShellSessionRequest describes the pod and container to exec into.
 type ShellSessionRequest struct {
-	Namespace string   `json:"namespace"`
-	PodName   string   `json:"podName"`
-	Container string   `json:"container,omitempty"`
-	Command   []string `json:"command,omitempty"`
+	// Target is the complete identity of the Pod, including its cluster.
+	Target    ObjectRef `json:"target"`
+	Container string    `json:"container,omitempty"`
+	Command   []string  `json:"command,omitempty"`
 }
 
 // ShellSession contains details about an active exec session.
 type ShellSession struct {
-	SessionID  string   `json:"sessionId"`
-	Namespace  string   `json:"namespace"`
-	PodName    string   `json:"podName"`
-	Container  string   `json:"container"`
-	Command    []string `json:"command"`
-	Containers []string `json:"containers"`
+	SessionID string `json:"sessionId"`
+	// Target is the complete identity of the object the shell was opened for.
+	Target     ObjectRef `json:"target"`
+	Container  string    `json:"container"`
+	Command    []string  `json:"command"`
+	Containers []string  `json:"containers"`
 }
 
 // ShellSessionInfo describes a tracked shell exec session.
 type ShellSessionInfo struct {
-	SessionID   string      `json:"sessionId"`
-	ClusterID   string      `json:"clusterId"`
-	ClusterName string      `json:"clusterName"`
-	Namespace   string      `json:"namespace"`
-	PodName     string      `json:"podName"`
-	Container   string      `json:"container"`
-	Command     []string    `json:"command"`
-	StartedAt   metav1.Time `json:"startedAt"`
+	SessionID   string `json:"sessionId"`
+	ClusterID   string `json:"clusterId"`
+	ClusterName string `json:"clusterName"`
+	// Target is the complete identity of the object the shell was opened for.
+	Target    ObjectRef   `json:"target"`
+	Container string      `json:"container"`
+	Command   []string    `json:"command"`
+	StartedAt metav1.Time `json:"startedAt"`
 }
 
 // DebugContainerRequest describes the parameters for creating an ephemeral debug container.
@@ -269,11 +269,25 @@ type ShellOutputEvent struct {
 
 // ShellStatusEvent reports lifecycle changes for a shell session.
 type ShellStatusEvent struct {
-	SessionID string `json:"sessionId"`
-	ClusterID string `json:"clusterId"`
-	Status    string `json:"status"`
-	Reason    string `json:"reason,omitempty"`
+	SessionID string             `json:"sessionId"`
+	ClusterID string             `json:"clusterId"`
+	Status    ShellSessionStatus `json:"status"`
+	Reason    string             `json:"reason,omitempty"`
 }
+
+// ShellSessionStatus is the lifecycle status a shell session reports. It is a
+// closed set so every emitter and the generated frontend enum agree.
+type ShellSessionStatus string
+
+const (
+	ShellSessionStatusOpen ShellSessionStatus = "open"
+	// ShellSessionStatusClosed means the shell exited or the app tore it down.
+	ShellSessionStatusClosed ShellSessionStatus = "closed"
+	// ShellSessionStatusEnded means a user asked to end the session, from any window.
+	ShellSessionStatusEnded   ShellSessionStatus = "ended"
+	ShellSessionStatusTimeout ShellSessionStatus = "timeout"
+	ShellSessionStatusError   ShellSessionStatus = "error"
+)
 
 // PodSimpleInfo represents basic pod information for list views
 type PodSimpleInfo struct {

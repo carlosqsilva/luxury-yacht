@@ -755,8 +755,11 @@ export interface ShellOutputEvent {
  */
 export interface ShellSession {
     "sessionId": string;
-    "namespace": string;
-    "podName": string;
+
+    /**
+     * Target is the complete identity of the object the shell was opened for.
+     */
+    "target": ObjectRef;
     "container": string;
     "command": string[] | null;
     "containers": string[] | null;
@@ -769,22 +772,52 @@ export interface ShellSessionInfo {
     "sessionId": string;
     "clusterId": string;
     "clusterName": string;
-    "namespace": string;
-    "podName": string;
+
+    /**
+     * Target is the complete identity of the object the shell was opened for.
+     */
+    "target": ObjectRef;
     "container": string;
     "command": string[] | null;
     "startedAt": v1$0.Time;
 }
 
 /**
- * ShellSessionRequest describes the namespace/pod/container to exec into.
+ * ShellSessionRequest describes the pod and container to exec into.
  */
 export interface ShellSessionRequest {
-    "namespace": string;
-    "podName": string;
+    /**
+     * Target is the complete identity of the Pod, including its cluster.
+     */
+    "target": ObjectRef;
     "container"?: string;
     "command"?: string[] | null;
 }
+
+/**
+ * ShellSessionStatus is the lifecycle status a shell session reports. It is a
+ * closed set so every emitter and the generated frontend enum agree.
+ */
+export enum ShellSessionStatus {
+    /**
+     * The Go zero value for the underlying type of the enum.
+     */
+    $zero = "",
+
+    ShellSessionStatusOpen = "open",
+
+    /**
+     * ShellSessionStatusClosed means the shell exited or the app tore it down.
+     */
+    ShellSessionStatusClosed = "closed",
+
+    /**
+     * ShellSessionStatusEnded means a user asked to end the session, from any window.
+     */
+    ShellSessionStatusEnded = "ended",
+    ShellSessionStatusTimeout = "timeout",
+    ShellSessionStatusError = "error",
+};
 
 /**
  * ShellStatusEvent reports lifecycle changes for a shell session.
@@ -792,7 +825,7 @@ export interface ShellSessionRequest {
 export interface ShellStatusEvent {
     "sessionId": string;
     "clusterId": string;
-    "status": string;
+    "status": ShellSessionStatus;
     "reason"?: string;
 }
 

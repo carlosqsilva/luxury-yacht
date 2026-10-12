@@ -22,6 +22,7 @@ const wailsMocks = vi.hoisted(() => ({
   CloseShellSession: vi.fn(),
 }));
 const handleInlineMock = vi.hoisted(() => vi.fn());
+const handleMock = vi.hoisted(() => vi.fn());
 
 const terminalMocks = vi.hoisted(() => {
   class TerminalInstance {
@@ -146,6 +147,7 @@ vi.mock('@core/backend-api', () => wailsMocks);
 vi.mock('@utils/errorHandler', () => ({
   errorHandler: {
     handleInline: (...args: unknown[]) => handleInlineMock(...args),
+    handle: (...args: unknown[]) => handleMock(...args),
   },
 }));
 
@@ -225,6 +227,16 @@ const podContainer = (name: string, kind: { isInit?: boolean; isEphemeral?: bool
   isEphemeral: kind.isEphemeral ?? false,
 });
 
+// Complete identity of the pod the rendered Shell tab targets.
+const podTarget = (clusterId: string) => ({
+  clusterId,
+  group: '',
+  version: 'v1',
+  kind: 'Pod',
+  namespace: 'team-a',
+  name: 'pod-1',
+});
+
 const flushAsync = () => act(() => Promise.resolve());
 const getLatestTerminal = () =>
   terminalMocks.instances.length > 0
@@ -271,8 +283,7 @@ describe('ShellTab', () => {
     }
     wailsMocks.StartShellSession.mockResolvedValue({
       sessionId: 'sess-1',
-      namespace: 'team-a',
-      podName: 'pod-1',
+      target: podTarget('alpha:ctx'),
       container: 'app',
       command: ['/bin/sh'],
       containers: ['app'],
@@ -351,9 +362,8 @@ describe('ShellTab', () => {
 
     clickConnectButton();
 
-    expect(wailsMocks.StartShellSession).toHaveBeenCalledWith('alpha:ctx', {
-      namespace: 'team-a',
-      podName: 'pod-1',
+    expect(wailsMocks.StartShellSession).toHaveBeenCalledWith({
+      target: podTarget('alpha:ctx'),
       container: undefined,
       command: ['/bin/sh'],
     });
@@ -564,6 +574,72 @@ describe('ShellTab', () => {
     expect(wailsMocks.SendShellInput).toHaveBeenCalledWith('sess-1', 'ls\n');
   });
 
+  const findEndSessionButton = () =>
+    Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find(
+      (button) => button.textContent === 'End Session'
+    );
+
+  it('ends the open session from the session bar without reporting a connection failure', async () => {
+    await renderShellTab();
+    expect(findEndSessionButton()).toBeUndefined();
+    clickConnectButton();
+    await flushAsync();
+    emitEvent('object-shell:status', { sessionId: 'sess-1', status: 'open' });
+    await flushAsync();
+
+    await act(async () => requireValue(findEndSessionButton(), 'expected End Session').click());
+    expect(wailsMocks.CloseShellSession).toHaveBeenCalledExactlyOnceWith('sess-1');
+
+    // The backend confirms the close right away; ending a session the user just
+    // opened must not look like a failed connection.
+    emitEvent('object-shell:status', { sessionId: 'sess-1', status: 'ended' });
+    await flushAsync();
+
+    expect(container.querySelector('.shell-tab__button')).not.toBeNull();
+    expect(container.querySelector('.shell-tab__connection-error')).toBeNull();
+    expect(handleInlineMock).not.toHaveBeenCalled();
+  });
+
+  it('treats a session ended from the Sessions list as a normal close right after connecting', async () => {
+    await renderShellTab();
+    clickConnectButton();
+    await flushAsync();
+    emitEvent('object-shell:status', { sessionId: 'sess-1', status: 'open' });
+    await flushAsync();
+
+    // Stop was requested outside this tab, so only the backend status says it was intentional.
+    emitEvent('object-shell:status', { sessionId: 'sess-1', status: 'ended' });
+    await flushAsync();
+
+    expect(wailsMocks.CloseShellSession).not.toHaveBeenCalled();
+    expect(container.querySelector('.shell-tab__button')).not.toBeNull();
+    expect(container.querySelector('.shell-tab__connection-error')).toBeNull();
+    expect(handleInlineMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps the session attached and reports the failure when ending it fails', async () => {
+    const failure = new Error('end failed');
+    wailsMocks.CloseShellSession.mockRejectedValueOnce(failure);
+    await renderShellTab();
+    clickConnectButton();
+    await flushAsync();
+    emitEvent('object-shell:status', { sessionId: 'sess-1', status: 'open' });
+    await flushAsync();
+
+    const endButton = requireValue(findEndSessionButton(), 'expected End Session');
+    await act(async () => endButton.click());
+    await flushAsync();
+
+    expect(handleMock).toHaveBeenCalledWith(
+      failure,
+      expect.objectContaining({ action: 'closeShellSession', sessionId: 'sess-1' })
+    );
+    expect(endButton.disabled).toBe(false);
+    getLatestTerminal()?.triggerData('pwd\n');
+    await flushAsync();
+    expect(wailsMocks.SendShellInput).toHaveBeenCalledWith('sess-1', 'pwd\n');
+  });
+
   it('detaches without closing the shell session when the component unmounts', async () => {
     await renderShellTab();
     clickConnectButton();
@@ -582,8 +658,7 @@ describe('ShellTab', () => {
         sessionId: 'existing-1',
         clusterId: 'alpha:ctx',
         clusterName: 'alpha',
-        namespace: 'team-a',
-        podName: 'pod-1',
+        target: podTarget('alpha:ctx'),
         container: 'app',
         command: ['/bin/sh'],
       },
@@ -619,15 +694,13 @@ describe('ShellTab', () => {
       {
         sessionId: 'matching',
         clusterId: 'alpha:ctx',
-        namespace: 'team-a',
-        podName: 'pod-1',
+        target: podTarget('alpha:ctx'),
         container: 'app',
       },
       {
         sessionId: 'other-cluster',
         clusterId: 'beta:ctx',
-        namespace: 'team-a',
-        podName: 'pod-1',
+        target: podTarget('beta:ctx'),
         container: 'app',
       },
     ]);
@@ -645,8 +718,7 @@ describe('ShellTab', () => {
         sessionId: 'existing-1',
         clusterId: 'alpha:ctx',
         clusterName: 'alpha',
-        namespace: 'team-a',
-        podName: 'pod-1',
+        target: podTarget('alpha:ctx'),
         container: 'app',
         command: ['/bin/sh'],
       },
@@ -666,15 +738,13 @@ describe('ShellTab', () => {
       {
         sessionId: 'alpha-session',
         clusterId: 'alpha:ctx',
-        namespace: 'team-a',
-        podName: 'pod-1',
+        target: podTarget('alpha:ctx'),
         container: 'app',
       },
       {
         sessionId: 'beta-session',
         clusterId: 'beta:ctx',
-        namespace: 'team-a',
-        podName: 'pod-1',
+        target: podTarget('beta:ctx'),
         container: 'app',
       },
     ]);
@@ -699,8 +769,7 @@ describe('ShellTab', () => {
       {
         sessionId: 'beta-session',
         clusterId: 'beta:ctx',
-        namespace: 'team-a',
-        podName: 'pod-1',
+        target: podTarget('beta:ctx'),
         container: 'app',
       },
     ]);
@@ -711,8 +780,7 @@ describe('ShellTab', () => {
         {
           sessionId: 'alpha-session',
           clusterId: 'alpha:ctx',
-          namespace: 'team-a',
-          podName: 'pod-1',
+          target: podTarget('alpha:ctx'),
           container: 'app',
         },
       ]);
@@ -727,15 +795,13 @@ describe('ShellTab', () => {
       {
         sessionId: 'alpha-session',
         clusterId: 'alpha:ctx',
-        namespace: 'team-a',
-        podName: 'pod-1',
+        target: podTarget('alpha:ctx'),
         container: 'app',
       },
       {
         sessionId: 'beta-session',
         clusterId: 'beta:ctx',
-        namespace: 'team-a',
-        podName: 'pod-1',
+        target: podTarget('beta:ctx'),
         container: 'app',
       },
     ]);
@@ -777,8 +843,7 @@ describe('ShellTab', () => {
     clickConnectButton();
     await flushAsync();
     expect(wailsMocks.StartShellSession).toHaveBeenLastCalledWith(
-      'beta:ctx',
-      expect.objectContaining({ container: 'beta-container' })
+      expect.objectContaining({ target: podTarget('beta:ctx'), container: 'beta-container' })
     );
   });
 
@@ -824,8 +889,7 @@ describe('ShellTab', () => {
         })
       );
       expect(wailsMocks.StartShellSession).toHaveBeenLastCalledWith(
-        'beta:ctx',
-        expect.objectContaining({ container: 'debug-abc12345' })
+        expect.objectContaining({ target: podTarget('beta:ctx'), container: 'debug-abc12345' })
       );
     }
   );
@@ -836,8 +900,7 @@ describe('ShellTab', () => {
         sessionId: 'existing-1',
         clusterId: 'alpha:ctx',
         clusterName: 'alpha',
-        namespace: 'team-a',
-        podName: 'pod-1',
+        target: podTarget('alpha:ctx'),
         container: 'app',
         command: ['/bin/sh'],
       },
