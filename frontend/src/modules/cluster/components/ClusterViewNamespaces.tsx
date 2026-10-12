@@ -2,6 +2,7 @@ import { useViewState } from '@core/contexts/ViewStateContext';
 import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
 import { useNamespace } from '@modules/namespace/contexts/NamespaceContext';
 import React, { useCallback, useMemo } from 'react';
+import { permissionDeniedFailure } from '@/core/refresh/refreshFailure';
 import NamespaceSummaryTable, {
   type NamespaceTableRow,
   projectNamespaceSummary,
@@ -53,7 +54,7 @@ const ClusterViewNamespaces: React.FC = () => {
           (Boolean(selectedClusterId) && !namespaceLoading)
         }
         error={
-          namespacesPermissionDenied ? 'Insufficient permission to list namespaces' : namespaceError
+          namespacesPermissionDenied ? permissionDeniedFailure(namespaceError) : namespaceError
         }
         blocked={!selectedClusterId}
         tableMode="Local Complete"

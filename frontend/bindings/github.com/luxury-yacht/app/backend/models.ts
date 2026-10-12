@@ -6,6 +6,9 @@
 import * as appupdates$0 from "./internal/appupdates/models.js";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
+import * as errorstatus$0 from "./internal/errorstatus/models.js";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore: Unused imports
 import * as resourcemodel$0 from "./resourcemodel/models.js";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
@@ -211,15 +214,6 @@ export enum ApplicationMenuCommand {
     ApplicationMenuCommandCheckForUpdates = "check-for-updates",
 };
 
-export interface BackendErrorEvent {
-    "clusterId": string;
-    "resourceKind"?: string;
-    "identifier"?: string;
-    "message": string;
-    "error"?: string;
-    "source"?: string;
-}
-
 /**
  * CatalogQueryCSVExport describes a file-backed catalog query export.
  */
@@ -333,9 +327,13 @@ export interface ClusterWorkspaceCommand {
     "visibleClusterId": string;
 }
 
+/**
+ * ClusterWorkspaceResult returns the latest coherent workspace state even when
+ * the command failed; Error is the failure's status.
+ */
 export interface ClusterWorkspaceResult {
     "state": ClusterWorkspaceState;
-    "error"?: string;
+    "error"?: errorstatus$0.Status | null;
 }
 
 export interface ClusterWorkspaceState {
@@ -627,6 +625,19 @@ export interface ObjectActionResponse {
 export type ObjectActionTargetRef = resourcemodel$0.ResourceRef;
 
 /**
+ * ObjectYAMLConflict is a YAML-editor outcome the user resolves in the editor:
+ * the edited object changed or was replaced since editing began. It carries the
+ * live YAML, so it is returned as a result and never as error text.
+ */
+export interface ObjectYAMLConflict {
+    "code": string;
+    "message": string;
+    "causes"?: string[] | null;
+    "currentYaml"?: string;
+    "currentResourceVersion"?: string;
+}
+
+/**
  * ObjectYAMLMutationRequest captures the payload required to validate or apply object YAML.
  */
 export interface ObjectYAMLMutationRequest {
@@ -641,10 +652,12 @@ export interface ObjectYAMLMutationRequest {
 }
 
 /**
- * ObjectYAMLMutationResponse returns basic metadata after a validation/apply attempt.
+ * ObjectYAMLMutationResponse returns basic metadata after a validation/apply
+ * attempt, or the conflict that stopped it.
  */
 export interface ObjectYAMLMutationResponse {
     "resourceVersion": string;
+    "yamlConflict"?: ObjectYAMLConflict | null;
 }
 
 /**
@@ -653,6 +666,12 @@ export interface ObjectYAMLMutationResponse {
  */
 export interface ObjectYAMLOwnershipCheckResponse {
     "conflicts": ObjectYAMLOwnershipConflict[] | null;
+
+    /**
+     * YAMLConflict is set when the edited object changed or was replaced since
+     * editing began; the check stays advisory and the save goes on to Apply.
+     */
+    "yamlConflict"?: ObjectYAMLConflict | null;
 }
 
 /**
@@ -688,6 +707,12 @@ export interface ObjectYAMLReloadMergeResponse {
     "mergedYAML": string;
     "currentYAML": string;
     "resourceVersion": string;
+
+    /**
+     * YAMLConflict is set when the merge cannot be completed automatically;
+     * it carries the live YAML for manual review.
+     */
+    "yamlConflict"?: ObjectYAMLConflict | null;
 }
 
 /**
@@ -989,8 +1014,8 @@ export interface UpdateInfo {
 }
 
 /**
- * BindingModelAnchor keeps object-detail DTOs reachable by the Wails generator
- * without exporting the backend-only Get<Kind> wrappers to TypeScript.
+ * BindingModelAnchor keeps object-detail DTOs reachable by the Wails generator;
+ * the object-details refresh domain returns them untyped.
  */
 export interface BindingModelAnchor {
     "BackendTLSPolicy": backendtlspolicy$0.BackendTLSPolicyDetails | null;

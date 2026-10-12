@@ -15,7 +15,9 @@ vi.mock('@/utils/errorHandler', () => ({ errorHandler: errorHandlerMock }));
 
 import { ALL_NAMESPACES_DISPLAY_NAME } from '@modules/namespace/constants';
 import { eventBus } from '@/core/events';
+import { localFailure } from '@/core/refresh/refreshFailure';
 import { resetAllScopedDomainStates, setScopedDomainState } from '@/core/refresh/store';
+import { makeErrorStatus } from '@/test-utils/errorStatusFixtures';
 import { NamespaceProvider, useNamespace } from './NamespaceContext';
 
 let mockClusterId = 'cluster-a';
@@ -1146,28 +1148,46 @@ describe('NamespaceProvider selection behaviour', () => {
     cleanup();
   });
 
-  it('exposes namespacesPermissionDenied for a permission-denied namespaces domain — and does not toast', () => {
-    namespaceDomainRef.current = {
-      status: 'error',
-      data: null,
-      error: 'permission denied for domain namespaces (core/namespaces)',
-      permissionDenied: true,
-    } as unknown as typeof namespaceDomainRef.current;
-    const { cleanup } = renderWithProvider();
-    act(() => {
-      vi.runAllTimers();
-    });
-    expect(namespaceRef.current?.namespacesPermissionDenied).toBe(true);
-    // A designed, rendered state — not a toast (the sidebar shows the message).
-    expect(errorHandlerMock.handle).not.toHaveBeenCalled();
-    cleanup();
-  });
+  const deniedFailure = {
+    kind: 'backend',
+    status: makeErrorStatus(
+      'Forbidden',
+      'permission denied for domain namespaces (core/namespaces)'
+    ),
+  } as const;
+
+  // The second state is what the namespaces stream leaves when it starts after
+  // the denial: the sidebar must still show the permission message.
+  it.each([
+    ['as answered', { status: 'error', error: deniedFailure }],
+    ['after its stream reset the state', { status: 'initialising', error: null }],
+  ])(
+    'exposes namespacesPermissionDenied for a permission-denied namespaces domain %s — and does not toast',
+    (_name, state) => {
+      namespaceDomainRef.current = {
+        ...state,
+        data: null,
+        permissionDenied: true,
+      } as unknown as typeof namespaceDomainRef.current;
+      const { cleanup } = renderWithProvider();
+      act(() => {
+        vi.runAllTimers();
+      });
+      expect(namespaceRef.current?.namespacesPermissionDenied).toBe(true);
+      // A designed, rendered state — not a toast (the sidebar shows the message).
+      expect(errorHandlerMock.handle).not.toHaveBeenCalled();
+      cleanup();
+    }
+  );
 
   it('keeps namespacesPermissionDenied false for transient errors (which still toast)', () => {
     namespaceDomainRef.current = {
       status: 'error',
       data: null,
-      error: 'apiserver timeout',
+      error: {
+        kind: 'backend',
+        status: makeErrorStatus('ServerTimeout', 'apiserver timeout'),
+      },
     } as unknown as typeof namespaceDomainRef.current;
     const { cleanup } = renderWithProvider();
     act(() => {
@@ -1183,7 +1203,7 @@ describe('NamespaceProvider selection behaviour', () => {
       'cluster-a|': {
         ...createNamespaceDomainWithCluster('ready', ['alpha'], 'cluster-a', 'alpha'),
         status: 'error',
-        error: 'Manual refresh timed out after 60 seconds for namespaces',
+        error: localFailure('Manual refresh timed out after 60 seconds for namespaces'),
       },
       'cluster-b|': createNamespaceDomainWithCluster('ready', ['beta'], 'cluster-b', 'beta'),
     };

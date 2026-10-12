@@ -9,10 +9,12 @@ package helm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/luxury-yacht/app/backend/internal/applog"
+	"github.com/luxury-yacht/app/backend/internal/errorstatus"
 	"github.com/luxury-yacht/app/backend/internal/logsources"
 	"github.com/luxury-yacht/app/backend/resourcemodel"
 	"github.com/luxury-yacht/app/backend/resources/common"
@@ -21,6 +23,7 @@ import (
 	"helm.sh/helm/v3/pkg/action"
 	"helm.sh/helm/v3/pkg/cli"
 	"helm.sh/helm/v3/pkg/release"
+	"helm.sh/helm/v3/pkg/storage/driver"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -132,26 +135,37 @@ func (s *Service) getRelease(namespace, name string) (*action.Configuration, *re
 	}
 	value, err := action.NewGet(actionConfig).Run(name)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get release %s: %w", name, err)
+		err = fmt.Errorf("failed to get release %s: %w", name, err)
+		if IsReleaseNotFound(err) {
+			err = errorstatus.NotFound(err)
+		}
+		return nil, nil, err
 	}
 	return actionConfig, value, nil
 }
 
+// IsReleaseNotFound reports that Helm storage has no record of the release:
+// it was uninstalled. Failures reaching the cluster, even API 404s, are not.
+func IsReleaseNotFound(err error) bool {
+	return errors.Is(err, driver.ErrReleaseNotFound)
+}
+
 // DeleteRelease removes a Helm release.
 func (s *Service) DeleteRelease(namespace, name string) error {
+	failure := fmt.Sprintf("Failed to delete Helm release %s/%s", namespace, name)
 	if err := s.ensureClient(); err != nil {
-		return err
+		return s.logDeleteError(err, failure, name)
 	}
 
 	settings := s.helmSettings()
 	actionConfig, err := s.initActionConfig(settings, namespace)
 	if err != nil {
-		return err
+		return s.logDeleteError(err, failure, name)
 	}
 
 	client := action.NewUninstall(actionConfig)
 	if _, err := client.Run(name); err != nil {
-		err = s.logDeleteError(err, fmt.Sprintf("Failed to delete Helm release %s/%s", namespace, name), name)
+		err = s.logDeleteError(err, failure, name)
 		return fmt.Errorf("failed to delete Helm release: %w", err)
 	}
 
