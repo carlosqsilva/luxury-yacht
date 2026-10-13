@@ -21,7 +21,7 @@ type lifecycleOwnerFixture struct {
 
 func newLifecycleOwnerFixture(t testing.TB, reporters ...sentryreporting.Reporter) *lifecycleOwnerFixture {
 	t.Helper()
-	logs := NewAppLogService(NewLogger(1000, reporters...))
+	logs := NewApplicationLogs(reporters...)
 	signals := newApplicationRuntimeSignals(func(context.Context, string, ...interface{}) {})
 	fixture := &lifecycleOwnerFixture{
 		AppLogs:     logs,
@@ -106,7 +106,7 @@ type refreshCoordinatorTestFixture struct {
 func newRefreshCoordinatorTestFixture(t testing.TB, reporters ...sentryreporting.Reporter) *refreshCoordinatorTestFixture {
 	t.Helper()
 	cluster := newClusterRuntimeTestFixture(t, reporters...)
-	attention := NewClusterAttentionService(cluster.Preferences, cluster.AppLogs.Logger())
+	attention := NewClusterAttentionService(cluster.Preferences, cluster.AppLogs.Logger(), cluster.ClusterRuntime.clusterNameForID)
 	resourceProjection := newRefreshResourceProjection()
 	nodeMaintenanceStore := nodemaintenance.NewStore(5)
 	operations := newApplicationOperationsCoordinator(
@@ -121,11 +121,8 @@ func newRefreshCoordinatorTestFixture(t testing.TB, reporters ...sentryreporting
 		resolveClusterDependencies:       cluster.ClusterRuntime.resolveClusterDependencies,
 		resourceDependenciesForClusterID: cluster.ClusterRuntime.resourceDependenciesForClusterID,
 		context:                          cluster.signals.CtxOrBackground,
-		emitEvent:                        cluster.signals.emitEvent,
 		logger:                           cluster.AppLogs.Logger(),
 		clusterName:                      cluster.ClusterRuntime.clusterNameForID,
-		recordTransportSuccess:           cluster.ClusterRuntime.recordClusterTransportSuccess,
-		recordTransportFailure:           cluster.ClusterRuntime.recordClusterTransportFailure,
 		resourceResolverForCluster: func(clusterID string) common.ResourceResolver {
 			return clusterRuntimeResourceResolver{
 				runtime:        cluster.ClusterRuntime,
@@ -149,10 +146,7 @@ func newRefreshCoordinatorTestFixture(t testing.TB, reporters ...sentryreporting
 		ResourceProjection:   resourceProjection,
 		NodeMaintenanceStore: nodeMaintenanceStore,
 		SettingsBridge:       cluster.refreshSettings,
-		AllowedNamespaces: func(clusterID string) []string {
-			namespaces, _ := cluster.Preferences.clusterAllowedNamespaces(clusterID)
-			return namespaces
-		},
+		AllowedNamespaces:    cluster.Preferences.clusterAllowedNamespaces,
 	})
 	refreshCoordinator.initGovernor()
 	cluster.Lifecycle = newApplicationLifecycle(cluster.signals, ApplicationLifecycleDependencies{

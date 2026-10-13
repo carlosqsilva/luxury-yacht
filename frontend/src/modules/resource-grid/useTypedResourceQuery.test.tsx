@@ -3,6 +3,7 @@ import { DEFAULT_GRID_TABLE_FILTER_STATE } from '@shared/components/tables/gridT
 import React, { act } from 'react';
 import * as ReactDOM from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { isPermissionDenied, localFailure } from '@/core/refresh/refreshFailure';
 import { makeResourceRef } from '@/test-utils/makeResourceRef';
 import { requireValue } from '@/test-utils/requireValue';
 import type { TypedQueryPayload } from './typedResourceQueryScope';
@@ -574,7 +575,7 @@ describe('useTypedResourceQuery', () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    expect(result?.error).toBe('cluster gone');
+    expect(result?.error).toEqual(localFailure('cluster gone'));
     expect(result?.loaded).toBe(true);
   });
 
@@ -728,6 +729,22 @@ describe('useTypedResourceQuery', () => {
     expect(result?.totalIsExact).toBe(false);
   });
 
+  // A denied scope is not re-asked in the background, and a stream reset can
+  // clear its stored failure: the denial alone must settle the table, or it
+  // keeps showing a spinner.
+  it('settles a denied scope whose stored failure a stream reset cleared', async () => {
+    requestRefreshDomainStateMock.mockResolvedValue({
+      status: 'executed',
+      data: { status: 'initialising', error: null, permissionDenied: true },
+    });
+
+    await renderQuery();
+
+    expect(result?.loading).toBe(false);
+    expect(result?.loaded).toBe(true);
+    expect(isPermissionDenied(result?.error)).toBe(true);
+  });
+
   it('marks failed query requests as loaded so the error can render instead of a spinner', async () => {
     requestRefreshDomainStateMock.mockRejectedValue(new Error('query failed'));
 
@@ -735,7 +752,7 @@ describe('useTypedResourceQuery', () => {
 
     expect(result?.loading).toBe(false);
     expect(result?.loaded).toBe(true);
-    expect(result?.error).toBe('query failed');
+    expect(result?.error).toEqual(localFailure('query failed'));
   });
 
   it('uses one-shot refresh reads for table queries so query scopes are cleaned up', async () => {

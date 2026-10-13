@@ -1,3 +1,7 @@
+import {
+  clearRequestedObjectPanelTab,
+  subscribeObjectPanelTabRequests,
+} from '@modules/object-panel/objectPanelTabRequests';
 import type { ReactNode } from 'react';
 import { act } from 'react';
 import * as ReactDOM from 'react-dom/client';
@@ -8,6 +12,7 @@ const listShellSessionsMock = vi.hoisted(() => vi.fn());
 const listPortForwardsMock = vi.hoisted(() => vi.fn());
 const listRuntimeOperationsMock = vi.hoisted(() => vi.fn());
 const stopPortForwardMock = vi.hoisted(() => vi.fn());
+const closeShellSessionMock = vi.hoisted(() => vi.fn());
 const browserOpenURLMock = vi.hoisted(() => vi.fn());
 
 vi.mock('@core/backend-api', () => ({
@@ -15,6 +20,7 @@ vi.mock('@core/backend-api', () => ({
   ListPortForwards: listPortForwardsMock,
   ListRuntimeOperations: listRuntimeOperationsMock,
   StopPortForward: stopPortForwardMock,
+  CloseShellSession: closeShellSessionMock,
 }));
 
 vi.mock('@core/desktop-runtime', () => ({
@@ -51,7 +57,6 @@ vi.mock('@shared/components/status/StatusIndicator', () => ({
 
 const openWithObjectMock = vi.hoisted(() => vi.fn());
 const requestObjectPanelTabMock = vi.hoisted(() => vi.fn());
-const getRequestedObjectPanelTabMock = vi.hoisted(() => vi.fn());
 const objectPanelIdMock = vi.hoisted(() => vi.fn(() => 'object-panel:pod:web-abc'));
 
 vi.mock('@modules/object-panel/hooks/useObjectPanel', () => ({
@@ -60,10 +65,13 @@ vi.mock('@modules/object-panel/hooks/useObjectPanel', () => ({
   }),
 }));
 
-vi.mock('@modules/object-panel/objectPanelTabRequests', () => ({
-  getRequestedObjectPanelTab: getRequestedObjectPanelTabMock,
-  requestObjectPanelTab: requestObjectPanelTabMock,
-}));
+// The real request store, so open-panel delivery behaves as in the app.
+vi.mock('@modules/object-panel/objectPanelTabRequests', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@modules/object-panel/objectPanelTabRequests')>();
+  requestObjectPanelTabMock.mockImplementation(actual.requestObjectPanelTab);
+  return { ...actual, requestObjectPanelTab: requestObjectPanelTabMock };
+});
 
 vi.mock('@modules/object-panel/contexts/ObjectPanelStateContext', () => ({
   objectPanelId: objectPanelIdMock,
@@ -124,8 +132,14 @@ describe('SessionsStatus shell session jump action', () => {
     sessionId: 'shell-1',
     clusterId: 'cluster-a',
     clusterName: 'cluster-a',
-    namespace: 'default',
-    podName: 'web-abc',
+    target: {
+      clusterId: 'cluster-a',
+      group: '',
+      version: 'v1',
+      kind: 'Pod',
+      namespace: 'default',
+      name: 'web-abc',
+    },
     container: 'app',
     command: ['/bin/sh'],
     startedAt: '2026-02-20T00:00:00Z',
@@ -145,19 +159,12 @@ describe('SessionsStatus shell session jump action', () => {
         type: 'shell',
         clusterId: baseShellSession.clusterId,
         clusterName: baseShellSession.clusterName,
-        target: {
-          group: '',
-          version: 'v1',
-          kind: 'Pod',
-          namespace: baseShellSession.namespace,
-          name: baseShellSession.podName,
-        },
+        target: baseShellSession.target,
         status: 'open',
         startedAt: baseShellSession.startedAt,
       },
     ]);
     stopPortForwardMock.mockResolvedValue(undefined);
-    getRequestedObjectPanelTabMock.mockReturnValue('shell');
     kubeconfigState.selectedClusterId = 'cluster-a';
     kubeconfigState.selectedKubeconfigs = ['selection-a', 'selection-b'];
     (
@@ -179,6 +186,7 @@ describe('SessionsStatus shell session jump action', () => {
     while (document.body.firstChild) {
       document.body.removeChild(document.body.firstChild);
     }
+    clearRequestedObjectPanelTab('object-panel:pod:web-abc');
   });
 
   const renderStatus = async () => {
@@ -203,7 +211,14 @@ describe('SessionsStatus shell session jump action', () => {
           id: 'pf-1',
           clusterId: 'cluster-a',
           clusterName: 'a',
-          namespace: 'default',
+          target: {
+            clusterId: 'cluster-a',
+            group: '',
+            version: 'v1',
+            kind: 'Pod',
+            namespace: 'default',
+            name: 'web-abc',
+          },
           podName: 'web-abc',
           containerPort: 8080,
           localPort: 18080,
@@ -235,6 +250,37 @@ describe('SessionsStatus shell session jump action', () => {
             action: 'stopPortForward',
             sessionId: 'pf-1',
           })
+        );
+      } else {
+        expect(errorHandlerMock.handle).not.toHaveBeenCalled();
+      }
+    }
+  );
+
+  it.each([false, true])(
+    'ends the selected shell session without opening it and restores its control after rejection=%s',
+    async (reject) => {
+      let finish: () => void = () => undefined;
+      const failure = new Error('end failed');
+      closeShellSessionMock.mockImplementation(
+        () =>
+          new Promise<void>((resolve, rejectPromise) => {
+            finish = () => (reject ? rejectPromise(failure) : resolve());
+          })
+      );
+      await renderStatus();
+      const button = container.querySelector<HTMLButtonElement>('[aria-label="End shell session"]');
+      expect(button).not.toBeNull();
+      await act(async () => button?.click());
+      expect(closeShellSessionMock).toHaveBeenCalledExactlyOnceWith('shell-1');
+      expect(openWithObjectMock).not.toHaveBeenCalled();
+      expect(button?.disabled).toBe(true);
+      await act(async () => finish());
+      expect(button?.disabled).toBe(false);
+      if (reject) {
+        expect(errorHandlerMock.handle).toHaveBeenCalledWith(
+          failure,
+          expect.objectContaining({ action: 'closeShellSession', sessionId: 'shell-1' })
         );
       } else {
         expect(errorHandlerMock.handle).not.toHaveBeenCalled();
@@ -275,8 +321,29 @@ describe('SessionsStatus shell session jump action', () => {
     expect(latestCloseSignal()).toBe(1);
   });
 
-  it('keeps the sessions panel open when the shell tab request is not verified', async () => {
-    getRequestedObjectPanelTabMock.mockReturnValue(undefined);
+  it('closes the sessions panel when an open object panel shows the shell tab immediately', async () => {
+    // An open panel applies the request and clears it synchronously, as ObjectPanel does.
+    const unsubscribe = subscribeObjectPanelTabRequests((panelId) =>
+      clearRequestedObjectPanelTab(panelId)
+    );
+    try {
+      await renderStatus();
+      const openButton = document.querySelector('.as-shell-session-jump') as HTMLButtonElement;
+      await act(async () => {
+        openButton.click();
+        await Promise.resolve();
+      });
+
+      expect(requestObjectPanelTabMock).toHaveBeenCalledWith('object-panel:pod:web-abc', 'shell');
+      expect(errorHandlerMock.handle).not.toHaveBeenCalled();
+      expect(latestCloseSignal()).toBe(1);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it('keeps the sessions panel open when the shell tab request is not accepted', async () => {
+    requestObjectPanelTabMock.mockReturnValueOnce(false);
     await renderStatus();
 
     const openButton = document.querySelector('.as-shell-session-jump') as HTMLButtonElement;
@@ -309,6 +376,7 @@ describe('SessionsStatus shell session jump action', () => {
         sessionId: 'shell-2',
         clusterId: 'cluster-b',
         clusterName: 'cluster-b',
+        target: { ...baseShellSession.target, clusterId: 'cluster-b' },
       },
     ]);
     listRuntimeOperationsMock.mockResolvedValue([
@@ -317,13 +385,7 @@ describe('SessionsStatus shell session jump action', () => {
         type: 'shell',
         clusterId: 'cluster-b',
         clusterName: 'cluster-b',
-        target: {
-          group: '',
-          version: 'v1',
-          kind: 'Pod',
-          namespace: baseShellSession.namespace,
-          name: baseShellSession.podName,
-        },
+        target: { ...baseShellSession.target, clusterId: 'cluster-b' },
         status: 'open',
         startedAt: baseShellSession.startedAt,
       },

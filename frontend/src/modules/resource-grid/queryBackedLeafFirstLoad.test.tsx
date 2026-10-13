@@ -223,6 +223,9 @@ vi.mock('@utils/errorHandler', () => ({
 }));
 
 vi.mock('@shared/components/icons/SharedIcons', () => ({
+  ChevronDownIcon: () => <span>collapse</span>,
+  ChevronUpIcon: () => <span>expand</span>,
+  CloseIcon: () => <span>close</span>,
   DeleteIcon: () => <span>delete</span>,
   DiffIcon: () => <span>diff</span>,
   DrainIcon: () => <span>drain</span>,
@@ -235,7 +238,7 @@ vi.mock('@shared/components/icons/SharedIcons', () => ({
 import ClusterViewConfig from '@modules/cluster/components/ClusterViewConfig';
 import ClusterViewCRDs from '@modules/cluster/components/ClusterViewCRDs';
 import ClusterViewEvents from '@modules/cluster/components/ClusterViewEvents';
-import ClusterViewNodes from '@modules/cluster/components/ClusterViewNodes';
+import ClusterViewNodes, { NodesTable } from '@modules/cluster/components/ClusterViewNodes';
 import ClusterViewRBAC from '@modules/cluster/components/ClusterViewRBAC';
 import ClusterViewStorage from '@modules/cluster/components/ClusterViewStorage';
 import NsViewAutoscaling from '@modules/namespace/components/NsViewAutoscaling';
@@ -248,6 +251,7 @@ import NsViewQuotas from '@modules/namespace/components/NsViewQuotas';
 import NsViewRBAC from '@modules/namespace/components/NsViewRBAC';
 import NsViewStorage from '@modules/namespace/components/NsViewStorage';
 import { WorkloadsTable } from '@modules/namespace/components/NsViewWorkloads';
+import { makeErrorStatus } from '@/test-utils/errorStatusFixtures';
 
 const fixtureIdentity = (kind: string) => {
   switch (kind) {
@@ -648,8 +652,13 @@ describe('query-backed leaf first load', () => {
         status: 'executed',
         data: {
           status: 'error',
-          error:
-            'permission denied for domain namespace-autoscaling (autoscaling/horizontalpodautoscalers)',
+          error: {
+            kind: 'backend',
+            status: makeErrorStatus(
+              'Forbidden',
+              'permission denied for domain namespace-autoscaling (autoscaling/horizontalpodautoscalers)'
+            ),
+          },
           permissionDenied: true,
           data: undefined,
         },
@@ -1287,7 +1296,7 @@ describe('query-backed leaf first load', () => {
     },
     {
       label: 'cluster nodes',
-      element: <ClusterViewNodes />,
+      element: <NodesTable />,
       payload: { rows: [] },
       expected: ['age', 'cpu', 'kind', 'memory', 'name', 'pods', 'restarts', 'status', 'version'],
     },

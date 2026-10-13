@@ -39,11 +39,12 @@ import { ObjectPanelTabs } from '@modules/object-panel/components/ObjectPanel/Ob
 import { resolveObjectPanelOpenTarget } from '@modules/object-panel/components/ObjectPanel/objectPanelOpenTarget';
 import type { ViewType } from '@modules/object-panel/components/ObjectPanel/types';
 import type { ObjectPanelRef } from '@modules/object-panel/objectPanelRef';
-import { getObjectPanelScopes } from '@modules/object-panel/objectPanelRef';
+import { getObjectPanelScopes, objectPanelId } from '@modules/object-panel/objectPanelRef';
 import { getKindColorClass } from '@shared/utils/kindBadgeColors';
 import type { DockPosition } from '@ui/dockable';
 import { getGroupForPanel, getGroupTabs } from '@ui/dockable/tabGroupState';
 import type { GroupKey } from '@ui/dockable/tabGroupTypes';
+import { failureMessage, type RefreshFailure } from '@/core/refresh/refreshFailure';
 import { buildObjectDetailModel } from './Details/objectDetailModel';
 import { resetObjectPanelScopedDomain } from './hooks/useObjectPanelScopedDomainLifecycle';
 
@@ -63,6 +64,23 @@ interface ObjectPanelProps {
 // ============================================================================
 // MAIN COMPONENT
 // ============================================================================
+
+/**
+ * True when failure is a NotFound naming exactly the panel's object, compared
+ * by panel identity (links may spell the kind in any case).
+ */
+const namesDeletedObject = (failure: RefreshFailure | null, object: ObjectPanelRef): boolean => {
+  if (failure?.kind !== 'backend' || failure.status.reason !== 'NotFound' || !failure.status.ref) {
+    return false;
+  }
+  try {
+    return objectPanelId({ ...failure.status.ref }) === objectPanelId(object);
+  } catch {
+    // A reference too incomplete to identify an object names nothing.
+    return false;
+  }
+};
+
 function ObjectPanel({
   panelId,
   objectRef,
@@ -189,13 +207,12 @@ function ObjectPanel({
     }
   }, [objectIdentityKey, resourceDeleted]);
 
-  const isNotFoundError = useMemo(() => {
-    if (!detailsError) {
-      return false;
-    }
-    const normalized = detailsError.toLowerCase();
-    return normalized.includes('not found') || normalized.includes('could not find');
-  }, [detailsError]);
+  // Only a NotFound that names this exact object means it was deleted; a
+  // related lookup's NotFound carries no reference.
+  const isNotFoundError = useMemo(
+    () => namesDeletedObject(detailsError, objectRef),
+    [detailsError, objectRef]
+  );
 
   useEffect(() => {
     if (!isNotFoundError || resourceDeleted) {
@@ -281,7 +298,7 @@ function ObjectPanel({
     detailModel,
     isActive: visibleActiveTab === 'details',
     detailsLoading,
-    detailsError,
+    detailsError: failureMessage(detailsError),
     deletion,
     finalizerRemovalCapabilities: {
       metadata: capabilityStates.removeFinalizer,

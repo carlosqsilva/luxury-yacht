@@ -5,6 +5,7 @@
  * Implements orchestrator logic for the core layer.
  */
 
+import { errorStatusOf } from '@utils/errorStatus';
 import { type AppEvents, eventBus } from '@/core/events';
 import {
   APP_LOG_SOURCES,
@@ -30,6 +31,7 @@ import { type RefreshContext, refreshManager } from './RefreshManager';
 import { RefreshErrorNotifier } from './refreshErrorNotifier';
 import { type RefresherTiming, refresherConfig } from './refresherConfig';
 import type { RefresherName, StaticRefresherName } from './refresherTypes';
+import { refreshFailureOf } from './refreshFailure';
 import type { DomainRegistration, StreamingRegistration } from './refreshRegistration';
 import {
   ClusterRefreshRuntime,
@@ -37,7 +39,13 @@ import {
   makeInFlightKey,
   type RefreshDemand,
 } from './refreshRuntime';
-import { isResourceStreamDomain, isResourceStreamViewActive } from './resourceStreamViews';
+import {
+  isNodesView,
+  isPodsTableNamespaceView,
+  isResourceStreamDomain,
+  isResourceStreamViewActive,
+  NODES_VIEW_PODS_SCOPE,
+} from './resourceStreamViews';
 import {
   normalizeNamespaceScope as normalizeNamespaceScopeValue,
   normalizeRefreshDomainScope,
@@ -248,7 +256,7 @@ class RefreshOrchestrator {
     error?: unknown,
     operationId?: string
   ): void {
-    if (message.includes('no active clusters available')) {
+    if (errorStatusOf(error)?.reason === 'ClusterNotReady') {
       // The cluster's backend subsystem is still initializing (its lifecycle
       // state was unknown when the fetch dispatched). Warm-up, not failure:
       // hold the scope for re-dispatch on readiness and skip the toast.
@@ -331,7 +339,7 @@ class RefreshOrchestrator {
     // Refresh namespaces across all enabled scopes.
     tasks.push(this.refreshEnabledScopes('namespaces', { isManual: true }));
 
-    const podsRefresh = this.triggerActiveWorkloadsPodsRefresh(targetContext);
+    const podsRefresh = this.triggerActivePodsTableRefresh(targetContext);
     if (podsRefresh) {
       tasks.push(podsRefresh);
     }
@@ -391,7 +399,7 @@ class RefreshOrchestrator {
         setScopedDomainState(domain, normalizedScope, (previous) => ({
           ...previous,
           status: 'error',
-          error: message,
+          error: refreshFailureOf(error instanceof Error ? error : new Error(message)),
           scope: normalizedScope,
         }));
         const notificationScope = normalizedScope?.trim() || undefined;
@@ -969,7 +977,7 @@ class RefreshOrchestrator {
     setScopedDomainState(domain, scope, (previous) => ({
       ...previous,
       status: 'error',
-      error: message,
+      error: refreshFailureOf(error),
       scope,
     }));
     const notificationScope = scope.trim() || undefined;
@@ -1064,20 +1072,26 @@ class RefreshOrchestrator {
     });
   }
 
-  private triggerActiveWorkloadsPodsRefresh(context: RefreshContext): Promise<void> | null {
-    if (context.currentView !== 'namespace' || context.activeNamespaceView !== 'workloads') {
+  // The pods table a view leases is a query lease, not the view's refresher,
+  // so manual refresh reaches it here.
+  private activePodsTableScope(context: RefreshContext): string | null {
+    if (isPodsTableNamespaceView(context)) {
+      return this.normalizeNamespaceScope(context.selectedNamespace);
+    }
+    if (isNodesView(context)) {
+      return normalizeNamespaceScopeValue(
+        NODES_VIEW_PODS_SCOPE,
+        context.selectedClusterId ?? undefined
+      );
+    }
+    return null;
+  }
+
+  private triggerActivePodsTableRefresh(context: RefreshContext): Promise<void> | null {
+    const scope = this.activePodsTableScope(context);
+    if (!scope || !this.isScopedDomainEnabledInternal('pods', scope)) {
       return null;
     }
-
-    const scope = this.normalizeNamespaceScope(context.selectedNamespace);
-    if (!scope) {
-      return null;
-    }
-
-    if (!this.isScopedDomainEnabledInternal('pods', scope)) {
-      return null;
-    }
-
     return this.fetchScopedDomain('pods', scope, { isManual: true });
   }
 
@@ -1359,7 +1373,7 @@ class RefreshOrchestrator {
     }
 
     // A cluster whose backend subsystem is still initializing cannot serve any
-    // request yet ("no active clusters available"). Hold the work and
+    // request yet (the backend answers ClusterNotReady). Hold the work and
     // re-dispatch on the lifecycle's became-serviceable edge — warm-up is
     // loading, not failure.
     if (!this.isScopeClusterServiceable(normalizedScope)) {
@@ -1568,7 +1582,7 @@ class RefreshOrchestrator {
       setScopedDomainState(domain, execution.scope, (previous) => ({
         ...previous,
         status: 'error',
-        error: message,
+        error: refreshFailureOf(error),
         permissionDenied: true,
         isManual: options.isManual,
       }));
@@ -1576,7 +1590,7 @@ class RefreshOrchestrator {
       return;
     }
     execution.runtime.markReconciliationFailed(domain, execution.scope);
-    if (this.errorNotifier.shouldSuppressNetworkError(message)) {
+    if (this.errorNotifier.shouldSuppressStartupError(error)) {
       setScopedDomainState(domain, execution.scope, (previous) => ({
         ...previous,
         status: previous.data ? 'ready' : previous.status,
@@ -1589,7 +1603,7 @@ class RefreshOrchestrator {
     setScopedDomainState(domain, execution.scope, (previous) => ({
       ...previous,
       status: 'error',
-      error: message,
+      error: refreshFailureOf(error),
       isManual: options.isManual,
     }));
     this.notifyRefreshError(domain, execution.scope, message, error, options.correlationId);

@@ -9,12 +9,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/luxury-yacht/app/backend/internal/errorstatus"
 	podspkg "github.com/luxury-yacht/app/backend/resources/pods"
 
 	"github.com/google/uuid"
 	"github.com/luxury-yacht/app/backend/internal/config"
 	"github.com/luxury-yacht/app/backend/internal/logsources"
 	"github.com/luxury-yacht/app/backend/resources/common"
+	"github.com/luxury-yacht/app/backend/resources/types"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -36,8 +38,7 @@ type shellSession struct {
 	id          string
 	clusterID   string
 	clusterName string
-	namespace   string
-	podName     string
+	target      RuntimeOperationTargetRef
 	container   string
 	command     []string
 	stdin       *io.PipeWriter
@@ -199,13 +200,17 @@ func (w *shellEventWriter) Write(p []byte) (int, error) {
 }
 
 // StartShellSession launches a kubectl exec session and begins streaming data back to the frontend.
-func (o *OperationsCoordinator) StartShellSession(clusterID string, req ShellSessionRequest) (*ShellSession, error) {
+func (o *OperationsCoordinator) StartShellSession(req ShellSessionRequest) (*ShellSession, error) {
+	clusterID := req.Target.ClusterID
 	operationEpoch := o.clusterOperationEpoch(clusterID)
-	launch, err := o.prepareShellLaunch(clusterID, req)
+	launch, err := o.prepareShellLaunch(req)
 	if err != nil {
-		return nil, err
+		return nil, errorstatus.UserAction(errorstatus.ObjectRef{
+			ClusterID: clusterID, Group: req.Target.Group, Version: req.Target.Version, Kind: req.Target.Kind,
+			Namespace: req.Target.Namespace, Name: req.Target.Name,
+		}, err)
 	}
-	sess, sessionCtx := newShellSession(o.operationContext(), clusterID, req, launch, operationEpoch)
+	sess, sessionCtx := newShellSession(o.operationContext(), req, launch, operationEpoch)
 	lifecycle := o.shellSessionLifecycle()
 	if !lifecycle.register(sess) {
 		sess.Close()
@@ -213,14 +218,18 @@ func (o *OperationsCoordinator) StartShellSession(clusterID string, req ShellSes
 	}
 	go o.monitorShellTimeout(sessionCtx, sess)
 	o.startShellSessionStream(lifecycle, sessionCtx, sess, launch.executor)
-	lifecycle.emitStatus(sess.id, clusterID, "open", "")
+	lifecycle.emitStatus(sess.id, clusterID, types.ShellSessionStatusOpen, "")
 	return shellSessionResponse(sess, launch.pod), nil
 }
 
-func (o *OperationsCoordinator) prepareShellLaunch(clusterID string, req ShellSessionRequest) (shellLaunch, error) {
-	if err := requirePodObject(req.Namespace, req.PodName); err != nil {
+func (o *OperationsCoordinator) prepareShellLaunch(req ShellSessionRequest) (shellLaunch, error) {
+	if err := requireTargetIdentity(req.Target, podspkg.Identity); err != nil {
 		return shellLaunch{}, err
 	}
+	if err := requirePodObject(req.Target.Namespace, req.Target.Name); err != nil {
+		return shellLaunch{}, err
+	}
+	clusterID := req.Target.ClusterID
 
 	if o == nil || o.clusterAccess == nil {
 		return shellLaunch{}, fmt.Errorf("cluster access not initialized")
@@ -236,9 +245,9 @@ func (o *OperationsCoordinator) prepareShellLaunch(clusterID string, req ShellSe
 	ctx, cancel := context.WithTimeout(o.operationContext(), config.ShellSessionShutdownTimeout)
 	defer cancel()
 
-	podIdentifier := fmt.Sprintf("%s/%s", req.Namespace, req.PodName)
+	podIdentifier := fmt.Sprintf("%s/%s", req.Target.Namespace, req.Target.Name)
 	pod, err := o.clusterAccess.FetchPodWithRetry(ctx, clusterID, podIdentifier, func(fetchCtx context.Context) (*corev1.Pod, error) {
-		return deps.KubernetesClient.CoreV1().Pods(req.Namespace).Get(fetchCtx, req.PodName, metav1.GetOptions{})
+		return deps.KubernetesClient.CoreV1().Pods(req.Target.Namespace).Get(fetchCtx, req.Target.Name, metav1.GetOptions{})
 	})
 	if err != nil {
 		return shellLaunch{}, fmt.Errorf("failed to load pod: %w", err)
@@ -290,16 +299,16 @@ func (o *OperationsCoordinator) requireShellExecPermission(ctx context.Context, 
 		OperationsPermissionCheck{
 			Version:     "v1",
 			Kind:        podspkg.Identity.Kind,
-			Namespace:   req.Namespace,
-			Name:        req.PodName,
+			Namespace:   req.Target.Namespace,
+			Name:        req.Target.Name,
 			Verb:        "get",
 			Subresource: "exec",
 		},
 		OperationsPermissionCheck{
 			Version:     "v1",
 			Kind:        podspkg.Identity.Kind,
-			Namespace:   req.Namespace,
-			Name:        req.PodName,
+			Namespace:   req.Target.Namespace,
+			Name:        req.Target.Name,
 			Verb:        "create",
 			Subresource: "exec",
 		},
@@ -324,8 +333,8 @@ func (o *OperationsCoordinator) buildShellExecutor(
 		RESTClient().
 		Post().
 		Resource("pods").
-		Namespace(req.Namespace).
-		Name(req.PodName).
+		Namespace(req.Target.Namespace).
+		Name(req.Target.Name).
 		SubResource("exec").
 		VersionedParams(&corev1.PodExecOptions{
 			Container: container,
@@ -355,7 +364,8 @@ func (o *OperationsCoordinator) buildShellExecutor(
 	return executor, nil
 }
 
-func newShellSession(parent context.Context, clusterID string, req ShellSessionRequest, launch shellLaunch, operationEpoch uint64) (*shellSession, context.Context) {
+func newShellSession(parent context.Context, req ShellSessionRequest, launch shellLaunch, operationEpoch uint64) (*shellSession, context.Context) {
+	clusterID := req.Target.ClusterID
 	sessionID := uuid.NewString()
 	stdinReader, stdinWriter := io.Pipe()
 	sizeQueue := newTerminalSizeQueue()
@@ -369,8 +379,7 @@ func newShellSession(parent context.Context, clusterID string, req ShellSessionR
 		id:             sessionID,
 		clusterID:      clusterID,
 		clusterName:    launch.deps.ClusterName,
-		namespace:      req.Namespace,
-		podName:        req.PodName,
+		target:         *runtimeOperationTarget(clusterID, podspkg.Identity.Group, podspkg.Identity.Version, podspkg.Identity.Kind, req.Target.Namespace, req.Target.Name),
 		container:      launch.container,
 		command:        append([]string(nil), launch.command...),
 		stdin:          stdinWriter,
@@ -403,9 +412,9 @@ func (o *OperationsCoordinator) startShellSessionStream(
 		})
 
 		if streamErr != nil {
-			lifecycle.finishStream(sess.id, "error", streamErr.Error())
+			lifecycle.finishStream(sess.id, types.ShellSessionStatusError, streamErr.Error())
 		} else {
-			lifecycle.finishStream(sess.id, "closed", "")
+			lifecycle.finishStream(sess.id, types.ShellSessionStatusClosed, "")
 		}
 	}()
 }
@@ -421,8 +430,7 @@ func shellSessionResponse(sess *shellSession, pod *corev1.Pod) *ShellSession {
 
 	return &ShellSession{
 		SessionID:  sess.id,
-		Namespace:  sess.namespace,
-		PodName:    sess.podName,
+		Target:     sess.target,
 		Container:  sess.container,
 		Command:    append([]string(nil), sess.command...),
 		Containers: containers,
@@ -480,15 +488,16 @@ func runtimeOperationFromShellSession(sess *shellSession) RuntimeOperation {
 	if sess == nil {
 		return RuntimeOperation{}
 	}
+	target := sess.target
 	return RuntimeOperation{
 		ID:          sess.id,
 		Type:        RuntimeOperationShell,
 		ClusterID:   sess.clusterID,
 		ClusterName: sess.clusterName,
-		Target:      runtimeOperationTarget(sess.clusterID, podspkg.Identity.Group, podspkg.Identity.Version, podspkg.Identity.Kind, sess.namespace, sess.podName),
+		Target:      &target,
 		Status:      "open",
 		StartedAt:   sess.startedAt.Format(time.RFC3339),
-		DisplayName: fmt.Sprintf("Shell %s/%s", sess.namespace, sess.podName),
+		DisplayName: fmt.Sprintf("Shell %s/%s", target.Namespace, target.Name),
 		Summary: map[string]string{
 			"container": sess.container,
 			"command":   strings.Join(sess.command, " "),
@@ -534,28 +543,35 @@ func (o *OperationsCoordinator) monitorShellTimeout(ctx context.Context, sess *s
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			// Check max duration first (hard limit)
-			if sess.totalDuration() >= config.ShellSessionMaxDuration {
-				if o.logger != nil {
-					o.logger.Warn(fmt.Sprintf("Shell session %s exceeded max duration (%s), terminating", sess.id, config.ShellSessionMaxDuration), logsources.ShellSession)
-				}
-				o.terminateShellWithReason(sess.id, "timeout", "session exceeded maximum duration")
-				return
-			}
-
-			// Check idle timeout
-			if sess.idleDuration() >= config.ShellSessionIdleTimeout {
-				if o.logger != nil {
-					o.logger.Warn(fmt.Sprintf("Shell session %s idle for %s, terminating", sess.id, config.ShellSessionIdleTimeout), logsources.ShellSession)
-				}
-				o.terminateShellWithReason(sess.id, "timeout", "session idle timeout")
+			if o.endExpiredShellSession(sess) {
 				return
 			}
 		}
 	}
 }
 
+// endExpiredShellSession ends a session past its maximum lifetime (checked
+// first, as the hard limit) or its idle window, and reports whether it did.
+func (o *OperationsCoordinator) endExpiredShellSession(sess *shellSession) bool {
+	var logMessage, reason string
+	switch {
+	case sess.totalDuration() >= config.ShellSessionMaxDuration:
+		logMessage = fmt.Sprintf("Shell session %s exceeded max duration (%s), terminating", sess.id, config.ShellSessionMaxDuration)
+		reason = "session exceeded maximum duration"
+	case sess.idleDuration() >= config.ShellSessionIdleTimeout:
+		logMessage = fmt.Sprintf("Shell session %s idle for %s, terminating", sess.id, config.ShellSessionIdleTimeout)
+		reason = "session idle timeout"
+	default:
+		return false
+	}
+	if o.logger != nil {
+		o.logger.Warn(logMessage, logsources.ShellSession)
+	}
+	o.terminateShellWithReason(sess.id, types.ShellSessionStatusTimeout, reason)
+	return true
+}
+
 // terminateShellWithReason closes a shell session and emits a status with the given reason.
-func (o *OperationsCoordinator) terminateShellWithReason(sessionID, status, reason string) {
+func (o *OperationsCoordinator) terminateShellWithReason(sessionID string, status types.ShellSessionStatus, reason string) {
 	o.shellSessionLifecycle().finishStream(sessionID, status, reason)
 }
