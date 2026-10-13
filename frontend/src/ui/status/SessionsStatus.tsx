@@ -4,6 +4,7 @@
  * Unified header status indicator for shell sessions and port forwards.
  */
 
+import { types } from '@core/backend-api/models';
 import { openURL } from '@core/desktop-runtime';
 import { useKubeconfig } from '@modules/kubernetes/config/KubeconfigContext';
 import { objectPanelId } from '@modules/object-panel/contexts/ObjectPanelStateContext';
@@ -86,6 +87,10 @@ const SessionFields = ({ fields, status }: { fields: SessionField[]; status: str
   </>
 );
 
+// A node shell whose stream ended but whose debug pod could not be deleted.
+const isKeptForCleanup = (session: ShellSessionInfo): boolean =>
+  session.status === types.ShellSessionStatus.ShellSessionStatusCleanupFailed;
+
 const ShellSessionItem = ({
   session,
   jumpingShellSessionId,
@@ -99,14 +104,19 @@ const ShellSessionItem = ({
   onOpen: (session: ShellSessionInfo) => void;
   onEnd: (sessionId: string) => Promise<void>;
 }) => {
-  const sessionStatus = session.status || 'active';
+  const sessionStatus = isKeptForCleanup(session) ? 'error' : 'active';
+  // A node shell runs in a debug pod the app created on that node.
+  const pod = session.debugPod ?? session.target;
+  const [clusterField, ...podFields] = sessionIdentityFields({
+    clusterName: session.clusterName,
+    clusterId: session.clusterId,
+    namespace: pod.namespace,
+    podName: pod.name,
+  });
   const fields = [
-    ...sessionIdentityFields({
-      clusterName: session.clusterName,
-      clusterId: session.clusterId,
-      namespace: session.target.namespace,
-      podName: session.target.name,
-    }),
+    clusterField,
+    ...(session.debugPod ? [{ label: 'node', value: session.target.name || '-' }] : []),
+    ...podFields,
     { label: 'container', value: session.container || '-' },
     { label: 'shell', value: session.command?.[0] || '/bin/sh' },
   ];
@@ -124,6 +134,9 @@ const ShellSessionItem = ({
           <div className="ss-session-fields as-pf-fields">
             <SessionFields fields={fields} status={sessionStatus} />
           </div>
+          {!!session.statusReason && (
+            <div className="pf-session-reason as-pf-reason">{session.statusReason}</div>
+          )}
         </div>
         <span className="as-shell-open-affordance" aria-hidden="true">
           {jumpingShellSessionId === session.sessionId ? '…' : <OpenIcon width={14} height={14} />}
@@ -378,7 +391,8 @@ const SessionsStatus: React.FC = () => {
 
   const totalCount = shellCount + portForwardCount;
   const totalHealthy =
-    shellCount + filteredPortForwards.filter((session) => session.status === 'active').length;
+    filteredShellSessions.filter((session) => !isKeptForCleanup(session)).length +
+    filteredPortForwards.filter((session) => session.status === 'active').length;
   const totalUnhealthy = Math.max(0, totalCount - totalHealthy);
 
   const status = useMemo<StatusState>(() => {
