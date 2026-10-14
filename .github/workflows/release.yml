@@ -81,7 +81,7 @@ jobs:
                 "artifact_path": "bin/*-windows-amd64.exe\nbin/*-windows-amd64-user-installer.exe\nbin/*-windows-amd64-system-installer.exe"
               },
               {
-                "runner": "windows-latest-arm",
+                "runner": "windows-11-arm",
                 "goos": "windows",
                 "arch": "arm64",
                 "input": "build_windows_arm64",
@@ -126,7 +126,7 @@ jobs:
 
   test:
     if: ${{ github.event.inputs.skip_tests != 'true' }}
-    runs-on: ubuntu-latest-32core-amd64
+    runs-on: ubuntu-latest #-32core-amd64
     steps:
       - uses: actions/checkout@v7
         with:
