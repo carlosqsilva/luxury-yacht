@@ -69,9 +69,10 @@ describe('useGridTableShortcuts', () => {
         onOpenFocusedRow: noop,
         onOpenContextMenu: noop,
         moveSelectionByDelta: () => false,
-        jumpToIndex: () => false,
+        moveRow: () => false,
+        jumpToStart: () => false,
+        jumpToEnd: () => false,
         getPageSizeRef,
-        tableDataLength: 25,
         isContextMenuVisible: false,
       });
       return null;
@@ -122,46 +123,57 @@ describe('useGridTableShortcuts', () => {
     );
   });
 
-  it('uses the optional row-selection action for Space while Enter still opens', async () => {
-    const onOpenFocusedRow = vi.fn(() => true);
-    const onSelectFocusedRow = vi.fn(() => true);
-    const Harness: React.FC = () => {
-      useGridTableShortcuts({
-        shortcutsActive: true,
-        enableContextMenu: false,
-        onOpenFocusedRow,
-        onSelectFocusedRow,
-        onOpenContextMenu: () => false,
-        moveSelectionByDelta: () => false,
-        jumpToIndex: () => false,
-        getPageSizeRef: { current: 10 },
-        tableDataLength: 1,
-        isContextMenuVisible: false,
+  it.each([true, false])(
+    'gives Space only the row expand toggle while Enter still opens (rows expand: %s)',
+    async (rowsExpand) => {
+      const onOpenFocusedRow = vi.fn(() => true);
+      const onToggleFocusedRow = vi.fn(() => true);
+      const Harness: React.FC = () => {
+        useGridTableShortcuts({
+          shortcutsActive: true,
+          enableContextMenu: false,
+          onOpenFocusedRow,
+          onToggleFocusedRow: rowsExpand ? onToggleFocusedRow : undefined,
+          onOpenContextMenu: () => false,
+          moveSelectionByDelta: () => false,
+          moveRow: () => false,
+          jumpToStart: () => false,
+          jumpToEnd: () => false,
+          getPageSizeRef: { current: 10 },
+          isContextMenuVisible: false,
+        });
+        return null;
+      };
+
+      await act(async () => {
+        root.render(<Harness />);
+        await Promise.resolve();
       });
-      return null;
-    };
 
-    await act(async () => {
-      root.render(<Harness />);
-      await Promise.resolve();
-    });
+      requireValue(
+        capturedShortcuts.shortcuts.find((s) => s.key === 'Enter'),
+        'Enter shortcut'
+      ).handler();
+      const space = requireValue(
+        capturedShortcuts.shortcuts.find((s) => s.key === ' '),
+        'Space shortcut'
+      );
+      space.handler();
 
-    requireValue(
-      capturedShortcuts.shortcuts.find((s) => s.key === 'Enter'),
-      'Enter shortcut'
-    ).handler();
-    requireValue(
-      capturedShortcuts.shortcuts.find((s) => s.key === ' '),
-      'Space shortcut'
-    ).handler();
+      expect(onOpenFocusedRow).toHaveBeenCalledTimes(1);
+      // Without an expand toggle Space is switched off (and so absent from help),
+      // never borrowing Enter's open action.
+      expect(space.enabled).toBe(rowsExpand);
+      expect(onToggleFocusedRow).toHaveBeenCalledTimes(rowsExpand ? 1 : 0);
+    }
+  );
 
-    expect(onOpenFocusedRow).toHaveBeenCalledTimes(1);
-    expect(onSelectFocusedRow).toHaveBeenCalledTimes(1);
-  });
-
-  it('wires moveSelectionByDelta and jumpToIndex to navigation shortcuts', async () => {
+  it('wires row moves, paging, Home/End and the expanded-table skips to their keys', async () => {
+    const moveRow = vi.fn(() => true);
     const moveSelectionByDelta = vi.fn(() => true);
-    const jumpToIndex = vi.fn(() => true);
+    const jumpToStart = vi.fn(() => true);
+    const jumpToEnd = vi.fn(() => true);
+    const moveParentRow = vi.fn(() => true);
     const getPageSizeRef = { current: 15 };
 
     const Harness: React.FC = () => {
@@ -170,10 +182,12 @@ describe('useGridTableShortcuts', () => {
         enableContextMenu: false,
         onOpenFocusedRow: () => false,
         onOpenContextMenu: () => false,
+        moveRow,
         moveSelectionByDelta,
-        jumpToIndex,
+        jumpToStart,
+        jumpToEnd,
+        moveParentRow,
         getPageSizeRef,
-        tableDataLength: 50,
         isContextMenuVisible: false,
       });
       return null;
@@ -184,42 +198,25 @@ describe('useGridTableShortcuts', () => {
       await Promise.resolve();
     });
 
-    const findShortcut = (key: string) => capturedShortcuts.shortcuts.find((s) => s.key === key);
+    const run = (key: string, alt = false) =>
+      requireValue(
+        capturedShortcuts.shortcuts.find((s) => s.key === key && Boolean(s.modifiers?.alt) === alt),
+        `${alt ? 'Alt+' : ''}${key} shortcut`
+      ).handler();
 
-    // ArrowDown calls moveSelectionByDelta(1).
-    requireValue(
-      findShortcut('ArrowDown'),
-      'expected test value in useGridTableShortcuts.test.tsx'
-    ).handler();
-    expect(moveSelectionByDelta).toHaveBeenCalledWith(1);
-
-    // ArrowUp calls moveSelectionByDelta(-1).
-    requireValue(
-      findShortcut('ArrowUp'),
-      'expected test value in useGridTableShortcuts.test.tsx'
-    ).handler();
-    expect(moveSelectionByDelta).toHaveBeenCalledWith(-1);
-
-    // PageDown uses the page size ref.
-    requireValue(
-      findShortcut('PageDown'),
-      'expected test value in useGridTableShortcuts.test.tsx'
-    ).handler();
+    run('ArrowDown');
+    run('ArrowUp');
+    expect(moveRow.mock.calls).toEqual([[1], [-1]]);
+    // Paging stays a page of this table's rows.
+    run('PageDown');
     expect(moveSelectionByDelta).toHaveBeenCalledWith(15);
-
-    // Home jumps to index 0.
-    requireValue(
-      findShortcut('Home'),
-      'expected test value in useGridTableShortcuts.test.tsx'
-    ).handler();
-    expect(jumpToIndex).toHaveBeenCalledWith(0);
-
-    // End jumps to the last index (tableDataLength - 1).
-    requireValue(
-      findShortcut('End'),
-      'expected test value in useGridTableShortcuts.test.tsx'
-    ).handler();
-    expect(jumpToIndex).toHaveBeenCalledWith(49);
+    run('Home');
+    run('End');
+    expect(jumpToStart).toHaveBeenCalledTimes(1);
+    expect(jumpToEnd).toHaveBeenCalledTimes(1);
+    run('ArrowDown', true);
+    run('ArrowUp', true);
+    expect(moveParentRow.mock.calls).toEqual([[1], [-1]]);
   });
 
   it('disables Shift+F10 context menu shortcut when enableContextMenu is false', async () => {
@@ -245,9 +242,10 @@ describe('useGridTableShortcuts', () => {
         onOpenFocusedRow: () => false,
         onOpenContextMenu: () => false,
         moveSelectionByDelta: () => false,
-        jumpToIndex: () => false,
+        moveRow: () => false,
+        jumpToStart: () => false,
+        jumpToEnd: () => false,
         getPageSizeRef: { current: 10 },
-        tableDataLength: 25,
         isContextMenuVisible: false,
         ...pagination,
       });

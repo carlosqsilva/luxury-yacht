@@ -44,6 +44,39 @@ const installStyles = (...sources: string[]) => {
   return style;
 };
 
+// Loads the GridTable and row-detail styles in either order. jsdom does not
+// resolve theme variables, so each distinct one gets its own stand-in color
+// (whichever tokens the styles use); like background, a later border-left
+// shorthand would override a more specific color in jsdom, so shorthands are
+// expanded first.
+const installRowDetailStyles = (globalLast: boolean) => {
+  const standIns = new Map<string, string>();
+  const resolveThemeVars = (source: string) =>
+    source
+      .replace(/var\((--[a-z0-9-]+)\)/g, (_match, name: string) => {
+        if (!standIns.has(name)) {
+          standIns.set(name, `rgb(${standIns.size + 1}, 0, 0)`);
+        }
+        return requireValue(standIns.get(name), 'stand-in color');
+      })
+      .replace(/\bborder-left:\s*([^;{}]+);/g, (declaration, value: string) => {
+        const style = document.createElement('div').style;
+        style.borderLeft = value;
+        return style.borderLeftColor
+          ? ['width', 'style', 'color']
+              .map(
+                (name) => `border-left-${name}: ${style.getPropertyValue(`border-left-${name}`)};`
+              )
+              .join('\n')
+          : declaration;
+      });
+  const grid = resolveThemeVars(readProjectFile('styles/components/gridtables.css'));
+  const rowDetail = resolveThemeVars(
+    readProjectFile('src/shared/components/tables/GridTableRowDetail.css')
+  );
+  return installStyles(...(globalLast ? [rowDetail, grid] : [grid, rowDetail]));
+};
+
 afterEach(() => {
   document.head.querySelectorAll('style[data-css-contract]').forEach((style) => {
     style.remove();
@@ -215,6 +248,57 @@ describe('strict CSS cascade contracts', () => {
       expect(
         window.getComputedStyle(document.querySelector('#nested') as HTMLElement).marginRight
       ).toBe('0px');
+    }
+  );
+
+  it.each([false, true])(
+    'keeps the selection rail off expanded rows and their tables, and on a selected expanded row (global styles last=%s)',
+    (globalLast) => {
+      const style = installRowDetailStyles(globalLast);
+      style.dataset.cssContract = 'row-detail-rail';
+      document.body.innerHTML = `
+      <div class="gridtable-row gridtable-row--selected" id="selected"></div>
+      <div class="gridtable-row gridtable-row--detail-open" id="expanded"></div>
+      <div class="gridtable-row-detail" id="detail"></div>
+      <div class="gridtable-row gridtable-row--detail-open gridtable-row--selected" id="selected-expanded"></div>
+      <div class="gridtable-row gridtable-row--detail-open gridtable-row--focused" id="focused-expanded"></div>`;
+      const rail = (id: string) =>
+        window.getComputedStyle(document.querySelector(`#${id}`) as HTMLElement).borderLeftColor;
+
+      // A selected row next to an expanded table must not read as part of it.
+      expect(rail('expanded')).not.toBe(rail('selected'));
+      expect(rail('detail')).not.toBe(rail('selected'));
+      // Expanding a row never hides that it is selected or focused.
+      expect(rail('selected-expanded')).toBe(rail('selected'));
+      expect(rail('focused-expanded')).toBe(rail('selected'));
+    }
+  );
+
+  it.each([false, true])(
+    'highlights an open row and the band around its table together, background and rail (global styles last=%s)',
+    (globalLast) => {
+      const style = installRowDetailStyles(globalLast);
+      style.dataset.cssContract = 'row-detail-highlight';
+      document.body.innerHTML = `
+      <div class="gridtable-row gridtable-row--detail-open gridtable-row--selected" id="selected"></div>
+      <div class="gridtable-row-detail" id="selected-detail"></div>
+      <div class="gridtable-row gridtable-row--detail-open gridtable-row--focused" id="focused"></div>
+      <div class="gridtable-row-detail" id="focused-detail"></div>
+      <div class="gridtable-row gridtable-row--detail-open" id="open"></div>
+      <div class="gridtable-row-detail" id="open-detail"></div>`;
+      const computed = (id: string) =>
+        window.getComputedStyle(document.querySelector(`#${id}`) as HTMLElement);
+      const background = (id: string) => computed(id).backgroundColor;
+      const rail = (id: string) => computed(id).borderLeftColor;
+
+      // A highlighted row's detail takes the same highlight and rail, so the
+      // group stays one block; an unselected group shows neither.
+      expect(background('selected-detail')).toBe(background('selected'));
+      expect(background('focused-detail')).toBe(background('focused'));
+      expect(background('open-detail')).not.toBe(background('selected'));
+      expect(rail('selected-detail')).toBe(rail('selected'));
+      expect(rail('focused-detail')).toBe(rail('focused'));
+      expect(rail('open-detail')).not.toBe(rail('selected'));
     }
   );
 
