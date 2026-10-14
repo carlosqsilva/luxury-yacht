@@ -1,18 +1,22 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 func repositoryPath(elements ...string) string {
@@ -973,16 +977,169 @@ func TestReleasePreparationExcludesUnsignedSigningArtifacts(t *testing.T) {
 	require.Greater(t, releaseStart, prepareStart)
 	require.Contains(t, workflow[prepareStart:releaseStart], "pattern: artifacts-*")
 
-	artifactNames := regexp.MustCompile(`(?m)^\s+artifact_name: (\S+)$`).FindAllStringSubmatch(workflow, -1)
-	require.NotEmpty(t, artifactNames)
-	for _, name := range artifactNames {
-		require.Truef(t, strings.HasPrefix(name[1], "artifacts-"), "release artifact %q must match the download pattern", name[1])
+	builds := runReleaseBuildPlan(t, nil, true, false).builds
+	require.NotEmpty(t, builds)
+	for _, build := range builds {
+		require.Truef(t, strings.HasPrefix(build["artifact_name"], "artifacts-"), "release artifact %q must match the download pattern", build["artifact_name"])
 	}
 	signingUploads := regexp.MustCompile(`(?m)^\s+name: (signpath-.+)$`).FindAllStringSubmatch(workflow, -1)
 	require.Len(t, signingUploads, 2)
 	for _, name := range signingUploads {
 		require.Falsef(t, strings.HasPrefix(name[1], "artifacts-"), "signing upload %q must not reach release preparation", name[1])
 	}
+}
+
+// Dry runs may skip tests and pick any combination of builds for faster
+// feedback, but a published release must test and build everything, and only a
+// complete build set may reach release preparation, which needs every updater
+// target.
+func TestReleaseDispatchCanNarrowDryRunsButNeverAPublishedRelease(t *testing.T) {
+	tagPush := runReleaseBuildPlan(t, nil, true, false)
+	require.NoError(t, tagPush.err)
+	require.Equal(t, "true", tagPush.outputs["complete"])
+	require.Equal(t, []string{
+		"artifacts-darwin",
+		"artifacts-windows-amd64",
+		"artifacts-windows-arm64",
+		"artifacts-linux-amd64",
+		"artifacts-linux-arm64",
+	}, tagPush.artifactNames())
+
+	// Each build has its own checkbox, checked by default, so an unedited
+	// dispatch is a full dry run.
+	inputs := readReleaseWorkflow(t).On.WorkflowDispatch.Inputs
+	var buildInputs []string
+	for _, build := range tagPush.builds {
+		input, found := inputs[build["input"]]
+		require.Truef(t, found, "build %q has no dispatch input", build["artifact_name"])
+		require.Equal(t, "boolean", input.Type, build["input"])
+		require.Equal(t, true, input.Default, build["input"])
+		buildInputs = append(buildInputs, build["input"])
+	}
+	full := runReleaseBuildPlan(t, dispatchedBuilds(buildInputs, buildInputs...), false, false)
+	require.NoError(t, full.err)
+	require.Equal(t, "true", full.outputs["complete"])
+
+	for _, testCase := range []struct {
+		selected []string
+		expected []string
+	}{
+		{[]string{"build_windows_amd64"}, []string{"artifacts-windows-amd64"}},
+		{[]string{"build_darwin", "build_windows_arm64"}, []string{"artifacts-darwin", "artifacts-windows-arm64"}},
+		{[]string{"build_linux_amd64", "build_linux_arm64"}, []string{"artifacts-linux-amd64", "artifacts-linux-arm64"}},
+	} {
+		plan := runReleaseBuildPlan(t, dispatchedBuilds(buildInputs, testCase.selected...), false, true)
+		require.NoError(t, plan.err, testCase.selected)
+		require.Equal(t, "false", plan.outputs["complete"], testCase.selected)
+		require.Equal(t, testCase.expected, plan.artifactNames(), testCase.selected)
+	}
+
+	require.Error(t, runReleaseBuildPlan(t, dispatchedBuilds(buildInputs), false, false).err, "a run must select a build")
+	require.Error(t, runReleaseBuildPlan(t, dispatchedBuilds(buildInputs, "build_windows_amd64"), true, false).err, "a release must build every target")
+	require.Error(t, runReleaseBuildPlan(t, nil, true, true).err, "a release must run the tests")
+
+	workflow := readTestFile(t, repositoryPath(".github", "workflows", "release.yml"))
+	for _, wiring := range []string{
+		"PUBLISH: ${{ github.event_name == 'push' || github.event.inputs.release == 'true' }}",
+		"SKIP_TESTS: ${{ github.event.inputs.skip_tests == 'true' }}",
+		"INPUTS: ${{ toJSON(github.event.inputs) }}",
+		"  test:\n    if: ${{ github.event.inputs.skip_tests != 'true' }}\n",
+		"  build:\n    needs:\n      - plan\n      - test\n    if: ${{ !cancelled() && !failure() }}\n",
+		"      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}\n",
+		"    if: ${{ !cancelled() && !failure() && needs.plan.outputs.complete == 'true' }}\n",
+	} {
+		require.Contains(t, workflow, wiring)
+	}
+}
+
+// dispatchedBuilds returns workflow_dispatch inputs, as GitHub passes them,
+// with only the selected build checkboxes checked.
+func dispatchedBuilds(buildInputs []string, selected ...string) map[string]string {
+	inputs := map[string]string{"release": "false", "skip_tests": "false"}
+	for _, input := range buildInputs {
+		inputs[input] = strconv.FormatBool(slices.Contains(selected, input))
+	}
+	return inputs
+}
+
+type releaseWorkflowDefinition struct {
+	On struct {
+		WorkflowDispatch struct {
+			Inputs map[string]struct {
+				Type    string `yaml:"type"`
+				Default any    `yaml:"default"`
+			} `yaml:"inputs"`
+		} `yaml:"workflow_dispatch"`
+	} `yaml:"on"`
+	Jobs map[string]struct {
+		Steps []releaseWorkflowStep `yaml:"steps"`
+	} `yaml:"jobs"`
+}
+
+type releaseWorkflowStep struct {
+	ID  string            `yaml:"id"`
+	Env map[string]string `yaml:"env"`
+	Run string            `yaml:"run"`
+}
+
+func readReleaseWorkflow(t *testing.T) releaseWorkflowDefinition {
+	t.Helper()
+	var workflow releaseWorkflowDefinition
+	require.NoError(t, yaml.Unmarshal([]byte(readTestFile(t, repositoryPath(".github", "workflows", "release.yml"))), &workflow))
+	return workflow
+}
+
+type releaseBuildPlan struct {
+	err     error
+	outputs map[string]string
+	builds  []map[string]string
+}
+
+func (plan releaseBuildPlan) artifactNames() []string {
+	names := make([]string, 0, len(plan.builds))
+	for _, build := range plan.builds {
+		names = append(names, build["artifact_name"])
+	}
+	return names
+}
+
+// runReleaseBuildPlan executes the workflow's real planning step the way the
+// runner does. Nil inputs model a tag push, which has no dispatch inputs.
+func runReleaseBuildPlan(t *testing.T, inputs map[string]string, publish, skipTests bool) releaseBuildPlan {
+	t.Helper()
+	planJob, found := readReleaseWorkflow(t).Jobs["plan"]
+	require.True(t, found, "missing plan job")
+	index := slices.IndexFunc(planJob.Steps, func(step releaseWorkflowStep) bool { return step.ID == "plan" })
+	require.GreaterOrEqual(t, index, 0, "missing plan step")
+	step := planJob.Steps[index]
+
+	inputsJSON, err := json.Marshal(inputs)
+	require.NoError(t, err)
+	outputPath := filepath.Join(t.TempDir(), "github-output")
+	command := exec.Command("bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", step.Run)
+	command.Env = append(os.Environ(),
+		"BUILDS="+step.Env["BUILDS"],
+		"INPUTS="+string(inputsJSON),
+		fmt.Sprintf("PUBLISH=%t", publish),
+		fmt.Sprintf("SKIP_TESTS=%t", skipTests),
+		"GITHUB_OUTPUT="+outputPath,
+	)
+	plan := releaseBuildPlan{outputs: map[string]string{}}
+	if output, err := command.CombinedOutput(); err != nil {
+		plan.err = fmt.Errorf("%w: %s", err, output)
+		return plan
+	}
+	for _, line := range strings.Split(strings.TrimSpace(readTestFile(t, outputPath)), "\n") {
+		key, value, found := strings.Cut(line, "=")
+		require.True(t, found, line)
+		plan.outputs[key] = value
+	}
+	var matrix struct {
+		Include []map[string]string `json:"include"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(plan.outputs["matrix"]), &matrix))
+	plan.builds = matrix.Include
+	return plan
 }
 
 func TestConfiguredUpdaterTargetsPublishOnlyReplaceablePayloads(t *testing.T) {

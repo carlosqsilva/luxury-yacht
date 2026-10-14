@@ -64,6 +64,9 @@ The signed Windows build additionally reads:
 | `SIGNPATH_API_TOKEN` | API token of the SignPath user that submits signing requests |
 | `SIGNPATH_ORGANIZATION_ID` | SignPath organization identifier |
 
+The [SignPath GitHub App](https://github.com/apps/signpath) must be installed
+on the `luxury-yacht` organization with access to this repository; the signing
+step fails with "Failed to retrieve GitHub App token" without it.
 The SignPath project `app` must have the `windows-exe` and
 `windows-installers` artifact configurations and the `test-signing` and
 `release-signing` policies. Dry runs use `test-signing`; tag pushes and checked
@@ -72,6 +75,23 @@ each executable and installer signing request. See
 [CODE_SIGNING.md](CODE_SIGNING.md).
 
 `RELEASES_REPO_TOKEN` authorizes publishing the generated artifacts to the GitHub release.
+
+## Testing Release Workflow Changes
+
+A manual **Release** run is a dry run unless **Create GitHub release** is
+checked. For faster feedback, a dry run can skip the test job and uncheck any
+of the build checkboxes. Release preparation needs every build, so a run with
+fewer builds stops after building. A published release always runs the tests
+and every build.
+
+Every build checkbox defaults to checked, so from the command line pass `false`
+for the builds to skip. This runs only the Windows amd64 build:
+
+```bash
+gh workflow run release.yml --ref <branch> -f skip_tests=true \
+  -f build_darwin=false -f build_windows_arm64=false \
+  -f build_linux_amd64=false -f build_linux_arm64=false
+```
 
 ## Publishing a Release
 

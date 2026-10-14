@@ -8,6 +8,38 @@ on:
         required: false
         default: false
         type: boolean
+      skip_tests:
+        description: "Skip the test job (dry runs only)"
+        required: false
+        default: false
+        type: boolean
+      # Build checkboxes: unchecking any is for dry runs only, and release
+      # preparation runs only when all are checked.
+      build_darwin:
+        description: "Build macOS (arm64 and amd64)"
+        required: false
+        default: true
+        type: boolean
+      build_windows_amd64:
+        description: "Build Windows amd64"
+        required: false
+        default: true
+        type: boolean
+      build_windows_arm64:
+        description: "Build Windows arm64"
+        required: false
+        default: true
+        type: boolean
+      build_linux_amd64:
+        description: "Build Linux amd64"
+        required: false
+        default: true
+        type: boolean
+      build_linux_arm64:
+        description: "Build Linux arm64"
+        required: false
+        default: true
+        type: boolean
   push:
     tags:
       - "v[1-9]*"
@@ -16,7 +48,84 @@ permissions:
   contents: read
 
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      complete: ${{ steps.plan.outputs.complete }}
+    steps:
+      - name: Select builds
+        id: plan
+        env:
+          PUBLISH: ${{ github.event_name == 'push' || github.event.inputs.release == 'true' }}
+          SKIP_TESTS: ${{ github.event.inputs.skip_tests == 'true' }}
+          # Null on tag pushes, which always build everything.
+          INPUTS: ${{ toJSON(github.event.inputs) }}
+          # Each build runs unless its "input" checkbox is unchecked.
+          BUILDS: |
+            [
+              {
+                "runner": "macos-latest",
+                "goos": "darwin",
+                "arch": "arm64-and-amd64",
+                "input": "build_darwin",
+                "artifact_name": "artifacts-darwin",
+                "artifact_path": "bin/*-macos-*.dmg\nbin/*-darwin-*.zip"
+              },
+              {
+                "runner": "windows-latest",
+                "goos": "windows",
+                "arch": "amd64",
+                "input": "build_windows_amd64",
+                "artifact_name": "artifacts-windows-amd64",
+                "artifact_path": "bin/*-windows-amd64.exe\nbin/*-windows-amd64-user-installer.exe\nbin/*-windows-amd64-system-installer.exe"
+              },
+              {
+                "runner": "windows-latest-arm",
+                "goos": "windows",
+                "arch": "arm64",
+                "input": "build_windows_arm64",
+                "artifact_name": "artifacts-windows-arm64",
+                "artifact_path": "bin/*-windows-arm64.exe\nbin/*-windows-arm64-user-installer.exe\nbin/*-windows-arm64-system-installer.exe"
+              },
+              {
+                "runner": "ubuntu-latest",
+                "goos": "linux",
+                "arch": "amd64",
+                "input": "build_linux_amd64",
+                "artifact_name": "artifacts-linux-amd64",
+                "artifact_path": "bin/*.deb\nbin/*.rpm\nbin/*-linux-*.tar.gz"
+              },
+              {
+                "runner": "ubuntu-latest-arm",
+                "goos": "linux",
+                "arch": "arm64",
+                "input": "build_linux_arm64",
+                "artifact_name": "artifacts-linux-arm64",
+                "artifact_path": "bin/*.deb\nbin/*.rpm\nbin/*-linux-*.tar.gz"
+              }
+            ]
+        run: |
+          matrix="$(jq -c --argjson inputs "$INPUTS" \
+            '{include: [.[] | select((($inputs // {})[.input] | tostring) != "false")]}' \
+            <<<"$BUILDS")"
+          selected="$(jq '.include | length' <<<"$matrix")"
+          complete="$([ "$selected" -eq "$(jq length <<<"$BUILDS")" ] && echo true || echo false)"
+          if [ "$PUBLISH" = "true" ] && { [ "$complete" != "true" ] || [ "$SKIP_TESTS" = "true" ]; }; then
+            echo "::error::A published release must run the tests and every build."
+            exit 1
+          fi
+          if [ "$selected" -eq 0 ]; then
+            echo "::error::Select at least one build."
+            exit 1
+          fi
+          {
+            echo "matrix=$matrix"
+            echo "complete=$complete"
+          } >> "$GITHUB_OUTPUT"
+
   test:
+    if: ${{ github.event.inputs.skip_tests != 'true' }}
     runs-on: ubuntu-latest-32core-amd64
     steps:
       - uses: actions/checkout@v7
@@ -51,7 +160,10 @@ jobs:
           wails3 task test:frontend
 
   build:
-    needs: test
+    needs:
+      - plan
+      - test
+    if: ${{ !cancelled() && !failure() }}
     permissions:
       contents: read
       actions: read
@@ -67,47 +179,7 @@ jobs:
     strategy:
       # Don't fail the whole build if one matrix job fails.
       fail-fast: false
-      matrix:
-        include:
-          - runner: macos-latest
-            goos: darwin
-            arch: arm64-and-amd64
-            artifact_name: artifacts-darwin
-            artifact_path: |
-              bin/*-macos-*.dmg
-              bin/*-darwin-*.zip
-          - runner: windows-latest
-            goos: windows
-            arch: amd64
-            artifact_name: artifacts-windows-amd64
-            artifact_path: |
-              bin/*-windows-amd64.exe
-              bin/*-windows-amd64-user-installer.exe
-              bin/*-windows-amd64-system-installer.exe
-          - runner: windows-latest-arm
-            goos: windows
-            arch: arm64
-            artifact_name: artifacts-windows-arm64
-            artifact_path: |
-              bin/*-windows-arm64.exe
-              bin/*-windows-arm64-user-installer.exe
-              bin/*-windows-arm64-system-installer.exe
-          - runner: ubuntu-latest
-            goos: linux
-            arch: amd64
-            artifact_name: artifacts-linux-amd64
-            artifact_path: |
-              bin/*.deb
-              bin/*.rpm
-              bin/*-linux-*.tar.gz
-          - runner: ubuntu-latest-arm
-            goos: linux
-            arch: arm64
-            artifact_name: artifacts-linux-arm64
-            artifact_path: |
-              bin/*.deb
-              bin/*.rpm
-              bin/*-linux-*.tar.gz
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
 
     runs-on: ${{ matrix.runner }}
     name: Build ${{ matrix.goos }} (${{ matrix.arch }})
@@ -295,8 +367,11 @@ jobs:
 
   prepare-release:
     needs:
+      - plan
       - test
       - build
+    # Release preparation requires every updater target.
+    if: ${{ !cancelled() && !failure() && needs.plan.outputs.complete == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
