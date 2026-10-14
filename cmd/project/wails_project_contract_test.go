@@ -915,6 +915,76 @@ func TestWindowsReleasePublishesAndDrillsBothInstallerScopes(t *testing.T) {
 	require.Contains(t, workflow, "-UninstallRegistryPath $config.windowsUninstallRegistryPath")
 }
 
+// Both installers and the updater payload carry the built executable, so it
+// must be signed before packaging, and the installers signed after the drill.
+func TestWindowsReleaseSignsTheExecutableBeforePackagingAndTheInstallersAfter(t *testing.T) {
+	workflow := readTestFile(t, repositoryPath(".github", "workflows", "release.yml"))
+	previous := -1
+	for _, step := range []string{
+		"wails3 task windows:build ARCH=${{ matrix.arch }}",
+		"artifact-configuration-slug: windows-exe",
+		"wails3 task windows:package:from-built ARCH=${{ matrix.arch }}",
+		"build/windows/package-drill.ps1",
+		"artifact-configuration-slug: windows-installers",
+		"Get-AuthenticodeSignature",
+		"name: ${{ matrix.artifact_name }}",
+	} {
+		index := strings.Index(workflow, step)
+		require.Greaterf(t, index, previous, "%q must follow the previous Windows release step", step)
+		previous = index
+	}
+	require.Equal(t, 2, strings.Count(workflow, "uses: signpath/github-action-submit-signing-request@v3"))
+	buildStart := strings.Index(workflow, "\n  build:\n")
+	strategyStart := strings.Index(workflow, "\n    strategy:\n")
+	require.GreaterOrEqual(t, buildStart, 0)
+	require.Greater(t, strategyStart, buildStart)
+	// SignPath reads the run's job details and downloads the unsigned artifacts with this token.
+	require.Contains(t, workflow[buildStart:strategyStart], "    permissions:\n      contents: read\n      actions: read\n")
+
+	// The runner only checks pwsh's last exit code, so an earlier failing test
+	// or validator would otherwise let an invalid build be signed and published.
+	for _, stepName := range []string{"Build Windows executable", "Create package for Windows"} {
+		stepStart := strings.Index(workflow, "      - name: "+stepName+"\n")
+		require.GreaterOrEqualf(t, stepStart, 0, "missing step %q", stepName)
+		step := workflow[stepStart+1:]
+		step = step[:strings.Index(step, "\n      - ")]
+		require.Containsf(t, step, "$PSNativeCommandUseErrorActionPreference = $true", "%q must stop on failing commands", stepName)
+	}
+	require.Contains(t, workflow, `SIGNPATH_SIGNING_POLICY: ${{ (github.event_name == 'push' || github.event.inputs.release == 'true') && 'release-signing' || 'test-signing' }}`)
+
+	// Rebuilding here would replace the signed executable with an unsigned one.
+	windowsTaskfile := readTestFile(t, repositoryPath("build", "windows", "Taskfile.yml"))
+	fromBuiltStart := strings.Index(windowsTaskfile, "\n  package:from-built:\n")
+	require.GreaterOrEqual(t, fromBuiltStart, 0)
+	fromBuilt := windowsTaskfile[fromBuiltStart+1:]
+	fromBuilt = fromBuilt[:strings.Index(fromBuilt, "\n\n")]
+	require.NotContains(t, fromBuilt, "- task: build")
+	require.Contains(t, fromBuilt, "INSTALL_SCOPE: user")
+	require.Contains(t, fromBuilt, "INSTALL_SCOPE: machine")
+}
+
+// Unsigned copies uploaded for SignPath share the final file names, so release
+// preparation must download only the per-platform release artifacts.
+func TestReleasePreparationExcludesUnsignedSigningArtifacts(t *testing.T) {
+	workflow := readTestFile(t, repositoryPath(".github", "workflows", "release.yml"))
+	prepareStart := strings.Index(workflow, "\n  prepare-release:\n")
+	releaseStart := strings.Index(workflow, "\n  release:\n")
+	require.GreaterOrEqual(t, prepareStart, 0)
+	require.Greater(t, releaseStart, prepareStart)
+	require.Contains(t, workflow[prepareStart:releaseStart], "pattern: artifacts-*")
+
+	artifactNames := regexp.MustCompile(`(?m)^\s+artifact_name: (\S+)$`).FindAllStringSubmatch(workflow, -1)
+	require.NotEmpty(t, artifactNames)
+	for _, name := range artifactNames {
+		require.Truef(t, strings.HasPrefix(name[1], "artifacts-"), "release artifact %q must match the download pattern", name[1])
+	}
+	signingUploads := regexp.MustCompile(`(?m)^\s+name: (signpath-.+)$`).FindAllStringSubmatch(workflow, -1)
+	require.Len(t, signingUploads, 2)
+	for _, name := range signingUploads {
+		require.Falsef(t, strings.HasPrefix(name[1], "artifacts-"), "signing upload %q must not reach release preparation", name[1])
+	}
+}
+
 func TestConfiguredUpdaterTargetsPublishOnlyReplaceablePayloads(t *testing.T) {
 	workflow := readTestFile(t, repositoryPath(".github", "workflows", "release.yml"))
 	require.NotContains(t, workflow, "UPDATER_TARGETS:")
@@ -928,7 +998,7 @@ func TestConfiguredUpdaterTargetsPublishOnlyReplaceablePayloads(t *testing.T) {
 		"linux/amd64",
 		"linux/arm64",
 	}, config.LuxuryYacht.UpdaterTargets)
-	windowsPackage := "wails3 task windows:package ARCH=${{ matrix.arch }}"
+	windowsPackage := "wails3 task windows:package:from-built ARCH=${{ matrix.arch }}"
 	windowsValidation := "wails3 task release:validate-windows-updater"
 	require.Contains(t, workflow, windowsPackage)
 	require.Contains(t, workflow, windowsValidation)

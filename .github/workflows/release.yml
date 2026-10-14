@@ -52,12 +52,18 @@ jobs:
 
   build:
     needs: test
+    permissions:
+      contents: read
+      actions: read
     env:
       SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
       SENTRY_BACKEND_DSN: ${{ secrets.SENTRY_BACKEND_DSN }}
       SENTRY_FRONTEND_DSN: ${{ secrets.SENTRY_FRONTEND_DSN }}
       SENTRY_FRONTEND_PROJECT: ${{ secrets.SENTRY_FRONTEND_PROJECT }}
       SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+      # Releases use the trusted certificate and need approval in SignPath;
+      # dry runs use the test certificate and are signed without approval.
+      SIGNPATH_SIGNING_POLICY: ${{ (github.event_name == 'push' || github.event.inputs.release == 'true') && 'release-signing' || 'test-signing' }}
     strategy:
       # Don't fail the whole build if one matrix job fails.
       fail-fast: false
@@ -183,11 +189,49 @@ jobs:
           wails3 task linux:generate:portable ARCH=${{ matrix.arch }}
           UPDATER_ARTIFACT="bin/$(GOOS=linux GOARCH=${{ matrix.arch }} RELEASE_FORMAT=updater go run ./cmd/project release-artifact-name)" GOARCH=${{ matrix.arch }} wails3 task release:validate-linux-updater
 
-      - name: Create package for Windows (unsigned)
+      - name: Build Windows executable
         if: matrix.goos == 'windows'
         run: |
+          # Fail on any failing command, not just the last one the runner checks.
+          $PSNativeCommandUseErrorActionPreference = $true
           go test ./internal/updatetemp ./internal/updateidentity ./internal/windowsinstall ./backend -run Windows -count=1
-          wails3 task windows:package ARCH=${{ matrix.arch }}
+          wails3 task windows:build ARCH=${{ matrix.arch }}
+          $config = go run ./cmd/project config | ConvertFrom-Json
+          "APP_VERSION=$($config.version)" >> $env:GITHUB_ENV
+          "WINDOWS_EXECUTABLE_NAME=$(go run ./cmd/project binary-name).exe" >> $env:GITHUB_ENV
+
+      - name: Upload unsigned Windows executable for signing
+        if: matrix.goos == 'windows'
+        id: unsigned_windows_executable
+        uses: actions/upload-artifact@v7
+        with:
+          name: signpath-windows-executable-${{ matrix.arch }}
+          path: bin/${{ env.WINDOWS_EXECUTABLE_NAME }}
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
+
+      - name: Sign Windows executable
+        if: matrix.goos == 'windows'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: app
+          signing-policy-slug: ${{ env.SIGNPATH_SIGNING_POLICY }}
+          artifact-configuration-slug: windows-exe
+          github-artifact-id: ${{ steps.unsigned_windows_executable.outputs.artifact-id }}
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: signed/windows-executable
+          parameters: |
+            version: ${{ toJSON(env.APP_VERSION) }}
+
+      - name: Create package for Windows
+        if: matrix.goos == 'windows'
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          Copy-Item -LiteralPath "signed/windows-executable/$env:WINDOWS_EXECUTABLE_NAME" -Destination "bin/$env:WINDOWS_EXECUTABLE_NAME" -Force
+          wails3 task windows:package:from-built ARCH=${{ matrix.arch }}
           $env:GOOS = "windows"
           $env:GOARCH = "${{ matrix.arch }}"
           $env:WINDOWS_ARCH = "${{ matrix.arch }}"
@@ -200,6 +244,48 @@ jobs:
           $systemInstaller = Get-ChildItem "bin/*-windows-${{ matrix.arch }}-system-installer.exe" -File -ErrorAction Stop
           if ($systemInstaller.Count -ne 1) { throw "Expected exactly one Windows system installer" }
           ./build/windows/package-drill.ps1 -UserInstaller $userInstaller.FullName -SystemInstaller $systemInstaller.FullName -ExpectedVersion $config.version -ProductName $config.productName -UninstallRegistryPath $config.windowsUninstallRegistryPath
+
+      - name: Upload unsigned Windows installers for signing
+        if: matrix.goos == 'windows'
+        id: unsigned_windows_installers
+        uses: actions/upload-artifact@v7
+        with:
+          name: signpath-windows-installers-${{ matrix.arch }}
+          path: bin/*-windows-${{ matrix.arch }}-*-installer.exe
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
+
+      - name: Sign Windows installers
+        if: matrix.goos == 'windows'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: app
+          signing-policy-slug: ${{ env.SIGNPATH_SIGNING_POLICY }}
+          artifact-configuration-slug: windows-installers
+          github-artifact-id: ${{ steps.unsigned_windows_installers.outputs.artifact-id }}
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: signed/windows-installers
+          parameters: |
+            version: ${{ toJSON(env.APP_VERSION) }}
+
+      - name: Verify Windows signatures
+        if: matrix.goos == 'windows'
+        run: |
+          Copy-Item -Path "signed/windows-installers/*-installer.exe" -Destination bin -Force
+          $files = @(Get-ChildItem "bin/*-windows-${{ matrix.arch }}.exe", "bin/*-windows-${{ matrix.arch }}-*-installer.exe" -File)
+          if ($files.Count -ne 3) { throw "Expected the updater executable and two installers, found $($files.Count)" }
+          foreach ($file in $files) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName
+            if ($null -eq $signature.SignerCertificate) { throw "$($file.Name) is not signed" }
+            # The test certificate is untrusted, so only release signatures must validate.
+            if ($env:SIGNPATH_SIGNING_POLICY -eq 'release-signing' -and $signature.Status -ne 'Valid') {
+              throw "$($file.Name) signature status is $($signature.Status)"
+            }
+            Write-Output "$($file.Name): signed by $($signature.SignerCertificate.Subject) ($($signature.Status))"
+          }
 
       - uses: actions/upload-artifact@v7
         with:
@@ -227,6 +313,8 @@ jobs:
       - name: Download all artifacts
         uses: actions/download-artifact@v8
         with:
+          # Excludes the unsigned signpath-* uploads, which share release file names.
+          pattern: artifacts-*
           path: ./artifacts
 
       - name: Materialize updater signing key

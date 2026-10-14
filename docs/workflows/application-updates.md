@@ -71,11 +71,13 @@ requires the platform/architecture payload to be enabled.
   preservation, side-by-side refusal, and cleanup after partial failure. The
   premerge gate cross-vets both architectures. Wails refuses a download unless
   its SHA-512 digest and Ed25519ph signature match the embedded public key.
-- Known gap: no Authenticode signing, so Smart App Control or enterprise App
-  Control may block the app. Authenticode is future hardening, not the payload
-  integrity boundary. With a certificate, sign the executable before the raw
-  copy and NSIS packaging, then sign the installer; artifact format and
-  eligibility stay unchanged.
+- Release CI Authenticode-signs through SignPath in two requests per
+  architecture: the built executable before the raw updater copy and NSIS
+  packaging (`windows:package:from-built` must not rebuild it), then both
+  installers after the drill. Authenticode is distribution trust, not the
+  payload integrity boundary; artifact format and eligibility are unchanged.
+  The NSIS-generated `uninstall.exe` is written at install time and stays
+  unsigned.
 
 ### Linux distributions
 
