@@ -80,17 +80,17 @@ each executable and installer signing request. See
 
 A manual **Release** run is a dry run unless **Create GitHub release** is
 checked. For faster feedback, a dry run can skip the test job and uncheck any
-of the build checkboxes. Release preparation needs every build, so a run with
-fewer builds stops after building. A published release always runs the tests
-and every build.
+of the **Build macOS**, **Build Windows**, and **Build Linux** checkboxes. Each
+platform builds amd64 and arm64 side by side. Release preparation needs every
+platform, so a run with fewer platforms stops after building. A published
+release always runs the tests and builds every platform.
 
-Every build checkbox defaults to checked, so from the command line pass `false`
-for the builds to skip. This runs only the Windows amd64 build:
+The platform checkboxes default to checked, so from the command line pass
+`false` for the platforms to skip. This runs only the Windows builds:
 
 ```bash
 gh workflow run release.yml --ref <branch> -f skip_tests=true \
-  -f build_darwin=false -f build_windows_arm64=false \
-  -f build_linux_amd64=false -f build_linux_arm64=false
+  -f build_macos=false -f build_linux=false
 ```
 
 ## Publishing a Release

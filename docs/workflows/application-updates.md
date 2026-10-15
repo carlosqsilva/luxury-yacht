@@ -135,10 +135,10 @@ requires the platform/architecture payload to be enabled.
   update does not run. The checked input or a matching version tag lets the
   separately permissioned publication job consume that artifact, reject an
   existing release, and create it.
-- For faster feedback, a dry-run dispatch can skip the test job and run only
-  some builds. The `plan` job rejects either choice for a published release.
+- For faster feedback, a dry-run dispatch can skip the test job and build only
+  some platforms. The `plan` job rejects either choice for a published release.
   Release preparation needs every updater target, so it only runs when all
-  builds are selected.
+  three platform jobs succeed.
 - Local check with a complete `artifacts/`:
   `RELEASE_DRY_RUN=true mise exec -- wails3 task release:app`.
 - Never overwrite a release automatically. A failed upload or publish leaves an
