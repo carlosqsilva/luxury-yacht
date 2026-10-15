@@ -16,6 +16,7 @@ import {
   selectPayloadRows,
 } from '@modules/resource-grid/typedResourceQueryScope';
 import { useClearHiddenRowSelection } from '@modules/resource-grid/useClearHiddenRowSelection';
+import { useOpenRowDetails } from '@modules/resource-grid/useOpenRowDetails';
 import { useQueryBackedClusterResourceGridTable } from '@modules/resource-grid/useQueryBackedResourceGridTable';
 import type { ContextMenuItem } from '@shared/components/ContextMenu';
 import { DrainIcon } from '@shared/components/icons/SharedIcons';
@@ -30,6 +31,7 @@ import { useNavigateToView } from '@shared/hooks/useNavigateToView';
 import { useNodeMaintenanceActions } from '@shared/hooks/useNodeMaintenanceActions';
 import { useObjectActionController } from '@shared/hooks/useObjectActionController';
 import { backendStatusTextClass } from '@shared/utils/backendStatusPresentation';
+import { getKindColorClass } from '@shared/utils/kindBadgeColors';
 import {
   buildRequiredCanonicalObjectRowKey,
   buildRequiredObjectReference,
@@ -58,14 +60,17 @@ interface NodesViewProps {
 interface NodesTableProps extends NodesViewProps {
   /** The highlighted row. */
   selectedNodeKey?: string | null;
-  /** The row whose pods are open under it. */
-  openNodeKey?: string | null;
+  /** The rows whose pods are open under them. */
+  openNodeKeys?: readonly string[];
   onNodeSelect?: (node: ClusterNodeRow) => void;
   onNodeSelectionClear?: () => void;
   onNodePodsToggle?: (node: ClusterNodeRow) => void;
-  onNodePodsClose?: () => void;
+  /** Closes these rows' pods. */
+  onNodePodsClose?: (rowKeys: readonly string[]) => void;
   renderNodePods?: (node: ClusterNodeRow) => React.ReactNode;
 }
+
+const NO_ROW_KEYS: readonly string[] = [];
 
 const parseNodePodsUsed = (pods?: string | number | null): number => {
   if (typeof pods === 'number') {
@@ -88,7 +93,7 @@ export const NodesTable: React.FC<NodesTableProps> = React.memo(
   ({
     error,
     selectedNodeKey = null,
-    openNodeKey = null,
+    openNodeKeys = NO_ROW_KEYS,
     onNodeSelect,
     onNodeSelectionClear,
     onNodePodsToggle,
@@ -136,14 +141,14 @@ export const NodesTable: React.FC<NodesTableProps> = React.memo(
         onNodePodsToggle
           ? {
               getRowKey: keyExtractor,
-              isOpen: (row) => keyExtractor(row) === openNodeKey,
+              isOpen: (row) => openNodeKeys.includes(keyExtractor(row)),
               onToggle: onNodePodsToggle,
               getLabel: (row, open) =>
                 `${open ? 'Hide' : 'Show'} pods for ${row.ref.name} (${row.pods || 'no'} pods)`,
               getText: (row) => row.pods || '—',
             }
           : undefined,
-      [keyExtractor, onNodePodsToggle, openNodeKey]
+      [keyExtractor, onNodePodsToggle, openNodeKeys]
     );
 
     const tableColumns = useMemo<GridColumnDefinition<ClusterNodeRow>[]>(() => {
@@ -325,12 +330,13 @@ export const NodesTable: React.FC<NodesTableProps> = React.memo(
       () =>
         renderNodePods
           ? {
-              openRowKey: openNodeKey,
+              openRowKeys: openNodeKeys,
               render: renderNodePods,
               getLabel: (row) => `Pods for ${row.ref.name}`,
+              getGroupClassName: (row) => getKindColorClass(row.ref.kind),
             }
           : undefined,
-      [openNodeKey, renderNodePods]
+      [openNodeKeys, renderNodePods]
     );
 
     const { gridTableProps, favModal, source, queryPayload } =
@@ -351,14 +357,18 @@ export const NodesTable: React.FC<NodesTableProps> = React.memo(
         filterOptions: { isNamespaceScoped: false },
       });
 
+    const selectedNodeKeys = useMemo(
+      () => (selectedNodeKey ? [selectedNodeKey] : NO_ROW_KEYS),
+      [selectedNodeKey]
+    );
     useClearHiddenRowSelection({
-      selectedKey: selectedNodeKey,
+      selectedKeys: selectedNodeKeys,
       source,
       keyExtractor,
       onClear: onNodeSelectionClear,
     });
     useClearHiddenRowSelection({
-      selectedKey: openNodeKey,
+      selectedKeys: openNodeKeys,
       source,
       keyExtractor,
       onClear: onNodePodsClose,
@@ -437,7 +447,7 @@ export const NodesTable: React.FC<NodesTableProps> = React.memo(
           diagnosticsMode="live"
           onRowClick={handleNodeClick}
           onRowPointerClick={onNodeSelect}
-          onRowSelectionToggle={onNodePodsToggle}
+          onRowExpandToggle={onNodePodsToggle}
           onRowSelectionClear={selectedNodeKey ? onNodeSelectionClear : undefined}
           isRowSelected={isRowSelected}
           rowDetail={rowDetail}
@@ -463,7 +473,6 @@ NodesTable.displayName = 'NodesTable';
 const ClusterViewNodes: React.FC<NodesViewProps> = ({ error }) => {
   const { selectedClusterId, selectedClusterName } = useKubeconfig();
   const [selectedNode, setSelectedNode] = useState<ClusterObjectReference | null>(null);
-  const [openNode, setOpenNode] = useState<ClusterObjectReference | null>(null);
 
   const toReference = useCallback(
     (node: ClusterNodeRow) =>
@@ -473,13 +482,18 @@ const ClusterViewNodes: React.FC<NodesViewProps> = ({ error }) => {
       ),
     [selectedClusterId, selectedClusterName]
   );
-  const keyOf = useCallback(
-    (ref: ClusterObjectReference | null) =>
-      ref
-        ? buildRequiredCanonicalObjectRowKey(ref, { fallbackClusterId: selectedClusterId })
-        : null,
+  const rowKeyOf = useCallback(
+    (ref: ClusterObjectReference) =>
+      buildRequiredCanonicalObjectRowKey(ref, { fallbackClusterId: selectedClusterId }),
     [selectedClusterId]
   );
+  const {
+    openRefs: openNodes,
+    openKeys: openNodeKeys,
+    toggle: toggleNodePods,
+    close: closeNodePods,
+    closeKeys: closeNodePodsByKey,
+  } = useOpenRowDetails({ keyOf: rowKeyOf });
 
   const handleNodeSelect = useCallback(
     (node: ClusterNodeRow) => setSelectedNode(toReference(node)),
@@ -490,16 +504,16 @@ const ClusterViewNodes: React.FC<NodesViewProps> = ({ error }) => {
     (node: ClusterNodeRow) => {
       const ref = toReference(node);
       setSelectedNode(ref);
-      setOpenNode((current) => (keyOf(current) === keyOf(ref) ? null : ref));
+      toggleNodePods(ref);
     },
-    [keyOf, toReference]
+    [toReference, toggleNodePods]
   );
-  const handleNodePodsClose = useCallback(() => setOpenNode(null), []);
-  // The attached table follows the open reference, not the row object, so a
+  // Each attached table follows its open reference, not the row object, so a
   // node refresh never rebuilds its query.
   const renderNodePods = useCallback(
-    () =>
-      openNode ? (
+    (node: ClusterNodeRow) => {
+      const attachedTo = openNodes.get(rowKeyOf(toReference(node)));
+      return attachedTo ? (
         <PodsTable
           namespace={ALL_NAMESPACES_SCOPE}
           clusterId={selectedClusterId}
@@ -507,22 +521,23 @@ const ClusterViewNodes: React.FC<NodesViewProps> = ({ error }) => {
           namespaceLinkView="pods"
           label="Node Pods"
           showNamespaceColumn
-          attachedTo={openNode}
-          onClose={handleNodePodsClose}
+          attachedTo={attachedTo}
+          onClose={closeNodePods}
         />
-      ) : null,
-    [handleNodePodsClose, openNode, selectedClusterId]
+      ) : null;
+    },
+    [closeNodePods, openNodes, rowKeyOf, selectedClusterId, toReference]
   );
 
   return (
     <NodesTable
       error={error}
-      selectedNodeKey={keyOf(selectedNode)}
-      openNodeKey={keyOf(openNode)}
+      selectedNodeKey={selectedNode ? rowKeyOf(selectedNode) : null}
+      openNodeKeys={openNodeKeys}
       onNodeSelect={handleNodeSelect}
       onNodeSelectionClear={handleNodeSelectionClear}
       onNodePodsToggle={handleNodePodsToggle}
-      onNodePodsClose={handleNodePodsClose}
+      onNodePodsClose={closeNodePodsByKey}
       renderNodePods={renderNodePods}
     />
   );

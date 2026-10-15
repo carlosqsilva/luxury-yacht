@@ -462,6 +462,23 @@ export interface NodeLogSource {
 }
 
 /**
+ * NodeShellSessionRequest describes a node shell: the equivalent of
+ * `kubectl debug node/<name> --profile=sysadmin -it --image=<image> -- <command>`.
+ */
+export interface NodeShellSessionRequest {
+    /**
+     * Target is the complete identity of the Node, including its cluster.
+     */
+    "target": ObjectRef;
+    "image": string;
+
+    /**
+     * Command replaces the image entrypoint; empty runs the image default.
+     */
+    "command"?: string[] | null;
+}
+
+/**
  * ObjectRef is the shared openable Kubernetes object identity.
  */
 export type ObjectRef = resourcemodel$0.ResourceRef;
@@ -765,6 +782,12 @@ export interface ShellSession {
      * Target is the complete identity of the object the shell was opened for.
      */
     "target": ObjectRef;
+
+    /**
+     * DebugPod is the pod a node shell created and attached to; the app deletes
+     * it when the session ends. Pod shells leave it unset.
+     */
+    "debugPod"?: ObjectRef | null;
     "container": string;
     "command": string[] | null;
     "containers": string[] | null;
@@ -782,9 +805,21 @@ export interface ShellSessionInfo {
      * Target is the complete identity of the object the shell was opened for.
      */
     "target": ObjectRef;
+
+    /**
+     * DebugPod is the pod a node shell created and attached to.
+     */
+    "debugPod"?: ObjectRef | null;
     "container": string;
     "command": string[] | null;
     "startedAt": v1$0.Time;
+
+    /**
+     * Status is cleanup-failed while the session's stream has ended but its
+     * debug pod could not be deleted; empty while the session is open.
+     */
+    "status"?: ShellSessionStatus;
+    "statusReason"?: string;
 }
 
 /**
@@ -822,6 +857,13 @@ export enum ShellSessionStatus {
     ShellSessionStatusEnded = "ended",
     ShellSessionStatusTimeout = "timeout",
     ShellSessionStatusError = "error",
+
+    /**
+     * ShellSessionStatusCleanupFailed means the stream ended but the debug pod
+     * a node shell created could not be deleted; the session stays listed so
+     * ending it again retries the delete.
+     */
+    ShellSessionStatusCleanupFailed = "cleanup-failed",
 };
 
 /**

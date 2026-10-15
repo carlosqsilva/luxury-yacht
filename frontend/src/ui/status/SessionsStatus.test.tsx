@@ -6,6 +6,7 @@ import type { ReactNode } from 'react';
 import { act } from 'react';
 import * as ReactDOM from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { requireValue } from '@/test-utils/requireValue';
 import SessionsStatus from './SessionsStatus';
 
 const listShellSessionsMock = vi.hoisted(() => vi.fn());
@@ -340,6 +341,101 @@ describe('SessionsStatus shell session jump action', () => {
     } finally {
       unsubscribe();
     }
+  });
+
+  it('identifies a node shell by its node and debug pod and opens the node', async () => {
+    const node = {
+      clusterId: 'cluster-a',
+      group: '',
+      version: 'v1',
+      kind: 'Node',
+      name: 'worker-1',
+    };
+    listShellSessionsMock.mockResolvedValue([
+      {
+        ...baseShellSession,
+        target: node,
+        debugPod: {
+          clusterId: 'cluster-a',
+          group: '',
+          version: 'v1',
+          kind: 'Pod',
+          namespace: 'default',
+          name: 'node-debugger-worker-1-abcde',
+        },
+        container: 'debugger',
+      },
+    ]);
+    listRuntimeOperationsMock.mockResolvedValue([
+      {
+        id: baseShellSession.sessionId,
+        type: 'shell',
+        clusterId: 'cluster-a',
+        clusterName: 'cluster-a',
+        target: node,
+        status: 'open',
+        startedAt: baseShellSession.startedAt,
+      },
+    ]);
+    await renderStatus();
+
+    const fields = Object.fromEntries(
+      Array.from(document.querySelectorAll('.as-shell-session .ss-field-row')).map((row) => [
+        row.querySelector('.ss-field-label')?.textContent?.replace(':', ''),
+        row.querySelector('.ss-field-value')?.textContent,
+      ])
+    );
+    expect(fields).toMatchObject({
+      node: 'worker-1',
+      namespace: 'default',
+      pod: 'node-debugger-worker-1-abcde',
+    });
+
+    const openButton = document.querySelector('.as-shell-session-jump') as HTMLButtonElement;
+    await act(async () => {
+      openButton.click();
+      await Promise.resolve();
+    });
+    expect(openWithObjectMock).toHaveBeenCalledWith(expect.objectContaining(node));
+    expect(requestObjectPanelTabMock).toHaveBeenCalledWith('object-panel:pod:web-abc', 'shell');
+  });
+
+  it('shows a node shell whose debug pod could not be deleted as failed, with the reason', async () => {
+    const reason =
+      'debug pod default/node-debugger-worker-1-abcde was not deleted: dial tcp: connection refused';
+    listShellSessionsMock.mockResolvedValue([
+      {
+        ...baseShellSession,
+        target: {
+          clusterId: 'cluster-a',
+          group: '',
+          version: 'v1',
+          kind: 'Node',
+          name: 'worker-1',
+        },
+        debugPod: {
+          clusterId: 'cluster-a',
+          group: '',
+          version: 'v1',
+          kind: 'Pod',
+          namespace: 'default',
+          name: 'node-debugger-worker-1-abcde',
+        },
+        container: 'debugger',
+        status: 'cleanup-failed',
+        statusReason: reason,
+      },
+    ]);
+    await renderStatus();
+
+    const row = requireValue(document.querySelector('.as-shell-session'), 'node shell row');
+    expect(row.querySelector('.pf-status-error')).not.toBeNull();
+    expect(row.textContent).toContain(reason);
+    // Ending the session again retries the delete.
+    expect(row.querySelector('[aria-label="End shell session"]')).not.toBeNull();
+    const indicator =
+      statusIndicatorMock.mock.calls[statusIndicatorMock.mock.calls.length - 1]?.[0];
+    expect(indicator?.status).toBe('unhealthy');
   });
 
   it('keeps the sessions panel open when the shell tab request is not accepted', async () => {

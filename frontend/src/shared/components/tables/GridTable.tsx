@@ -71,7 +71,8 @@ const GridTable = memo(function GridTableComponent<T>(props: GridTableProps<T>) 
     tableContentWidth,
     tableViewportWidth,
     renderRowContent,
-    rowDetailIndex,
+    rowDetailIndexes,
+    bodyInTabOrder,
     renderRowDetail,
     headerRow,
     showLoadingOverlay,
@@ -120,7 +121,8 @@ const GridTable = memo(function GridTableComponent<T>(props: GridTableProps<T>) 
       totalVirtualHeight={totalVirtualHeight}
       getRowTop={getRowTop}
       renderRowContent={renderRowContent}
-      rowDetailIndex={rowDetailIndex}
+      rowDetailIndexes={rowDetailIndexes}
+      bodyInTabOrder={bodyInTabOrder}
       renderRowDetail={renderRowDetail}
       onWrapperFocus={handleWrapperFocus}
       onWrapperBlur={handleWrapperBlur}
