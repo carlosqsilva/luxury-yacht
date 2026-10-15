@@ -49,7 +49,7 @@ permissions:
 
 jobs:
   plan:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       complete: ${{ steps.plan.outputs.complete }}
@@ -65,7 +65,7 @@ jobs:
           BUILDS: |
             [
               {
-                "runner": "macos-latest",
+                "runner": "macos-26",
                 "goos": "darwin",
                 "arch": "arm64-and-amd64",
                 "input": "build_darwin",
@@ -73,7 +73,7 @@ jobs:
                 "artifact_path": "bin/*-macos-*.dmg\nbin/*-darwin-*.zip"
               },
               {
-                "runner": "windows-latest",
+                "runner": "windows-2025",
                 "goos": "windows",
                 "arch": "amd64",
                 "input": "build_windows_amd64",
@@ -89,7 +89,7 @@ jobs:
                 "artifact_path": "bin/*-windows-arm64.exe\nbin/*-windows-arm64-user-installer.exe\nbin/*-windows-arm64-system-installer.exe"
               },
               {
-                "runner": "ubuntu-latest",
+                "runner": "ubuntu-24.04",
                 "goos": "linux",
                 "arch": "amd64",
                 "input": "build_linux_amd64",
@@ -97,7 +97,7 @@ jobs:
                 "artifact_path": "bin/*.deb\nbin/*.rpm\nbin/*-linux-*.tar.gz"
               },
               {
-                "runner": "ubuntu-latest-arm",
+                "runner": "ubuntu-24.04-arm",
                 "goos": "linux",
                 "arch": "arm64",
                 "input": "build_linux_arm64",
@@ -126,7 +126,7 @@ jobs:
 
   test:
     if: ${{ github.event.inputs.skip_tests != 'true' }}
-    runs-on: ubuntu-latest #-32core-amd64
+    runs-on: ubuntu-24.04 #-32core-amd64
     steps:
       - uses: actions/checkout@v7
         with:
@@ -372,7 +372,7 @@ jobs:
       - build
     # Release preparation requires every updater target.
     if: ${{ !cancelled() && !failure() && needs.plan.outputs.complete == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -429,7 +429,7 @@ jobs:
   release:
     if: ${{ github.event.inputs.release == 'true' || github.event_name == 'push' }}
     needs: prepare-release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     env:
@@ -461,7 +461,7 @@ jobs:
     if: ${{ github.event.inputs.release == 'true' || github.event_name == 'push' }}
     needs:
       - release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
 
