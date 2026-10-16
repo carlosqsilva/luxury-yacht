@@ -353,7 +353,6 @@ const payload: ObjectMapSnapshotPayload = {
     },
   ],
   edges: [{ id: 'edge-1', source: 'deploy', target: 'pod', type: 'owner', label: 'owns' }],
-  maxDepth: 4,
   maxNodes: 250,
   truncated: false,
 };
@@ -363,10 +362,20 @@ const shortNamesPayload: ObjectMapSnapshotPayload = {
   seed: ref('service', 'Service', 'frontend', ''),
   nodes: [
     { id: 'service', depth: 0, ref: ref('service', 'Service', 'frontend', '') },
-    { id: 'pod', depth: 1, ref: ref('pod', 'Pod', 'frontend-abc', '') },
+    {
+      id: 'slice',
+      depth: 1,
+      ref: ref('slice', 'EndpointSlice', 'frontend-abc', 'discovery.k8s.io'),
+    },
   ],
   edges: [
-    { id: 'edge-service', source: 'service', target: 'pod', type: 'selector', label: 'selects' },
+    {
+      id: 'edge-service',
+      source: 'service',
+      target: 'slice',
+      type: 'endpoint',
+      label: 'has endpoints',
+    },
   ],
 };
 
@@ -514,6 +523,69 @@ const rolloutReplicaSetPayload: ObjectMapSnapshotPayload = {
       type: 'schedules',
       label: 'schedules',
     },
+  ],
+};
+
+// The backend graph for a Pod seed: its owner chain and the HPA scaling it,
+// the EndpointSlice listing the Pod with its Service and Ingress in front, the
+// PDB and NetworkPolicy selecting the Pod, and the Node it runs on.
+const podNeighborhoodPayload: ObjectMapSnapshotPayload = {
+  ...payload,
+  seed: ref('pod', 'Pod', 'web-pod', ''),
+  nodes: [
+    { id: 'pod', depth: 0, ref: ref('pod', 'Pod', 'web-pod', '') },
+    { id: 'rs', depth: 1, ref: ref('rs', 'ReplicaSet', 'web-rs', 'apps') },
+    { id: 'deploy', depth: 2, ref: ref('deploy', 'Deployment', 'web', 'apps') },
+    {
+      id: 'hpa',
+      depth: 3,
+      ref: ref('hpa', 'HorizontalPodAutoscaler', 'web', 'autoscaling', 'v2'),
+    },
+    { id: 'node', depth: 1, ref: ref('node', 'Node', 'worker-a', '') },
+    { id: 'slice', depth: 1, ref: ref('slice', 'EndpointSlice', 'web-abc', 'discovery.k8s.io') },
+    { id: 'svc', depth: 2, ref: ref('svc', 'Service', 'web', '') },
+    { id: 'ing', depth: 3, ref: ref('ing', 'Ingress', 'web', 'networking.k8s.io') },
+    { id: 'pdb', depth: 1, ref: ref('pdb', 'PodDisruptionBudget', 'web', 'policy') },
+    { id: 'netpol', depth: 1, ref: ref('netpol', 'NetworkPolicy', 'web', 'networking.k8s.io') },
+  ],
+  edges: [
+    { id: 'deploy-rs', source: 'deploy', target: 'rs', type: 'owner', label: 'owns' },
+    { id: 'rs-pod', source: 'rs', target: 'pod', type: 'owner', label: 'owns' },
+    { id: 'hpa-deploy', source: 'hpa', target: 'deploy', type: 'scales', label: 'scales' },
+    { id: 'pod-node', source: 'pod', target: 'node', type: 'schedules', label: 'scheduled on' },
+    { id: 'svc-slice', source: 'svc', target: 'slice', type: 'endpoint', label: 'has endpoints' },
+    { id: 'slice-pod', source: 'slice', target: 'pod', type: 'endpoint', label: 'has endpoints' },
+    { id: 'ing-svc', source: 'ing', target: 'svc', type: 'routes', label: 'routes to' },
+    { id: 'pdb-pod', source: 'pdb', target: 'pod', type: 'selector', label: 'selects' },
+    { id: 'netpol-pod', source: 'netpol', target: 'pod', type: 'selector', label: 'selects' },
+  ],
+};
+
+// An old ReplicaSet with no Pods still references the ConfigMap from its pod
+// template; that ConfigMap is reachable only through the collapsible RS. The
+// new Pod's ConfigMap and the HPA scaling the Deployment are reached without it.
+const collapseRemnantPayload: ObjectMapSnapshotPayload = {
+  ...payload,
+  nodes: [
+    { id: 'deploy', depth: 0, ref: ref('deploy', 'Deployment', 'web', 'apps') },
+    { id: 'rs-new', depth: 1, ref: ref('rs-new', 'ReplicaSet', 'web-new', 'apps') },
+    { id: 'rs-old', depth: 1, ref: ref('rs-old', 'ReplicaSet', 'web-old', 'apps') },
+    { id: 'pod-new', depth: 2, ref: ref('pod-new', 'Pod', 'web-new-abc', '') },
+    { id: 'config-old', depth: 2, ref: ref('config-old', 'ConfigMap', 'web-config-v1', '') },
+    { id: 'config-new', depth: 3, ref: ref('config-new', 'ConfigMap', 'web-config-v2', '') },
+    {
+      id: 'hpa',
+      depth: 1,
+      ref: ref('hpa', 'HorizontalPodAutoscaler', 'web', 'autoscaling', 'v2'),
+    },
+  ],
+  edges: [
+    { id: 'edge-new', source: 'deploy', target: 'rs-new', type: 'owner', label: 'owns' },
+    { id: 'edge-old', source: 'deploy', target: 'rs-old', type: 'owner', label: 'owns' },
+    { id: 'edge-pod', source: 'rs-new', target: 'pod-new', type: 'owner', label: 'owns' },
+    { id: 'edge-config', source: 'rs-old', target: 'config-old', type: 'uses', label: 'uses' },
+    { id: 'edge-config-new', source: 'pod-new', target: 'config-new', type: 'uses', label: 'uses' },
+    { id: 'edge-hpa', source: 'hpa', target: 'deploy', type: 'scales', label: 'scales' },
   ],
 };
 
@@ -1686,6 +1758,72 @@ describe('ObjectMap', () => {
     cleanup();
   });
 
+  it('shows every object the backend graph sends for a Pod', async () => {
+    const { container, cleanup } = await renderObjectMap({
+      testPayload: podNeighborhoodPayload,
+    });
+
+    for (const label of [
+      'Pod: web-pod',
+      'ReplicaSet: web-rs',
+      'Deployment: web',
+      'HorizontalPodAutoscaler: web',
+      'Node: worker-a',
+      'EndpointSlice: web-abc',
+      'Service: web',
+      'Ingress: web',
+      'PodDisruptionBudget: web',
+      'NetworkPolicy: web',
+    ]) {
+      expect(container.querySelector(`[aria-label="${label}"]`), label).toBeTruthy();
+    }
+
+    cleanup();
+  });
+
+  it('hides objects reachable only through collapsed ReplicaSets but keeps the rest of the lineage', async () => {
+    const { container, cleanup } = await renderObjectMap({ testPayload: collapseRemnantPayload });
+    const kept = ['ConfigMap: web-config-v2', 'HorizontalPodAutoscaler: web'];
+
+    expect(container.querySelector('[aria-label="ReplicaSet: web-old"]')).toBeNull();
+    expect(container.querySelector('[aria-label="ConfigMap: web-config-v1"]')).toBeNull();
+    for (const label of kept) {
+      expect(container.querySelector(`[aria-label="${label}"]`), label).toBeTruthy();
+    }
+
+    const badge = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Show 1 hidden ReplicaSet"]'
+    );
+    await act(async () => {
+      requireValue(badge, 'expected collapse badge').click();
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector('[aria-label="ReplicaSet: web-old"]')).toBeTruthy();
+    expect(container.querySelector('[aria-label="ConfigMap: web-config-v1"]')).toBeTruthy();
+    for (const label of kept) {
+      expect(container.querySelector(`[aria-label="${label}"]`), label).toBeTruthy();
+    }
+
+    cleanup();
+  });
+
+  it('keeps permission warnings visible when the map has no objects', async () => {
+    const { container, cleanup } = await renderObjectMap({
+      testPayload: {
+        ...payload,
+        nodes: [],
+        edges: [],
+        warnings: ['skipped pods: insufficient permissions'],
+      },
+    });
+
+    expect(container.querySelector('[data-testid="object-map-empty"]')).toBeTruthy();
+    expect(container.textContent).toContain('skipped pods: insufficient permissions');
+
+    cleanup();
+  });
+
   it('renders empty, truncated, and warning states outside the renderer', async () => {
     const emptyPayload: ObjectMapSnapshotPayload = {
       ...payload,
@@ -1707,7 +1845,7 @@ describe('ObjectMap', () => {
     });
 
     expect(warned.container.querySelector('.object-map__banner')?.textContent).toContain(
-      'Showing 2 of many'
+      'Showing 2'
     );
     expect(warned.container.querySelector('.object-map__warnings')?.textContent).toContain(
       'permission denied for secrets'
@@ -1763,6 +1901,110 @@ describe('ObjectMap', () => {
       initialPath
     );
     expect(resetButton?.disabled).toBe(true);
+
+    cleanup();
+  });
+
+  it('moves a dragged node while a kind filter is active', async () => {
+    const { container, cleanup } = await renderObjectMap();
+    const kindTrigger = requireValue(
+      container.querySelector<HTMLElement>('[aria-label="Filter map kinds"]'),
+      'kind filter'
+    );
+    await act(async () => {
+      kindTrigger.dispatchEvent(mouseEvent('click'));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      requireValue(
+        document.body.querySelector<HTMLButtonElement>('button[aria-label="Select none"]'),
+        'Select none'
+      ).dispatchEvent(mouseEvent('click'));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      requireValue(
+        Array.from(document.body.querySelectorAll<HTMLElement>('.dropdown-option')).find((option) =>
+          option.textContent?.includes('Pod')
+        ),
+        'Pod option'
+      ).dispatchEvent(mouseEvent('click'));
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[data-testid="mock-node-deploy"]')).toBeNull();
+
+    const pod = requireValue(
+      container.querySelector<HTMLElement>('[data-testid="mock-node-pod"]'),
+      'pod node'
+    );
+    const startX = Number(pod.dataset.x);
+    await act(async () => {
+      requireValue(
+        container.querySelector<HTMLButtonElement>('[data-testid="mock-drag-first-node"]'),
+        'drag control'
+      ).click();
+      await Promise.resolve();
+    });
+
+    expect(Number(pod.dataset.x)).toBe(startX + 60);
+
+    cleanup();
+  });
+
+  it('keeps dragged positions across refreshes until the dragged object leaves the map', async () => {
+    const { container, rerender, cleanup } = await renderObjectMap();
+    const deployX = () =>
+      requireValue(
+        container.querySelector<HTMLElement>('[data-testid="mock-node-deploy"]'),
+        'deployment node'
+      ).dataset.x;
+    const resetButton = () =>
+      requireValue(
+        container.querySelector<HTMLButtonElement>('button[aria-label="Reset layout"]'),
+        'reset layout'
+      );
+    const computedX = deployX();
+    await act(async () => {
+      requireValue(
+        container.querySelector<HTMLButtonElement>('[data-testid="mock-drag-first-node"]'),
+        'drag control'
+      ).click();
+      await Promise.resolve();
+    });
+    const draggedX = deployX();
+    expect(draggedX).not.toBe(computedX);
+
+    const statusOnly = {
+      ...payload,
+      nodes: (payload.nodes ?? []).map((node) =>
+        node.id === 'pod' ? { ...node, status: { state: 'Running', label: 'Running' } } : node
+      ),
+    };
+    await rerender(statusOnly);
+    expect(deployX()).toBe(draggedX);
+
+    const withNewPod = {
+      ...statusOnly,
+      nodes: [
+        ...(statusOnly.nodes ?? []),
+        { id: 'pod-2', depth: 1, ref: ref('pod-2', 'Pod', 'web-def', '') },
+      ],
+      edges: [
+        ...(statusOnly.edges ?? []),
+        { id: 'edge-2', source: 'deploy', target: 'pod-2', type: 'owner', label: 'owns' },
+      ],
+    };
+    await rerender(withNewPod);
+    expect(deployX()).toBe(draggedX);
+
+    await rerender({
+      ...payload,
+      nodes: [requireValue(payload.nodes?.[1], 'pod node')],
+      edges: [],
+    });
+    expect(resetButton().disabled).toBe(true);
+    await rerender(payload);
+    expect(deployX()).toBe(computedX);
 
     cleanup();
   });
