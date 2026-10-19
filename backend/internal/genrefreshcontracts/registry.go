@@ -64,6 +64,8 @@ type domainSpec struct {
 	frontendHasPriority       bool
 	frontendRegistrationOrder int
 	frontendScheduled         bool
+	scopeSelectors            []string
+	scopeQuery                string
 }
 
 func typeOf[T any]() reflect.Type {
@@ -190,6 +192,7 @@ var contractTypes = []typeSpec{
 	{name: "PodSnapshotPayload", typeOf: typeOf[snapshot.PodSnapshot]()},
 	{name: "ObjectDeletionMetadata", typeOf: typeOf[snapshot.ObjectDeletionMetadata]()},
 	{name: "ObjectDetailsSnapshotPayload", typeOf: typeOf[snapshot.ObjectDetailsSnapshotPayload]()},
+	{name: "GenericObjectDetails", typeOf: typeOf[snapshot.GenericObjectDetails]()},
 	{name: "ObjectEventSummary", typeOf: typeOf[snapshot.ObjectEventSummary]()},
 	{name: "ObjectEventsSnapshotPayload", typeOf: typeOf[snapshot.ObjectEventsSnapshotPayload]()},
 	{name: "ObjectMapReference", typeOf: typeOf[snapshot.ObjectMapReference]()},
