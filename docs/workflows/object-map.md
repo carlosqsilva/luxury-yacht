@@ -87,8 +87,8 @@ One rule decides what a map contains, and nothing else changes it.
   same way connect it to the seed. They point either away from the seed (what
   it uses or contains) or toward it (what uses or contains it). Paths never
   turn around.
-- The same rule drives click highlight, focus mode, and the frontend's prune
-  after ReplicaSet collapse (`collectLineage` in `objectMapTraversal.ts`). Each
+- The same rule drives click highlight and the frontend's prune after
+  ReplicaSet collapse (`collectLineage` in `objectMapTraversal.ts`). Each
   keeps every link between the objects it keeps, as the map does.
 - The backend walks breadth-first in both directions at once, so nearer
   objects come first. The node cap is the only bound, and the banner says
@@ -139,16 +139,25 @@ One rule decides what a map contains, and nothing else changes it.
   scope, or whose API version the cluster does not serve is reported in the
   warnings instead and never drawn as missing.
 - The payload is what the map shows before the view controls: the Kind
-  filter, the legend's link toggles, focus mode, ReplicaSet collapse (with its
-  +N badge), and search. The frontend applies no relationship rules of its own.
+  filter, the legend's link toggles, ReplicaSet collapse (with its +N badge),
+  and search. The frontend applies no relationship rules of its own.
+
+## Layout
+
+- Objects with a link to another object on the map are laid out in columns
+  that follow their links, with the seed in column 0.
+- Objects with no such link, common on namespace and Helm release maps and
+  under a Kind filter, form their own block of lanes ordered by kind. It sits
+  right of or below the linked layout, whichever lets the whole map fit a
+  16:10 view at the largest zoom, and never moves the linked objects.
 
 ## Map Interactions
 
 - Every wheel gesture zooms around the pointer: a mouse wheel, a trackpad
   scroll, and a pinch. Dragging the background pans. Both turn off auto-fit.
   The map registers no G6 wheel behavior, so a wheel never pans as well.
-- Dragging an object pins it. A pin applies under every Kind filter and in
-  focus mode, and survives refreshes while its object stays on the map.
+- Dragging an object pins it. A pin applies under every Kind filter and
+  survives refreshes while its object stays on the map.
   **Reset layout** clears all pins. Pins last only while the map is open.
 - Tab reaches the search field and toolbar controls. Enter in the search field
   centers a matching visible object; repeated presses cycle through matches.
