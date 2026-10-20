@@ -10,6 +10,7 @@ import (
 
 	"github.com/luxury-yacht/app/backend/refresh/domain"
 	"github.com/luxury-yacht/app/backend/refresh/domainpermissions"
+	"github.com/luxury-yacht/app/backend/refresh/doorbell"
 	"github.com/luxury-yacht/app/backend/refresh/informer"
 	"github.com/luxury-yacht/app/backend/refresh/ingest"
 	"github.com/luxury-yacht/app/backend/refresh/metrics"
@@ -27,25 +28,15 @@ type registrationDeps struct {
 	metricsProvider metrics.Provider      // Provider for collecting metrics
 	cfg             Config                // Configuration settings
 	serverHost      string                // Hostname of the server
-	// noteNamespaceNotifier receives the namespaces change notifier created during
-	// registration, so the subsystem can wire its doorbell broadcast once the
-	// resource-stream manager exists. Nil in tests that don't exercise streaming.
+	// bell is the cluster generation's doorbell; every producer registered here
+	// rings it and schedules its timers through it.
+	bell doorbell.Bell
+	// afterNamespacesRing runs after each namespaces ring (the readiness hook).
+	afterNamespacesRing func(version, reason string)
+	// noteNamespaceNotifier receives the namespaces change notifier, whose
+	// workload readiness gates cooling. Nil in tests that don't need it.
 	noteNamespaceNotifier func(*snapshot.NamespaceChangeNotifier)
-	// noteObjectEventsNotifier is the object-events doorbell counterpart of
-	// noteNamespaceNotifier; same wiring lifecycle.
-	noteObjectEventsNotifier func(*snapshot.ObjectEventsChangeNotifier)
-	// noteEventTableNotifier receives the cluster-events and namespace-events
-	// doorbell notifiers; same wiring lifecycle.
-	noteEventTableNotifier func(*snapshot.EventTableChangeNotifier)
-	noteAttentionIndex     func(*snapshot.ClusterAttentionIndex)
-}
-
-// noteEventTable hands a registered event table's doorbell notifier to the
-// subsystem; nil (failed registration) and unwired test deps are ignored.
-func (deps registrationDeps) noteEventTable(notifier *snapshot.EventTableChangeNotifier) {
-	if notifier != nil && deps.noteEventTableNotifier != nil {
-		deps.noteEventTableNotifier(notifier)
-	}
+	noteAttentionIndex    func(*snapshot.ClusterAttentionIndex)
 }
 
 // domainRegistration describes a single domain registration entry.
@@ -376,13 +367,20 @@ func domainRegistrations(ctx context.Context, deps registrationDeps) []domainReg
 					deps.metricsProvider,
 					clusterMeta,
 					deps.ingestManager,
+					deps.bell,
 				)
 			},
 			fallbackChecks: []listCheck{
 				{group: "", resource: "nodes"},
 			},
 			registerFallback: func() error {
-				return snapshot.RegisterNodeDomainList(deps.registry, deps.cfg.KubernetesClient, deps.metricsProvider)
+				return snapshot.RegisterNodeDomainList(
+					deps.registry,
+					deps.cfg.KubernetesClient,
+					deps.metricsProvider,
+					deps.ingestManager,
+					deps.bell,
+				)
 			},
 			fallbackLog:  "Registering nodes domain using list fallback due to missing informer permissions",
 			deniedReason: "core/nodes (and pods)",
@@ -398,6 +396,7 @@ func domainRegistrations(ctx context.Context, deps registrationDeps) []domainReg
 					allowed,
 					clusterMeta,
 					deps.ingestManager,
+					deps.bell,
 				)
 			},
 		}),
@@ -416,13 +415,13 @@ func domainRegistrations(ctx context.Context, deps registrationDeps) []domainReg
 					deps.registry,
 					deps.informerFactory.APIExtensionsInformerFactory(),
 					clusterMeta,
+					deps.bell,
 				)
 			},
 		}),
 
 		"cluster-events": directRegistration("cluster-events", func() error {
-			notifier, err := snapshot.RegisterClusterEventsDomain(deps.registry, deps.informerFactory.SharedInformerFactory(), clusterMeta)
-			deps.noteEventTable(notifier)
+			_, err := snapshot.RegisterClusterEventsDomain(deps.registry, deps.informerFactory.SharedInformerFactory(), clusterMeta, deps.bell)
 			return err
 		}),
 
@@ -442,6 +441,7 @@ func domainRegistrations(ctx context.Context, deps registrationDeps) []domainReg
 					allowed,
 					clusterMeta,
 					deps.ingestManager,
+					deps.bell,
 				)
 			},
 		}),
@@ -460,6 +460,7 @@ func domainRegistrations(ctx context.Context, deps registrationDeps) []domainReg
 					deps.informerFactory.SharedInformerFactory(),
 					clusterMeta,
 					deps.ingestManager,
+					deps.bell,
 				)
 			},
 			deniedReason: "core/persistentvolumes",
@@ -482,6 +483,7 @@ func domainRegistrations(ctx context.Context, deps registrationDeps) []domainReg
 					},
 					clusterMeta,
 					deps.ingestManager,
+					deps.bell,
 				)
 			},
 		}),
@@ -490,6 +492,7 @@ func domainRegistrations(ctx context.Context, deps registrationDeps) []domainReg
 				deps.registry,
 				deps.informerFactory.SharedInformerFactory(),
 				clusterMeta,
+				deps.bell,
 			)
 		}),
 		"namespace-config": accessListRegistration(runtimeAccess, listDomainConfig{
@@ -501,13 +504,13 @@ func domainRegistrations(ctx context.Context, deps registrationDeps) []domainReg
 					allowed,
 					clusterMeta,
 					deps.ingestManager,
+					deps.bell,
 				)
 			},
 		}),
 
 		"namespace-events": directRegistration("namespace-events", func() error {
-			notifier, err := snapshot.RegisterNamespaceEventsDomain(deps.registry, deps.informerFactory.SharedInformerFactory(), clusterMeta)
-			deps.noteEventTable(notifier)
+			_, err := snapshot.RegisterNamespaceEventsDomain(deps.registry, deps.informerFactory.SharedInformerFactory(), clusterMeta, deps.bell)
 			return err
 		}),
 		"namespace-helm": directRegistration("namespace-helm", func() error {
@@ -515,6 +518,7 @@ func domainRegistrations(ctx context.Context, deps registrationDeps) []domainReg
 				deps.registry,
 				deps.informerFactory.HelmStorage(),
 				clusterMeta,
+				deps.bell,
 			)
 		}),
 		"namespace-network": accessListRegistration(runtimeAccess, listDomainConfig{
@@ -527,6 +531,7 @@ func domainRegistrations(ctx context.Context, deps registrationDeps) []domainReg
 					allowed,
 					clusterMeta,
 					deps.ingestManager,
+					deps.bell,
 				)
 			},
 		}),
@@ -539,6 +544,7 @@ func domainRegistrations(ctx context.Context, deps registrationDeps) []domainReg
 					allowed,
 					clusterMeta,
 					deps.ingestManager,
+					deps.bell,
 				)
 			},
 		}),
@@ -552,6 +558,7 @@ func domainRegistrations(ctx context.Context, deps registrationDeps) []domainReg
 					allowed,
 					clusterMeta,
 					deps.ingestManager,
+					deps.bell,
 				)
 			},
 		}),
@@ -562,6 +569,7 @@ func domainRegistrations(ctx context.Context, deps registrationDeps) []domainReg
 				deps.informerFactory.SharedInformerFactory(),
 				clusterMeta,
 				deps.ingestManager,
+				deps.bell,
 			)
 		}),
 
@@ -571,6 +579,7 @@ func domainRegistrations(ctx context.Context, deps registrationDeps) []domainReg
 				deps.metricsProvider,
 				clusterMeta,
 				deps.ingestManager,
+				deps.bell,
 			)
 		}),
 
@@ -590,14 +599,8 @@ func domainRegistrations(ctx context.Context, deps registrationDeps) []domainReg
 			return snapshot.RegisterObjectHelmValuesDomain(deps.registry, helmProvider)
 		}), func() bool { return helmOK }),
 		"object-events": directRegistration("object-events", func() error {
-			notifier, err := snapshot.RegisterObjectEventsDomain(deps.registry, deps.cfg.KubernetesClient, deps.informerFactory.SharedInformerFactory())
-			if err != nil {
-				return err
-			}
-			if deps.noteObjectEventsNotifier != nil {
-				deps.noteObjectEventsNotifier(notifier)
-			}
-			return nil
+			_, err := snapshot.RegisterObjectEventsDomain(deps.registry, deps.cfg.KubernetesClient, deps.informerFactory.SharedInformerFactory(), deps.bell)
+			return err
 		}),
 		"object-map": directRegistration("object-map", func() error {
 			return snapshot.RegisterObjectMapDomain(
@@ -684,6 +687,7 @@ func clusterAttentionRegistration(deps registrationDeps, access domainpermission
 					IgnoredObjectPruner: deps.cfg.AttentionIgnoredObjectPruner,
 					CatalogService:      deps.cfg.ObjectCatalogService,
 				},
+				deps.bell,
 			)
 			if err == nil && deps.noteAttentionIndex != nil {
 				deps.noteAttentionIndex(index)
@@ -783,9 +787,13 @@ func namespacesRegistration(ctx context.Context, deps registrationDeps) domainRe
 			deps.registry,
 			deps.informerFactory.SharedInformerFactory(),
 			deps.ingestManager,
-			deps.cfg.AllowedNamespaces,
-			deps.cfg.KubernetesClient,
-			eventsExpected,
+			snapshot.NamespaceDomainOptions{
+				AllowedNamespaces: deps.cfg.AllowedNamespaces,
+				Client:            deps.cfg.KubernetesClient,
+				EventsExpected:    eventsExpected,
+			},
+			deps.bell,
+			deps.afterNamespacesRing,
 		)
 		if err != nil {
 			return err
