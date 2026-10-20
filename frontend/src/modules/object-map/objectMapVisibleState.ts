@@ -2,7 +2,7 @@
  * frontend/src/modules/object-map/objectMapVisibleState.ts
  *
  * Derives the visible object-map layout after kind filtering, relationship
- * filtering, focus mode, and search are applied.
+ * filtering, pins, and search are applied.
  */
 
 import type { ObjectMapEdge, ObjectMapNode } from '@core/refresh/types';
@@ -30,11 +30,13 @@ export interface ObjectMapVisibleStateInput {
   layout: ObjectMapLayout;
   seedNodeId: string;
   activeNodeId: string | null;
-  focusMode: boolean;
   selectedKinds: MultiSelectFilterSelection;
   enabledEdgeTypes: Set<string> | null;
   searchQuery: string;
   useShortResourceNames: boolean;
+  // Where the user dropped dragged objects, keyed by node id. Pins apply in
+  // every view, after filtering has laid the map out.
+  pinnedPositions: ReadonlyMap<string, { x: number; y: number }>;
 }
 
 export interface ObjectMapVisibleState {
@@ -55,6 +57,7 @@ const toLayoutNodeInput = (node: PositionedNode): ObjectMapNode => ({
   ref: node.ref,
   creationTimestamp: node.creationTimestamp,
   status: node.status,
+  missing: node.missing,
 });
 
 const toLayoutEdgeInput = (
@@ -150,50 +153,28 @@ const applyKindFilter = ({
   );
 };
 
-const applyFocusMode = (
+const applyPinnedPositions = (
   layout: ObjectMapLayout,
-  focusMode: boolean,
-  activeNodeId: string | null
+  pinnedPositions: ReadonlyMap<string, { x: number; y: number }>
 ): ObjectMapLayout => {
-  const activeNode = activeNodeId
-    ? (layout.nodes.find((node) => node.id === activeNodeId) ?? null)
-    : null;
-  if (!focusMode || !activeNodeId || !activeNode) {
+  if (pinnedPositions.size === 0) {
     return layout;
   }
-
-  const focusSelectionState = computeObjectMapSelectionState(layout.edges, activeNodeId);
-  const visibleNodeIds = new Set<string>([activeNodeId, ...focusSelectionState.connectedIds]);
-  const focusedNodes = layout.nodes.filter((node) => visibleNodeIds.has(node.id));
-  const focusedEdges = layout.edges.filter((edge) =>
-    focusSelectionState.connectedEdgeIds.has(edge.id)
-  );
-  const focusedEdgeInputs = focusedEdges.map(toLayoutEdgeInput);
-
-  const focusedLayout = computeObjectMapLayout(
-    focusedNodes.map(toLayoutNodeInput),
-    focusedEdgeInputs,
-    activeNodeId
-  );
-  const focusedActiveNode = focusedLayout.nodes.find((node) => node.id === activeNodeId);
-  if (!focusedActiveNode) {
-    return focusedLayout;
+  let moved = false;
+  const nodes = layout.nodes.map((node) => {
+    const pin = pinnedPositions.get(node.id);
+    if (!pin || (pin.x === node.x && pin.y === node.y)) {
+      return node;
+    }
+    moved = true;
+    return { ...node, x: pin.x, y: pin.y };
+  });
+  if (!moved) {
+    return layout;
   }
-
-  const dx = activeNode.x - focusedActiveNode.x;
-  const dy = activeNode.y - focusedActiveNode.y;
-  if (dx === 0 && dy === 0) {
-    return focusedLayout;
-  }
-
-  const nodes = focusedLayout.nodes.map((node) => ({
-    ...node,
-    x: node.x + dx,
-    y: node.y + dy,
-  }));
   return {
     nodes,
-    edges: routeObjectMapEdges(nodes, focusedEdgeInputs),
+    edges: routeObjectMapEdges(nodes, layout.edges.map(toLayoutEdgeInput)),
     bounds: computeObjectMapBounds(nodes),
   };
 };
@@ -219,11 +200,11 @@ export const deriveObjectMapVisibleState = ({
   layout,
   seedNodeId,
   activeNodeId,
-  focusMode,
   selectedKinds,
   enabledEdgeTypes,
   searchQuery,
   useShortResourceNames,
+  pinnedPositions,
 }: ObjectMapVisibleStateInput): ObjectMapVisibleState => {
   const hasSelectedKinds = selectedKinds.mode === 'some';
   const realEdgeTypes = computeRealEdgeTypes(layout.edges);
@@ -241,7 +222,7 @@ export const deriveObjectMapVisibleState = ({
           enabledEdgeTypes,
           seedNodeId,
         });
-  const visibleLayout = applyFocusMode(kindFilteredLayout, focusMode, activeNodeId);
+  const visibleLayout = applyPinnedPositions(kindFilteredLayout, pinnedPositions);
   const visibleSelectionState = computeObjectMapSelectionState(visibleLayout.edges, activeNodeId);
   const normalizedSearchQuery = searchQuery.trim().toLowerCase();
   const searchMatches = computeSearchMatches(

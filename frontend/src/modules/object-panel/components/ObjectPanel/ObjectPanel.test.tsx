@@ -8,10 +8,10 @@ import { resolveBuiltinGroupVersion } from '@shared/constants/builtinGroupVersio
 import { act, createContext, useSyncExternalStore } from 'react';
 import * as ReactDOM from 'react-dom/client';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { buildClusterScope } from '@/core/refresh/clusterScope';
 import type { RefreshFailure } from '@/core/refresh/refreshFailure';
-import type { ErrorStatusObjectRef } from '@/core/refresh/types';
+import type { ErrorStatusObjectRef, ObjectDetail } from '@/core/refresh/types';
 import { makeErrorStatus } from '@/test-utils/errorStatusFixtures';
+import { testScope } from '@/test-utils/refreshScope';
 import { requireValue } from '@/test-utils/requireValue';
 
 const notFound = (ref?: ErrorStatusObjectRef): RefreshFailure => ({
@@ -27,7 +27,7 @@ interface DetailsTabCapture {
     finalizers?: string[];
   } | null;
   detailModel: {
-    activeDetail: unknown;
+    activeDetail: ObjectDetail | null;
     containerSection: unknown;
     dataSection: unknown;
     roleRules?: unknown;
@@ -470,7 +470,7 @@ describe('ObjectPanel tab availability', () => {
       scopedDomain: { data: { details: {} }, status: 'idle', error: null },
     });
 
-    const detailScope = buildClusterScope(defaultClusterId, 'team-a:/v1:pod:api');
+    const detailScope = testScope(defaultClusterId, 'team-a:/v1:Pod:api');
     // Refresher names are panel-scoped (kind + panelId) so simultaneously-open
     // same-kind panels register distinct refreshers.
     const refresherName = `object-pod:${buildPanelId(defaultClusterId, 'Pod', 'team-a', 'api')}`;
@@ -556,7 +556,7 @@ describe('ObjectPanel tab availability', () => {
 
     expect(mockRefreshOrchestrator.fetchScopedDomain).toHaveBeenCalledWith(
       'object-details',
-      buildClusterScope(defaultClusterId, 'team-a:apps/v1:deployment:api'),
+      testScope(defaultClusterId, 'team-a:apps/v1:Deployment:api'),
       expect.objectContaining({ isManual: true })
     );
   });
@@ -633,7 +633,7 @@ describe('ObjectPanel tab availability', () => {
     });
 
     expect(yamlTabPropsRef.current).toMatchObject({
-      scope: buildClusterScope(defaultClusterId, 'team-a:apps/v1:deployment:api'),
+      scope: testScope(defaultClusterId, 'team-a:apps/v1:Deployment:api'),
       canEdit: false,
       editDisabledReason: 'forbidden',
       isActive: true,
@@ -667,7 +667,7 @@ describe('ObjectPanel tab availability', () => {
       await Promise.resolve();
     });
     expect(manifestTabPropsRef.current).toMatchObject({
-      scope: buildClusterScope(defaultClusterId, 'team-a:my-app'),
+      scope: testScope(defaultClusterId, 'team-a:my-app'),
       isActive: true,
     });
 
@@ -677,7 +677,7 @@ describe('ObjectPanel tab availability', () => {
       await Promise.resolve();
     });
     expect(valuesTabPropsRef.current).toMatchObject({
-      scope: buildClusterScope(defaultClusterId, 'team-a:my-app'),
+      scope: testScope(defaultClusterId, 'team-a:my-app'),
       isActive: true,
     });
   });
@@ -754,7 +754,7 @@ describe('ObjectPanel tab availability', () => {
     });
 
     expect(ctx.container.querySelector('.object-panel-empty-state')).toBeNull();
-    expect(getDetailsTabProps().detailModel.activeDetail).toEqual({ status: 'Ready' });
+    expect(getDetailsTabProps().detailModel.activeDetail?.details).toEqual({ status: 'Ready' });
   });
 
   // The panel closes on a NotFound only when it names this exact object.
@@ -826,7 +826,7 @@ describe('ObjectPanel tab availability', () => {
       },
     });
 
-    expect(getDetailsTabProps().detailModel.activeDetail).toEqual(detailsPayload);
+    expect(getDetailsTabProps().detailModel.activeDetail?.details).toEqual(detailsPayload);
   });
 
   it('passes deletion metadata from the refresh envelope to DetailsTab', async () => {

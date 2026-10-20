@@ -24,10 +24,7 @@ import { queryNamespacePermissions } from '@/core/capabilities';
 import { PanelLifecycleClusterSurface } from '@/core/panel-windows/panelLifecycleGuards';
 import { useAutoRefreshEnabled } from '@/core/refresh/hooks/useRefreshPreferences';
 import './ObjectPanel.css';
-import {
-  CLUSTER_SCOPE,
-  RESOURCE_CAPABILITIES,
-} from '@modules/object-panel/components/ObjectPanel/constants';
+import { RESOURCE_CAPABILITIES } from '@modules/object-panel/components/ObjectPanel/constants';
 import { useObjectPanelCapabilities } from '@modules/object-panel/components/ObjectPanel/hooks/useObjectPanelCapabilities';
 import { useObjectPanelFeatureSupport } from '@modules/object-panel/components/ObjectPanel/hooks/useObjectPanelFeatureSupport';
 import { useObjectPanelRefresh } from '@modules/object-panel/components/ObjectPanel/hooks/useObjectPanelRefresh';
@@ -137,9 +134,7 @@ function ObjectPanel({
     helmScope,
     isHelmRelease,
     isEvent,
-  } = getObjectPanelScopes(objectData, {
-    clusterScope: CLUSTER_SCOPE,
-  });
+  } = getObjectPanelScopes(objectData);
 
   const lastPermissionScopeRef = useRef<string | null>(null);
   useEffect(() => {
@@ -173,7 +168,7 @@ function ObjectPanel({
 
   // Only poll when this tab is active in its group (Step 8: active-tab-only polling).
   const {
-    detailPayload,
+    detail,
     creationTimestamp,
     lastModified,
     deletion,
@@ -251,8 +246,8 @@ function ObjectPanel({
   // Keep DetailsTab props derived from this memoized model, not from the
   // enclosing props object; ObjectPanelContent depends on that stability.
   const detailModel = useMemo(
-    () => buildObjectDetailModel(objectData, objectKind, detailPayload),
-    [detailPayload, objectData, objectKind]
+    () => buildObjectDetailModel(objectData, detail),
+    [detail, objectData]
   );
 
   // The shared object action controller (in ActionsMenu) executes every action

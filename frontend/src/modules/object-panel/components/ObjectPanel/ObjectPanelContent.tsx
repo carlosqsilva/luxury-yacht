@@ -321,10 +321,8 @@ const transientTabs = new Map<ViewType, React.ComponentType<ObjectPanelContentPr
   [
     'jobs',
     ({ objectData, isPanelOpen, detailTabProps }) => {
-      const cronJobDetails =
-        detailTabProps?.detailModel.objectKind === 'cronjob'
-          ? (detailTabProps.detailModel.activeDetail as { jobs?: types.JobSimpleInfo[] } | null)
-          : null;
+      const activeDetail = detailTabProps?.detailModel.activeDetail;
+      const cronJobDetails = activeDetail?.detailType === 'cronjob' ? activeDetail.details : null;
       return (
         <PanelTabBoundary
           scope="panel-jobs"
@@ -375,7 +373,7 @@ const transientTabs = new Map<ViewType, React.ComponentType<ObjectPanelContentPr
   ],
   [
     'values',
-    ({ helmScope, isPanelOpen }) => {
+    ({ helmScope, isPanelOpen, panelId }) => {
       return (
         <PanelTabBoundary
           scope="panel-values"
@@ -383,7 +381,7 @@ const transientTabs = new Map<ViewType, React.ComponentType<ObjectPanelContentPr
           tabName="Values"
           loadingName="values"
         >
-          <ValuesTab scope={helmScope} isActive={isPanelOpen} />
+          <ValuesTab scope={helmScope} isActive={isPanelOpen} panelId={panelId} />
         </PanelTabBoundary>
       );
     },

@@ -97,7 +97,7 @@ func TestFetchContainerLogsRejectsInvalidScopeCluster(t *testing.T) {
 			name:      "missing scope cluster",
 			clusterID: "cluster-a",
 			scope:     "default:/v1:pod:demo",
-			want:      "container logs scope requires a single cluster scope",
+			want:      "container logs scope requires a cluster scope",
 		},
 		{
 			name:      "mismatched scope cluster",
@@ -268,6 +268,9 @@ func TestActionWrappersRequireTargetIdentity(t *testing.T) {
 		{"HelmDelete name", func() error {
 			return app.gateway.deleteHelmReleaseAction(objectActionTarget("cluster-a", "helm.sh", "v3", "HelmRelease", "ns", ""))
 		}, "name is required"},
+		{"HelmDelete target", func() error {
+			return app.gateway.deleteHelmReleaseAction(objectActionTarget("cluster-a", "apps", "v1", "Deployment", "ns", "release"))
+		}, "delete requires helm.sh/v3 HelmRelease target, got apps/v1 Deployment"},
 		{"Cordon name", func() error {
 			return app.gateway.cordonNodeAction(objectActionTarget("cluster-a", "", "v1", "Node", "", ""))
 		}, "name is required"},
