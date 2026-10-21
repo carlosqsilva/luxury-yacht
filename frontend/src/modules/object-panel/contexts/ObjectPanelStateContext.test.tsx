@@ -574,6 +574,47 @@ describe('ObjectPanelStateContext', () => {
     });
   });
 
+  it('announces panels the user closes, but not panels that move away', async () => {
+    await renderProvider();
+    const closed: Array<[string, string[]]> = [];
+    const stop = stateRef.current?.subscribeClosedPanels((clusterId, panelIds) => {
+      closed.push([clusterId, panelIds]);
+    });
+    for (const [kind, name] of [
+      ['Pod', 'api'],
+      ['Deployment', 'web'],
+      ['Service', 'db'],
+    ]) {
+      act(() => {
+        stateRef.current?.onRowClick({ kind, name, namespace: 'team-a', clusterId: 'cluster-a' });
+      });
+    }
+    const [api, web, db] = Array.from(stateRef.current?.openPanels.keys() ?? []);
+
+    act(() => stateRef.current?.removeOwnedPanel('cluster-a', web));
+    expect(closed).toEqual([]);
+    act(() => stateRef.current?.closePanel('cluster-a', api));
+    act(() => stateRef.current?.closePanel('cluster-a', api));
+    expect(closed).toEqual([['cluster-a', [api]]]);
+    act(() => stateRef.current?.onCloseObjectPanel());
+    expect(closed).toEqual([
+      ['cluster-a', [api]],
+      ['cluster-a', [db]],
+    ]);
+
+    stop?.();
+    act(() => {
+      stateRef.current?.onRowClick({
+        kind: 'Pod',
+        name: 'later',
+        namespace: 'team-a',
+        clusterId: 'cluster-a',
+      });
+    });
+    act(() => stateRef.current?.onCloseObjectPanel());
+    expect(closed).toHaveLength(2);
+  });
+
   it('evicts every active-cluster panel when onCloseObjectPanel runs', async () => {
     await renderProvider();
     act(() => {
@@ -600,6 +641,37 @@ describe('ObjectPanelStateContext', () => {
 
     // Two panels × at least one scope each → at least 2 eviction calls.
     expect(resetScopedDomainMock.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('opens a native window with the group the directory gives it', async () => {
+    const objectRef = {
+      clusterId: 'cluster-a',
+      group: 'apps',
+      version: 'v1',
+      kind: 'Deployment',
+      namespace: 'default',
+      name: 'api',
+    };
+    const group = {
+      clusterId: 'cluster-a',
+      groupId: 'floating-1',
+      activePanelId: 'panel-native',
+      tabs: [{ kind: 'object', panelId: 'panel-native', objectRef, activeView: 'yaml' }],
+    } as panelwindow.WorkspaceGroup;
+
+    await act(async () => {
+      root.render(
+        <ObjectPanelStateProvider initialGroup={group}>
+          <Harness />
+        </ObjectPanelStateProvider>
+      );
+    });
+
+    expect(stateRef.current?.panelIdsForCluster('cluster-a')).toEqual(['panel-native']);
+    expect(stateRef.current?.getOwnedPanel('cluster-a', 'panel-native')).toMatchObject({
+      objectRef,
+      activeView: 'yaml',
+    });
   });
 
   it('retains complete local object identity while updating the active view', async () => {

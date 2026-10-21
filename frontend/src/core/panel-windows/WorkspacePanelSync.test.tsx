@@ -4,8 +4,15 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { clusterWorkspaceStore } from '@/core/cluster-workspace/clusterWorkspaceStore';
 import type { ClusterClosePreflight } from '@/modules/kubernetes/config/KubeconfigContext';
 import { PanelLifecycleGuardProvider } from './panelLifecycleGuards';
+import { nativePanelPublication } from './publicationQueue';
+import { useClosedPanelIntents } from './useClosedPanelIntents';
 import { WorkspacePanelLifecycle } from './WorkspacePanelLifecycle';
-import { usePanelWorkspaceSync, WorkspacePanelSync } from './WorkspacePanelSync';
+import {
+  useIncomingGroupTransfers,
+  usePanelWorkspaceOpen,
+  usePanelWorkspaceSync,
+  WorkspacePanelSync,
+} from './WorkspacePanelSync';
 
 const mocks = vi.hoisted(() => ({
   selected: ['production'],
@@ -43,6 +50,8 @@ const mocks = vi.hoisted(() => ({
   upsert: vi.fn(),
   dock: vi.fn(),
   open: vi.fn(),
+  closeIntent: vi.fn(async (..._args: unknown[]) => undefined),
+  closedListener: null as null | ((clusterId: string, panelIds: string[]) => void),
   report: vi.fn(),
   close: vi.fn(),
   preflight: null as ClusterClosePreflight | null,
@@ -78,6 +87,12 @@ vi.mock('@/modules/object-panel/contexts/ObjectPanelStateContext', () => ({
     restorePanelTabs: mocks.upsert,
     panelIdsForCluster: () => ['api'],
     getOwnedPanel: () => ({ nativeLocation: null }),
+    subscribeClosedPanels: (listener: typeof mocks.closedListener) => {
+      mocks.closedListener = listener;
+      return () => {
+        mocks.closedListener = null;
+      };
+    },
   }),
 }));
 vi.mock('@/ui/dockable', () => ({
@@ -94,6 +109,7 @@ vi.mock('@/utils/errorHandler', () => ({ reportOperationalError: mocks.report })
 vi.mock('./index', () => ({
   acknowledgePanelWorkspaceReady: mocks.ready,
   openPanelWorkspaceObject: mocks.open,
+  closePanelWorkspaceObject: mocks.closeIntent,
   publishDockedPanels: mocks.publish,
   closeClusterView: mocks.close,
   onWorkspaceCloseRequested: () => () => undefined,
@@ -109,9 +125,11 @@ vi.mock('./index', () => ({
 let root: ReactDOM.Root;
 let container: HTMLDivElement;
 let sync: ReturnType<typeof usePanelWorkspaceSync>;
+let incoming: ReturnType<typeof useIncomingGroupTransfers>;
 let releaseWorkspace: () => void;
 function Probe() {
   sync = usePanelWorkspaceSync();
+  incoming = useIncomingGroupTransfers();
   return null;
 }
 beforeEach(async () => {
@@ -186,12 +204,14 @@ it('waits for confirmed tab membership before panel reads, opens, and publicatio
 });
 
 it.each([true, false])(
-  'pauses full-window publication until close settles (accepted: %s)',
+  'leaves a closing cluster out of publications until its close settles (accepted: %s)',
   async (accepted) => {
     let settle: (closed: boolean) => void = () => undefined;
     await act(async () => {
       settle = await sync.quiesceCluster('production');
     });
+    // Publications only arrange, so leaving the cluster out closes nothing.
+    expect(mocks.publish).toHaveBeenLastCalledWith('app-a', []);
     mocks.publish.mockClear();
     mocks.read.mockClear();
     mocks.visible = [];
@@ -220,7 +240,7 @@ it.each([true, false])(
           </WorkspacePanelSync>
         )
       );
-      expect(mocks.publish).toHaveBeenLastCalledWith('app-a', []);
+      expect(mocks.publish).not.toHaveBeenCalled();
     } else {
       expect(mocks.publish).toHaveBeenLastCalledWith('app-a', [
         expect.objectContaining({ clusterId: 'production' }),
@@ -231,7 +251,9 @@ it.each([true, false])(
 );
 
 it('resumes synchronization after a failed publication prevents cluster closure', async () => {
+  // The initial snapshot, the one without the closing cluster, and its retry.
   mocks.publish
+    .mockRejectedValueOnce(new Error('publication failed'))
     .mockRejectedValueOnce(new Error('publication failed'))
     .mockRejectedValueOnce(new Error('publication failed'));
   await act(async () =>
@@ -317,94 +339,12 @@ it('drains an object open and prevents its late result from remounting a closing
   expect(result).toBeNull();
 });
 
-it('preserves a provisional target while the directory still points to its source', async () => {
-  sync.stage('move-1', [
-    {
-      clusterId: 'production',
-      groupId: 'right',
-      tabs: mocks.local.production,
-      activePanelId: 'api',
-    },
-  ] as never);
-  mocks.read.mockResolvedValue({
-    revision: 2,
-    panels: [
-      {
-        tab: mocks.local.production[0],
-        location: { kind: 'docked', windowName: 'app-b', groupId: 'right' },
-      },
-    ],
-  });
-  await act(async () => mocks.changed?.({ clusterId: 'production' }));
-  expect(mocks.remove).not.toHaveBeenCalled();
-  sync.settle('move-1');
-  await act(async () => mocks.changed?.({ clusterId: 'production' }));
-  expect(mocks.remove).toHaveBeenCalledWith('production', 'api');
-});
-
 it('returns the latest source groups for a cluster-view handoff', async () => {
   await sync.flush();
   expect(sync.groupsForCluster('production')).toEqual([
     expect.objectContaining({ tabs: mocks.local.production }),
   ]);
   expect(sync.groupsForCluster('staging')).toEqual([]);
-});
-
-it('keeps transferred panels when a pre-commit directory read returns after settlement', async () => {
-  sync.stage('move-1', [
-    {
-      clusterId: 'production',
-      groupId: 'right',
-      tabs: mocks.local.production,
-      activePanelId: 'api',
-    },
-  ] as never);
-  let finishRead: (value: unknown) => void = () => undefined;
-  mocks.read.mockImplementationOnce(
-    () =>
-      new Promise((resolve) => {
-        finishRead = resolve;
-      })
-  );
-  await act(async () => mocks.changed?.({ clusterId: 'production' }));
-  mocks.read.mockClear();
-  mocks.read.mockResolvedValue({
-    revision: 3,
-    panels: [
-      {
-        tab: mocks.local.production[0],
-        location: { kind: 'docked', windowName: 'app-a', groupId: 'right' },
-      },
-    ],
-  });
-  await act(async () => {
-    sync.settle('move-1');
-    finishRead({
-      revision: 2,
-      panels: [
-        {
-          tab: mocks.local.production[0],
-          location: { kind: 'docked', windowName: 'app-b', groupId: 'right' },
-        },
-      ],
-    });
-  });
-  expect(mocks.remove).not.toHaveBeenCalled();
-  expect(mocks.detach).not.toHaveBeenCalled();
-  expect(mocks.read).toHaveBeenCalledWith('app-a', 'production');
-
-  // A later authoritative move must still remove the old renderer's copy.
-  mocks.read.mockResolvedValue({
-    revision: 4,
-    panels: [
-      {
-        tab: mocks.local.production[0],
-        location: { kind: 'docked', windowName: 'app-c', groupId: 'right' },
-      },
-    ],
-  });
-  await act(async () => mocks.changed?.({ clusterId: 'production' }));
-  expect(mocks.remove).toHaveBeenCalledWith('production', 'api');
 });
 
 it('does not read a revoked cluster while the frontend still displays its closing tab', async () => {
@@ -556,4 +496,237 @@ it('processes a retained-panel notification received while an earlier claim is p
   await act(async () => mocks.changed?.({ clusterId: 'production' }));
   await act(async () => finish({ render: true, panel: first }));
   expect(mocks.dock).toHaveBeenCalledWith('production', ['second'], 'second', 'bottom', undefined);
+});
+
+// A native window docking its group into this app view ('app-a'). The directory
+// keeps the source placement until commit and records this view as the target.
+const dockingPanel = (overrides: Record<string, unknown> = {}) => ({
+  tab: mocks.local.production[0],
+  location: {
+    kind: 'panel-window',
+    windowName: 'panel-1',
+    groupId: 'native',
+    index: 0,
+    active: true,
+  },
+  transfer: {
+    transferId: 'dock-1',
+    target: { kind: 'docked', windowName: 'app-a', groupId: 'bottom', index: 0, active: true },
+  },
+  ...overrides,
+});
+
+async function readDirectory(revision: number, panels: unknown[]) {
+  mocks.read.mockResolvedValue({ revision, panels });
+  await act(async () => mocks.changed?.({ clusterId: 'production' }));
+}
+
+it('lists a dock-back group the directory targets at this view and keeps its provisional copy', async () => {
+  await readDirectory(2, [dockingPanel()]);
+  expect(incoming).toEqual([
+    {
+      transferId: 'dock-1',
+      clusterId: 'production',
+      sourceWindowName: 'panel-1',
+      groupId: 'bottom',
+      insertIndex: 0,
+      view: false,
+      tabs: [mocks.local.production[0]],
+      activePanelId: 'api',
+    },
+  ]);
+  expect(mocks.detach).not.toHaveBeenCalled();
+  expect(mocks.remove).not.toHaveBeenCalled();
+});
+
+it.each([
+  ['the directory cancels the move', [dockingPanel({ transfer: undefined })]],
+  ['the native source closes with its panels', []],
+])('drops the provisional copy when %s', async (_case, panels) => {
+  await readDirectory(2, [dockingPanel()]);
+  await readDirectory(3, panels);
+  expect(incoming).toEqual([]);
+  expect(mocks.detach).toHaveBeenCalledWith('production', ['api']);
+  expect(mocks.remove).toHaveBeenCalledWith('production', 'api');
+});
+
+it('keeps the copy once the directory commits the dock to this view', async () => {
+  await readDirectory(2, [dockingPanel()]);
+  await readDirectory(3, [
+    {
+      tab: mocks.local.production[0],
+      location: { kind: 'docked', windowName: 'app-a', groupId: 'bottom', index: 0, active: true },
+    },
+  ]);
+  expect(incoming).toEqual([]);
+  expect(mocks.remove).not.toHaveBeenCalled();
+});
+
+it('ignores an older directory read that predates the move', async () => {
+  await readDirectory(2, [dockingPanel()]);
+  await readDirectory(1, [dockingPanel({ transfer: undefined })]);
+  expect(incoming).toHaveLength(1);
+  expect(mocks.remove).not.toHaveBeenCalled();
+});
+
+it('lists each group of a cluster view move as a view move', async () => {
+  const [api] = mocks.local.production;
+  const worker = { ...api, panelId: 'worker', objectRef: { ...api.objectRef, name: 'worker' } };
+  const viewPanel = (tab: typeof api, groupId: string) => ({
+    tab,
+    location: { kind: 'docked', windowName: 'app-b', groupId, index: 0, active: true },
+    transfer: {
+      transferId: 'view-1',
+      view: true,
+      target: { kind: 'docked', windowName: 'app-a', groupId, index: 0, active: true },
+    },
+  });
+  await readDirectory(2, [viewPanel(api, 'right'), viewPanel(worker, 'bottom')]);
+  expect(incoming).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ transferId: 'view-1', groupId: 'right', view: true, tabs: [api] }),
+      expect.objectContaining({
+        transferId: 'view-1',
+        groupId: 'bottom',
+        view: true,
+        tabs: [worker],
+      }),
+    ])
+  );
+  expect(incoming).toHaveLength(2);
+});
+
+it('reopens an object only after this view retries its failed close', async () => {
+  const tab = mocks.local.production[0] as never;
+  mocks.closeIntent.mockRejectedValueOnce(new Error('ipc unavailable'));
+  act(() => mocks.closedListener?.('production', ['api']));
+  await act(async () => undefined);
+  mocks.open.mockResolvedValueOnce({ render: true });
+
+  await act(async () => {
+    await sync.openPanel(tab);
+  });
+
+  expect(mocks.closeIntent).toHaveBeenCalledTimes(2);
+  expect(mocks.closeIntent.mock.invocationCallOrder[1]).toBeLessThan(
+    mocks.open.mock.invocationCallOrder[0] ?? 0
+  );
+});
+
+it('refuses to reopen an object while its close cannot land', async () => {
+  const offline = new Error('ipc unavailable');
+  mocks.closeIntent.mockRejectedValueOnce(offline).mockRejectedValueOnce(offline);
+  act(() => mocks.closedListener?.('production', ['api']));
+  await act(async () => undefined);
+
+  await expect(sync.openPanel(mocks.local.production[0] as never)).rejects.toBe(offline);
+  expect(mocks.open).not.toHaveBeenCalled();
+  await act(async () => sync.flush());
+  expect(mocks.closeIntent).toHaveBeenCalledTimes(3);
+});
+
+it("reopens an object while another object's close is still failing", async () => {
+  mocks.closeIntent.mockRejectedValueOnce(new Error('ipc unavailable'));
+  act(() => mocks.closedListener?.('production', ['worker']));
+  await act(async () => undefined);
+  mocks.open.mockResolvedValueOnce({ render: true });
+
+  await act(async () => {
+    await sync.openPanel(mocks.local.production[0] as never);
+  });
+
+  expect(mocks.open).toHaveBeenCalledOnce();
+  expect(mocks.closeIntent).toHaveBeenCalledOnce();
+  await act(async () => sync.flush());
+  expect(mocks.closeIntent).toHaveBeenCalledTimes(2);
+});
+
+it('reopens an object only after a close still in flight lands', async () => {
+  let release: () => void = () => undefined;
+  mocks.closeIntent.mockImplementationOnce(
+    () =>
+      new Promise<undefined>((resolve) => {
+        release = () => resolve(undefined);
+      })
+  );
+  act(() => mocks.closedListener?.('production', ['api']));
+  mocks.open.mockResolvedValueOnce({ render: true });
+
+  const opening = sync.openPanel(mocks.local.production[0] as never);
+  await act(async () => undefined);
+  expect(mocks.open).not.toHaveBeenCalled();
+  release();
+  await act(async () => {
+    await opening;
+  });
+  expect(mocks.open).toHaveBeenCalledOnce();
+});
+
+it('opens from a native window only after its failed close is retried', async () => {
+  const nativeContainer = document.createElement('div');
+  const nativeRoot = ReactDOM.createRoot(nativeContainer);
+  let open: ReturnType<typeof usePanelWorkspaceOpen> | undefined;
+  function NativeProbe() {
+    useClosedPanelIntents(nativePanelPublication, 'panel-1');
+    open = usePanelWorkspaceOpen();
+    return null;
+  }
+  await act(async () => nativeRoot.render(<NativeProbe />));
+  mocks.closeIntent.mockRejectedValueOnce(new Error('ipc unavailable'));
+  act(() => mocks.closedListener?.('production', ['api']));
+  await act(async () => undefined);
+  mocks.open.mockResolvedValueOnce({ render: true });
+
+  await act(async () => {
+    await open?.(mocks.local.production[0] as never);
+  });
+
+  expect(mocks.closeIntent).toHaveBeenCalledTimes(2);
+  expect(mocks.closeIntent).toHaveBeenLastCalledWith('panel-1', 'production', 'api');
+  expect(mocks.closeIntent.mock.invocationCallOrder[1]).toBeLessThan(
+    mocks.open.mock.invocationCallOrder[0] ?? 0
+  );
+  await act(async () => nativeRoot.unmount());
+});
+
+it('refuses to open from a native window while its close cannot land', async () => {
+  const nativeRoot = ReactDOM.createRoot(document.createElement('div'));
+  let open: ReturnType<typeof usePanelWorkspaceOpen> | undefined;
+  function NativeProbe() {
+    useClosedPanelIntents(nativePanelPublication, 'panel-1');
+    open = usePanelWorkspaceOpen();
+    return null;
+  }
+  await act(async () => nativeRoot.render(<NativeProbe />));
+  const offline = new Error('ipc unavailable');
+  mocks.closeIntent.mockRejectedValueOnce(offline).mockRejectedValueOnce(offline);
+  act(() => mocks.closedListener?.('production', ['api']));
+  await act(async () => undefined);
+
+  await expect(open?.(mocks.local.production[0] as never)).rejects.toBe(offline);
+  expect(mocks.open).not.toHaveBeenCalled();
+  await act(async () => nativePanelPublication.flush());
+  await act(async () => nativeRoot.unmount());
+});
+
+it('sends a close intent for each panel the user closes and drains it on flush', async () => {
+  let release: () => void = () => undefined;
+  mocks.closeIntent.mockImplementationOnce(
+    () =>
+      new Promise<undefined>((resolve) => {
+        release = () => resolve(undefined);
+      })
+  );
+  act(() => mocks.closedListener?.('production', ['api', 'worker']));
+  let flushed = false;
+  const flushing = sync.flush().then(() => {
+    flushed = true;
+  });
+  await act(async () => undefined);
+  expect(mocks.closeIntent).toHaveBeenCalledWith('app-a', 'production', 'api');
+  expect(flushed).toBe(false);
+  release();
+  await act(async () => flushing);
+  expect(mocks.closeIntent).toHaveBeenLastCalledWith('app-a', 'production', 'worker');
+  expect(flushed).toBe(true);
 });

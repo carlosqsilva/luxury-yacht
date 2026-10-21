@@ -161,11 +161,11 @@ type PanelWindowCommands interface {
 	BeginPanelWindowOpen(string, panelwindow.GroupSnapshot) (panelwindow.WindowDescriptor, error)
 	AcknowledgePanelWindowReady(string, string) (panelwindow.WindowDescriptor, error)
 	BeginPanelWindowDock(string, string, panelwindow.GroupSnapshot) error
-	AcknowledgePanelWindowDock(string, string, string) error
+	AcknowledgePanelTransfer(string, string, bool) error
 	FailPanelWindowTransfer(string, string, string) error
 	AcknowledgePanelWindowClose(string) error
 	AcknowledgeWorkspaceWindowClose(string) error
-	UpdatePanelWindowSnapshot(string, panelwindow.GroupSnapshot) error
+	PublishPanelWindowGroup(string, panelwindow.WorkspaceGroup) error
 	RequestPanelTabClose(string, string) error
 	RequestPanelTabTransfer(string, panelwindow.TabTransferRequest) error
 	AcceptPanelTabTransfer(string, string) error
@@ -696,11 +696,13 @@ func (s *DesktopService) BeginPanelWindowDock(ctx context.Context, windowName, t
 	return s.panelWindows.BeginPanelWindowDock(windowName, targetPosition, snapshot)
 }
 
-func (s *DesktopService) AcknowledgePanelWindowDock(ctx context.Context, callerWindowName, windowName, transferID string) error {
+// AcknowledgePanelTransfer settles a directory move this renderer was asked to
+// reconstruct: mounted commits it, otherwise the source keeps the panels.
+func (s *DesktopService) AcknowledgePanelTransfer(ctx context.Context, callerWindowName, transferID string, mounted bool) error {
 	if err := validatePanelCommandCaller(ctx, callerWindowName); err != nil {
 		return err
 	}
-	return s.panelWindows.AcknowledgePanelWindowDock(callerWindowName, windowName, transferID)
+	return s.panelWindows.AcknowledgePanelTransfer(callerWindowName, transferID, mounted)
 }
 
 func (s *DesktopService) FailPanelWindowTransfer(ctx context.Context, callerWindowName, windowName, transferID string) error {
@@ -724,11 +726,12 @@ func (s *DesktopService) AcknowledgeWorkspaceWindowClose(ctx context.Context, ca
 	return s.panelWindows.AcknowledgeWorkspaceWindowClose(callerWindowName)
 }
 
-func (s *DesktopService) UpdatePanelWindowSnapshot(ctx context.Context, windowName string, snapshot panelwindow.GroupSnapshot) error {
+// PublishPanelWindowGroup reports a native window's arrangement of its group.
+func (s *DesktopService) PublishPanelWindowGroup(ctx context.Context, windowName string, group panelwindow.WorkspaceGroup) error {
 	if err := validatePanelCommandCaller(ctx, windowName); err != nil {
 		return err
 	}
-	return s.panelWindows.UpdatePanelWindowSnapshot(windowName, snapshot)
+	return s.panelWindows.PublishPanelWindowGroup(windowName, group)
 }
 
 func (s *DesktopService) RequestPanelTabClose(ctx context.Context, windowName, panelID string) error {

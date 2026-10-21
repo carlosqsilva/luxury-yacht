@@ -40,7 +40,6 @@ import {
 } from '@/core/panel-windows/panelLifecycleGuards';
 import { requestPanelTabMove } from '@/core/panel-windows/panelTabActions';
 import { resolvePanelWindowClusterName } from '@/core/panel-windows/panelWindowClusterName';
-import { nativePanelPublication } from '@/core/panel-windows/publicationQueue';
 import {
   type DockableTabDragPayload,
   objectPanelTabSnapshot,
@@ -54,10 +53,10 @@ import './PanelWindowApp.css';
 
 const acknowledgedTransfers = new Set<string>();
 
-const initialGroups = (snapshot: panelwindow.GroupSnapshot): TabGroupState => ({
+const initialGroups = (group: panelwindow.WorkspaceGroup): TabGroupState => ({
   right: {
-    tabs: snapshot.tabs?.map((tab) => tab.panelId) ?? [],
-    activeTab: snapshot.activePanelId,
+    tabs: group.tabs?.map((tab) => tab.panelId) ?? [],
+    activeTab: group.activePanelId,
   },
   bottom: { tabs: [], activeTab: null },
   floating: [],
@@ -83,7 +82,7 @@ function PanelWindowSurface({
       }),
     [descriptor.windowName, guards]
   );
-  const initialTabGroups = useMemo(() => initialGroups(descriptor.snapshot), [descriptor.snapshot]);
+  const initialTabGroups = useMemo(() => initialGroups(descriptor.group), [descriptor.group]);
 
   const requestTabClose = useCallback(
     (panelId: string) => {
@@ -99,21 +98,21 @@ function PanelWindowSurface({
   );
 
   useEffect(() => {
-    if (acknowledgedTransfers.has(descriptor.snapshot.transferId)) {
+    if (acknowledgedTransfers.has(descriptor.transferId)) {
       return;
     }
-    acknowledgedTransfers.add(descriptor.snapshot.transferId);
+    acknowledgedTransfers.add(descriptor.transferId);
     const acknowledgeReady = async () => {
       try {
-        await acknowledgePanelWindowReady(descriptor.windowName, descriptor.snapshot.transferId);
+        await acknowledgePanelWindowReady(descriptor.windowName, descriptor.transferId);
         setReady(true);
       } catch (error) {
-        acknowledgedTransfers.delete(descriptor.snapshot.transferId);
+        acknowledgedTransfers.delete(descriptor.transferId);
         try {
           await failPanelWindowTransfer(
             descriptor.windowName,
             descriptor.windowName,
-            descriptor.snapshot.transferId
+            descriptor.transferId
           );
         } catch (cleanupError) {
           reportOperationalError(cleanupError, {
@@ -163,13 +162,12 @@ function PanelWindowSurface({
         activePanelId: group.activeTab ?? group.tabs[0] ?? '',
       };
       guards.freeze(snapshot.transferId, group.tabs);
-      void nativePanelPublication
-        .flush()
-        .then(() => beginPanelWindowDock(descriptor.windowName, targetPosition, snapshot))
-        .catch((error) => {
-          guards.releaseTransfer(snapshot.transferId);
-          reportOperationalError(error, { source: 'PanelWindowApp', action: 'dock-group' });
-        });
+      // The directory validates the group against its own placement, so a
+      // queued window snapshot need not land first.
+      void beginPanelWindowDock(descriptor.windowName, targetPosition, snapshot).catch((error) => {
+        guards.releaseTransfer(snapshot.transferId);
+        reportOperationalError(error, { source: 'PanelWindowApp', action: 'dock-group' });
+      });
     },
     [descriptor, guards, getTabSnapshot]
   );
@@ -248,7 +246,7 @@ function PanelWindowSurface({
       initialTabGroups={initialTabGroups}
       onGroupMoveRequest={handleGroupMove}
       onTabMoveRequest={(payload, target) => {
-        void requestPanelTabMove(payload, target, nativePanelPublication, '').catch((error) =>
+        void requestPanelTabMove(payload, target, '').catch((error) =>
           reportOperationalError(error, {
             source: 'PanelWindowApp',
             action: 'move-panel-tab',
@@ -315,7 +313,7 @@ export default function PanelWindowApp({
                       clusterId={descriptor.clusterId}
                       clusterName={clusterName}
                     >
-                      <ObjectPanelStateProvider initialGroupSnapshot={descriptor.snapshot}>
+                      <ObjectPanelStateProvider initialGroup={descriptor.group}>
                         <ClusterLifecycleProvider>
                           <NamespaceProvider>
                             <PanelLifecycleGuardProvider>
