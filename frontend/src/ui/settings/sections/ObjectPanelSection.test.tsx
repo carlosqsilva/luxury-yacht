@@ -1,3 +1,9 @@
+import {
+  type ObjectPanelLayoutDefaults,
+  type ObjectPanelPosition,
+  resetAppPreferencesCacheForTesting,
+  setAppPreferencesForTesting,
+} from '@core/settings/appPreferences';
 import { act } from 'react';
 import * as ReactDOM from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -11,14 +17,7 @@ const setInputValue = (input: HTMLInputElement, value: string): void => {
 };
 
 const appPreferenceMocks = vi.hoisted(() => ({
-  getDefaultObjectPanelPosition: vi.fn(() => 'right'),
   setDefaultObjectPanelPosition: vi.fn(),
-  getObjectPanelLayoutDefaults: vi.fn(() => ({
-    dockedRightWidth: 420,
-    dockedBottomHeight: 260,
-    floatingWidth: 720,
-    floatingHeight: 520,
-  })),
   getIntegerPreferenceMetadata: vi.fn((key: string) => ({
     key,
     type: 'integer',
@@ -54,18 +53,31 @@ const dockableMocks = vi.hoisted(() => ({
   applyLayoutDefaultsAcrossClusters: vi.fn(),
 }));
 
-vi.mock('@core/settings/appPreferences', () => ({
-  getDefaultObjectPanelPosition: () => appPreferenceMocks.getDefaultObjectPanelPosition(),
-  getIntegerPreferenceMetadata: (key: string) =>
-    appPreferenceMocks.getIntegerPreferenceMetadata(key),
-  setDefaultObjectPanelPosition: (...args: unknown[]) =>
-    appPreferenceMocks.setDefaultObjectPanelPosition(...args),
-  getObjectPanelLayoutDefaults: () => appPreferenceMocks.getObjectPanelLayoutDefaults(),
-  normalizeIntegerPreferenceValue: (key: string, value: number) =>
-    appPreferenceMocks.normalizeIntegerPreferenceValue(key, value),
-  setObjectPanelLayoutDefaults: (...args: unknown[]) =>
-    appPreferenceMocks.setObjectPanelLayoutDefaults(...args),
-}));
+// The real preference store; the setters update it as the optimistic setters do,
+// without a backend. Metadata and normalization are stubbed.
+vi.mock('@core/settings/appPreferences', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@core/settings/appPreferences')>();
+  return {
+    ...actual,
+    getIntegerPreferenceMetadata: (key: string) =>
+      appPreferenceMocks.getIntegerPreferenceMetadata(key),
+    setDefaultObjectPanelPosition: (position: ObjectPanelPosition) => {
+      appPreferenceMocks.setDefaultObjectPanelPosition(position);
+      actual.setAppPreferencesForTesting({ defaultObjectPanelPosition: position });
+    },
+    normalizeIntegerPreferenceValue: (key: string, value: number) =>
+      appPreferenceMocks.normalizeIntegerPreferenceValue(key, value),
+    setObjectPanelLayoutDefaults: (layout: ObjectPanelLayoutDefaults) => {
+      appPreferenceMocks.setObjectPanelLayoutDefaults(layout);
+      actual.setAppPreferencesForTesting({
+        objectPanelDockedRightWidth: layout.dockedRightWidth,
+        objectPanelDockedBottomHeight: layout.dockedBottomHeight,
+        objectPanelFloatingWidth: layout.floatingWidth,
+        objectPanelFloatingHeight: layout.floatingHeight,
+      });
+    },
+  };
+});
 
 vi.mock('@ui/dockable', () => ({
   useDockablePanelContext: () => ({
@@ -85,8 +97,14 @@ describe('ObjectPanelSection', () => {
     container = document.createElement('div');
     document.body.appendChild(container);
     root = ReactDOM.createRoot(container);
-    appPreferenceMocks.getDefaultObjectPanelPosition.mockReturnValue('right');
     appPreferenceMocks.setDefaultObjectPanelPosition.mockClear();
+    resetAppPreferencesCacheForTesting();
+    setAppPreferencesForTesting({
+      objectPanelDockedRightWidth: 420,
+      objectPanelDockedBottomHeight: 260,
+      objectPanelFloatingWidth: 720,
+      objectPanelFloatingHeight: 520,
+    });
 
     act(() => {
       root.render(<ObjectPanelSection />);
