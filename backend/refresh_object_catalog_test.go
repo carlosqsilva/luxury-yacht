@@ -12,7 +12,6 @@ import (
 	"github.com/luxury-yacht/app/backend/kind/streamrows"
 	"github.com/luxury-yacht/app/backend/objectcatalog"
 	"github.com/luxury-yacht/app/backend/refresh/domain"
-	refreshinformer "github.com/luxury-yacht/app/backend/refresh/informer"
 	"github.com/luxury-yacht/app/backend/refresh/ingest"
 	refreshpermissions "github.com/luxury-yacht/app/backend/refresh/permissions"
 	"github.com/luxury-yacht/app/backend/refresh/resourcestream"
@@ -40,7 +39,7 @@ func TestCatalogFinalizerBridgeProjectsArbitraryKindsIntoAttention(t *testing.T)
 	stream := resourcestream.NewManager(nil, nil, snapshot.ClusterMeta{ClusterID: "cluster-a", ClusterName: "A"}, nil)
 	t.Cleanup(stream.Stop)
 	index, err := snapshot.RegisterClusterAttentionDomain(
-		registry, nil, snapshot.ClusterAttentionPermissions{},
+		registry, snapshot.ClusterAttentionPermissions{},
 		snapshot.ClusterMeta{ClusterID: "cluster-a", ClusterName: "A"}, nil,
 		snapshot.ClusterAttentionOptions{}, stream,
 	)
@@ -81,7 +80,7 @@ func TestCatalogFinalizerBridgeStopsForUnavailableInputs(t *testing.T) {
 	stream := resourcestream.NewManager(nil, nil, snapshot.ClusterMeta{ClusterID: "cluster-a"}, nil)
 	t.Cleanup(stream.Stop)
 	index, err := snapshot.RegisterClusterAttentionDomain(
-		registry, nil, snapshot.ClusterAttentionPermissions{},
+		registry, snapshot.ClusterAttentionPermissions{},
 		snapshot.ClusterMeta{ClusterID: "cluster-a"}, nil,
 		snapshot.ClusterAttentionOptions{}, stream,
 	)
@@ -110,7 +109,7 @@ func catalogLifecycleTestApp(t *testing.T, tier system.ResourceTier, cooled bool
 	checker := refreshpermissions.NewCheckerWithReview(clusterID, time.Minute, func(context.Context, string, string, string, string) (bool, error) {
 		return true, nil
 	})
-	factory := refreshinformer.New(context.Background(), kubeClient, apiExtensionsClient, time.Minute, checker)
+	grants := refreshpermissions.NewGrants(checker)
 	app.ClusterRuntime.clusterClients = make(map[string]*clusterClients)
 	app.ClusterRuntime.clusterClients[clusterID] = &clusterClients{
 		meta:                ClusterMeta{ID: clusterID, Name: "Cluster A"},
@@ -121,8 +120,8 @@ func catalogLifecycleTestApp(t *testing.T, tier system.ResourceTier, cooled bool
 		dynamicClient:       fake.NewSimpleDynamicClient(runtime.NewScheme()),
 	}
 	app.Refresh.setRefreshSubsystem(clusterID, &system.Subsystem{
-		Cooled:          cooled,
-		InformerFactory: factory,
+		Cooled:           cooled,
+		PermissionGrants: grants,
 		IngestManager: ingest.NewIngestManager(
 			streamrows.ClusterMeta{ClusterID: clusterID, ClusterName: "Cluster A"},
 			kubeClient,
@@ -208,22 +207,22 @@ func TestCatalogWaitsForRebuiltIngestStoreBeforeFirstCollection(t *testing.T) {
 		"catalog should complete its first collection after the ingest store syncs")
 }
 
-// The shared factory always starts cluster-wide ReplicaSet, HPA and Event
-// informers. A namespace-only identity is forbidden from all three, so those
-// informers never sync. Catalog startup must still publish the rows the identity
-// can read instead of waiting forever for caches that can never fill.
-func TestCatalogStartsForNamespaceScopedIdentityDeniedClusterWideInformers(t *testing.T) {
+// A namespace-only identity is forbidden from the cluster-wide ReplicaSet, HPA
+// and Event lists. Catalog startup must still publish the rows the identity can
+// read instead of waiting forever for stores that can never fill.
+func TestCatalogStartsForNamespaceScopedIdentityDeniedClusterWideReflectors(t *testing.T) {
 	const namespace = "team-a"
 	app, target := catalogLifecycleTestApp(t, system.TierForeground, false)
 	app.Refresh.allowedNamespaces = func(string) ([]string, error) { return []string{namespace}, nil }
 	clients := app.ClusterRuntime.clusterClientsForID(target.meta.ID)
 	kube := clients.client.(*cgofake.Clientset)
-	// Only ReplicaSets in the scope namespace are granted. Denying the other kinds
-	// keeps ingest reflectors, which fake typed REST clients cannot run, skipped.
+	// Only a custom resource in the scope namespace is granted. Denying every
+	// registry kind keeps ingest reflectors, which fake typed REST clients cannot
+	// run, skipped.
 	kube.PrependReactor("create", "selfsubjectaccessreviews", func(action cgotesting.Action) (bool, runtime.Object, error) {
 		review := action.(cgotesting.CreateAction).GetObject().(*authorizationv1.SelfSubjectAccessReview)
 		attributes := review.Spec.ResourceAttributes
-		review.Status.Allowed = attributes != nil && attributes.Namespace == namespace && attributes.Resource == "replicasets"
+		review.Status.Allowed = attributes != nil && attributes.Namespace == namespace && attributes.Resource == "widgets"
 		return true, review, nil
 	})
 	kube.PrependReactor("list", "*", func(action cgotesting.Action) (bool, runtime.Object, error) {
@@ -233,25 +232,25 @@ func TestCatalogStartsForNamespaceScopedIdentityDeniedClusterWideInformers(t *te
 		return true, nil, apierrors.NewForbidden(action.GetResource().GroupResource(), "", errors.New("namespace-only identity"))
 	})
 	kube.Discovery().(*fakediscovery.FakeDiscovery).Resources = []*metav1.APIResourceList{{
-		GroupVersion: "apps/v1",
+		GroupVersion: "example.com/v1",
 		APIResources: []metav1.APIResource{{
-			Name: "replicasets", Kind: "ReplicaSet", Namespaced: true, Verbs: []string{"list", "watch"},
+			Name: "widgets", Kind: "Widget", Namespaced: true, Verbs: []string{"list", "watch"},
 		}},
 	}}
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
-	replicaSetGVR := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "replicasets"}
-	replicaSet := &unstructured.Unstructured{}
-	replicaSet.SetGroupVersionKind(schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "ReplicaSet"})
-	replicaSet.SetNamespace(namespace)
-	replicaSet.SetName("web-5d9f")
-	replicaSet.SetUID("replicaset-uid")
+	widgetGVR := schema.GroupVersionResource{Group: "example.com", Version: "v1", Resource: "widgets"}
+	widget := &unstructured.Unstructured{}
+	widget.SetGroupVersionKind(schema.GroupVersionKind{Group: "example.com", Version: "v1", Kind: "Widget"})
+	widget.SetNamespace(namespace)
+	widget.SetName("web-5d9f")
+	widget.SetUID("widget-uid")
 	clients.dynamicClient = fake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
-		map[schema.GroupVersionResource]string{replicaSetGVR: "ReplicaSetList"}, replicaSet)
+		map[schema.GroupVersionResource]string{widgetGVR: "WidgetList"}, widget)
 
 	subsystem, err := system.NewSubsystemWithServices(context.Background(), system.Config{
 		KubernetesClient: kube, APIExtensionsClient: clients.apiextensionsClient, DynamicClient: clients.dynamicClient,
-		ClusterID: target.meta.ID, ClusterName: target.meta.Name, Logger: app.AppLogs.Logger(), ResyncInterval: time.Minute,
+		ClusterID: target.meta.ID, ClusterName: target.meta.Name, Logger: app.AppLogs.Logger(),
 		AllowedNamespaces:     []string{namespace},
 		ObjectDetailsProvider: app.Resources.objectDetailProvider(), NodeMaintenanceStore: app.NodeMaintenanceStore,
 	})
@@ -262,10 +261,8 @@ func TestCatalogStartsForNamespaceScopedIdentityDeniedClusterWideInformers(t *te
 		cancel()
 		subsystem.ResourceStream.Stop()
 		subsystem.IngestManager.Stop()
-		_ = subsystem.InformerFactory.Shutdown()
 	})
 	subsystem.IngestManager.Start(ctx)
-	require.NoError(t, subsystem.InformerFactory.Start(ctx))
 
 	require.NoError(t, app.Refresh.startObjectCatalogForTarget(target))
 	service := app.Refresh.objectCatalogServiceForCluster(target.meta.ID)
@@ -274,10 +271,10 @@ func TestCatalogStartsForNamespaceScopedIdentityDeniedClusterWideInformers(t *te
 	require.Eventuallyf(t, func() bool {
 		return service.Health().Status == objectcatalog.HealthStateOK && service.Query(query).TotalItems == 1
 	}, 3*time.Second, 10*time.Millisecond,
-		"catalog must publish the namespace's ReplicaSet; health %+v", service.Health())
+		"catalog must publish the namespace's Widget; health %+v", service.Health())
 	ref := service.Query(query).Items[0].Ref
 	require.Equal(t, target.meta.ID, ref.ClusterID)
-	require.Equal(t, "ReplicaSet", ref.Kind)
+	require.Equal(t, "Widget", ref.Kind)
 	require.Equal(t, namespace, ref.Namespace)
 	require.Equal(t, "web-5d9f", ref.Name)
 }
@@ -392,7 +389,7 @@ func TestCatalogStopsOnlyWithOwningGeneration(t *testing.T) {
 	select {
 	case <-entry.done:
 	default:
-		t.Fatal("catalog survived retirement of its informer generation")
+		t.Fatal("catalog survived retirement of its feed generation")
 	}
 }
 

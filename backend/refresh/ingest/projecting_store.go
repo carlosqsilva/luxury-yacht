@@ -3,9 +3,9 @@
 // ONLY the projection, fed by a reflector that borrows client-go's List/Watch/
 // relist machinery.
 //
-// Today client-go's typed informers cache the full typed object (*corev1.Pod,
-// …) while the maintained stores additionally hold projected rows — double
-// storage. ProjectingStore collapses that: the source object is projected the
+// client-go's typed informers cache the full typed object (*corev1.Pod, …), so
+// a maintained store beside them holds a second copy as projected rows.
+// ProjectingStore avoids that double storage: the source object is projected the
 // moment it lands and is then droppable, so the store holds the projected row
 // alone. It is wired into the live refresh subsystem via IngestManager
 // (system.NewSubsystemWithServices -> ingest.NewIngestManager), which feeds the
@@ -59,11 +59,15 @@ type Bundle struct {
 	// and ResourceQuotaAggregate for namespace pressure). It is nil for kinds with
 	// no aggregate consumer, exactly as ObjectMap is nil for kinds with no graph node.
 	Aggregate interface{}
-	// Indexes carries optional secondary-index entries for consumers that need keyed
-	// bundle reads without scanning the whole store. The map key is the index name and
-	// the values are the index values this object should be reachable through.
-	Indexes map[string][]string
 }
+
+// BundleIndexFunc returns the values a stored Bundle is reachable through under one
+// secondary index (see ProjectingStore.AddIndex). The store derives them from the
+// bundle on every add, remove, and rebuild instead of keeping them per object, so the
+// func must be a pure function of the bundle's retained halves (the Table half is nil
+// unless the store retains it). It runs under the store's write lock and must not call
+// back into the store. Empty values are not indexed.
+type BundleIndexFunc func(Bundle) []string
 
 // Sink receives a kind's Table-half row incrementally as the reflector mutates
 // the store: Upsert on Add/Update/Replace, Delete on eviction. Both halves carry
@@ -122,6 +126,18 @@ type BundleReplacer interface {
 	ReplaceBundles(rows []Bundle)
 }
 
+// BundleSeeder is an optional BundleSink extension for a consumer that needs the
+// full source set and does not spill it itself (an owner index, or the source
+// records behind Attention's spilled findings, for stores whose rows keep what
+// those records read).
+// RestoreBundles hands it every restored Bundle, under the store's write lock,
+// after the rows and indexes are installed. Restore runs before the reflector
+// starts, so the seed precedes every live delta. Like any sink, a seeder must
+// not call back into the store.
+type BundleSeeder interface {
+	SeedBundles(rows []Bundle)
+}
+
 // ProjectingStore is a cache.Store that holds the PROJECTED row per object
 // instead of the full source object. On Add/Update/Replace it runs the injected
 // projection and stores only the result keyed by cache.MetaNamespaceKeyFunc; the
@@ -132,10 +148,12 @@ type ProjectingStore struct {
 
 	mu   sync.RWMutex
 	rows map[string]interface{}
-	// indexes maps indexName -> indexValue -> projected-store keys. It is maintained
-	// alongside rows and points back into rows so indexed reads return the same stored
-	// projections as List.
-	indexes map[string]map[string]map[string]struct{}
+	// indexers are the registered secondary indexes by name (AddIndex). indexes maps
+	// indexName -> indexValue -> projected-store keys, derived from the stored rows by
+	// indexers. It is maintained alongside rows and points back into rows so indexed
+	// reads return the same stored projections as List.
+	indexers map[string]BundleIndexFunc
+	indexes  map[string]map[string]map[string]struct{}
 
 	// sinks receive each row's Table half incrementally as the store mutates
 	// (Upsert on store, Delete on eviction), so consumers — a maintained store, a
@@ -146,7 +164,7 @@ type ProjectingStore struct {
 
 	// catalogSinks receive each row's Catalog half incrementally, on the same
 	// Upsert/Delete events, so the object catalog stays current for an ingest-owned
-	// kind without reading the (now-absent) shared informer. They are registered and
+	// kind without a second watch. They are registered and
 	// fanned exactly like sinks, but carry the Catalog half rather than the Table half.
 	catalogSinks []Sink
 
@@ -229,87 +247,86 @@ func (s *ProjectingStore) storedValue(projected interface{}) interface{} {
 	return b
 }
 
-func bundleIndexValues(projected interface{}) map[string][]string {
-	b, ok := projected.(Bundle)
-	if !ok || len(b.Indexes) == 0 {
-		return nil
+// AddIndex registers a secondary index that RowsByIndex and RewriteBundlesByIndex
+// read under name, then indexes the rows already stored, so it may run before or
+// after the reflector's first relist or a restore. An empty name or nil func is
+// ignored; registering a name again replaces its func.
+func (s *ProjectingStore) AddIndex(name string, index BundleIndexFunc) {
+	if name == "" || index == nil {
+		return
 	}
-	out := make(map[string][]string, len(b.Indexes))
-	for name, values := range b.Indexes {
-		if name == "" {
-			continue
-		}
-		next := uniqueSortedIndexValues(values)
-		if len(next) == 0 {
-			continue
-		}
-		out[name] = next
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.indexers == nil {
+		s.indexers = make(map[string]BundleIndexFunc)
 	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
+	s.indexers[name] = index
+	s.rebuildIndexesLocked()
 }
 
-func uniqueSortedIndexValues(values []string) []string {
-	seen := make(map[string]struct{}, len(values))
-	unique := make([]string, 0, len(values))
-	for _, value := range values {
-		if value == "" {
-			continue
-		}
-		if _, ok := seen[value]; ok {
-			continue
-		}
-		seen[value] = struct{}{}
-		unique = append(unique, value)
+// addIndexesForKey and removeIndexesForKey must see the same stored value for a key:
+// removal recomputes the values the add derived. Duplicate values are harmless
+// because set insert and delete are idempotent.
+func (s *ProjectingStore) addIndexesForKey(key string, stored interface{}) {
+	b, ok := stored.(Bundle)
+	if !ok {
+		return
 	}
-	sort.Strings(unique)
-	return unique
-}
-
-func (s *ProjectingStore) addIndexesForKey(key string, projected interface{}) {
-	for name, values := range bundleIndexValues(projected) {
-		byValue := s.indexes[name]
-		if byValue == nil {
-			byValue = make(map[string]map[string]struct{}, len(values))
-			s.indexes[name] = byValue
-		}
-		for _, value := range values {
-			keys := byValue[value]
-			if keys == nil {
-				keys = make(map[string]struct{})
-				byValue[value] = keys
+	for name, index := range s.indexers {
+		for _, value := range index(b) {
+			if value != "" {
+				s.addIndexEntry(name, value, key)
 			}
-			keys[key] = struct{}{}
 		}
 	}
 }
 
-func (s *ProjectingStore) removeIndexesForKey(key string, projected interface{}) {
-	for name, values := range bundleIndexValues(projected) {
-		byValue := s.indexes[name]
-		if byValue == nil {
-			continue
+func (s *ProjectingStore) addIndexEntry(name, value, key string) {
+	byValue := s.indexes[name]
+	if byValue == nil {
+		byValue = make(map[string]map[string]struct{})
+		s.indexes[name] = byValue
+	}
+	keys := byValue[value]
+	if keys == nil {
+		keys = make(map[string]struct{})
+		byValue[value] = keys
+	}
+	keys[key] = struct{}{}
+}
+
+func (s *ProjectingStore) removeIndexesForKey(key string, stored interface{}) {
+	b, ok := stored.(Bundle)
+	if !ok {
+		return
+	}
+	for name, index := range s.indexers {
+		for _, value := range index(b) {
+			s.removeIndexEntry(name, value, key)
 		}
-		for _, value := range values {
-			keys := byValue[value]
-			if keys == nil {
-				continue
-			}
-			delete(keys, key)
-			if len(keys) == 0 {
-				delete(byValue, value)
-			}
-		}
-		if len(byValue) == 0 {
-			delete(s.indexes, name)
-		}
+	}
+}
+
+func (s *ProjectingStore) removeIndexEntry(name, value, key string) {
+	byValue := s.indexes[name]
+	keys := byValue[value]
+	if keys == nil {
+		return
+	}
+	delete(keys, key)
+	if len(keys) == 0 {
+		delete(byValue, value)
+	}
+	if len(byValue) == 0 {
+		delete(s.indexes, name)
 	}
 }
 
 func (s *ProjectingStore) rebuildIndexesLocked() {
 	s.indexes = make(map[string]map[string]map[string]struct{})
+	if len(s.indexers) == 0 {
+		return
+	}
 	for key, row := range s.rows {
 		s.addIndexesForKey(key, row)
 	}
@@ -626,9 +643,9 @@ func (s *ProjectingStore) projectedRows(project func(interface{}) interface{}) [
 	return out
 }
 
-// RowsByIndex returns full projected rows whose Bundle.Indexes includes one of the
-// supplied values under indexName. The returned rows are the same stored projections
-// List would return, read under one lock and de-duplicated across values.
+// RowsByIndex returns full projected rows whose values under the indexName index
+// (AddIndex) include one of the supplied values. The returned rows are the same stored
+// projections List would return, read under one lock and de-duplicated across values.
 func (s *ProjectingStore) RowsByIndex(indexName string, values []string) []interface{} {
 	if indexName == "" || len(values) == 0 {
 		return nil
@@ -981,9 +998,8 @@ func (s *ProjectingStore) SpillBundles(path string) error {
 // Unlike Replace, restore does NOT fan the loaded rows to the incremental sinks (Table/
 // Bundle): it sets synced=true silently. Consumers that rebuild their own baseline from a
 // separate spill (the maintained stores) or only want deltas (the live-notify sinks) are
-// fine, but a sink consumer that needs the FULL baseline and has no independent restore must
-// seed itself from the store's rows once it observes sync — see NamespaceWorkloadTracker,
-// which would otherwise miss every restored workload and wrongly dim active namespaces.
+// fine. A bundle sink that needs the FULL baseline and has no independent restore
+// implements BundleSeeder and receives the restored set here.
 func (s *ProjectingStore) RestoreBundles(path string) (string, map[string]string, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -1009,8 +1025,25 @@ func (s *ProjectingStore) RestoreBundles(path string) (string, map[string]string
 		}
 	}
 	s.markSyncedLocked()
+	s.seedBundleSinksLocked()
 	s.mu.Unlock()
 	return snap.RV, snap.PartitionRVs, nil
+}
+
+// seedBundleSinksLocked hands the restored set to every BundleSeeder; callers
+// hold the write lock.
+func (s *ProjectingStore) seedBundleSinksLocked() {
+	var bundles []Bundle
+	for _, sink := range s.bundleSinks {
+		seeder, ok := sink.(BundleSeeder)
+		if !ok {
+			continue
+		}
+		if bundles == nil {
+			_, _, bundles = replaceRows(s.rows)
+		}
+		seeder.SeedBundles(bundles)
+	}
 }
 
 // MarkSynced flips the store's synced flag without a Replace, for the stage-3 resume path:

@@ -57,7 +57,7 @@ func newNamespaceIndexer() cache.Indexer {
 	})
 }
 
-// TestConfigMaintainedStoreIngestion proves the informer-fed store reflects
+// TestConfigMaintainedStoreIngestion proves the reflector-fed store reflects
 // Add/Update/Delete (incl. tombstone), tracks the max resourceVersion, and projects
 // rows identically to a direct BuildStreamSummary.
 func TestConfigMaintainedStoreIngestion(t *testing.T) {
@@ -203,8 +203,8 @@ func TestNamespaceConfigBuilderMaintainedMatchesListPath(t *testing.T) {
 	}
 
 	collect := configCollectIndexer(cmIdx, secIdx)
-	listBuilder := &NamespaceConfigBuilder{collectIndexer: collect}
-	maintainedBuilder := &NamespaceConfigBuilder{collectIndexer: collect, maintained: maintained}
+	listBuilder := newTypedTableListOracle(namespaceConfigDomainSpec(), collect)
+	maintainedBuilder := &NamespaceConfigBuilder{available: availableFromIndexers(collect), maintained: maintained}
 
 	scopes := []string{
 		"namespace:default",
@@ -261,8 +261,8 @@ func TestNamespaceConfigDirectServeEdgeScopesMatchListPath(t *testing.T) {
 	}
 
 	collect := configCollectIndexer(cmIdx, secIdx)
-	listBuilder := &NamespaceConfigBuilder{collectIndexer: collect}
-	maintainedBuilder := &NamespaceConfigBuilder{collectIndexer: collect, maintained: maintained}
+	listBuilder := newTypedTableListOracle(namespaceConfigDomainSpec(), collect)
+	maintainedBuilder := &NamespaceConfigBuilder{available: availableFromIndexers(collect), maintained: maintained}
 
 	// Single-shot scopes: whitespace-padded search, descending sort, mixed-case kind
 	// filter, and a kind+search combination.

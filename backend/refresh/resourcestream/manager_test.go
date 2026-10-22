@@ -393,10 +393,11 @@ func newRacedPodIngestStore(t *testing.T, pod *corev1.Pod) *ingest.ProjectingSto
 	t.Helper()
 	project := snapshot.NewPodIngestProjector(
 		snapshot.ClusterMeta{ClusterID: "c1", ClusterName: "cluster"},
-		snapshot.PodOwnerSources{ReplicaSets: testsupport.NewReplicaSetLister(t)},
+		snapshot.PodOwnerSources{ReplicaSetOwner: testsupport.ReplicaSetOwnerLookup(testsupport.NewReplicaSetLister(t))},
 	)
 	store := ingest.NewProjectingStore(project)
 	store.SetRetainTable(true)
+	store.AddIndex(snapshot.PodOwnerKeyIndexName, snapshot.PodOwnerKeyIndexValues)
 	require.NoError(t, store.Add(pod))
 	return store
 }
@@ -438,6 +439,7 @@ func TestJobBundleArrivalHealsPreviouslyProjectedCronJobPod(t *testing.T) {
 	)
 	store := ingest.NewProjectingStore(project)
 	store.SetRetainTable(true)
+	store.AddIndex(snapshot.PodOwnerKeyIndexName, snapshot.PodOwnerKeyIndexValues)
 	require.NoError(t, store.Add(pod))
 	manager.podIngest = podIngestStoreAdapter{store: store}
 
@@ -464,9 +466,18 @@ func TestJobBundleArrivalHealsPreviouslyProjectedCronJobPod(t *testing.T) {
 // TestManagerReplicaSetAddHealsRacedPodOwnerRows is the regression test for the
 // empty Deployment Pods tab: a pod projected BEFORE its ReplicaSet was observed
 // keeps OwnerKind=ReplicaSet, so the Deployment workload scope does not serve it.
-// When the RS informer delivers the ReplicaSet, the manager must heal the stored
+// When the RS reflector delivers the ReplicaSet, the manager must heal the stored
 // bundle. The pods store's ring for the healed row is covered end to end by
 // system.TestReplicaSetHealRingsHealedPodScopes.
+// healReplicaSet delivers a ReplicaSet's projected bundle to the heal sink, as
+// its owned reflector's store does.
+func healReplicaSet(t *testing.T, manager *Manager, rs *appsv1.ReplicaSet) {
+	t.Helper()
+	projected, err := snapshot.NewReplicaSetIngestProjector(manager.clusterMeta)(rs)
+	require.NoError(t, err)
+	replicaSetPodOwnerHealBundleSink{manager: manager}.UpsertBundle(projected.(ingest.Bundle))
+}
+
 func TestManagerReplicaSetAddHealsRacedPodOwnerRows(t *testing.T) {
 	rs := &appsv1.ReplicaSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -488,7 +499,7 @@ func TestManagerReplicaSetAddHealsRacedPodOwnerRows(t *testing.T) {
 	store := newRacedPodIngestStore(t, racedOwnerPod())
 	manager.podIngest = podIngestStoreAdapter{store: store}
 
-	manager.handleReplicaSetEvent(nil, rs, MessageTypeAdded)
+	healReplicaSet(t, manager, rs)
 
 	// The stored bundle is healed: the collapsed owner now names the Deployment
 	// while the direct owner keeps the ReplicaSet, so BOTH workload scopes serve it.
@@ -523,7 +534,7 @@ func TestManagerReplicaSetModifiedHealsRacedPodOwnerRows(t *testing.T) {
 	store := newRacedPodIngestStore(t, racedOwnerPod())
 	manager.podIngest = podIngestStoreAdapter{store: store}
 
-	manager.handleReplicaSetEvent(oldRS, newRS, MessageTypeModified)
+	healReplicaSet(t, manager, newRS)
 
 	rows := store.List()
 	require.Len(t, rows, 1)
@@ -545,7 +556,7 @@ func TestManagerReplicaSetAddWithoutDeploymentOwnerDoesNotHeal(t *testing.T) {
 	store := newRacedPodIngestStore(t, racedOwnerPod())
 	manager.podIngest = podIngestStoreAdapter{store: store}
 
-	manager.handleReplicaSetEvent(nil, rs, MessageTypeAdded)
+	healReplicaSet(t, manager, rs)
 
 	rows := store.List()
 	require.Len(t, rows, 1)

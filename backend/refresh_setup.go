@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/luxury-yacht/app/backend/internal/config"
 	"github.com/luxury-yacht/app/backend/internal/lifecycle"
 	"github.com/luxury-yacht/app/backend/internal/logsources"
 	"github.com/luxury-yacht/app/backend/internal/parallel"
@@ -202,7 +201,7 @@ func (a *RefreshCoordinator) buildRefreshSubsystems(
 		return nil, nil, errors.New("no kubeconfig selections available")
 	}
 
-	// Subsystem construction (informer wiring, permission preflight, spill restore)
+	// Subsystem construction (reflector wiring, permission preflight, spill restore)
 	// is the expensive per-cluster step; build the selections concurrently so N
 	// clusters do not pay it serially. Outcomes are assembled in selection order, so
 	// clusterOrder is exactly what the serial loop produced. Per-cluster internal
@@ -281,11 +280,9 @@ func (a *RefreshCoordinator) buildRefreshSubsystemForSelection(
 		KubernetesClient:           clients.client,
 		MetricsClient:              clients.metricsClient,
 		RestConfig:                 clients.restConfig,
-		ResyncInterval:             config.RefreshResyncInterval,
 		MetricsInterval:            a.resolveMetricsInterval(),
 		APIExtensionsClient:        clients.apiextensionsClient,
 		GatewayClient:              clients.gatewayClient,
-		GatewayInformerFactory:     clients.gatewayInformerFactory,
 		GatewayAPIPresence:         clients.gatewayAPIPresence,
 		DynamicClient:              clients.dynamicClient,
 		ObjectDetailsProvider:      a.resources.objectDetailProvider(),
@@ -314,7 +311,7 @@ func (a *RefreshCoordinator) buildRefreshSubsystemForSelection(
 		return nil, err
 	}
 
-	// Evict cached detail/YAML/helm responses on informer and ingest changes,
+	// Evict cached detail/YAML/helm responses on ingest changes,
 	// then ring the object-details doorbell.
 	a.registerResponseCacheInvalidation(subsystem, clusterMeta.ID)
 
@@ -404,7 +401,6 @@ func (a *RefreshCoordinator) buildRefreshMux(
 		ManualQueue:     aggregateQueue,
 		Telemetry:       aggregateTelemetryHandler,
 		Metrics:         aggregateMetrics,
-		HealthHub:       nil, // Health is per-cluster, not global.
 	})
 	aggregates := &refreshAggregateHandlers{
 		snapshot:      aggregateService,

@@ -313,6 +313,7 @@ export class ResourceStreamManager {
         return;
       }
       case 'cancel-flush':
+      case 'cancel-trailing-resync':
         window.clearTimeout(effect.timer);
         return;
       case 'advance-source':
@@ -324,6 +325,13 @@ export class ResourceStreamManager {
       case 'request-resync':
         this.resyncSubscription(subscription, effect.reason, effect.force, effect.errorReason);
         return;
+      case 'schedule-trailing-resync': {
+        const timer = window.setTimeout(() => {
+          this.applyProtocolEvent(subscription, { type: 'trailing-resync-fired', timer });
+        }, effect.delayMs);
+        this.applyProtocolEvent(subscription, { type: 'trailing-resync-timer-attached', timer });
+        return;
+      }
       case 'permission-denied':
         eventBus.emit('refresh:resource-stream-permission-denied', {
           domain: subscription.domain,

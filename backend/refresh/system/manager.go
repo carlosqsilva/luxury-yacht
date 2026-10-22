@@ -11,7 +11,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -23,7 +22,6 @@ import (
 	"k8s.io/klog/v2"
 	metricsclient "k8s.io/metrics/pkg/client/clientset/versioned"
 	gatewayversioned "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
-	gatewayinformers "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions"
 
 	"github.com/luxury-yacht/app/backend/internal/applog"
 	"github.com/luxury-yacht/app/backend/internal/config"
@@ -35,7 +33,6 @@ import (
 	"github.com/luxury-yacht/app/backend/refresh/containerlogsstream"
 	"github.com/luxury-yacht/app/backend/refresh/domain"
 	"github.com/luxury-yacht/app/backend/refresh/doorbell"
-	"github.com/luxury-yacht/app/backend/refresh/informer"
 	"github.com/luxury-yacht/app/backend/refresh/ingest"
 	"github.com/luxury-yacht/app/backend/refresh/metrics"
 	"github.com/luxury-yacht/app/backend/refresh/permissions"
@@ -60,11 +57,9 @@ type Config struct {
 	KubernetesClient             kubernetes.Interface                     // Kubernetes client for API interactions.
 	MetricsClient                *metricsclient.Clientset                 // Metrics client for collecting cluster metrics.
 	RestConfig                   *rest.Config                             // REST configuration for Kubernetes client.
-	ResyncInterval               time.Duration                            // Interval for resyncing informers.
 	MetricsInterval              time.Duration                            // Interval for collecting metrics.
 	APIExtensionsClient          apiextensionsclientset.Interface         // Client for API extensions.
 	GatewayClient                gatewayversioned.Interface               // Gateway API client for direct Gateway API resource access.
-	GatewayInformerFactory       gatewayinformers.SharedInformerFactory   // Informers for Gateway API resources.
 	GatewayAPIPresence           common.GatewayAPIPresence                // Installed Gateway API kind set.
 	DynamicClient                dynamic.Interface                        // Dynamic client for interacting with Kubernetes resources.
 	ObjectDetailsProvider        snapshot.ObjectDetailProvider            // Provider for detailed object information.
@@ -88,10 +83,9 @@ type Config struct {
 // Subsystem bundles the refresh manager and supporting services.
 type Subsystem struct {
 	Manager          *refresh.Manager        // Refresh manager for coordinating resource updates.
-	Handler          http.Handler            // HTTP handler for serving refresh-related endpoints.
 	Telemetry        *telemetry.Recorder     // Telemetry recorder for capturing metrics and events.
 	PermissionIssues []PermissionIssue       // List of permission issues encountered during refresh.
-	InformerFactory  *informer.Factory       // Factory for creating informers.
+	PermissionGrants *permissions.Grants     // List/watch decisions this generation was built with.
 	IngestManager    *ingest.IngestManager   // Owned-reflector ingestion manager for cut kinds.
 	RuntimePerms     *permissions.Checker    // Checker for runtime permissions.
 	Registry         *domain.Registry        // Registry for managing domain information.
@@ -113,11 +107,11 @@ type Subsystem struct {
 	// app_refresh_setup) once the aggregate service exists.
 	NamespacesDoorbell *NamespacesDoorbellObserver
 
-	// Cooled marks a subsystem in the governor's Cold-tier SERVING state: its informers,
+	// Cooled marks a subsystem in the governor's Cold-tier SERVING state: its reflectors,
 	// metrics poller, and permission revalidation are stopped (heap reclaimed) and its
 	// maintained stores have been swapped to off-heap mmap-backed columns, but it stays
 	// registered and serves Build queries from those stores (its SnapshotService runs a
-	// cooled, always-settled informer hub). A cooled subsystem is non-nil but NOT live:
+	// cooled, always-settled feed hub). A cooled subsystem is non-nil but NOT live:
 	// the governor re-warm path detects this and rebuilds a fresh, live subsystem.
 	Cooled bool
 
@@ -221,13 +215,13 @@ func (s *Subsystem) ColdPreparationAge(now time.Time) (time.Duration, bool) {
 
 // scopedResourcePredicate reports which resources' permission checks fan out
 // over a configured namespace scope (docs/architecture/namespace-scope.md): exactly
-// the namespaced, ingest-owned kinds, because only their data path runs
-// per-namespace. A check's scope must match its data source's scope — scoping
-// the check for a cluster-wide source (events, HPA, replicasets, gateway,
-// helm storage) would register domains that then serve silently-empty data.
+// the namespaced built-in kinds, because their owned reflectors partition per
+// namespace. A check's scope must match its data source's scope — scoping
+// the check for a cluster-wide source would register domains that then serve
+// silently-empty data.
 func scopedResourcePredicate() func(group, resource string) bool {
 	scoped := make(map[string]struct{})
-	for _, d := range kindregistry.IngestOwnedDescriptors() {
+	for _, d := range kindregistry.All {
 		if d.Identity.Namespaced {
 			scoped[d.Identity.Group+"/"+d.Identity.Resource] = struct{}{}
 		}
@@ -238,42 +232,53 @@ func scopedResourcePredicate() func(group, resource string) bool {
 	}
 }
 
-func newInformerInfrastructure(ctx context.Context, cfg Config) (*permissions.Checker, *informer.Factory, error) {
+func newPermissionInfrastructure(cfg Config) (*permissions.Checker, *permissions.Grants, error) {
 	runtimePerms := permissions.NewChecker(cfg.KubernetesClient, cfg.ClusterID, 0)
 	if len(cfg.AllowedNamespaces) > 0 {
 		runtimePerms.SetScope(cfg.AllowedNamespaces, scopedResourcePredicate())
 	}
-	if err := informer.DisableWatchList(); err != nil {
-		return nil, nil, fmt.Errorf("configure informer startup transport: %w", err)
+	if err := ingest.DisableWatchList(); err != nil {
+		return nil, nil, fmt.Errorf("configure reflector startup transport: %w", err)
 	}
-	factory := informer.New(ctx, cfg.KubernetesClient, cfg.APIExtensionsClient, cfg.ResyncInterval, runtimePerms).
-		WithGatewayFactory(ctx, cfg.GatewayInformerFactory, cfg.GatewayAPIPresence)
-	return runtimePerms, factory, nil
+	return runtimePerms, permissions.NewGrants(runtimePerms), nil
 }
 
-func newIngestInfrastructure(ctx context.Context, cfg Config, factory *informer.Factory, runtimePerms *permissions.Checker) (*ingest.IngestManager, error) {
+func newIngestInfrastructure(cfg Config, runtimePerms *permissions.Checker) (*ingest.IngestManager, error) {
 	clusterMeta := snapshot.ClusterMeta{ClusterID: cfg.ClusterID, ClusterName: cfg.ClusterName}
 	manager := ingest.NewIngestManager(
 		streamrows.ClusterMeta{ClusterID: cfg.ClusterID, ClusterName: cfg.ClusterName},
 		cfg.KubernetesClient,
 		cfg.APIExtensionsClient,
-		cfg.GatewayClient,
+		&ingest.GatewaySource{Client: cfg.GatewayClient, Presence: cfg.GatewayAPIPresence},
 		cfg.AllowedNamespaces...,
 	)
 	manager.SetDynamicClient(cfg.DynamicClient)
 	registerIngestProjectors(manager, cfg.ClusterID)
 	jobControllerOwners := snapshot.NewJobControllerOwnerIndex()
-	registerPodReflector(manager, factory, clusterMeta, jobControllerOwners.Lookup)
+	replicaSetOwners := snapshot.NewReplicaSetOwnerIndex()
+	registerPodReflector(manager, clusterMeta, replicaSetOwners.Lookup, jobControllerOwners.Lookup)
 	if err := registerWorkloadReflectors(manager, clusterMeta); err != nil {
+		return nil, err
+	}
+	if err := registerReplicaSetReflector(manager, clusterMeta); err != nil {
 		return nil, err
 	}
 	if !manager.AddBundleSink(snapshot.JobGVR, jobControllerOwners) {
 		return nil, fmt.Errorf("register Job owner sink: Job ingest store is unavailable")
 	}
+	if !manager.AddBundleSink(snapshot.ReplicaSetGVR, replicaSetOwners) {
+		return nil, fmt.Errorf("register ReplicaSet owner sink: ReplicaSet ingest store is unavailable")
+	}
 	registerNetworkReflectors(manager, clusterMeta)
 	registerNodeReflector(manager, clusterMeta)
+	if err := registerNamespaceReflector(manager, clusterMeta); err != nil {
+		return nil, err
+	}
+	if err := registerEventReflector(manager, clusterMeta); err != nil {
+		return nil, err
+	}
 	manager.SetPermissionFilter(ingestPermissionFilter(runtimePerms))
-	registerCustomResourceIngest(ctx, manager, factory, cfg.ClusterID)
+	registerCustomResourceIngest(manager, cfg.ClusterID)
 	return manager, nil
 }
 
@@ -349,15 +354,15 @@ func restServerHost(cfg *rest.Config) string {
 	return cfg.Host
 }
 
-func registerSubsystemDomains(ctx context.Context, factory *informer.Factory, gate *permissionGate, runtimePerms *permissions.Checker, registrations []domainRegistration) error {
-	preflight := preflightRequests(registrations, []informer.PermissionRequest{
+func registerSubsystemDomains(ctx context.Context, grants *permissions.Grants, gate *permissionGate, runtimePerms *permissions.Checker, registrations []domainRegistration) error {
+	preflight := preflightRequests(registrations, []permissions.Request{
 		{Group: metricsAPIGroup, Resource: "nodes", Verb: "list"},
 		{Group: metricsAPIGroup, Resource: "pods", Verb: "list"},
 	})
 	// The preflight budget bounds only priming. Reviews it leaves uncached are
 	// retried by the gate checks, so only caller cancellation aborts the build.
 	preflightCtx, cancel := context.WithTimeout(ctx, config.PermissionPreflightTimeout)
-	_ = factory.PrimePermissions(preflightCtx, preflight)
+	_ = grants.Prime(preflightCtx, preflight)
 	cancel()
 	if err := ctx.Err(); err != nil {
 		return err
@@ -371,17 +376,17 @@ func registerSubsystemDomains(ctx context.Context, factory *informer.Factory, ga
 // at construction.
 func NewSubsystemWithServices(ctx context.Context, cfg Config) (*Subsystem, error) {
 	registry := domain.New()
-	runtimePerms, informerFactory, err := newInformerInfrastructure(ctx, cfg)
+	runtimePerms, grants, err := newPermissionInfrastructure(cfg)
 	if err != nil {
 		return nil, err
 	}
-	ingestManager, err := newIngestInfrastructure(ctx, cfg, informerFactory, runtimePerms)
+	ingestManager, err := newIngestInfrastructure(cfg, runtimePerms)
 	if err != nil {
 		return nil, err
 	}
-	informerHub := newIngestInformerHub(informerFactory, ingestManager)
+	hub := newIngestHub(ingestManager)
 	issues := &permissionIssueRecorder{}
-	gate := newPermissionGate(registry, informerFactory, issues.append, logPermissionSkip)
+	gate := newPermissionGate(registry, grants, issues.append, logPermissionSkip)
 
 	telemetryRecorder := telemetry.NewRecorder()
 	telemetryRecorder.SetClusterMeta(cfg.ClusterID, cfg.ClusterName)
@@ -393,7 +398,7 @@ func NewSubsystemWithServices(ctx context.Context, cfg Config) (*Subsystem, erro
 		clusterMeta,
 		runtimePerms,
 	).WithLogger(applog.ClusterScoped(cfg.Logger, cfg.ClusterID, cfg.ClusterName)).
-		WithInformerHub(informerHub)
+		WithFeedHub(hub)
 	containerLogsHandler, resourceManager, err := registerStreamHandlers(streamDeps{
 		cfg:         cfg,
 		telemetry:   telemetryRecorder,
@@ -417,7 +422,7 @@ func NewSubsystemWithServices(ctx context.Context, cfg Config) (*Subsystem, erro
 	namespacesDoorbell := &NamespacesDoorbellObserver{}
 	deps := registrationDeps{
 		registry:            registry,
-		informerFactory:     informerFactory,
+		permissionGrants:    grants,
 		ingestManager:       ingestManager,
 		metricsProvider:     metricsProvider,
 		cfg:                 cfg,
@@ -434,33 +439,20 @@ func NewSubsystemWithServices(ctx context.Context, cfg Config) (*Subsystem, erro
 
 	registrations := domainRegistrations(ctx, deps)
 	snapshotService.WithDomainReadiness(domainReadinessResources(registrations))
-	if err := registerSubsystemDomains(ctx, informerFactory, gate, runtimePerms, registrations); err != nil {
+	if err := registerSubsystemDomains(ctx, grants, gate, runtimePerms, registrations); err != nil {
 		return nil, err
 	}
-	resourceManager.RegisterSources(informerFactory, ingestManager)
+	resourceManager.RegisterSources(grants, ingestManager)
 	queue := refresh.NewInMemoryQueue()
 
-	manager := refresh.NewManager(registry, informerHub, snapshotService, metricsPoller, queue)
-
-	// Build the core refresh routes once so all server configurations stay consistent.
-	mux := BuildRefreshMux(MuxConfig{
-		SnapshotService: snapshotService,
-		ManualQueue:     queue,
-		Telemetry:       telemetryRecorder,
-		Metrics: singleClusterMetricsDemandController{
-			clusterID: clusterMeta.ClusterID,
-			manager:   manager,
-		},
-		HealthHub: informerHub,
-	})
+	manager := refresh.NewManager(registry, hub, snapshotService, metricsPoller, queue)
 
 	built = true
 	return &Subsystem{
 		Manager:               manager,
-		Handler:               mux,
 		Telemetry:             telemetryRecorder,
 		PermissionIssues:      issues.issues,
-		InformerFactory:       informerFactory,
+		PermissionGrants:      grants,
 		IngestManager:         ingestManager,
 		RuntimePerms:          runtimePerms,
 		Registry:              registry,
@@ -559,19 +551,6 @@ func ingestPermissionFilter(checker *permissions.Checker) func(group, resource, 
 			return false
 		}
 		return true
-	}
-}
-
-// HealthHandler returns an HTTP handler compatible with /healthz/refresh.
-func HealthHandler(hub refresh.InformerHub) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if hub == nil || !hub.HasSynced(r.Context()) {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_, _ = w.Write([]byte("informers not yet synced"))
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
 	}
 }
 
