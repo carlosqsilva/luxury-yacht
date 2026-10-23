@@ -15,7 +15,6 @@ import {
 } from '@/core/logging/appLogsClient';
 import { getPreference, subscribePreference } from '@/core/settings/appPreferences';
 import { compareUtf16Strings } from '@/shared/utils/sort';
-import { reportOperationalError } from '@/utils/errorHandler';
 import { fetchSnapshot, type Snapshot, setMetricsActive } from './client';
 import { clusterReadiness } from './clusterReadiness';
 import { parseClusterScope } from './clusterScope';
@@ -110,7 +109,6 @@ type ScopedDomainStateChange = {
   changed: boolean;
 };
 
-const noopStreamingCleanup = () => undefined;
 const METRICS_DEMAND_RETRY_INITIAL_MS = 1_000;
 const METRICS_DEMAND_RETRY_MAX_MS = 30_000;
 
@@ -415,8 +413,8 @@ class RefreshOrchestrator {
     runtime: ClusterRefreshRuntime,
     streaming: StreamingRegistration
   ): void {
-    const shouldStream = this.shouldStreamScope(domain, scope);
-    if (enabled && shouldStream) {
+    const plan = this.scopeStreamPlan(domain, scope);
+    if (enabled && plan === 'now') {
       runtime.clearStreamingReady(domain, scope);
       if (!preserveState) {
         resetScopedDomainState(domain, scope);
@@ -429,6 +427,15 @@ class RefreshOrchestrator {
       this.stopStreamingScope(domain, scope, streaming, !preserveState);
       this.cancelInFlightForScopedDomain(domain, scope);
       return;
+    }
+    if (plan === 'once-serviceable') {
+      // Warm-up is loading: the stream starts once the cluster serves
+      // (handleClusterBecameServiceable), and query readers wait for it.
+      setScopedDomainState(domain, scope, (previous) => ({
+        ...previous,
+        status: previous.data ? previous.status : 'initialising',
+        scope,
+      }));
     }
     if (runtime.hasStreamingBookkeeping(domain, scope)) {
       runtime.clearStreamingReady(domain, scope);
@@ -649,27 +656,29 @@ class RefreshOrchestrator {
   }
 
   private shouldStreamScope(domain: RefreshDomain, scope?: string): boolean {
+    return this.scopeStreamPlan(domain, scope) === 'now';
+  }
+
+  // Whether a scope streams now, once its cluster can serve, or not at all.
+  private scopeStreamPlan(
+    domain: RefreshDomain,
+    scope?: string
+  ): 'now' | 'once-serviceable' | 'never' {
     const trimmed = scope?.trim() ?? '';
-    if (!trimmed) {
-      return false;
-    }
-    if (!getPreference('autoRefreshEnabled')) {
-      return false;
+    if (!trimmed || !getPreference('autoRefreshEnabled')) {
+      return 'never';
     }
     // One-shot query scopes are never streaming targets, for ANY domain: event
     // queries share the singleton named stream with the parameterless base
     // scope and would churn it on every query.
     const parsed = tryParseRefreshScope(domain, trimmed);
-    if (!parsed || hasOneShotQuery(domain, parsed)) {
-      return false;
+    if (!parsed || hasOneShotQuery(parsed) || this.isStreamingBlocked(domain, trimmed)) {
+      return 'never';
     }
     // No stream can be established while the scope's cluster backend is still
     // initializing — the named-stream handler rejects the request and the
     // client would otherwise hot-loop on reconnect attempts.
-    if (!this.isScopeClusterServiceable(trimmed)) {
-      return false;
-    }
-    return !this.isStreamingBlocked(domain, trimmed);
+    return this.isScopeClusterServiceable(trimmed) ? 'now' : 'once-serviceable';
   }
 
   private getConfig(domain: RefreshDomain): DomainRegistration<RefreshDomain> {
@@ -723,14 +732,11 @@ class RefreshOrchestrator {
     }
     this.clearTimer(runtime.takeStreamStartRetry(domain, scope));
 
-    const startResult = streaming.start(scope);
-    const startPromise = Promise.resolve(startResult);
+    const startPromise = streaming.start(scope);
     runtime.beginStreamingStart(domain, scope, startPromise);
 
     startPromise
-      .then((cleanup) =>
-        this.completeStreamingStart(domain, scope, streaming, runtime, startPromise, cleanup)
-      )
+      .then(() => this.completeStreamingStart(domain, scope, streaming, runtime, startPromise))
       .catch((error) => this.failStreamingStart(domain, scope, runtime, startPromise, error));
 
     return startPromise.then(() => undefined).catch(() => undefined);
@@ -741,18 +747,15 @@ class RefreshOrchestrator {
     scope: string,
     streaming: StreamingRegistration,
     runtime: ClusterRefreshRuntime,
-    startPromise: Promise<(() => void) | undefined>,
-    cleanup: (() => void) | undefined
+    startPromise: Promise<void>
   ): void {
     if (!this.isRuntimeCurrent(runtime)) {
-      this.runStreamingCleanup(cleanup, domain, scope);
       return;
     }
     const enabledNow = this.isScopedDomainEnabledInternal(domain, scope);
     if (!enabledNow || runtime.isStreamingCancelled(domain, scope)) {
       runtime.failStreamingStart(domain, scope, startPromise);
       runtime.clearStreamingCancelled(domain, scope);
-      this.runStreamingCleanup(cleanup, domain, scope);
       if (enabledNow) {
         // A re-enable can race the cancelled start. Restart here because the
         // re-enable observed this pending promise and could not start its own.
@@ -761,10 +764,7 @@ class RefreshOrchestrator {
       return;
     }
 
-    if (
-      !runtime.finishStreamingStart(domain, scope, startPromise, cleanup ?? noopStreamingCleanup)
-    ) {
-      this.runStreamingCleanup(cleanup, domain, scope);
+    if (!runtime.finishStreamingStart(domain, scope, startPromise)) {
       return;
     }
     this.clearTimer(runtime.resetStreamStartRetry(domain, scope));
@@ -773,32 +773,11 @@ class RefreshOrchestrator {
     this.reconcileInitialStreamingSnapshot(domain, scope, streaming);
   }
 
-  private runStreamingCleanup(
-    cleanup: (() => void) | undefined,
-    domain: RefreshDomain,
-    scope: string,
-    action = 'cleanupStreamingDomain'
-  ): void {
-    if (typeof cleanup !== 'function') {
-      return;
-    }
-    try {
-      cleanup();
-    } catch (error) {
-      reportOperationalError(error, {
-        source: 'RefreshOrchestrator',
-        action,
-        domain,
-        scope,
-      });
-    }
-  }
-
   private failStreamingStart(
     domain: RefreshDomain,
     scope: string,
     runtime: ClusterRefreshRuntime,
-    startPromise: Promise<(() => void) | undefined>,
+    startPromise: Promise<void>,
     error: unknown
   ): void {
     runtime.failStreamingStart(domain, scope, startPromise);
@@ -881,20 +860,19 @@ class RefreshOrchestrator {
 
     if (pending) {
       pending
-        .then((streamingCleanup) => {
+        .then(() => {
           // LOAD-BEARING — docs/architecture/refresh-system.md, "Streaming
           // Start Lifecycle": teardown has exactly one owner. The start's
           // own continuation (attached first) already handled a cancelled
           // arrival — teardown, or an adopted restart when the scope was
-          // re-enabled — and cleared the cancel flag. Acting here
-          // too would release the manager subscription twice. The flag still
-          // being set means this stop still owns the teardown.
+          // re-enabled — and cleared the cancel flag. Acting here too would
+          // tear down twice, or clear a restarted start's cancellation. The
+          // flag still being set means this stop still owns the teardown.
           if (!runtime.isStreamingCancelled(domain, scope)) {
             return;
           }
           runtime.failStreamingStart(domain, scope, pending);
           runtime.clearStreamingCancelled(domain, scope);
-          this.runStreamingCleanup(streamingCleanup, domain, scope, 'stopPendingStreamingDomain');
         })
         .catch(() => {
           runtime.failStreamingStart(domain, scope, pending);
@@ -902,11 +880,7 @@ class RefreshOrchestrator {
         });
     }
 
-    const cleanup = runtime.getStreamingCleanup(domain, scope);
-    if (cleanup) {
-      this.runStreamingCleanup(cleanup, domain, scope, 'stopStreamingDomain');
-      runtime.deleteStreamingCleanup(domain, scope);
-    }
+    runtime.markStreamingStopped(domain, scope);
     runtime.clearStreamHealth(domain, scope);
     streaming.stop?.(scope, { reset });
     if (reset) {
@@ -992,6 +966,7 @@ class RefreshOrchestrator {
     // cluster-events, polling disabled — are cleaned up too. forEachScopedDomain only sees
     // enabled leases, so it would leave those orphaned for a closed cluster.
     this.resetScopedStatesForRemovedClusters(connected);
+    this.errorNotifier.clearRemovedClusters(connected);
     Array.from(this.clusterRuntimes.entries()).forEach(([clusterId, runtime]) => {
       if (connected.has(clusterId)) {
         return;
@@ -1894,8 +1869,10 @@ class RefreshOrchestrator {
   };
 
   private readonly handleKubeconfigChanging = () => {
-    // A kubeconfig change supersedes tracked auth-failure state.
+    // A kubeconfig change supersedes tracked auth-failure state and the
+    // errors already reported.
     this.forEachRuntime((runtime) => runtime.markAuthRecovered());
+    this.errorNotifier.clearAll();
     this.incrementContextVersion();
     this.stopAllStreaming(true);
     this.forEachRuntime((runtime) => this.cancelRuntimePolls(runtime));

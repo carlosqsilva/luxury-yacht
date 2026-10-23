@@ -86,9 +86,6 @@ import { EffectivePermissionsTable } from './diagnostics/TableEffectivePermissio
 import { KubernetesAPIClientsTable } from './diagnostics/TableKubernetesAPIClients';
 import { useDiagnosticsPolling } from './diagnostics/useDiagnosticsPolling';
 
-// Re-export for backwards compatibility
-export { resolveDomainNamespace } from './diagnostics';
-
 // 'inactive' is its own state, NOT a degree of failure. A scope with no stream
 // is usually just unleased; folding that into 'degraded' told the user
 // something was wrong with a domain they simply were not using.
@@ -236,6 +233,12 @@ const FIXED_SCOPE_ROLES: Partial<Record<RefreshDomain, { label: string; tooltip:
 };
 
 const resolveCatalogScopeRole = (query: string): { label: string; tooltip: string } => {
+  if (!query) {
+    return {
+      label: 'Live Scope',
+      tooltip: 'Cluster catalog stream scope; Browse and resource discovery re-read on its changes',
+    };
+  }
   const params = new URLSearchParams(query);
   return params.get('limit') === '1'
     ? {

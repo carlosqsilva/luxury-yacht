@@ -246,6 +246,17 @@
         "!**/src/shared/components/errors/**",
         "!**/src/ui/errors/**"
       ]
+    },
+    {
+      // Tests mount real state owners through test-utils/appState instead of stubbing them
+      // (docs/workflows/testing.md). Never add an exemption.
+      "path": "./biome-plugins/no-owned-state-mocks.grit",
+      "includes": [
+        "**/src/**/*.test.{ts,tsx}",
+        // A benchmark times one component's own work, which real owners and StrictMode would
+        // add to.
+        "!**/src/**/*.benchmark.test.{ts,tsx}"
+      ]
     }
   ],
   // Overrides are narrow architectural boundaries, not general escape hatches. Keep the reason for

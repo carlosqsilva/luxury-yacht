@@ -100,10 +100,6 @@ export const PodsTab: React.FC<PodsTabProps> = ({ isActive }) => {
   });
   const { open: openPod, navigate: navigatePodForWorkspace } = podIdentity;
   const navigatePod = navigationAvailable ? navigatePodForWorkspace : undefined;
-  const getOwnerReference = useCallback(
-    (pod: PodSnapshotEntry) => podOwnerReference(pod, objectData?.clusterName),
-    [objectData?.clusterName]
-  );
   const handleNamespaceSelect = useCallback(
     (pod: PodSnapshotEntry) => {
       if (!pod.ref.namespace || !viewState) {
@@ -161,15 +157,14 @@ export const PodsTab: React.FC<PodsTabProps> = ({ isActive }) => {
         (pod) => formatRestartCount(pod.restarts),
         {
           alignData: 'right',
-          sortValue: (pod) => pod.restarts ?? 0,
           getTitle: (pod) => `${pod.restarts ?? 0} restarts`,
           getClassName: getRestartsClassName,
         }
       ),
       createTextColumn<PodSnapshotEntry>('owner', 'Owner', workloadNameFromOwner, {
-        ...objectLink(getOwnerReference),
-        isInteractive: (pod) => Boolean(getOwnerReference(pod)),
-        getClassName: (pod) => (getOwnerReference(pod) ? 'object-panel-link' : undefined),
+        ...objectLink(podOwnerReference),
+        isInteractive: (pod) => Boolean(podOwnerReference(pod)),
+        getClassName: (pod) => (podOwnerReference(pod) ? 'object-panel-link' : undefined),
       }),
       createTextColumn<PodSnapshotEntry>('node', 'Node', (pod) => pod.node || '—', {
         ...objectLink((pod) =>
@@ -233,7 +228,6 @@ export const PodsTab: React.FC<PodsTabProps> = ({ isActive }) => {
     objectData?.clusterId,
     objectData?.clusterName,
     objectLink,
-    getOwnerReference,
     navigatePod,
     viewState,
   ]);
