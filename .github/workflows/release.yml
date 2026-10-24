@@ -94,7 +94,7 @@ jobs:
     needs:
       - plan
     if: ${{ github.event.inputs.skip_tests != 'true' }}
-    runs-on: ubuntu-24.04 #-32core-amd64
+    runs-on: ubuntu-latest-32core-amd64 # ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
         with:
