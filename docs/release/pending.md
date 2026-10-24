@@ -1,56 +1,64 @@
-### Added
+This release is focused on bugfixes, UI/UX, and code refactoring for stability and performance. There are no headline new features, but there are many minor quality-of-life improvements.
 
 ### Changed
 
-- Refresh:
-  - Cluster tabs you are not looking at no longer refresh in the background. A tab's data refreshes when you return to it.
-  - The "Refresh background clusters" setting is removed.
-- YAML editing:
-  - While you edit, the YAML tab now shows when the object is modified outside the editor: a table lists each changed field, with its original value, the external edit, and your edit. Status-only updates are ignored.
-  - When a field you edited was also changed outside the editor, you pick the external edit or your edit in that field's row before saving, so no change is overwritten by accident. You can change your pick, and "Merge changes and continue editing" brings in the other external changes either way.
+- Better live feedback when editing YAML, and new conflict resolution options.
+  - When there are conflicts, a new warning panel gives you options for resolving them. If someone else changes a field in the object you're currently editing, you choose whether to keep your edit or theirs.
   - If the object is deleted and recreated while you edit, you can copy your draft and start editing the new object.
-  - Save turns green and Cancel turns red while you have unsaved edits.
-- Scrollbar tweaks. They are wider and higher-contrast. They appear only while scrolling or when the pointer is over the scroll area, and fade out shortly after scrolling stops.
-- A table showing partial data, such as namespaces missing from a cluster, a kind you cannot list, or an approximate count, now shows a Partial chip in its filter bar. Hover over it for the details. Before, this showed only in the result count's tooltip, and only while a filter was active.
+  - The Save and Cancel buttons light up when you have unsaved edits.
+- Data refresh improvements
+  - Object panels in near-realtime, instead of every 2 to 5 seconds.
+  - "Refresh background clusters" setting is removed because it's no longer needed. Switching in a background cluster shows the last data immediately, and updates in about a second.
+  - Refresh (Cmd+R, or Ctrl+R on Windows and Linux) reloads everything on screen for the current cluster, including open panels and sidebar badges.
+  - Panels in their own window properly refresh like the main window.
+  - The "refreshing" indicator appears only when you ask for a manual refresh.
+  - Gateway API, HPA, CRD, and Helm tables update as soon as something changes, and no longer reload every 15 seconds when nothing has changed.
+  - A workload's Pods list drops a pod as soon as the pod stops belonging to that workload.
+- The app uses less memory on clusters with many pods or events.
+- Scrollbars are wider and higher-contrast. They appear only while you scroll or hover over the scroll area, and fade out shortly after.
+- A new `partial` chip in the filter bar for data views shows when a table has incomplete data, such as namespaces you cannot read, a kind you cannot list, or an approximate count. Hover over it for details.
 
 ### Fixed
 
-- YAML editing:
-  - In dark mode, the Cancel button in the "Take ownership of managed fields?" dialog was nearly invisible. It now uses the standard button style.
-  - Merging the latest object into your draft no longer fails when someone else changed a field you did not edit, such as the replica count. For custom resources, it no longer undoes that change.
-- Clicking a recent warning on the cluster Overview opens its object on the Events tab again. Before, the panel opened on Details.
-- Object action menus offer every action you are allowed to take. Before, a custom resource's panel could leave out Delete, and the object map could leave out Scale, until something else had loaded those permissions.
+- Tables and Browse:
+  - A table or Browse view with a saved search loads filtered rows right away, instead of briefly showing every row.
+  - A favorite saved with no sort opens unsorted and stays selected.
+  - Browse shows a page's load error in the table, and reads each page once when you sort, filter, or page.
+  - Browse lists objects in namespaces where you can list them but not watch them.
+  - Namespace, node drain, and catalog diff lists no longer redraw unchanged rows on each refresh.
+  - Closing the Pods list under a node or workload keeps that row highlighted.
 - Object panels:
-  - A node or service opened from a link in another object's details works like one opened from its table. A node offers Cordon and Drain, and its Shell tab opens a node shell. A service offers Port Forward. Before, those actions were missing, and the node's Shell tab was missing or failed to start.
-  - A ReplicaSet opened from its Deployment's details lists its pods in the Pods tab. Before, the tab stayed empty.
-  - A custom resource whose kind name matches a built-in kind, such as a Volcano Job, no longer shows that kind's Pods, Jobs, Logs, or Shell tab. Before, those tabs appeared, and its Logs tab could not load.
-- With short resource names on, a custom resource whose kind name matches a built-in kind shows its full kind. Before, it showed the built-in kind's short name, such as "deploy".
-- Importing settings now reports a failure when the imported settings cannot be read back, and keeps your current settings. Before, it said the import succeeded and reset every setting to its default, including turning error reporting off.
-- Closing the pods listed under a node or workload with their Close button keeps that row highlighted. Before, the highlight cleared.
-- Reopening a cluster whose data still fails to load shows the error again. Before, the error showed only the first time the cluster was open.
-- A namespace list that fails to load shows one error. Before, it showed two.
-- Browse:
-  - A page that fails to load now shows its error in the table as well as in the error notice. Before, only the notice appeared and the table looked loaded.
-  - Sorting, filtering, or paging reads the new page once. Before, each change read it twice.
-- Command palette:
-  - Cmd+Shift+N (Ctrl+Shift+N on Windows and Linux) switches an open palette to namespace selection. Before, it did nothing while the palette was open.
-  - Shortcuts show ⌘ only on macOS. Windows and Linux show Ctrl and Shift.
-- While a window is closing, the macOS menu no longer opens Settings, the command palette, or other views in it.
-- Namespace, node drain, and catalog diff lists no longer redraw unchanged rows on each refresh.
-- Diagnostics no longer counts a stream's first connection as a resync.
-- A panel you open or move into a window now always takes keyboard focus. Before, it could stay unfocused when its contents loaded slowly.
-- A table or Browse view with a saved search now loads filtered rows. Before, it briefly showed every row first.
-- Opening a favorite saved with no sort shows its table unsorted, and the favorite stays selected. Before, the table came back sorted by name and the favorite looked unsaved.
+  - A node or service opened from a link has the same context menu actions as one opened from its table.
+  - A ReplicaSet opened from its Deployment lists its pods.
+  - A custom resource whose kind name matches a built-in kind no longer gets the built-in kind's Pods, Jobs, Logs, or Shell tab, or its short name.
+  - Object Map properly handles objects with names containing `?`, which `Role` and `ClusterRole` allow.
+  - Object Map context menus show every action you are allowed to take, such as Delete on custom resources and Scale on the object map.
+  - A panel you open or move into a window takes keyboard focus.
+  - A Logs tab on a workload with many pods picks up new or changed pods much sooner.
+  - The "HPA managed" flag no longer says "not managed" while HPA data is still loading or not readable.
 - Object links:
-  - Alt+click now goes to the view that lists the object. Storage classes, ingress classes, and webhook configurations open the cluster Config view, and pod disruption budgets open Quotas. Custom resources open the Custom view, even when their kind name matches a built-in kind, and built-in kinds with no list (such as Leases and ReplicaSets) open Browse. Before, some of these went to the wrong view or did nothing; a ReplicaSet opened the Workloads view, which does not list ReplicaSets.
-  - Opening an object whose cluster is not open in the window now says so. Before, nothing happened.
-  - A panel opened from a link to an object in another cluster now shows that cluster's name.
-
-- The Diagnostics panel no longer closes when you switch cluster tabs.
-- Closing the app window a floating panel is docking into no longer leaves that panel window unresponsive for up to 15 seconds.
-- Clusters whose kubeconfig file name or context name contains a comma now load. Before, the app read the comma as separating two clusters and loaded nothing for that cluster.
-- The object panel's Map tab now shows the right object when the object's name contains `?`, which Role and ClusterRole names allow. Before, it looked up a different object.
-- Tables:
-  - Gateway API resources, HPAs, CRDs, and Helm releases update in their tables as soon as they change. Before, a table could keep the old rows until the next change.
-  - Those tables no longer refetch every 15 seconds when nothing has changed.
-  - A workload's Pods list drops a pod as soon as the pod stops belonging to that workload.
+  - Alt+click goes to the view that lists the object, such as Config for storage classes and Quotas for pod disruption budgets. Built-in kinds without their own list, such as ReplicaSets and Leases, go to Browse, and custom resources go to the Custom view.
+  - Opening an object whose cluster is not open in the window says so.
+  - A panel opened from a link to another cluster's object shows that cluster's name.
+- YAML editor:
+  - The Cancel button in the "Take ownership of managed fields?" dialog is visible in dark mode.
+- Clusters and access:
+  - Clusters whose kubeconfig file name or context name contains a comma now load.
+  - Identities limited to some namespaces can see HPAs, Events, and Helm releases there, instead of "Insufficient permissions".
+  - A namespace's warning-event count shows as unavailable when you cannot read its Events, instead of zero.
+  - Reopening a cluster whose data still fails to load shows the error again.
+  - A namespace list that fails to load shows one error instead of two.
+- The Helm view no longer gets stuck showing `pending-install` or `pending-upgrade`.
+- Clicking a recent warning on the cluster Overview opens its object on the Events tab again.
+- Settings:
+  - Importing settings that cannot be read back reports a failure and keeps your current settings. Before, it reset every setting to its default, including turning error reporting off.
+  - Advanced and Object Panel settings show the saved value while Settings is open. A failed save goes back to the saved value, and changes made in another window appear.
+  - Invalid values in a hand-edited or older settings file are repaired when the app loads.
+- Windows and menus:
+  - Closing the app window that a floating panel is docking into no longer freezes the panel window for up to 15 seconds.
+  - While a window is closing, the macOS menu no longer opens Settings, the command palette, or other views in it.
+  - The Diagnostics panel stays open when you switch cluster tabs.
+- Command palette:
+  - Cmd+Shift+N (Ctrl+Shift+N on Windows and Linux) switches an open palette to namespace selection.
+  - Shortcuts show ⌘ only on macOS.
+- Diagnostics no longer counts a stream's first connection as a resync.
