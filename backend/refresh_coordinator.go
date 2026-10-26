@@ -9,6 +9,7 @@ import (
 
 	"github.com/luxury-yacht/app/backend/internal/authstate"
 	"github.com/luxury-yacht/app/backend/internal/logsources"
+	"github.com/luxury-yacht/app/backend/internal/preferenceschema"
 	"github.com/luxury-yacht/app/backend/nodemaintenance"
 	"github.com/luxury-yacht/app/backend/refresh/containerlogsstream"
 	"github.com/luxury-yacht/app/backend/refresh/snapshot"
@@ -114,9 +115,9 @@ type RefreshCoordinator struct {
 }
 
 type refreshResourceGateway interface {
+	responseCacheInvalidator
 	clearCaches()
 	objectDetailProvider() snapshot.ObjectDetailProvider
-	registerResponseCacheInvalidation(*system.Subsystem, string)
 }
 
 type RefreshCoordinatorDependencies struct {
@@ -157,7 +158,7 @@ func newRefreshCoordinator(dependencies RefreshCoordinatorDependencies) *Refresh
 		objectCatalogEntries:      make(map[string]*objectCatalogEntry),
 		resourceProjection:        dependencies.ResourceProjection,
 		nodeMaintenanceStore:      dependencies.NodeMaintenanceStore,
-		metricsInterval:           time.Duration(defaultMetricsIntervalMs()) * time.Millisecond,
+		metricsInterval:           time.Duration(preferenceschema.DefaultMetricsRefreshIntervalMs) * time.Millisecond,
 	}
 	dependencies.SettingsBridge.bind(coordinator)
 	return coordinator

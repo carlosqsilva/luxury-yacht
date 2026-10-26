@@ -6,7 +6,8 @@
  * from the canonical object reference.
  */
 
-import { getDefaultObjectPanelPosition } from '@core/settings/appPreferences';
+import { getPreference } from '@core/settings/appPreferences';
+import { usePreference } from '@core/settings/usePreference';
 import type { DetailsTabProps } from '@modules/object-panel/components/ObjectPanel/Details/DetailsTab';
 import {
   useObjectPanelActiveTab,
@@ -22,9 +23,7 @@ import { DockablePanel, useDockablePanelContext } from '@ui/dockable';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { queryNamespacePermissions } from '@/core/capabilities';
 import { PanelLifecycleClusterSurface } from '@/core/panel-windows/panelLifecycleGuards';
-import { useAutoRefreshEnabled } from '@/core/refresh/hooks/useRefreshPreferences';
 import './ObjectPanel.css';
-import { RESOURCE_CAPABILITIES } from '@modules/object-panel/components/ObjectPanel/constants';
 import { useObjectPanelCapabilities } from '@modules/object-panel/components/ObjectPanel/hooks/useObjectPanelCapabilities';
 import { useObjectPanelFeatureSupport } from '@modules/object-panel/components/ObjectPanel/hooks/useObjectPanelFeatureSupport';
 import { useObjectPanelRefresh } from '@modules/object-panel/components/ObjectPanel/hooks/useObjectPanelRefresh';
@@ -41,9 +40,9 @@ import { getKindColorClass } from '@shared/utils/kindBadgeColors';
 import type { DockPosition } from '@ui/dockable';
 import { getGroupForPanel, getGroupTabs } from '@ui/dockable/tabGroupState';
 import type { GroupKey } from '@ui/dockable/tabGroupTypes';
+import { resetRefreshDomain } from '@/core/data-access';
 import { failureMessage, type RefreshFailure } from '@/core/refresh/refreshFailure';
 import { buildObjectDetailModel } from './Details/objectDetailModel';
-import { resetObjectPanelScopedDomain } from './hooks/useObjectPanelScopedDomainLifecycle';
 
 // ============================================================================
 // COMPONENT PROPS
@@ -89,7 +88,7 @@ function ObjectPanel({
   const { closePanel, setObjectPanelActiveTab } = useObjectPanelState();
   const { tabGroups, getPreferredOpenGroupKey } = useDockablePanelContext();
   const openTarget = resolveObjectPanelOpenTarget(
-    defaultPosition ?? getDefaultObjectPanelPosition(),
+    defaultPosition ?? getPreference('defaultObjectPanelPosition'),
     defaultGroupKey,
     getPreferredOpenGroupKey
   );
@@ -122,19 +121,11 @@ function ObjectPanel({
 
   // Metrics are collected for the panel's whole life, whatever tab it shows and even behind
   // another panel of its dock group, so the Metrics tab opens on a chart that is already running.
-  const autoRefreshEnabled = useAutoRefreshEnabled();
+  const autoRefreshEnabled = usePreference('autoRefreshEnabled');
   usePanelMetricsCollector(panelId, objectRef, autoRefreshEnabled);
 
-  const {
-    objectKind,
-    detailScope,
-    eventsScope,
-    containerLogsScope,
-    mapScope,
-    helmScope,
-    isHelmRelease,
-    isEvent,
-  } = getObjectPanelScopes(objectData);
+  const { detailScope, eventsScope, containerLogsScope, mapScope, helmScope, isHelmRelease } =
+    getObjectPanelScopes(objectData);
 
   const lastPermissionScopeRef = useRef<string | null>(null);
   useEffect(() => {
@@ -152,16 +143,11 @@ function ObjectPanel({
     queryNamespacePermissions(namespace, objectData?.clusterId ?? null);
   }, [objectData?.clusterId, objectData?.namespace]);
 
-  const featureSupport = useObjectPanelFeatureSupport(
-    objectKind,
-    RESOURCE_CAPABILITIES,
-    isHelmRelease
-  );
+  const featureSupport = useObjectPanelFeatureSupport(objectData);
 
   const { capabilityStates, capabilities, capabilityReasons, nodeLogsState, nodeLogSources } =
     useObjectPanelCapabilities({
       objectData,
-      objectKind,
       detailScope,
       featureSupport,
     });
@@ -177,9 +163,6 @@ function ObjectPanel({
     fetchResourceDetails,
   } = useObjectPanelRefresh({
     detailScope,
-    objectKind,
-    objectData,
-    panelId,
     isOpen: isActiveTab,
     resourceDeleted,
   });
@@ -216,7 +199,8 @@ function ObjectPanel({
     setResourceDeleted(true);
     setDeletedResourceName(objectData?.name ?? '');
     if (detailScope) {
-      resetObjectPanelScopedDomain({ domain: 'object-details', scope: detailScope });
+      // Lands once the details lease releases (the deleted panel stops leasing).
+      resetRefreshDomain('object-details', detailScope);
     }
   }, [detailScope, isNotFoundError, objectData?.name, resourceDeleted]);
 
@@ -233,7 +217,6 @@ function ObjectPanel({
     capabilities,
     objectData,
     isHelmRelease,
-    isEvent,
     isOpen: true,
     setActiveTab,
     currentTab: activeTab,
@@ -361,7 +344,6 @@ function ObjectPanel({
             mapScope={mapScope}
             helmScope={helmScope}
             objectData={objectData}
-            objectKind={objectKind}
             resourceDeleted={resourceDeleted}
             deletedResourceName={deletedResourceName}
             onClosePanel={close}

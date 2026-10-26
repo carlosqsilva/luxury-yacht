@@ -161,7 +161,7 @@ func newApplicationLifecycle(
 // windows start. Interactive startup waits for WindowRuntimeReady.
 func (a *ApplicationLifecycle) ServiceStartup(ctx context.Context, _ application.ServiceOptions) error {
 	// Process-global Kubernetes logging must be installed before any owner can
-	// start a client or informer. Both installers are idempotent.
+	// start a client or reflector. Both installers are idempotent.
 	errorcapture.Init()
 	errorcapture.InstallUnhandledErrorDedup()
 	a.cleanupStaleAppStateWrites()
@@ -424,8 +424,8 @@ func (a *ApplicationLifecycle) ReleasePanelCluster(referenceID string) error {
 func (a *ApplicationLifecycle) StageClusterViewTransfer(source, target, clusterID string) (bool, error) {
 	return a.workspace.StageClusterViewTransfer(source, target, clusterID)
 }
-func (a *ApplicationLifecycle) CommitClusterViewTransfer(source, target, clusterID string, groups []panelwindow.WorkspaceGroup) error {
-	return a.workspace.CommitClusterViewTransfer(source, target, clusterID, groups)
+func (a *ApplicationLifecycle) CommitClusterViewTransfer(source, target, clusterID, transferID string) error {
+	return a.workspace.CommitClusterViewTransfer(source, target, clusterID, transferID)
 }
 func (a *ApplicationLifecycle) CancelClusterViewTransfer(target, clusterID string) error {
 	return a.workspace.CancelClusterViewTransfer(target, clusterID)

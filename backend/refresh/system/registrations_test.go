@@ -7,12 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	goruntime "runtime"
+	"slices"
 	"testing"
 
 	"github.com/luxury-yacht/app/backend/objectcatalog"
 	"github.com/luxury-yacht/app/backend/refresh/domain"
 	"github.com/luxury-yacht/app/backend/refresh/domainpermissions"
-	"github.com/luxury-yacht/app/backend/refresh/informer"
 	"github.com/luxury-yacht/app/backend/refresh/permissions"
 	"github.com/luxury-yacht/app/backend/refresh/resourcestream"
 	"github.com/luxury-yacht/app/backend/refresh/snapshot"
@@ -315,7 +315,12 @@ func TestDomainInventoryIsCompatibleWithExistingContractHomes(t *testing.T) {
 	require.ElementsMatch(t, []string{"snapshot-replace", "change-signal"}, objectEvents.StreamSemantics)
 	require.Equal(t, "event-snapshot-payload", objectEvents.CoverageContract)
 
-	for _, domainID := range []string{"object-details", "object-yaml"} {
+	// object-details also rings a change signal after its cached details are
+	// evicted; object-yaml only replaces snapshots.
+	for domainID, semantics := range map[string][]string{
+		"object-details": {"snapshot-replace", "change-signal"},
+		"object-yaml":    {"snapshot-replace"},
+	} {
 		detail := contract.DomainInventory[domainID]
 		require.Equal(t, "detail-payload", detail.BehaviorClass)
 		if domainID == "object-details" {
@@ -323,7 +328,7 @@ func TestDomainInventoryIsCompatibleWithExistingContractHomes(t *testing.T) {
 		} else {
 			require.Equal(t, "snapshot-cache-plus-provider-cache", detail.CachePolicy)
 		}
-		require.Equal(t, []string{"snapshot-replace"}, detail.StreamSemantics)
+		require.Equal(t, semantics, detail.StreamSemantics, domainID)
 		require.Equal(t, "detail-payload-shape", detail.CoverageContract)
 	}
 
@@ -379,8 +384,8 @@ func TestSnapshotAndAggregateDomainRegistrationContracts(t *testing.T) {
 		"no fallback: denial must serve the permission-denied domain, not a degraded list")
 	require.Equal(t, "core/namespaces", namespaces.listWatch.deniedReason)
 
-	// Cluster overview degrades per resource (issue #244): the informer path is
-	// gated only on namespaces (the one informer the builder still owns — nodes,
+	// Cluster overview degrades per resource (issue #244): the feed path is
+	// gated only on namespaces (the one list+watch the builder still requires — nodes,
 	// pods, and workload counts come from permission-skip-safe ingest stores),
 	// and the list fallback registers when ANY primary resource is listable, so
 	// an identity without node access still gets a partial overview.
@@ -398,7 +403,7 @@ func TestSnapshotAndAggregateDomainRegistrationContracts(t *testing.T) {
 	}, overview.listWatch.fallbackChecks)
 	require.True(t, overview.listWatch.fallbackAllowAny,
 		"any listable primary resource must be enough for the list fallback")
-	require.NotNil(t, overview.listWatch.registerInformer)
+	require.NotNil(t, overview.listWatch.registerListWatch)
 	require.NotNil(t, overview.listWatch.registerFallback)
 	require.Equal(t, "cluster overview requires nodes, pods, or namespaces", overview.listWatch.deniedReason)
 }
@@ -436,10 +441,7 @@ func TestStreamOnlyDomainsHaveEndpointWiring(t *testing.T) {
 	require.NotEmpty(t, streamOnlyDomains)
 
 	kubeClient := fake.NewClientset()
-	runtimePerms := permissions.NewChecker(kubeClient, "cluster-a", 0)
-	informerFactory := informer.New(context.Background(), kubeClient, nil, 0, runtimePerms)
 	containerLogsHandler, resourceManager, err := registerStreamHandlers(streamDeps{
-		informerFactory: informerFactory,
 		cfg: Config{
 			KubernetesClient: kubeClient,
 			ClusterID:        "cluster-a",
@@ -873,17 +875,35 @@ func TestDomainReadinessResourcesUnionsDeclaredContracts(t *testing.T) {
 	require.Equal(t, []string{"core/namespaces"}, readiness["namespaces"])
 	require.Equal(t, []string{"core/pods"}, readiness["pods"])
 
-	// Domains with no declaration anywhere stay absent and keep the
-	// conservative factory-wide gate.
-	require.NotContains(t, readiness, "object-yaml")
-	require.NotContains(t, readiness, "object-details")
-	require.NotContains(t, readiness, "catalog")
-
-	// Every mapped domain has a non-empty, canonical (group/resource) key set.
+	// Every key is canonical (group/resource).
 	for domainName, keys := range readiness {
-		require.NotEmptyf(t, keys, "domain %q mapped with an empty readiness set", domainName)
 		for _, key := range keys {
 			require.Containsf(t, key, "/", "domain %q key %q is not canonical", domainName, key)
 		}
+	}
+}
+
+// Every domain declares which object feeds it waits on. A domain left out
+// would fall back to the whole-feed gate, which waits on every kind (so one
+// slow watch delays it) yet skips on-demand dynamic reflectors (so its first
+// build could serve one of those unsynced as empty). Domains whose payload
+// reads no object feed (catalog service, live GETs, metrics, maintenance)
+// declare an empty set and build without waiting.
+func TestEveryDomainDeclaresItsFeedReadiness(t *testing.T) {
+	registrations := domainRegistrations(context.Background(), registrationDeps{cfg: Config{}})
+	readiness := domainReadinessResources(registrations)
+
+	feedIndependent := []string{
+		"catalog", "catalog-diff", "namespace-metrics", "object-details",
+		"object-helm-manifest", "object-helm-values", "object-maintenance", "object-yaml",
+	}
+	for _, registration := range registrations {
+		keys, declared := readiness[registration.name]
+		require.Truef(t, declared, "domain %q declares no feed readiness", registration.name)
+		if slices.Contains(feedIndependent, registration.name) {
+			require.Emptyf(t, keys, "feed-independent domain %q must not wait on feeds", registration.name)
+			continue
+		}
+		require.NotEmptyf(t, keys, "domain %q reads object feeds but declares none", registration.name)
 	}
 }

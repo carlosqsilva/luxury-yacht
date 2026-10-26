@@ -12,10 +12,12 @@
 import { act } from 'react';
 import * as ReactDOM from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { eventBus } from '@/core/events';
 import { resetScopedDomainState } from '@/core/refresh/store';
 import { containerLogsStreamManager } from '@/core/refresh/streaming/containerLogsStreamManager';
-import { resetAppPreferencesCacheForTesting } from '@/core/settings/appPreferences';
+import {
+  resetAppPreferencesCacheForTesting,
+  setAppPreferencesForTesting,
+} from '@/core/settings/appPreferences';
 import { testScope } from '@/test-utils/refreshScope';
 import LogViewer from './LogViewer';
 import { resetLogViewerPrefsCacheForTesting, setLogViewerPrefs } from './logViewerPrefsCache';
@@ -26,13 +28,11 @@ vi.mock('@core/backend-api', () => ({
 }));
 vi.mock('@/core/refresh/orchestrator', () => ({
   refreshOrchestrator: {
-    stopStreamingDomain: vi.fn(),
-    setScopedDomainEnabled: vi.fn(),
-    startStreamingDomain: vi.fn(),
+    acquireScopedDomainLease: vi.fn(),
+    releaseScopedDomainLease: vi.fn(),
     restartStreamingDomain: vi.fn(),
     refreshStreamingDomainOnce: vi.fn(),
     fetchScopedDomain: vi.fn(),
-    updateContext: vi.fn(),
   },
 }));
 vi.mock('@/core/refresh/hooks/useAutoRefreshLoadingState', () => ({
@@ -190,7 +190,7 @@ describe.runIf(process.env.LOGS_BENCHMARK === '1')('Logs tab stream-batch benchm
   // Fills the buffer, then times each batch from arrival to the rendered tab.
   const measure = async ({ bufferSize, json, displayMode }: Case) => {
     const panelId = `obj:benchmark:${bufferSize}:${json}:${displayMode}`;
-    eventBus.emit('settings:obj-panel-logs-buffer-size', bufferSize);
+    setAppPreferencesForTesting({ objPanelLogsBufferMaxSize: bufferSize });
     setLogViewerPrefs(panelId, {
       selectedFilters: { mode: 'all' },
       autoRefresh: true,
@@ -214,6 +214,7 @@ describe.runIf(process.env.LOGS_BENCHMARK === '1')('Logs tab stream-batch benchm
     await act(async () => {
       root.render(
         <LogViewer
+          target="owned-pods"
           resourceKind="deployment"
           containerLogsScope={SCOPE}
           isActive

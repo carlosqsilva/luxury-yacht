@@ -87,6 +87,16 @@ same slot.
   descriptors (keeping discovery gates). Fresh selection requests reveal the
   destination even when discovery arrives later; mounting with a restored
   selection and unrelated refreshes preserve manual collapse.
+- Alt-click goes to the view that lists the object, resolved from its API
+  group, kind, and scope (`utils/kindViewMap.ts`), in this order:
+  - its resource family's view;
+  - the view whose `listDomain` (`core/navigation/viewRegistry.ts`) is the
+    kind's list domain, a kind facet generated from the backend registry;
+  - Browse, for a built-in kind no view lists (such as ReplicaSets);
+  - the Custom view, for any other custom resource, even one that reuses a
+    built-in kind name.
+  A backend test checks that each list domain's table lists the kind, and a
+  type check requires a view for every list domain.
 
 ## Cluster Attention
 
@@ -103,14 +113,14 @@ resource views remain the place to browse and operate on full inventories.
   cluster-scoped objects.
 - A row combines one object's active typed causes and carries its complete
   cluster/GVR identity; Kind and Name links open it. Any RBAC-visible catalog
-  object can appear; Events keep their informer-owned path.
+  object can appear; Events come from the events store, not the catalog.
 - Findings is a backend-owned typed query facet. A row may publish several
   finding type IDs; values OR within Findings and AND with Kind, Namespace,
   Severity, and other filters. Labels come from the centralized finding
   policy; requests and persisted filters use stable type IDs.
 - A per-cluster maintained query store holds findings, updated incrementally
-  from existing Pod, workload, and Node reflector bundles and the shared Event
-  informer; a domain-owned timer advances grace periods and event expiry. The
+  from the Pod, workload, Node, and Event reflector bundles; a domain-owned
+  timer advances grace periods and event expiry. The
   `attention` stream clock is the only change signal (catalog subset changes
   update the index, which rings it); the frontend refetches the current page
   and polls only as the stream-down fallback.

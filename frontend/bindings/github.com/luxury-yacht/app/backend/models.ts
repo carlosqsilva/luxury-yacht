@@ -154,19 +154,6 @@ export interface AppLogsAddedEvent {
  */
 export type AppSettings = types$0.AppSettings;
 
-/**
- * Per-kind detail DTOs are no longer re-exported here. The generated
- * ResourceGateway.Get<Kind> methods (resource_details_generated.go) reference
- * each kind's DTO by its own package (e.g. deployment.DeploymentDetails), and Wails reaches every
- * nested sub-type through those parent structs — so no package-backend alias is
- * needed for any kind DTO or its sub-types. What remains is app-level and shared
- * types (settings, logs, shell, cluster-tab infos, common ref/condition/route
- * sub-types in resources/types) plus the three DTOs whose detail binding is
- * hand-written and therefore still named in package backend (HelmReleaseDetails,
- * PodDetailInfo, CustomResourceDefinitionDetails).
- */
-export type AppSettingsSchema = types$0.AppSettingsSchema;
-
 export interface AppearanceModeChangedEvent {
     "mode": string;
 }
@@ -810,7 +797,8 @@ export interface PortForwardStatusEvent {
 }
 
 /**
- * RevisionEntry describes a single historical revision of a workload rollout.
+ * RevisionEntry describes a single historical revision of a workload rollout
+ * or a Helm release.
  */
 export interface RevisionEntry {
     /**
@@ -819,24 +807,28 @@ export interface RevisionEntry {
     "revision": number;
 
     /**
-     * CreatedAt is the ISO-8601 creation timestamp of the underlying ReplicaSet or ControllerRevision.
+     * CreatedAt is the ISO-8601 time the revision was made: the ReplicaSet or
+     * ControllerRevision creation, or the Helm revision's deployment.
      */
     "createdAt": string;
 
     /**
-     * ChangeCause is the value of the kubernetes.io/change-cause annotation, if present.
+     * ChangeCause is the value of the kubernetes.io/change-cause annotation, if
+     * present, or the Helm revision's description.
      */
     "changeCause": string;
 
     /**
-     * Current indicates that this revision matches the workload's active revision.
+     * Current indicates the revision a rollback replaces: the workload's active
+     * revision, or the release's latest revision.
      */
     "current": boolean;
 
     /**
-     * PodTemplate is the YAML-serialised pod template spec for this revision.
+     * Content is the YAML a rollback to this revision reinstates: the workload's
+     * pod template spec, or the release's rendered manifest.
      */
-    "podTemplate": string;
+    "content": string;
 }
 
 export interface RuntimeOperation {

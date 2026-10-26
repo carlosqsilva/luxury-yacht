@@ -5,7 +5,7 @@
  * Provides shared helper functions for the frontend.
  */
 
-import { getSuppressNetworkErrorNotifications } from '@/core/settings/appPreferences';
+import { getPreference } from '@/core/settings/appPreferences';
 import { captureUserVisibleError } from '@/core/telemetry/sentry';
 import { ErrorCategory } from '@/shared/constants/errorCategories';
 import { errorStatusOf, isBrowserFetchFailure } from './errorStatus';
@@ -238,7 +238,7 @@ class ErrorHandler {
     const suppressNotification =
       (errorStatusOf(error)?.expected === true &&
         (category === ErrorCategory.PERMISSION || category === ErrorCategory.AUTHENTICATION)) ||
-      (category === ErrorCategory.NETWORK && getSuppressNetworkErrorNotifications());
+      (category === ErrorCategory.NETWORK && getPreference('suppressNetworkErrorNotifications'));
 
     if (suppressNotification) {
       this.logExpectedCondition(errorDetails);

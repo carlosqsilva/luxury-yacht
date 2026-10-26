@@ -16,8 +16,10 @@ import {
   readObjectYAMLForRef,
   requestData,
   requestRefreshDomain,
-  setRefreshDomainEnabled,
+  useScopedRefreshDomainLifecycle,
 } from '@/core/data-access';
+import { compareDriftFields, copyDriftField, type DriftField } from './yamlDriftFields';
+import { hasUnsavedYamlEdits } from './yamlPanelGuard';
 import { LINT_DEBOUNCE_MS } from './yamlTabConfig';
 import {
   applyResourceVersionToYaml,
@@ -95,6 +97,24 @@ export interface UseYamlTransactionResult {
   hasRemoteDrift: boolean;
   driftForced: boolean;
   backendDriftCurrentYaml: string | null;
+  /** The live object was deleted and recreated (new uid) since editing began. */
+  objectReplaced: boolean;
+  /** Fields someone else changed since editing began, with the draft's values. */
+  driftFields: DriftField[];
+  /** While editing, the draft holds edits Save would apply. */
+  hasUnsavedEdits: boolean;
+  /** The value chosen for each field both sides changed, by field key. */
+  driftChoices: ReadonlyMap<string, DriftChoiceView>;
+  /** Why drift keeps Save unavailable, or null. */
+  saveBlockedReason: string | null;
+  /** Why merging the live changes into the draft is unavailable, or null. */
+  mergeBlockedReason: string | null;
+  /** Copies their value of a field both sides changed into the draft. */
+  chooseTheirs: (field: DriftField) => void;
+  /** Keeps your value of a field both sides changed, restoring it after theirs. */
+  chooseYours: (field: DriftField) => void;
+  /** Discards the draft and edits the recreated object instead. */
+  editNewObject: () => void;
   postApplyNotice: YamlPostApplyNotice | null;
   dismissPostApplyNotice: () => void;
   hasServerYamlError: boolean;
@@ -202,6 +222,136 @@ const shouldClearManualYamlOverride = ({
     snapshotIdentity?.resourceVersion &&
       snapshotIdentity.resourceVersion === latestObjectIdentity.resourceVersion
   );
+};
+
+// The conflict code for an object deleted and recreated since editing began
+// (backend/object_yaml_mutation.go, backend/object_yaml_reload_merge.go).
+const OBJECT_REPLACED_CONFLICT_CODE = 'ObjectUIDMismatch';
+
+/**
+ * The live object differs from the edit baseline in content the user edits,
+ * not only in status or server-managed metadata (the field policy's semantic
+ * compare), so routine controller churn is not drift.
+ */
+const differsFromBaseline = (baselineYaml: string, liveYaml: string): boolean =>
+  sanitizeYamlForSemanticCompare(baselineYaml) !==
+  sanitizeYamlForSemanticCompare(normalizeYamlString(liveYaml));
+
+/** The live object has the edited object's name but a different uid. */
+const isReplacementOf = (baseline: ObjectIdentity | null, live: ObjectIdentity | null): boolean =>
+  Boolean(baseline?.uid && live?.uid && baseline.uid !== live.uid);
+
+/** A conflict's live object, and the watched snapshot when the conflict arrived. */
+type ConflictLiveObject = { yaml: string; watchedYaml: string };
+
+// The live YAML the drift notice compares with: a conflict's live object until
+// the watched snapshot changes, or the watched snapshot once it has drifted
+// from the baseline or been replaced. A conflict starts a read that cancels
+// any read already out, so the watched snapshot changes only with a read sent
+// after the conflict. (resourceVersions are opaque, so they are not ordered.)
+const driftLiveYamlOf = ({
+  isEditing,
+  conflictLiveObject,
+  watchedYaml,
+  hasRemoteDrift,
+  objectReplaced,
+  liveYaml,
+}: {
+  isEditing: boolean;
+  conflictLiveObject: ConflictLiveObject | null;
+  watchedYaml: string;
+  hasRemoteDrift: boolean;
+  objectReplaced: boolean;
+  liveYaml: string;
+}): string | null => {
+  if (conflictLiveObject?.watchedYaml === watchedYaml) {
+    return conflictLiveObject.yaml;
+  }
+  return isEditing && (hasRemoteDrift || objectReplaced) ? liveYaml : null;
+};
+
+export type DriftChoice = 'theirs' | 'yours';
+
+/** A field's chosen value, and your value to show while theirs is chosen. */
+export type DriftChoiceView = { choice: DriftChoice; yours: string | undefined };
+
+/**
+ * A choice on a field both sides changed, made while their value was `now`.
+ * `yoursDraftYaml` is a draft holding your value, to restore it from.
+ */
+type ConflictChoice = DriftChoiceView & { now: string | undefined; yoursDraftYaml: string };
+
+// A choice holds while their value is unchanged and the draft still matches
+// it: theirs while the draft has their value, yours while it has another.
+const choiceOf = (
+  field: DriftField,
+  choices: ReadonlyMap<string, ConflictChoice>
+): ConflictChoice | null => {
+  const recorded = choices.get(field.key);
+  if (!recorded || recorded.now !== field.now) {
+    return null;
+  }
+  return (recorded.choice === 'yours') === field.conflict ? recorded : null;
+};
+
+// Records `choice` on `field`. While the field is a conflict the draft holds
+// your value; once theirs is in the draft, the earlier record still does.
+const withChoice = (
+  choices: ReadonlyMap<string, ConflictChoice>,
+  field: DriftField,
+  choice: DriftChoice,
+  draftYaml: string
+): ReadonlyMap<string, ConflictChoice> => {
+  const recorded = choices.get(field.key);
+  const held =
+    field.conflict || !recorded
+      ? { yours: field.draft, yoursDraftYaml: draftYaml }
+      : { yours: recorded.yours, yoursDraftYaml: recorded.yoursDraftYaml };
+  return new Map(choices).set(field.key, { choice, now: field.now, ...held });
+};
+
+const fieldList = (fields: DriftField[]): string => fields.map((field) => field.label).join(', ');
+
+type DriftGates = {
+  driftChoices: ReadonlyMap<string, DriftChoiceView>;
+  /** Fields where your value was chosen over theirs. */
+  yoursFields: DriftField[];
+  saveBlockedReason: string | null;
+  mergeBlockedReason: string | null;
+};
+
+// A field both sides changed blocks Save and Merge until a value is chosen.
+const resolveDriftGates = (
+  fields: DriftField[],
+  choices: ReadonlyMap<string, ConflictChoice>,
+  objectReplaced: boolean
+): DriftGates => {
+  const driftChoices = new Map<string, DriftChoiceView>();
+  const undecided: DriftField[] = [];
+  const yoursFields: DriftField[] = [];
+  for (const field of fields) {
+    const chosen = choiceOf(field, choices);
+    if (chosen) {
+      driftChoices.set(field.key, { choice: chosen.choice, yours: chosen.yours });
+    } else if (field.conflict) {
+      undecided.push(field);
+    }
+    if (chosen?.choice === 'yours') {
+      yoursFields.push(field);
+    }
+  }
+  const choiceNeeded =
+    undecided.length > 0
+      ? `You both changed ${fieldList(undecided)}. Choose which value to keep.`
+      : null;
+  return {
+    driftChoices,
+    yoursFields,
+    saveBlockedReason: objectReplaced
+      ? 'The object was recreated, so this draft cannot be saved to it.'
+      : choiceNeeded,
+    mergeBlockedReason: choiceNeeded,
+  };
 };
 
 type PostApplySnapshotDecision =
@@ -483,10 +633,7 @@ const normalizeYamlTransactionDiff = (
   return diff;
 };
 
-export const buildYamlTransactionDiff = (
-  before: string,
-  after: string
-): YamlTransactionDiffResult => {
+const buildYamlTransactionDiff = (before: string, after: string): YamlTransactionDiffResult => {
   const diff = computeBudgetedLineDiff(before, after, YAML_TAB_DIFF_BUDGETS);
   return normalizeYamlTransactionDiff({
     lines: diff.lines,
@@ -520,7 +667,14 @@ export const useYamlTransaction = ({
   const [editBaseline, setEditBaseline] = useState<YamlEditBaseline | null>(null);
   const [hasRemoteDrift, setHasRemoteDrift] = useState(false);
   const [driftForced, setDriftForced] = useState(false);
-  const [backendDriftCurrentYaml, setBackendDriftCurrentYaml] = useState<string | null>(null);
+  const [conflictLiveObject, setConflictLiveObject] = useState<ConflictLiveObject | null>(null);
+  const [replacedByConflict, setReplacedByConflict] = useState(false);
+  // Choices on fields both sides changed, by field key.
+  const [conflictChoices, setConflictChoices] = useState<ReadonlyMap<string, ConflictChoice>>(
+    () => new Map()
+  );
+  // Set by Edit the new object: edit again once the snapshot is a new object.
+  const [restartFrom, setRestartFrom] = useState<{ uid: string | null } | null>(null);
   const [postApplyNotice, setPostApplyNotice] = useState<YamlPostApplyNotice | null>(null);
   const [pendingOwnershipWarning, setPendingOwnershipWarning] =
     useState<PendingOwnershipWarning | null>(null);
@@ -545,31 +699,50 @@ export const useYamlTransaction = ({
   const baselineResourceVersion = baselineIdentity?.resourceVersion ?? null;
   const baselineMergeYaml = editBaseline?.yaml ?? '';
   const effectiveIdentity = baselineIdentity ?? latestObjectIdentity ?? objectIdentity ?? null;
+  const liveIdentity = latestObjectIdentity ?? objectIdentity ?? null;
+  const objectReplaced =
+    isEditing && (replacedByConflict || isReplacementOf(baselineIdentity, liveIdentity));
+  // Read when a conflict arrives, which can be after an await.
+  const watchedYamlRef = useRef(yamlContent);
+  watchedYamlRef.current = yamlContent;
+  const driftLiveYaml = driftLiveYamlOf({
+    isEditing,
+    conflictLiveObject,
+    watchedYaml: yamlContent,
+    hasRemoteDrift,
+    objectReplaced,
+    liveYaml: effectiveYamlContent,
+  });
+  const driftFields = useMemo(
+    () =>
+      isEditing && driftLiveYaml
+        ? compareDriftFields({
+            baselineYaml: baselineMergeYaml,
+            liveYaml: driftLiveYaml,
+            draftYaml,
+          })
+        : [],
+    [baselineMergeYaml, draftYaml, driftLiveYaml, isEditing]
+  );
+  const hasUnsavedEdits = useMemo(
+    () => isEditing && hasUnsavedYamlEdits(draftYaml, baselineMergeYaml),
+    [baselineMergeYaml, draftYaml, isEditing]
+  );
+  const { driftChoices, yoursFields, saveBlockedReason, mergeBlockedReason } = useMemo(
+    () => resolveDriftGates(driftFields, conflictChoices, objectReplaced),
+    [driftFields, conflictChoices, objectReplaced]
+  );
 
-  useEffect(() => {
-    if (!scope) {
-      return undefined;
-    }
-
-    const enabled = isActive && !isEditing;
-    setRefreshDomainEnabled({ domain: 'object-yaml', scope, enabled });
-    if (enabled) {
-      void requestRefreshDomain({
-        domain: 'object-yaml',
-        scope,
-        reason: 'startup',
-      });
-    }
-
-    return () => {
-      setRefreshDomainEnabled({
-        domain: 'object-yaml',
-        scope,
-        enabled: false,
-        preserveState: true,
-      });
-    };
-  }, [scope, isActive, isEditing]);
+  // The tab keeps watching the object while editing, so a remote change shows
+  // as drift right away. Live snapshots never touch the draft or its baseline;
+  // only editor actions set them.
+  useScopedRefreshDomainLifecycle({
+    domain: 'object-yaml',
+    scope,
+    enabled: isActive,
+    preserveState: true,
+    fetchOnEnable: 'startup',
+  });
 
   useEffect(() => {
     if (!objectIdentity) {
@@ -682,7 +855,7 @@ export const useYamlTransaction = ({
   useEffect(() => {
     if (!isEditing) {
       setHasRemoteDrift(false);
-      setBackendDriftCurrentYaml(null);
+      setConflictLiveObject(null);
       setDriftForced(false);
       return;
     }
@@ -696,15 +869,25 @@ export const useYamlTransaction = ({
       latestObjectIdentity?.resourceVersion ?? objectIdentity?.resourceVersion ?? null;
     if (!baselineResourceVersion || !currentVersion) {
       setHasRemoteDrift(false);
-      setBackendDriftCurrentYaml(null);
+      setConflictLiveObject(null);
       return;
     }
-    const driftDetected = currentVersion !== baselineResourceVersion;
+    const driftDetected =
+      currentVersion !== baselineResourceVersion &&
+      differsFromBaseline(baselineMergeYaml, effectiveYamlContent);
     setHasRemoteDrift(driftDetected);
     if (!driftDetected) {
-      setBackendDriftCurrentYaml(null);
+      setConflictLiveObject(null);
     }
-  }, [baselineResourceVersion, driftForced, isEditing, latestObjectIdentity, objectIdentity]);
+  }, [
+    baselineMergeYaml,
+    baselineResourceVersion,
+    driftForced,
+    effectiveYamlContent,
+    isEditing,
+    latestObjectIdentity,
+    objectIdentity,
+  ]);
 
   useEffect(() => {
     if (!isEditing) {
@@ -730,7 +913,9 @@ export const useYamlTransaction = ({
     setActionDetails([]);
     setHasRemoteDrift(false);
     setDriftForced(false);
-    setBackendDriftCurrentYaml(null);
+    setConflictLiveObject(null);
+    setReplacedByConflict(false);
+    setConflictChoices(new Map());
     setIsSaving(false);
     setHasServerYamlError(false);
     setPendingSnapshotAdoptionYaml(null);
@@ -794,7 +979,9 @@ export const useYamlTransaction = ({
     setProtectedEditMessage(null);
     setHasRemoteDrift(false);
     setDriftForced(false);
-    setBackendDriftCurrentYaml(null);
+    setConflictLiveObject(null);
+    setReplacedByConflict(false);
+    setConflictChoices(new Map());
     setPostApplyNotice(null);
     setPendingSnapshotAdoptionYaml(null);
     setHasServerYamlError(false);
@@ -823,20 +1010,47 @@ export const useYamlTransaction = ({
     exitEditMode();
   }, [exitEditMode, isSaving]);
 
-  const handleReloadMergeConflict = useCallback(
+  // A conflict carries the live object: show the draft's drift from it, and
+  // note a replaced object, which cannot be merged into.
+  const adoptConflictLiveObject = useCallback(
     (conflict: ObjectYamlConflict) => {
-      setActionError(conflict.message);
-      setActionDetails(conflict.causes ?? []);
       setHasRemoteDrift(true);
       setDriftForced(true);
-      setHasServerYamlError(false);
+      if (conflict.code === OBJECT_REPLACED_CONFLICT_CODE) {
+        setReplacedByConflict(true);
+      }
       if (conflict.currentYaml) {
-        setBackendDriftCurrentYaml(
-          prepareVisibleDraftYaml(normalizeYamlString(conflict.currentYaml))
-        );
+        setConflictLiveObject({
+          yaml: prepareVisibleDraftYaml(normalizeYamlString(conflict.currentYaml)),
+          watchedYaml: watchedYamlRef.current,
+        });
+        // A user read cancels a read already out, so the next watched snapshot
+        // is at least as new as the conflict's object.
+        if (scope) {
+          void requestRefreshDomain({ domain: 'object-yaml', scope, reason: 'user' });
+        }
       }
     },
-    [prepareVisibleDraftYaml]
+    [prepareVisibleDraftYaml, scope]
+  );
+
+  // A replaced object is explained by the drift notice; other conflicts keep
+  // the backend's message and causes.
+  const showConflictText = useCallback((conflict: ObjectYamlConflict) => {
+    if (conflict.code === OBJECT_REPLACED_CONFLICT_CODE) {
+      return;
+    }
+    setActionError(conflict.message);
+    setActionDetails(conflict.causes ?? []);
+  }, []);
+
+  const handleReloadMergeConflict = useCallback(
+    (conflict: ObjectYamlConflict) => {
+      showConflictText(conflict);
+      setHasServerYamlError(false);
+      adoptConflictLiveObject(conflict);
+    },
+    [adoptConflictLiveObject, showConflictText]
   );
 
   const handleReloadMergeError = useCallback((caughtError: unknown) => {
@@ -847,14 +1061,21 @@ export const useYamlTransaction = ({
   }, []);
 
   const handleReloadAndMerge = useCallback(async () => {
-    if (isSaving || !effectiveIdentity) {
+    if (isSaving || !effectiveIdentity || mergeBlockedReason) {
       return;
     }
 
     try {
       const result = await requestPreparedYamlMerge({
         clusterId: resolvedClusterId,
-        baselineMergeYaml,
+        // A field where yours was chosen starts from their value, so the
+        // merge applies yours instead of stopping on it.
+        baselineMergeYaml: driftLiveYaml
+          ? yoursFields.reduce(
+              (yaml, field) => copyDriftField(yaml, driftLiveYaml, field.path),
+              baselineMergeYaml
+            )
+          : baselineMergeYaml,
         sourceYaml: manualYamlOverride?.yaml ?? yamlContent,
         draftYaml,
         effectiveIdentity,
@@ -879,7 +1100,9 @@ export const useYamlTransaction = ({
       setProtectedEditMessage(null);
       setHasRemoteDrift(false);
       setDriftForced(false);
-      setBackendDriftCurrentYaml(null);
+      setConflictLiveObject(null);
+      setReplacedByConflict(false);
+      setConflictChoices(new Map());
       setPostApplyNotice(null);
       setVerifiedPostApply(null);
       setPendingSnapshotAdoptionYaml(null);
@@ -898,15 +1121,18 @@ export const useYamlTransaction = ({
   }, [
     baselineMergeYaml,
     draftYaml,
+    driftLiveYaml,
     effectiveIdentity,
     handleReloadMergeConflict,
     handleReloadMergeError,
     isSaving,
     manualYamlOverride,
+    mergeBlockedReason,
     prepareVisibleDraftYaml,
     resolvedClusterId,
     scope,
     yamlContent,
+    yoursFields,
   ]);
 
   const verifyAppliedYaml = useCallback(
@@ -938,14 +1164,17 @@ export const useYamlTransaction = ({
     [hydrateLatestObject, verifiedPostApply]
   );
 
-  // The object changed or was replaced since editing began: keep the draft and
-  // editing state so the user can reload and merge.
-  const handleSaveConflict = useCallback((conflict: ObjectYamlConflict) => {
-    setActionError(conflict.message);
-    setActionDetails(conflict.causes ?? []);
-    setHasServerYamlError(true);
-    setPendingSnapshotAdoptionYaml(null);
-  }, []);
+  // The object was replaced since editing began: keep the draft and editing
+  // state, and show the draft's drift from the new object.
+  const handleSaveConflict = useCallback(
+    (conflict: ObjectYamlConflict) => {
+      showConflictText(conflict);
+      setHasServerYamlError(true);
+      setPendingSnapshotAdoptionYaml(null);
+      adoptConflictLiveObject(conflict);
+    },
+    [adoptConflictLiveObject, showConflictText]
+  );
 
   const handleSaveError = useCallback((caughtError: unknown) => {
     const failure = describeRequestFailure(caughtError, 'Failed to save YAML changes.');
@@ -1026,6 +1255,9 @@ export const useYamlTransaction = ({
   );
 
   const handleSaveClick = useCallback(async () => {
+    if (saveBlockedReason) {
+      return;
+    }
     const request = prepareSaveRequest({
       isEditing,
       isSaving,
@@ -1078,8 +1310,54 @@ export const useYamlTransaction = ({
     performSave,
     prepareVisibleDraftYaml,
     resolvedClusterId,
+    saveBlockedReason,
     yamlContent,
   ]);
+
+  const chooseTheirs = useCallback(
+    (field: DriftField) => {
+      if (!driftLiveYaml) {
+        return;
+      }
+      setConflictChoices((current) => withChoice(current, field, 'theirs', draftYaml));
+      setDraftYaml((current) => copyDriftField(current, driftLiveYaml, field.path));
+    },
+    [draftYaml, driftLiveYaml]
+  );
+
+  const chooseYours = useCallback(
+    (field: DriftField) => {
+      const recorded = conflictChoices.get(field.key);
+      if (!field.conflict && recorded) {
+        // Theirs is in the draft: put yours back.
+        setDraftYaml((current) => copyDriftField(current, recorded.yoursDraftYaml, field.path));
+      }
+      setConflictChoices((current) => withChoice(current, field, 'yours', draftYaml));
+    },
+    [conflictChoices, draftYaml]
+  );
+
+  const editNewObject = useCallback(() => {
+    setRestartFrom({ uid: baselineIdentity?.uid ?? null });
+    exitEditMode();
+    if (scope) {
+      void requestRefreshDomain({ domain: 'object-yaml', scope, reason: 'user' });
+    }
+  }, [baselineIdentity?.uid, exitEditMode, scope]);
+
+  // Edit the new object once the snapshot shows it (a uid other than the one
+  // the discarded draft was edited from).
+  useEffect(() => {
+    if (!restartFrom || isEditing) {
+      return;
+    }
+    const liveUid = (latestObjectIdentity ?? objectIdentity)?.uid ?? null;
+    if (restartFrom.uid && liveUid === restartFrom.uid) {
+      return;
+    }
+    setRestartFrom(null);
+    handleEnterEdit();
+  }, [handleEnterEdit, isEditing, latestObjectIdentity, objectIdentity, restartFrom]);
 
   const confirmOwnershipAndSave = useCallback(async () => {
     if (!pendingOwnershipWarning || isSaving) {
@@ -1110,7 +1388,16 @@ export const useYamlTransaction = ({
     effectiveYamlContent,
     hasRemoteDrift,
     driftForced,
-    backendDriftCurrentYaml,
+    backendDriftCurrentYaml: conflictLiveObject?.yaml ?? null,
+    objectReplaced,
+    driftFields,
+    hasUnsavedEdits,
+    driftChoices,
+    saveBlockedReason,
+    mergeBlockedReason,
+    chooseTheirs,
+    chooseYours,
+    editNewObject,
     postApplyNotice,
     dismissPostApplyNotice,
     hasServerYamlError,

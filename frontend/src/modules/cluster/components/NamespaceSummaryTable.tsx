@@ -10,7 +10,6 @@ import type { GridColumnDefinition } from '@shared/components/tables/GridTable';
 import { TABLE_PAGE_SIZE_OPTIONS } from '@shared/components/tables/pageSizeOptions';
 import { useGridTablePersistence } from '@shared/components/tables/persistence/useGridTablePersistence';
 import { useObjectActionController } from '@shared/hooks/useObjectActionController';
-import { backendStatusTextClass } from '@shared/utils/backendStatusPresentation';
 import {
   buildRequiredCanonicalObjectRowKey,
   buildRequiredObjectReference,
@@ -20,7 +19,7 @@ import React, { useCallback, useMemo } from 'react';
 import { useClusterNameResolver } from '@/core/cluster-workspace/useClusterWorkspace';
 import type { RefreshFailure } from '@/core/refresh/refreshFailure';
 import type { NamespaceSignalState } from '@/core/refresh/types';
-import { useDefaultTablePageSize } from '@/hooks/useDefaultTablePageSize';
+import { usePreference } from '@/core/settings/usePreference';
 
 export interface NamespaceTableRow extends NamespaceSummaryWithMetrics {
   ageTimestamp?: number;
@@ -146,7 +145,7 @@ const NamespaceSummaryTable: React.FC<NamespaceSummaryTableProps> = ({
   cacheKey,
   emptyMessage,
 }) => {
-  const defaultPageSize = useDefaultTablePageSize();
+  const defaultPageSize = usePreference('defaultTablePageSize');
   const resolveClusterName = useClusterNameResolver();
   const { openWithObject } = useObjectPanel();
   // A configured namespace that is missing or inaccessible has no object to open.
@@ -162,7 +161,6 @@ const NamespaceSummaryTable: React.FC<NamespaceSummaryTableProps> = ({
   // batch-queried, so missing delete permissions resolve lazily per row.
   const objectActions = useObjectActionController({
     context: 'gridtable',
-    queryMissingPermissions: true,
     onOpen: (object) => openWithObject(object),
     onGoToNamespace: (object) => goToNamespace(buildRequiredObjectReference(object)),
   });
@@ -200,17 +198,10 @@ const NamespaceSummaryTable: React.FC<NamespaceSummaryTableProps> = ({
       );
     }
     result.push(
-      {
-        key: 'status',
-        header: 'Status',
-        sortable: true,
-        sortValue: (row) => row.status ?? row.phase,
-        render: (row) => (
-          <span className={backendStatusTextClass(row.statusPresentation)}>
-            {row.status ?? row.phase ?? 'Unknown'}
-          </span>
-        ),
-      },
+      cf.createStatusChipColumn('status', 'Status', (row) => ({
+        value: row.status ?? row.phase ?? 'Unknown',
+        presentation: row.statusPresentation,
+      })),
       cf.createTextColumn('workloads', 'Workloads', workloadText, {
         alignHeader: 'center',
         alignData: 'center',

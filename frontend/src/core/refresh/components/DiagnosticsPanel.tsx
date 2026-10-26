@@ -25,10 +25,9 @@ import { useKubeconfig } from '@/modules/kubernetes/config/KubeconfigContext';
 import { useNamespace } from '@/modules/namespace/contexts/NamespaceContext';
 import type { NormalizedTelemetrySummary } from '../client';
 import { refreshOrchestrator } from '../orchestrator';
-import { refreshManager } from '../RefreshManager';
 import { failureMessage, isPermissionDenied, type RefreshFailure } from '../refreshFailure';
-import { isResourceStreamDomain as isResourceTableDomain } from '../resourceStreamViews';
 import { type DomainSnapshotState, useRefreshState } from '../store';
+import { isResourceStreamDomain as isResourceTableDomain } from '../streaming/resourceStreamDomains';
 import { resourceStreamManager } from '../streaming/resourceStreamManager';
 import type {
   ContainerLogsSnapshotPayload,
@@ -52,7 +51,6 @@ import {
   type CapabilityBatchRow,
   type DiagnosticsPanelProps,
   type DiagnosticsRow,
-  DOMAIN_REFRESHER_MAP,
   DOMAIN_STREAM_MAP,
   dedupeDiagnosticsRows,
   formatInterval,
@@ -87,9 +85,6 @@ import { ConnectionsTable } from './diagnostics/TableConnections';
 import { EffectivePermissionsTable } from './diagnostics/TableEffectivePermissions';
 import { KubernetesAPIClientsTable } from './diagnostics/TableKubernetesAPIClients';
 import { useDiagnosticsPolling } from './diagnostics/useDiagnosticsPolling';
-
-// Re-export for backwards compatibility
-export { resolveDomainNamespace } from './diagnostics';
 
 // 'inactive' is its own state, NOT a degree of failure. A scope with no stream
 // is usually just unleased; folding that into 'degraded' told the user
@@ -238,6 +233,12 @@ const FIXED_SCOPE_ROLES: Partial<Record<RefreshDomain, { label: string; tooltip:
 };
 
 const resolveCatalogScopeRole = (query: string): { label: string; tooltip: string } => {
+  if (!query) {
+    return {
+      label: 'Live Scope',
+      tooltip: 'Cluster catalog stream scope; Browse and resource discovery re-read on its changes',
+    };
+  }
   const params = new URLSearchParams(query);
   return params.get('limit') === '1'
     ? {
@@ -514,27 +515,22 @@ const resolveDisabledPollingDetails = (
   return { label: 'disabled', tooltip: 'Polling disabled for this domain', enabled: false };
 };
 
+// Each leased scope polls on its own schedule; a scope nobody leases does not.
 const resolvePollingDetails = (params: {
   domain: RefreshDomain;
-  refresherName?: (typeof DOMAIN_REFRESHER_MAP)[RefreshDomain];
+  scope: string | undefined;
   streamActive: boolean;
   streamHealthy: boolean;
 }): PollingDetails => {
-  const { domain, refresherName, streamActive, streamHealthy } = params;
-  if (!refresherName) {
-    return { label: '—', tooltip: 'No polling refresher', enabled: false };
-  }
-  const refresherState = refreshManager.getState(refresherName);
-  if (!refresherState) {
-    return { label: '—', tooltip: 'Polling not registered', enabled: false };
-  }
-  if (refresherState.status === 'paused') {
+  const { domain, scope, streamActive, streamHealthy } = params;
+  const polling = refreshOrchestrator.getPollingStatus(domain, scope);
+  if (polling.state === 'paused') {
     return { label: 'paused', tooltip: 'Polling paused by auto-refresh', enabled: false };
   }
-  if (refresherState.status === 'disabled') {
+  if (polling.state === 'off') {
     return resolveDisabledPollingDetails(domain, streamActive, streamHealthy);
   }
-  return { label: 'enabled', tooltip: `State: ${refresherState.status}`, enabled: true };
+  return { label: 'enabled', tooltip: 'Polling while leased', enabled: true };
 };
 
 const ROW_COUNT_DOMAINS = new Set<RefreshDomain>([
@@ -817,7 +813,7 @@ const buildDomainTelemetryDetails = (params: {
     telemetrySuccess: telemetryInfo?.successCount,
     telemetryFailure: telemetryInfo?.failureCount,
     durationLabel: formatTelemetryMilliseconds(telemetryInfo?.lastDurationMs),
-    syncWaitLabel: formatTelemetryMilliseconds(telemetryInfo?.maxInformerSyncWaitMs),
+    syncWaitLabel: formatTelemetryMilliseconds(telemetryInfo?.maxSyncWaitMs),
     streamHealth,
     streamActive: resolveStreamActive(isResourceStreamDomain, streamTelemetry, streamHealth),
     streamHealthy: streamHealth?.status === 'healthy',
@@ -932,7 +928,6 @@ const buildPodDiagnosticsRow = (
   const payload = state.data as PodSnapshotPayload | null;
   const lastUpdated = stateLastUpdated(state);
   const lastUpdatedInfo = formatLastUpdated(lastUpdated);
-  const refresherName = DOMAIN_REFRESHER_MAP.pods;
   const streamHealth = toStreamHealthSummary(
     resourceStreamManager.getHealthSnapshot('pods', scope)
   );
@@ -940,7 +935,7 @@ const buildPodDiagnosticsRow = (
   const streamHealthy = streamHealth?.status === 'healthy';
   const pollingDetails = resolvePollingDetails({
     domain: 'pods',
-    refresherName,
+    scope,
     streamActive,
     streamHealthy,
   });
@@ -973,10 +968,9 @@ const buildPodDiagnosticsRow = (
     domain: 'pods',
     label: resolvePodLabel(scope),
     status: state.status,
+    streamActive,
     version: stateVersion(state),
-    interval: formatInterval(
-      refresherName ? refreshManager.getRefresherInterval(refresherName) : null
-    ),
+    interval: formatInterval(refreshOrchestrator.getPollingStatus('pods', scope).intervalMs),
     lastUpdated: lastUpdatedInfo.display,
     lastUpdatedTooltip: lastUpdatedInfo.tooltip,
     duration: '—',
@@ -1045,7 +1039,7 @@ const resolveContainerLogsRowContext = (
   const streamHealthy = streamHealth?.status === 'healthy';
   const pollingDetails = resolvePollingDetails({
     domain: 'container-logs',
-    refresherName: DOMAIN_REFRESHER_MAP['container-logs'],
+    scope,
     streamActive,
     streamHealthy,
   });
@@ -1338,15 +1332,14 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
         const data = asRecord(state.data);
         const countDetails = resolveDiagnosticsCountDetails(domain, state, data);
         const lastUpdatedInfo = formatLastUpdated(telemetryDetails.lastUpdated);
-        const refresherName = DOMAIN_REFRESHER_MAP[domain];
         const intervalLabel = formatInterval(
-          refresherName ? refreshManager.getRefresherInterval(refresherName) : null
+          refreshOrchestrator.getPollingStatus(domain, effectiveScope).intervalMs
         );
         const namespaceLabel = resolveDomainNamespace(domain, effectiveScope);
 
         const pollingDetails = resolvePollingDetails({
           domain,
-          refresherName,
+          scope: effectiveScope,
           streamActive: telemetryDetails.streamActive,
           streamHealthy: telemetryDetails.streamHealthy,
         });
@@ -1373,6 +1366,7 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
           domain,
           label,
           status: state.status,
+          streamActive: telemetryDetails.streamActive,
           version: stateVersion(state),
           interval: intervalLabel,
           lastUpdated:
@@ -1484,7 +1478,11 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ onClose, isO
     getClusterMeta,
   ]);
 
-  const filteredRows = useMemo(() => rows.filter((row) => row.status !== 'idle'), [rows]);
+  // Idle scopes nobody uses are noise; an idle scope a live stream serves is in use.
+  const filteredRows = useMemo(
+    () => rows.filter((row) => row.status !== 'idle' || row.streamActive),
+    [rows]
+  );
 
   // Cluster names for the tree's cluster group rows, keyed by cluster id.
   const clusterNamesById = useMemo(() => {

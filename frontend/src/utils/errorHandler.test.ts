@@ -6,6 +6,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { setAppPreferencesForTesting } from '@/core/settings/appPreferences';
 import { bindingRejection, makeErrorStatus } from '@/test-utils/errorStatusFixtures';
 import type { ErrorHandlerOptions } from './errorHandler';
 import { ErrorCategory, ErrorSeverity, errorHandler } from './errorHandler';
@@ -14,12 +15,7 @@ const telemetryMocks = vi.hoisted(() => ({
   captureUserVisibleError: vi.fn(),
 }));
 
-const settingsMocks = vi.hoisted(() => ({
-  getSuppressNetworkErrorNotifications: vi.fn(() => false),
-}));
-
 vi.mock('@/core/telemetry/sentry', () => telemetryMocks);
-vi.mock('@/core/settings/appPreferences', () => settingsMocks);
 
 describe('ErrorHandler', () => {
   const ErrorHandlerClass = errorHandler.constructor as unknown as new (
@@ -35,7 +31,7 @@ describe('ErrorHandler', () => {
 
   beforeEach(() => {
     telemetryMocks.captureUserVisibleError.mockReset();
-    settingsMocks.getSuppressNetworkErrorNotifications.mockReset().mockReturnValue(false);
+    setAppPreferencesForTesting({ suppressNetworkErrorNotifications: false });
     handler = new ErrorHandlerClass({
       enableLogging: true,
       logToConsole: true,
@@ -102,7 +98,7 @@ describe('ErrorHandler', () => {
   });
 
   it('suppresses network error notifications when the preference is enabled', () => {
-    settingsMocks.getSuppressNetworkErrorNotifications.mockReturnValue(true);
+    setAppPreferencesForTesting({ suppressNetworkErrorNotifications: true });
     const listener = vi.fn();
     handler.subscribe(listener);
 
@@ -115,7 +111,6 @@ describe('ErrorHandler', () => {
   });
 
   it('shows network error notifications when the preference is disabled', () => {
-    settingsMocks.getSuppressNetworkErrorNotifications.mockReturnValue(false);
     const listener = vi.fn();
     handler.subscribe(listener);
 

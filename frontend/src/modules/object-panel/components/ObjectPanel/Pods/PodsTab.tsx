@@ -16,6 +16,7 @@ import {
   createKindColumn,
   createResourceBarColumn,
   createResourceNameColumn,
+  createStatusChipColumn,
   createTextColumn,
   withColumnSizing,
   withNamespaceColumn,
@@ -41,7 +42,6 @@ import {
 import { useQueryBackedClusterResourceGridTable } from '@modules/resource-grid/useQueryBackedResourceGridTable';
 import { useResourceGridObjectIdentity } from '@modules/resource-grid/useResourceGridObjectIdentity';
 import { useObjectActionController } from '@shared/hooks/useObjectActionController';
-import { backendStatusTextClass } from '@shared/utils/backendStatusPresentation';
 import { buildRequiredObjectReference } from '@shared/utils/objectIdentity';
 import { podNamespacePermissionTargets, podOwnerReference } from '@shared/utils/podTableModel';
 import { buildObjectPanelPodsSelector } from './objectPanelPodsScope';
@@ -100,10 +100,6 @@ export const PodsTab: React.FC<PodsTabProps> = ({ isActive }) => {
   });
   const { open: openPod, navigate: navigatePodForWorkspace } = podIdentity;
   const navigatePod = navigationAvailable ? navigatePodForWorkspace : undefined;
-  const getOwnerReference = useCallback(
-    (pod: PodSnapshotEntry) => podOwnerReference(pod, objectData?.clusterName),
-    [objectData?.clusterName]
-  );
   const handleNamespaceSelect = useCallback(
     (pod: PodSnapshotEntry) => {
       if (!pod.ref.namespace || !viewState) {
@@ -120,7 +116,7 @@ export const PodsTab: React.FC<PodsTabProps> = ({ isActive }) => {
   // Scope the pods query to the panel's workload/node. Null for objects we
   // cannot scope, which keeps the query gated off (see queryClusterId).
   const podsSelector = useMemo(
-    () => buildObjectPanelPodsSelector(objectData ?? null, objectData?.kind ?? null),
+    () => buildObjectPanelPodsSelector(objectData ?? null),
     [objectData]
   );
 
@@ -149,9 +145,10 @@ export const PodsTab: React.FC<PodsTabProps> = ({ isActive }) => {
         getClassName: () => 'object-panel-link',
         getTitle: (pod) => pod.ref.name,
       }),
-      createTextColumn<PodSnapshotEntry>('status', 'Status', (pod) => pod.status || '—', {
-        getClassName: (pod) => backendStatusTextClass(pod.statusPresentation),
-      }),
+      createStatusChipColumn<PodSnapshotEntry>('status', 'Status', (pod) => ({
+        value: pod.status,
+        presentation: pod.statusPresentation,
+      })),
       createTextColumn<PodSnapshotEntry>('ready', 'Ready', (pod) => pod.ready || '—', {
         alignData: 'right',
       }),
@@ -161,15 +158,14 @@ export const PodsTab: React.FC<PodsTabProps> = ({ isActive }) => {
         (pod) => formatRestartCount(pod.restarts),
         {
           alignData: 'right',
-          sortValue: (pod) => pod.restarts ?? 0,
           getTitle: (pod) => `${pod.restarts ?? 0} restarts`,
           getClassName: getRestartsClassName,
         }
       ),
       createTextColumn<PodSnapshotEntry>('owner', 'Owner', workloadNameFromOwner, {
-        ...objectLink(getOwnerReference),
-        isInteractive: (pod) => Boolean(getOwnerReference(pod)),
-        getClassName: (pod) => (getOwnerReference(pod) ? 'object-panel-link' : undefined),
+        ...objectLink(podOwnerReference),
+        isInteractive: (pod) => Boolean(podOwnerReference(pod)),
+        getClassName: (pod) => (podOwnerReference(pod) ? 'object-panel-link' : undefined),
       }),
       createTextColumn<PodSnapshotEntry>('node', 'Node', (pod) => pod.node || '—', {
         ...objectLink((pod) =>
@@ -233,7 +229,6 @@ export const PodsTab: React.FC<PodsTabProps> = ({ isActive }) => {
     objectData?.clusterId,
     objectData?.clusterName,
     objectLink,
-    getOwnerReference,
     navigatePod,
     viewState,
   ]);

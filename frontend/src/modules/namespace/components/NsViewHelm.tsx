@@ -16,16 +16,16 @@ import * as cf from '@shared/components/tables/columnFactories';
 import type { GridColumnDefinition } from '@shared/components/tables/GridTable';
 import { useNavigateToView } from '@shared/hooks/useNavigateToView';
 import { useObjectActionController } from '@shared/hooks/useObjectActionController';
-import { backendStatusTextClass } from '@shared/utils/backendStatusPresentation';
+import { kindDisplayName } from '@shared/kinds/kindDisplay';
+import { HELM_RELEASE_GVK } from '@shared/kinds/kindFacets';
 import {
   buildRequiredCanonicalObjectRowKey,
   buildRequiredObjectReference,
 } from '@shared/utils/objectIdentity';
 import React, { useCallback, useMemo } from 'react';
 import type { NamespaceHelmSnapshotPayload, NamespaceHelmSummary } from '@/core/refresh/types';
-import { useShortNames } from '@/hooks/useShortNames';
+import { usePreference } from '@/core/settings/usePreference';
 import { resolveEmptyStateMessage } from '@/utils/emptyState';
-import { getDisplayKind } from '@/utils/kindAliasMap';
 
 // Data interface for Helm releases
 export interface HelmData extends Omit<NamespaceHelmSummary, 'chart'> {
@@ -62,7 +62,7 @@ const HelmViewGrid: React.FC<HelmViewProps> = React.memo(
     const { navigateToView } = useNavigateToView();
     const { selectedClusterId, selectedClusterName } = useKubeconfig();
     const queryClusterId = selectedClusterId;
-    const useShortResourceNames = useShortNames();
+    const useShortResourceNames = usePreference('useShortResourceNames');
     const namespaceColumnLink = useNamespaceColumnLink<HelmData>('helm');
     const helmReference = useCallback(
       (resource: HelmData) =>
@@ -74,7 +74,6 @@ const HelmViewGrid: React.FC<HelmViewProps> = React.memo(
     );
     const objectActions = useObjectActionController({
       context: 'gridtable',
-      useDefaultHandlers: false,
       onOpen: (object) => openWithObject(object),
     });
     const handleResourceClick = useCallback(
@@ -95,7 +94,7 @@ const HelmViewGrid: React.FC<HelmViewProps> = React.memo(
         cf.createKindColumn<HelmData>({
           key: 'kind',
           getKind: () => 'HelmRelease',
-          getDisplayText: () => getDisplayKind('HelmRelease', useShortResourceNames),
+          getDisplayText: () => kindDisplayName(HELM_RELEASE_GVK, useShortResourceNames),
           onClick: handleResourceClick,
           onAltClick: (resource) => navigateToView(helmReference(resource)),
           isInteractive: () => true,
@@ -108,17 +107,10 @@ const HelmViewGrid: React.FC<HelmViewProps> = React.memo(
       ];
 
       baseColumns.push(
-        cf.createTextColumn<HelmData>(
-          'status',
-          'Status',
-          (resource) => {
-            const status = resource.status || resource.info?.status || 'unknown';
-            return status;
-          },
-          {
-            getClassName: (resource) => backendStatusTextClass(resource.statusPresentation),
-          }
-        ),
+        cf.createStatusChipColumn<HelmData>('status', 'Status', (resource) => ({
+          value: resource.status || resource.info?.status || 'unknown',
+          presentation: resource.statusPresentation,
+        })),
         cf.createTextColumn<HelmData>('chart', 'Chart', (resource) => {
           if (!resource.chart) {
             return '-';
@@ -183,8 +175,6 @@ const HelmViewGrid: React.FC<HelmViewProps> = React.memo(
             return '-';
           },
           {
-            sortValue: (resource) =>
-              resource.updated || resource.info?.last_deployed || resource.lastDeployed,
             getClassName: (resource) =>
               resource.updated || resource.info?.last_deployed || resource.lastDeployed
                 ? 'last-updated'
@@ -236,7 +226,6 @@ const HelmViewGrid: React.FC<HelmViewProps> = React.memo(
         ? cf.withNamespaceColumn(baseColumns, {
             afterColumnKey: 'name',
             accessor: (resource) => resource.ref.namespace,
-            sortValue: (resource) => (resource.ref.namespace || '').toLowerCase(),
             ...namespaceColumnLink,
           })
         : baseColumns;

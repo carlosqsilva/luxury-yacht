@@ -25,13 +25,6 @@ const hoistedRefs = vi.hoisted(() => ({
   nodeLogsError: { current: null as Error | null },
   podsTabProps: { current: null as unknown },
   metricsTabProps: { current: null as unknown },
-  setScopedDomainEnabled: vi.fn(),
-}));
-
-vi.mock('@/core/refresh', () => ({
-  refreshOrchestrator: {
-    setScopedDomainEnabled: (...args: unknown[]) => hoistedRefs.setScopedDomainEnabled(...args),
-  },
 }));
 
 vi.mock('@modules/object-panel/components/ObjectPanel/Details/DetailsTab', () => ({
@@ -145,16 +138,8 @@ describe('ObjectPanelContent', () => {
     isPanelOpen: true,
     capabilities: {
       hasObjPanelLogs: true,
-      hasNodeLogs: false,
       hasShell: false,
-      hasManifest: true,
-      hasValues: true,
-      canDelete: true,
-      canRestart: true,
-      canScale: true,
       canEditYaml: true,
-      canTrigger: false,
-      canSuspend: false,
     },
     capabilityReasons: {},
     nodeLogsState: { allowed: false, pending: false, reason: undefined },
@@ -164,8 +149,13 @@ describe('ObjectPanelContent', () => {
     containerLogsScope: 'cluster-a|team-a:apps/v1:deployment:api',
     mapScope: 'cluster-a|team-a:apps/v1:Deployment:api',
     helmScope: 'team-a:api',
-    objectData: { kind: 'Deployment', name: 'api', namespace: 'team-a' },
-    objectKind: 'deployment',
+    objectData: {
+      kind: 'Deployment',
+      group: 'apps',
+      version: 'v1',
+      name: 'api',
+      namespace: 'team-a',
+    },
     resourceDeleted: false,
     deletedResourceName: '',
     onClosePanel: vi.fn(),
@@ -181,7 +171,6 @@ describe('ObjectPanelContent', () => {
         ref.current = null;
       }
     });
-    hoistedRefs.setScopedDomainEnabled.mockClear();
   });
 
   afterEach(() => {
@@ -246,7 +235,8 @@ describe('ObjectPanelContent', () => {
   it('renders logs viewer when logs tab is active and capability present', async () => {
     await renderContent({ activeTab: 'logs' });
     expect(hoistedRefs.logViewerProps.current).toMatchObject({
-      resourceKind: 'deployment',
+      target: 'owned-pods',
+      resourceKind: 'Deployment',
       isActive: true,
     });
   });
@@ -291,9 +281,14 @@ describe('ObjectPanelContent', () => {
   it('renders node logs tab when logs tab is active for a node', async () => {
     const nodeProps: Partial<React.ComponentProps<typeof ObjectPanelContent>> = {
       activeTab: 'logs',
-      capabilities: { ...baseProps.capabilities, hasObjPanelLogs: true, hasNodeLogs: false },
-      objectData: { kind: 'Node', name: 'node-1', clusterId: 'alpha:ctx' },
-      objectKind: 'node',
+      capabilities: { ...baseProps.capabilities, hasObjPanelLogs: true },
+      objectData: {
+        kind: 'Node',
+        group: '',
+        version: 'v1',
+        name: 'node-1',
+        clusterId: 'alpha:ctx',
+      },
       nodeLogsState: { allowed: false, pending: true, reason: undefined },
       nodeLogSources: [
         {
@@ -330,8 +325,13 @@ describe('ObjectPanelContent', () => {
 
     await renderContent({
       activeTab: 'logs',
-      objectData: { kind: 'Node', name: 'node-1', clusterId: 'alpha:ctx' },
-      objectKind: 'node',
+      objectData: {
+        kind: 'Node',
+        group: '',
+        version: 'v1',
+        name: 'node-1',
+        clusterId: 'alpha:ctx',
+      },
     });
 
     expect(container.textContent).toContain('Failed to load Logs');
@@ -386,7 +386,6 @@ describe('ObjectPanelContent', () => {
       objectData: baseProps.objectData,
       isActive: true,
       eventsScope: baseProps.eventsScope,
-      panelId: baseProps.panelId,
     });
   });
 
@@ -436,7 +435,7 @@ describe('ObjectPanelContent', () => {
       objectData: pod,
       detailModel: buildObjectDetailModel(pod, podDetail),
     };
-    const podProps = { objectData: pod, objectKind: 'pod', detailTabProps };
+    const podProps = { objectData: pod, detailTabProps };
     await renderContent({ activeTab: 'details', ...podProps });
     expect(container.querySelector('[data-testid="metrics-tab"]')).toBeNull();
 
@@ -511,56 +510,5 @@ describe('ObjectPanelContent', () => {
     expect(onClosePanel).toHaveBeenCalledTimes(1);
     expect(container.textContent).toContain('Object not found');
     expect(container.textContent).toContain('api is no longer available.');
-  });
-
-  it('disables panel-scoped refresh domains with preserveState and exact scope identity', async () => {
-    await renderContent({
-      detailScope: 'cluster-a|default:apps/v1:Deployment:api',
-      eventsScope: 'cluster-a|default:apps/v1:Deployment:api|events',
-      containerLogsScope: 'cluster-a|default:apps/v1:Deployment:api|logs',
-      mapScope: 'cluster-a|default:apps/v1:Deployment:api|map',
-      helmScope: 'cluster-a|default:helm:team-a:api',
-    });
-
-    hoistedRefs.setScopedDomainEnabled.mockClear();
-
-    await renderContent({ isPanelOpen: false });
-
-    expect(hoistedRefs.setScopedDomainEnabled).toHaveBeenCalledWith(
-      'object-events',
-      'cluster-a|default:apps/v1:Deployment:api|events',
-      false,
-      { preserveState: true }
-    );
-    expect(hoistedRefs.setScopedDomainEnabled).toHaveBeenCalledWith(
-      'object-yaml',
-      'cluster-a|default:apps/v1:Deployment:api',
-      false,
-      { preserveState: true }
-    );
-    expect(hoistedRefs.setScopedDomainEnabled).toHaveBeenCalledWith(
-      'object-helm-manifest',
-      'cluster-a|default:helm:team-a:api',
-      false,
-      { preserveState: true }
-    );
-    expect(hoistedRefs.setScopedDomainEnabled).toHaveBeenCalledWith(
-      'object-helm-values',
-      'cluster-a|default:helm:team-a:api',
-      false,
-      { preserveState: true }
-    );
-    expect(hoistedRefs.setScopedDomainEnabled).toHaveBeenCalledWith(
-      'container-logs',
-      'cluster-a|default:apps/v1:Deployment:api|logs',
-      false,
-      { preserveState: true }
-    );
-    expect(hoistedRefs.setScopedDomainEnabled).toHaveBeenCalledWith(
-      'object-map',
-      'cluster-a|default:apps/v1:Deployment:api|map',
-      false,
-      { preserveState: true }
-    );
   });
 });

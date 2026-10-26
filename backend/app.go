@@ -3,6 +3,7 @@ package backend
 import (
 	"context"
 
+	"github.com/luxury-yacht/app/backend/internal/preferenceschema"
 	"github.com/luxury-yacht/app/backend/nodemaintenance"
 	"github.com/luxury-yacht/app/backend/resources/common"
 	"github.com/luxury-yacht/app/internal/panelwindow"
@@ -53,12 +54,12 @@ type ApplicationRuntimeOptions struct {
 	BeginPanelWindowOpen       func(panelwindow.GroupSnapshot) (panelwindow.WindowDescriptor, error)
 	AcknowledgePanelReady      func(string, string) (panelwindow.WindowDescriptor, error)
 	BeginPanelWindowDock       func(string, string, panelwindow.GroupSnapshot) error
-	AcknowledgePanelDock       func(string, string, string) error
+	AcknowledgePanelTransfer   func(string, string, bool) error
 	FailPanelTransfer          func(string, string, string) error
 	AcknowledgePanelClose      func(string) error
 	AcknowledgeWorkspaceClose  func(string) error
 	RoutePanelCommand          func(string, panelwindow.WorkspaceCommand) error
-	UpdatePanelSnapshot        func(string, panelwindow.GroupSnapshot) error
+	PublishPanelGroup          func(string, panelwindow.WorkspaceGroup) error
 	RequestPanelTabClose       func(string, string) error
 	RequestPanelTabTransfer    func(string, panelwindow.TabTransferRequest) error
 	AcceptPanelTabTransfer     func(string, string) error
@@ -93,8 +94,8 @@ func NewApplicationRuntime(wailsApplication *application.App, configured ...Appl
 		},
 	)
 	clusterWorkspace := newClusterWorkspaceProjection()
-	containerLogsPolicy := NewContainerLogsSelectionPolicy(defaultObjPanelLogsTargetPerScopeLimit)
-	permissionFetchPolicy := NewPermissionFetchPolicy(defaultPermissionSSRRFetchConcurrency)
+	containerLogsPolicy := NewContainerLogsSelectionPolicy(preferenceschema.DefaultObjPanelLogsTargetPerScopeLimit)
+	permissionFetchPolicy := NewPermissionFetchPolicy(preferenceschema.DefaultPermissionSSRRFetchConcurrency)
 	updateCheck := &updateCheckPort{}
 	kubeconfigSearchPaths := &kubeconfigSearchPathPort{}
 	desktopShell := NewDesktopShell(
@@ -107,12 +108,12 @@ func NewApplicationRuntime(wailsApplication *application.App, configured ...Appl
 			BeginPanelWindowOpen:       options.BeginPanelWindowOpen,
 			AcknowledgePanelReady:      options.AcknowledgePanelReady,
 			BeginPanelWindowDock:       options.BeginPanelWindowDock,
-			AcknowledgePanelDock:       options.AcknowledgePanelDock,
+			AcknowledgePanelTransfer:   options.AcknowledgePanelTransfer,
 			FailPanelTransfer:          options.FailPanelTransfer,
 			AcknowledgePanelClose:      options.AcknowledgePanelClose,
 			AcknowledgeWorkspaceClose:  options.AcknowledgeWorkspaceClose,
 			RoutePanelCommand:          options.RoutePanelCommand,
-			UpdatePanelSnapshot:        options.UpdatePanelSnapshot,
+			PublishPanelGroup:          options.PublishPanelGroup,
 			RequestPanelTabClose:       options.RequestPanelTabClose,
 			RequestPanelTabTransfer:    options.RequestPanelTabTransfer,
 			AcceptPanelTabTransfer:     options.AcceptPanelTabTransfer,
@@ -129,10 +130,10 @@ func NewApplicationRuntime(wailsApplication *application.App, configured ...Appl
 		options.Reporter, signals.CtxOrBackground, appLogs.Logger(), Version, installationTelemetry,
 	)
 	refreshSettings := newRefreshSettingBridge(
-		defaultObjPanelLogsTargetGlobalLimit,
-		defaultMetricsIntervalMs(),
+		preferenceschema.DefaultObjPanelLogsTargetGlobalLimit,
+		preferenceschema.DefaultMetricsRefreshIntervalMs,
 	)
-	clusterRateLimits := newClusterRateLimitBridge(defaultKubernetesClientQPS, defaultKubernetesClientBurst)
+	clusterRateLimits := newClusterRateLimitBridge(preferenceschema.DefaultKubernetesClientQPS, preferenceschema.DefaultKubernetesClientBurst)
 	preferences := NewPreferencesService(
 		desktopShell,
 		NewSettingsEffectDispatcher(errorReporting, clusterRateLimits, permissionFetchPolicy, containerLogsPolicy, refreshSettings, appLogs.Logger()),

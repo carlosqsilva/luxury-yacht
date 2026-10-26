@@ -91,19 +91,23 @@ Scope tails are one executable contract:
 - Backend: `backend/refresh/system` (registry, permission gates, manual jobs;
   `ManualQueue` in `backend/refresh/types.go`), `backend/refresh/snapshot`
   (list/table payloads, never `backend/resources`),
-  `backend/refresh/resourcestream` (query-backed signals).
-- Frontend (`frontend/src/core/refresh`): `RefreshManager.ts` scheduler,
-  `orchestrator.ts` executor, `refreshRuntime.ts` per-cluster runtimes,
-  `store.ts` and `hooks/`; request policy in `frontend/src/core/data-access`.
+  `backend/refresh/resourcestream` (the generation's doorbell hub:
+  subscriptions, resume buffers, fan-out). Stores and producers ring it and
+  own their row-to-scope translation in `backend/refresh/snapshot`.
+- Frontend (`frontend/src/core/refresh`): `orchestrator.ts` owns leases, poll
+  scheduling, stream starts, signal refetch, and fetch execution;
+  `refreshRuntime.ts` holds per-cluster runtimes; `store.ts` and `hooks/`.
+  Request policy lives in `frontend/src/core/data-access`.
 
 ### Construction, publication, and teardown
 
 - `buildRefreshSubsystemForSelection` is the one construction chokepoint for
   startup, selector open, auth recovery, and governor re-warm; per-cluster
   readiness, invalidation, and lifecycle wiring belong there.
-- Per-cluster order: informer factory and permission checker, permission
-  preflight, ordered domain registration, snapshots/queues/streams, manager
-  start, then revalidation.
+- Per-cluster order: permission checker and grant tracking
+  (`permissions.Grants`), owned reflectors, snapshot service and resource stream (the doorbell every producer receives at
+  construction), permission preflight and ordered domain registration, the
+  stream's owner-heal sources, queue, manager start, then revalidation.
 - Construction uses the caller's context and has no total deadline (a slow
   reachable cluster still connects); only caller cancellation aborts, and a
   cancelled build publishes no permission-denied fallback domains. The context
@@ -113,7 +117,9 @@ Scope tails are one executable contract:
   review.
 - Replacement publishes the new handler/stream generation before stopping old
   producers. Teardown, including Factory Reset before clearing spill/cache,
-  unpublishes first, then stops producers.
+  unpublishes first, then stops producers. Stopping the resource stream is the
+  producer barrier: it waits for running rings and timed producer callbacks
+  ([data-freshness.md](data-freshness.md#signals-and-source-clocks)).
 - Replacement moves queued or running manual jobs to the new queue; succeeded,
   failed, and cancelled jobs stay terminal.
 - Preferences effects arrive through two write-only sinks
@@ -126,10 +132,11 @@ Scope tails are one executable contract:
 ## Frontend runtime state
 
 `ClusterRefreshRuntime` owns one record per `(clusterId, domain, scope)`: the
-only source of truth for activation and query/snapshot demand counts, deferred
-readiness intent, the scoped permission epoch, snapshot request ownership,
-trailing reads, pending reconciliation and backoff, and stream policy,
-initialization, connection ownership, cancellation, and health.
+only source of truth for activation and query/snapshot demand counts, the poll
+timer, deferred readiness intent, the scoped permission epoch, snapshot request
+ownership, trailing reads, pending reconciliation and backoff, and stream
+policy, initialization, start retry, connection ownership, cancellation, and
+health.
 
 - Add no parallel maps or sets for those fields; add an event to the relevant
   discriminated state and keep network, timer, store, and cleanup work in the
@@ -144,14 +151,26 @@ initialization, connection ownership, cancellation, and health.
   `permissionDenied` is presentation, not the retry gate; the epoch reset
   clears it. It is kept apart from the stored failure, which stream starts and
   resyncs clear.
-- `RefreshManager` reduces scheduler intent (`enabled`/`paused`/`disabled`),
-  timing (`idle`/`cooldown` with owned handles), and execution (`idle` or an
-  ID-owned run); `RefresherState` is derived. The orchestrator separately
-  reduces global metrics demand (`metricsDemandState.ts`) as
-  `idle`/`requesting`/`waiting-retry`; only the matching demand key completes
-  or schedules a retry.
-- Context changes abort, then reconcile, even when rapid. Global pause blocks
-  passive work only.
+- Leases are the only demand signal. Each leased scope owns one poll timer,
+  armed at its contract interval after the previous poll settles and bounded
+  by its contract timeout. The pause input is the auto-refresh preference plus
+  window visibility (`app:visibility-hidden`/`app:visibility-visible`), which
+  each window root publishes when it mounts and on every change. A pause
+  change cancels every poll and re-arms leased scopes when passive work
+  resumes; a repeat of the current state changes nothing. Streams follow leases: they start on the first lease, readiness,
+  auth recovery, the end of an auto-refresh pause, or a cleared block, never
+  from a fetch path. Active subscriptions always equal the leased streaming
+  scopes that are serviceable, not blocked, and not one-shot queries, while
+  auto-refresh is on and the window is visible. The orchestrator separately reduces global metrics demand
+  (`metricsDemandState.ts`) as `idle`/`requesting`/`waiting-retry`; only the
+  matching demand key completes or schedules a retry.
+- A scope change releases the old lease, which cancels its poll and in-flight
+  work, then acquires the new one, even when rapid. The pause blocks passive
+  work only.
+- `setConnectedClusters` only prunes runtimes of closed clusters; it creates
+  no demand. A pruned cluster's stream subscriptions end at once, including
+  any a released lease left inside the unsubscribe debounce, so reopening the
+  cluster subscribes afresh instead of reclaiming its old runtime's stream.
 - `preserveState` disable keeps stream-owned data for a remount. Resetting a
   streaming scope no consumer has enabled also resets its owner
   (`stop(scope, { reset: true })`) so closed-panel data is released; an
@@ -160,9 +179,10 @@ initialization, connection ownership, cancellation, and health.
   reads coalesce without aborting owners, and a caller arriving mid-read waits
   for the trailing snapshot. Manual refresh commands keep their separate
   stream-refresh behavior.
-- A failed snapshot keeps reconciliation pending even with a healthy stream;
-  retries back off to at most 60 seconds until success or a settled permission
-  denial. Typed query errors surface while displayed rows stay; missing
+- A failed snapshot keeps that scope's reconciliation pending even with a
+  healthy stream; its polls retry with a backoff of at most 60 seconds until
+  success or a settled permission denial. A failed stream start retries per
+  scope with `streamReconnectDelay` (1 s doubling, 30 s cap). Typed query errors surface while displayed rows stay; missing
   warm-up data is a separate state.
 
 ### Resource-stream protocol
@@ -271,6 +291,12 @@ typed `Rows` ([large-data.md](large-data.md), [GridTable](../frontend/gridtable.
   embed pods set `DetailListsPods`;
   any pod change in a namespace evicts their cached details there, since a pod
   row does not name its workload (a stale pod list hides a new pod's logs).
+- Refresh owns the response-cache eviction handlers
+  (`backend/refresh_response_cache_invalidation.go`). Each evicts through the
+  gateway invalidator, then records the change in the subsystem's
+  `ObjectDetailsChangeNotifier`, which rings the `object-details` doorbell, so
+  a signal-triggered read never returns the pre-change copy. Resync echoes
+  still evict but do not ring.
 
 ## Streaming start lifecycle
 

@@ -68,19 +68,13 @@ func registryKinds(pred func(kindspec.Descriptor) bool) []string {
 
 func TestObjectMapCollectorKindsDoNotDrift(t *testing.T) {
 	assertKindSet(t, "object-map collectors", []string{
-		"ClusterRole", "ClusterRoleBinding", "ConfigMap", "CronJob", "DaemonSet",
-		"Deployment", "EndpointSlice", "HorizontalPodAutoscaler", "Ingress", "IngressClass", "Job",
+		"BackendTLSPolicy", "ClusterRole", "ClusterRoleBinding", "ConfigMap", "CronJob", "DaemonSet",
+		"Deployment", "EndpointSlice", "GRPCRoute", "Gateway", "GatewayClass", "HTTPRoute",
+		"HorizontalPodAutoscaler", "Ingress", "IngressClass", "Job", "ListenerSet",
 		"NetworkPolicy", "Node", "PersistentVolume", "PersistentVolumeClaim", "Pod",
-		"PodDisruptionBudget", "ReplicaSet", "Role", "RoleBinding", "Secret", "Service", "ServiceAccount",
-		"StatefulSet", "StorageClass",
+		"PodDisruptionBudget", "ReferenceGrant", "ReplicaSet", "Role", "RoleBinding", "Secret", "Service", "ServiceAccount",
+		"StatefulSet", "StorageClass", "TLSRoute",
 	}, registryKinds(func(d kindspec.Descriptor) bool { return d.Collector != nil }))
-}
-
-func TestObjectMapGatewayCollectorKindsDoNotDrift(t *testing.T) {
-	assertKindSet(t, "object-map gateway collectors", []string{
-		"BackendTLSPolicy", "GRPCRoute", "Gateway", "GatewayClass", "HTTPRoute",
-		"ListenerSet", "ReferenceGrant", "TLSRoute",
-	}, registryKinds(func(d kindspec.Descriptor) bool { return d.GatewayCollector != nil }))
 }
 
 func TestObjectMapEdgeKindsDoNotDrift(t *testing.T) {
@@ -107,6 +101,7 @@ func TestStreamSummaryDomainKindsDoNotDrift(t *testing.T) {
 	// intentionally outside the registry-derived domain set guarded here.
 	want := map[string][]string{
 		"cluster-config":        {"GatewayClass", "IngressClass", "MutatingWebhookConfiguration", "StorageClass", "ValidatingWebhookConfiguration"},
+		"cluster-crds":          {"CustomResourceDefinition"},
 		"cluster-rbac":          {"ClusterRole", "ClusterRoleBinding"},
 		"cluster-storage":       {"PersistentVolume"},
 		"namespace-autoscaling": {"HorizontalPodAutoscaler"},
@@ -128,17 +123,4 @@ func TestStreamSummaryDomainKindsDoNotDrift(t *testing.T) {
 	for domain, wantKinds := range want {
 		assertKindSet(t, "stream domain "+domain, wantKinds, got[domain])
 	}
-}
-
-func TestStreamCustomHandlerKindsDoNotDrift(t *testing.T) {
-	// HPA keeps a bespoke live-stream handler over its autoscaling/v1 informer. The
-	// snapshot side still streams it via the registry, so dropping the flag would
-	// silently double-stream it — guard the set. ConfigMap/Secret previously carried
-	// this flag only for their Helm-release refresh side-effect; that is now served by
-	// the dedicated helm-storage source and the kinds are owned-reflector ingest kinds,
-	// so their live notify comes from the generic ingest notify sink, not a custom
-	// handler.
-	assertKindSet(t, "custom stream handlers",
-		[]string{"HorizontalPodAutoscaler"},
-		registryKinds(func(d kindspec.Descriptor) bool { return d.Stream != nil && d.Stream.CustomStreamHandler }))
 }

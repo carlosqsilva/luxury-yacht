@@ -34,6 +34,12 @@ failure behavior, and diagnostics.
 - Single-resource domains are all-or-nothing. Multi-resource domains degrade to
   partial data when showing permitted resources is useful; partial builders
   guard nil or missing listers.
+- A resource a domain reads but does not require, such as the pods behind
+  Nodes' pod counts, is an `Optional` runtime resource. Each read checks it and
+  records the result in the domain's allowed resources, so the builder can
+  report it as missing; it never denies the domain or joins its feed
+  readiness. A builder must not check a resource its policy omits: an
+  unevaluated resource reads as denied.
 - `namespaces` is deliberately fail-fast with no degraded fallback: the sidebar
   shows an explicit permission message, and a permission-denied build still
   fires the cluster-Ready transition.
@@ -82,6 +88,11 @@ failure behavior, and diagnostics.
   catalog in the request's cluster-scoped dependencies (injected
   `ResourceResolver`); never guess `resource` from kind. Refresh permission
   state is not a shortcut for request-time mutation checks.
+- The synthetic Helm release identity (`helm.sh/v3 HelmRelease`) names no API
+  resource. `QueryPermissions` evaluates it as the release's storage
+  (`helm.StorageGVK`, core/v1 Secrets) in the release namespace, without the
+  release name, and reports the result under the release identity. Helm
+  mutations check the storage verbs they write (rollback: create and update).
 - Capability query types and rule matching: `backend/capabilities`. Frontend
   permission store, specs, hooks, and feature labels:
   `frontend/src/core/capabilities`. Specs and diagnostics filters use stable
@@ -111,9 +122,12 @@ failure behavior, and diagnostics.
   templates, and kind eligibility are backend-authored: catalog in
   `backend/objectaction`, per-kind eligibility from
   `backend/kind/kindspec.Descriptor` aggregated through `backend/kind/kindregistry`.
-  `go generate ./backend` writes
-  `frontend/src/shared/actions/objectActions.generated.ts`. Change the source
-  and regenerate; never add a frontend action matrix.
+  `go generate ./backend` writes the action vocabulary to
+  `frontend/src/shared/actions/objectActions.generated.ts` and per-kind
+  eligibility to the kind facets table
+  (`frontend/src/shared/kinds/kindFacets.generated.ts`,
+  [resource-kind-registry.md](resource-kind-registry.md)). Change the source and
+  regenerate; never add a frontend action matrix.
 - `frontend/src/shared/actions/objectActionPolicy.ts`
   (`resolveObjectActionPolicy`) projects the generated data for contract,
   policy, and port-forward helpers. Every UI-visible mutating action appears

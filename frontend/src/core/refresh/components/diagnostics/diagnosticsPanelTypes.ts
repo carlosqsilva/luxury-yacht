@@ -23,13 +23,16 @@ export interface DiagnosticsRow {
   clusterId: string;
   label: string;
   status: DomainStatus;
+  // A live stream subscription serves this scope, so it is in use even while
+  // its status is idle (a query-backed table before its first change signal).
+  streamActive?: boolean;
   version: string;
   interval: string;
   lastUpdated: string;
   lastUpdatedTooltip: string;
   telemetryTooltip?: string;
   duration?: string;
-  // Formatted peak informer-sync-gate wait (initial-LIST gating cost) for this
+  // Formatted peak feed-sync-gate wait (initial-LIST gating cost) for this
   // domain; '—' / undefined when no wait was recorded.
   syncWait?: string;
   telemetrySuccess?: number;

@@ -18,7 +18,7 @@ func TestDesktopServiceCommandsDelegateToTheirDeclaredOwners(t *testing.T) {
 	}{
 		"FavoritesCommands":      {field: "favorites", count: 5},
 		"UIStateCommands":        {field: "uiState", count: 7},
-		"PreferencesCommands":    {field: "preferences", count: 13},
+		"PreferencesCommands":    {field: "preferences", count: 12},
 		"DataManagementCommands": {field: "dataManagement", count: 5},
 		"ClusterAttentionCommands": {
 			field: "attention", count: 6,
@@ -30,7 +30,7 @@ func TestDesktopServiceCommandsDelegateToTheirDeclaredOwners(t *testing.T) {
 		"UpdateCommands":         {field: "updates", count: 6},
 		"AppLogCommands":         {field: "logs", count: 5},
 		"DesktopShellCommands":   {field: "desktopShell", count: 6},
-		"PanelWindowCommands":    {field: "panelWindows", count: 25},
+		"PanelWindowCommands":    {field: "panelWindows", count: 26},
 		"PanelMetricsCommands":   {field: "panelMetrics", count: 2},
 	}
 

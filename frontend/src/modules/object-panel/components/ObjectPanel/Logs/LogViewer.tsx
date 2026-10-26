@@ -23,7 +23,6 @@ import { useLogKeyboardShortcuts } from './hooks/useLogKeyboardShortcuts';
 import { logCopyText, useRawViewFallback } from './hooks/useLogPresentation';
 import { useLogSelectionCopy } from './hooks/useLogSelectionCopy';
 import './LogViewer.css';
-import { eventBus } from '@/core/events';
 import { useAutoRefreshLoadingState } from '@/core/refresh/hooks/useAutoRefreshLoadingState';
 import { applyPassiveLoadingPolicy } from '@/core/refresh/loadingPolicy';
 import { refreshOrchestrator } from '@/core/refresh/orchestrator';
@@ -36,11 +35,8 @@ import type {
   ContainerLogsTargetIssue,
   ContainerLogsWarning,
 } from '@/core/refresh/types';
-import {
-  getObjPanelLogsApiTimestampFormat,
-  getObjPanelLogsApiTimestampUseLocalTimeZone,
-  setObjPanelLogsApiTimestampUseLocalTimeZone,
-} from '@/core/settings/appPreferences';
+import { setObjPanelLogsApiTimestampUseLocalTimeZone } from '@/core/settings/appPreferences';
+import { usePreference } from '@/core/settings/usePreference';
 import { formatObjPanelLogsApiTimestamp } from '@/utils/objPanelLogsApiTimestampFormat';
 import { INACTIVE_SCOPE } from '../constants';
 import { containsAnsi } from './ansi';
@@ -113,6 +109,9 @@ import {
 import { buildStablePodColorMap } from './podColors';
 
 interface LogViewerProps {
+  /** Whose containers the viewer reads: one pod's, or the pods the object owns. */
+  target: 'pod' | 'owned-pods';
+  /** The object's kind; names the download file. */
   resourceKind: string;
   /**
    * Refresh-domain scope string for the container-logs producer. Owned by
@@ -378,6 +377,7 @@ const hasActiveLogResultFilter = (
 ): boolean => isNarrowingFilterSelection(selectedFilters) || textFilterHidesLines;
 
 const LogViewerInner: React.FC<LogViewerProps> = ({
+  target,
   resourceKind,
   containerLogsScope,
   isActive = false,
@@ -397,11 +397,8 @@ const LogViewerInner: React.FC<LogViewerProps> = ({
     const cached = getLogViewerPrefs(panelId);
     return cached ? applyLogViewerPrefs(initialLogViewerState, cached) : initialLogViewerState;
   });
-  const [apiTimestampFormat, setApiTimestampFormatState] = React.useState<string>(() =>
-    getObjPanelLogsApiTimestampFormat()
-  );
-  const [apiTimestampUseLocalTimeZone, setApiTimestampUseLocalTimeZoneState] =
-    React.useState<boolean>(() => getObjPanelLogsApiTimestampUseLocalTimeZone());
+  const apiTimestampFormat = usePreference('objPanelLogsApiTimestampFormat');
+  const apiTimestampUseLocalTimeZone = usePreference('objPanelLogsApiTimestampUseLocalTimeZone');
   const [isTailFollowing, setIsTailFollowing] = React.useState(true);
 
   // Destructure commonly used state for readability
@@ -447,21 +444,9 @@ const LogViewerInner: React.FC<LogViewerProps> = ({
   const searchRowId = useId();
   const terminalTheme = useTerminalTheme(logsContentRef);
 
-  useEffect(
-    () => eventBus.on('settings:obj-panel-logs-api-timestamp-format', setApiTimestampFormatState),
-    []
-  );
-  useEffect(
-    () =>
-      eventBus.on(
-        'settings:obj-panel-logs-api-timestamp-use-local-time-zone',
-        setApiTimestampUseLocalTimeZoneState
-      ),
-    []
-  );
   const resourceKindKey = resourceKind?.toLowerCase() ?? '';
-  const isWorkload = resourceKindKey !== 'pod';
-  const supportsPreviousContainerLogs = resourceKindKey === 'pod';
+  const isWorkload = target === 'owned-pods';
+  const supportsPreviousContainerLogs = target === 'pod';
   const selectedFilterValues = useMemo(
     () => filterSelectionValues(selectedFilters),
     [selectedFilters]

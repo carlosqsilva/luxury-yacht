@@ -12,7 +12,7 @@ require (
 	github.com/joho/godotenv v1.5.1
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/stretchr/testify v1.12.1
-	github.com/wailsapp/wails/v3 v3.0.0-beta.30
+	github.com/wailsapp/wails/v3 v3.0.0-beta.34
 	github.com/yuin/goldmark v1.8.6
 	golang.org/x/mod v0.42.0
 	golang.org/x/sync v0.24.0
@@ -30,7 +30,7 @@ require (
 	k8s.io/kubectl v0.37.1
 	k8s.io/metrics v0.37.1
 	k8s.io/streaming v0.37.1
-	k8s.io/utils v0.0.0-20260707023825-cf1189d6abe3
+	k8s.io/utils v0.0.0-20261023123148-ca04ba58ecab
 	sigs.k8s.io/gateway-api v1.6.3
 	sigs.k8s.io/yaml v1.6.0
 )

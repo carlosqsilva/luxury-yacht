@@ -28,14 +28,13 @@ import * as cf from '@shared/components/tables/columnFactories';
 import type { GridColumnDefinition, GridTableProps } from '@shared/components/tables/GridTable';
 import { useNavigateToView } from '@shared/hooks/useNavigateToView';
 import { useObjectActionController } from '@shared/hooks/useObjectActionController';
-import { backendStatusTextClass } from '@shared/utils/backendStatusPresentation';
+import { kindDisplayName } from '@shared/kinds/kindDisplay';
 import type React from 'react';
 import { useCallback, useMemo } from 'react';
 import type { RefreshFailure } from '@/core/refresh/refreshFailure';
-import { useShortNames } from '@/hooks/useShortNames';
+import { usePreference } from '@/core/settings/usePreference';
 import { resolveEmptyStateMessage } from '@/utils/emptyState';
 import { errorHandler } from '@/utils/errorHandler';
-import { getDisplayKind } from '@/utils/kindAliasMap';
 
 export type CustomResourceGridRow = CatalogBackedCustomResourceRow;
 
@@ -49,21 +48,21 @@ type CatalogRowsResult = ReturnType<typeof useCatalogBackedCustomResourceRows>;
  */
 // Status is whatever the backend projected for the object. Kinds whose API defines no status
 // arrive without one and fall through to the factory's placeholder rather than a made-up label.
-export const customResourceStatusColumn = cf.createTextColumn<CustomResourceGridRow>(
+export const customResourceStatusColumn = cf.createStatusChipColumn<CustomResourceGridRow>(
   'status',
   'Status',
-  (resource) => resource.status || undefined,
-  {
-    sortable: false,
-    getClassName: (resource) => backendStatusTextClass(resource.statusPresentation),
-  }
+  (resource) => ({
+    value: resource.status || undefined,
+    presentation: resource.statusPresentation,
+  }),
+  { sortable: false }
 );
 
 export function useCustomResourceGridParts({ kindFallback }: { kindFallback?: string } = {}) {
   const { openWithObject } = useObjectPanel();
   const { navigateToView } = useNavigateToView();
   const { selectedClusterId, selectedClusterName } = useKubeconfig();
-  const useShortResourceNames = useShortNames();
+  const useShortResourceNames = usePreference('useShortResourceNames');
 
   const handleResourceClick = useCallback(
     (resource: CustomResourceGridRow) => {
@@ -115,10 +114,13 @@ export function useCustomResourceGridParts({ kindFallback }: { kindFallback?: st
             : resource.ref.kind,
         getAlias: (resource) => resource.kindAlias,
         getDisplayText: (resource) =>
-          getDisplayKind(
-            kindFallback
-              ? resource.ref.kind || resource.kindAlias || kindFallback
-              : resource.ref.kind,
+          kindDisplayName(
+            {
+              group: resource.ref.group,
+              kind: kindFallback
+                ? resource.ref.kind || resource.kindAlias || kindFallback
+                : resource.ref.kind,
+            },
             useShortResourceNames
           ),
         onClick: handleResourceClick,
@@ -193,7 +195,6 @@ export function useCustomResourceGridParts({ kindFallback }: { kindFallback?: st
 
   const objectActions = useObjectActionController({
     context: 'gridtable',
-    queryMissingPermissions: true,
     onOpen: (object) => openWithObject(object),
   });
 

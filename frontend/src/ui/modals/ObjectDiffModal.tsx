@@ -38,18 +38,15 @@ import ModalHeader from '@shared/components/modals/ModalHeader';
 import ModalSurface from '@shared/components/modals/ModalSurface';
 import { useModalFocusTrap } from '@shared/components/modals/useModalFocusTrap';
 import { useModalPresence } from '@shared/components/modals/useModalPresence';
-
+import { kindDisplayName, kindNameDisplay } from '@shared/kinds/kindDisplay';
 import {
   readCatalogObjectMatchForRef,
   requestData,
-  requestRefreshDomain,
-  resetRefreshDomain,
-  setRefreshDomainEnabled,
+  useScopedRefreshDomainLifecycle,
 } from '@/core/data-access';
 import { failureMessage, type RefreshFailure } from '@/core/refresh/refreshFailure';
-import { useShortNames } from '@/hooks/useShortNames';
+import { usePreference } from '@/core/settings/usePreference';
 import { formatAgeAgo, formatFullDate } from '@/utils/ageFormatter';
-import { getDisplayKind } from '@/utils/kindAliasMap';
 import { useObjectDiffYaml } from './useObjectDiffYaml';
 
 interface ObjectDiffModalProps {
@@ -135,7 +132,7 @@ const buildSelectionParts = (
   }
   const namespaceLabel = buildNamespaceLabel(item.ref.namespace);
   const clusterLabel = clusterName?.trim() || item.ref.clusterId.trim();
-  const kindLabel = getDisplayKind(item.ref.kind, shortNamesEnabled);
+  const kindLabel = kindDisplayName(item.ref, shortNamesEnabled);
   return {
     hasSelection: true,
     clusterLabel,
@@ -290,7 +287,8 @@ const buildKindOptions = (kinds: string[], shortNamesEnabled: boolean): Dropdown
     if (!value) {
       return;
     }
-    options.set(value.toLowerCase(), { value, label: getDisplayKind(value, shortNamesEnabled) });
+    // Options are keyed by kind name, so their labels are by name too.
+    options.set(value.toLowerCase(), { value, label: kindNameDisplay(value, shortNamesEnabled) });
   });
   return Array.from(options.values()).sort((a, b) => a.label.localeCompare(b.label));
 };
@@ -457,24 +455,13 @@ const useCatalogDiffSnapshot = (
   const effectiveScope = scope ?? INACTIVE_SCOPE;
   const state = useRefreshScopedDomain('catalog-diff', effectiveScope);
 
-  useEffect(() => {
-    if (!scope || !enabled) {
-      return;
-    }
-
-    setRefreshDomainEnabled({ domain: 'catalog-diff', scope, enabled: true });
-    void requestRefreshDomain({
-      domain: 'catalog-diff',
-      scope,
-      reason: 'user',
-    });
-
-    return () => {
-      // Clean up the previous scope to prevent background refreshes.
-      setRefreshDomainEnabled({ domain: 'catalog-diff', scope, enabled: false });
-      resetRefreshDomain('catalog-diff', scope);
-    };
-  }, [enabled, scope]);
+  // Releasing without preserving state clears the previous scope's rows.
+  useScopedRefreshDomainLifecycle({
+    domain: 'catalog-diff',
+    scope,
+    enabled: Boolean(scope && enabled),
+    fetchOnEnable: 'user',
+  });
 
   return { scope, state };
 };
@@ -1025,7 +1012,7 @@ const ObjectDiffModal: React.FC<ObjectDiffModalProps> = ({
   const rightMatchRequestRef = useRef(0);
   const appliedInitialRequestIdRef = useRef<number | null>(null);
   const modalRef = useRef<HTMLDivElement>(null);
-  const useShortNamesSetting = useShortNames();
+  const useShortNamesSetting = usePreference('useShortResourceNames');
 
   const clusterOptions = useMemo(
     () => buildClusterOptions(selectedKubeconfigs, getClusterMeta),

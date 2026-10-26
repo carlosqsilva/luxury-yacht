@@ -23,7 +23,7 @@ import { errorHandler } from '@utils/errorHandler';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useScopedRefreshDomainLifecycle } from '@/core/data-access';
 import { useRefreshScopedDomain } from '@/core/refresh';
-import { useQueryStreamSignal } from '@/core/refresh/hooks/useStreamSignalRefetch';
+import { useQueryStreamSignal } from '@/core/refresh/hooks/useQueryStreamSignal';
 import type { RefreshFailure } from '@/core/refresh/refreshFailure';
 import {
   buildRefreshScope,
@@ -32,7 +32,7 @@ import {
   selectorForNamespaceSelection,
 } from '@/core/refresh/scopeSelector';
 import type { RefreshDomain } from '@/core/refresh/types';
-import { useDefaultTablePageSize } from '@/hooks/useDefaultTablePageSize';
+import { usePreference } from '@/core/settings/usePreference';
 import type { SortConfig } from '@/hooks/useTableSort';
 import { backendQuerySource } from './backendQuerySource';
 import type { QueryBackedTableState } from './queryBackedTableState';
@@ -244,7 +244,7 @@ function useTypedQueryLifecycle<
 }): TypedQueryLifecycle<TPayload, TRow> {
   const { tableState, handleTableStateChange } = useQueryBackedTableState(defaultSort);
   const [tableStateReady, setTableStateReady] = useState(false);
-  const defaultPageSize = useDefaultTablePageSize();
+  const defaultPageSize = usePreference('defaultTablePageSize');
   const pageLimit = typedQueryPageLimitOrDefault(persistence.pageSize, defaultPageSize);
   useEffect(() => {
     const sanitized = removeHiddenFilters(
@@ -370,7 +370,7 @@ const anchorDecisionKeyExtractor = () => '';
 // row, turn it into a backend anchor jump — the landing page then contains
 // the row and the normal buffer match takes over. A missing anchor
 // (filtered/not-found) is reported through the app's notification channel.
-export function useAnchorOnUnmatchedFocusRequest<TRow>({
+function useAnchorOnUnmatchedFocusRequest<TRow>({
   clusterId,
   enabled = true,
   domain,

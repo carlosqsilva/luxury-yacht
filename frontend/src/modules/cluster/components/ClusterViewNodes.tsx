@@ -30,7 +30,7 @@ import {
 import { useNavigateToView } from '@shared/hooks/useNavigateToView';
 import { useNodeMaintenanceActions } from '@shared/hooks/useNodeMaintenanceActions';
 import { useObjectActionController } from '@shared/hooks/useObjectActionController';
-import { backendStatusTextClass } from '@shared/utils/backendStatusPresentation';
+import { kindDisplayName } from '@shared/kinds/kindDisplay';
 import { getKindColorClass } from '@shared/utils/kindBadgeColors';
 import {
   buildRequiredCanonicalObjectRowKey,
@@ -46,10 +46,8 @@ import type {
   NodeMetricsInfo,
 } from '@/core/refresh/types';
 import { nodeRowCpuValue, nodeRowMemoryValue } from '@/core/resource-metrics';
-import { useShortNames } from '@/hooks/useShortNames';
-import { parseCompactAgeToSeconds } from '@/utils/ageFormatter';
+import { usePreference } from '@/core/settings/usePreference';
 import { resolveEmptyStateMessage } from '@/utils/emptyState';
-import { getDisplayKind } from '@/utils/kindAliasMap';
 
 // The table is query-backed (sourced from the typed query + replay cache);
 // only `error` is consumed, for the empty-state text.
@@ -71,25 +69,13 @@ interface NodesTableProps extends NodesViewProps {
 }
 
 const NO_ROW_KEYS: readonly string[] = [];
-
-const parseNodePodsUsed = (pods?: string | number | null): number => {
-  if (typeof pods === 'number') {
-    return Number.isFinite(pods) ? pods : 0;
-  }
-  const raw = pods?.trim() ?? '';
-  if (!raw || raw === '—' || raw === '-') {
-    return 0;
-  }
-  const [used] = raw.split('/');
-  const parsed = Number.parseFloat(used.trim());
-  return Number.isFinite(parsed) ? parsed : 0;
-};
+const NODES_VIEW_ID = 'cluster-nodes';
 
 /*
  * GridTable component for cluster nodes
  * Displays nodes with their status, resource usage, and other details
  */
-export const NodesTable: React.FC<NodesTableProps> = React.memo(
+const NodesTable: React.FC<NodesTableProps> = React.memo(
   ({
     error,
     selectedNodeKey = null,
@@ -103,7 +89,7 @@ export const NodesTable: React.FC<NodesTableProps> = React.memo(
     const { openWithObject } = useObjectPanel();
     const { navigateToView } = useNavigateToView();
     const { selectedClusterId, selectedClusterName } = useKubeconfig();
-    const useShortResourceNames = useShortNames();
+    const useShortResourceNames = usePreference('useShortResourceNames');
     const [metricsInfo, setMetricsInfo] = useState<NodeMetricsInfo | null>(null);
 
     const watchClusterIds = useMemo(
@@ -152,15 +138,11 @@ export const NodesTable: React.FC<NodesTableProps> = React.memo(
     );
 
     const tableColumns = useMemo<GridColumnDefinition<ClusterNodeRow>[]>(() => {
-      const ageSortNow = Date.now();
-
-      const resolveNodeStatus = (node: ClusterNodeRow) => {
-        const text = node.status ?? 'Unknown';
-        return {
-          text,
-          className: backendStatusTextClass(node.statusPresentation),
-        };
-      };
+      const statusChipColumn = cf.createStatusChipColumn<ClusterNodeRow>(
+        'status',
+        'Status',
+        (node) => ({ value: node.status ?? 'Unknown', presentation: node.statusPresentation })
+      );
 
       const resolveNodeRestarts = (node: ClusterNodeRow) => {
         const restartCount = node.restarts ?? 0;
@@ -178,7 +160,6 @@ export const NodesTable: React.FC<NodesTableProps> = React.memo(
         {
           alignHeader: 'center',
           alignData: 'center',
-          sortValue: (row) => parseNodePodsUsed(row.pods),
         }
       );
 
@@ -186,11 +167,10 @@ export const NodesTable: React.FC<NodesTableProps> = React.memo(
       const columns: GridColumnDefinition<ClusterNodeRow>[] = [
         cf.createKindColumn<ClusterNodeRow>({
           getKind: () => 'Node',
-          getDisplayText: () => getDisplayKind('Node', useShortResourceNames),
+          getDisplayText: () => kindDisplayName({ group: '', kind: 'Node' }, useShortResourceNames),
           onClick: (row) => handleNodeClick(row),
           onAltClick: handleNodeAltClick,
           isInteractive: () => true,
-          sortValue: () => 'node',
         }),
         cf.createResourceNameColumn<ClusterNodeRow>((row) => row.ref.name || '', {
           onClick: (row) => handleNodeClick(row),
@@ -200,16 +180,13 @@ export const NodesTable: React.FC<NodesTableProps> = React.memo(
           isInteractive: () => true,
         }),
         {
-          key: 'status',
-          header: 'Status',
-          sortable: true,
-          sortValue: (row: ClusterNodeRow) => resolveNodeStatus(row).text.toLowerCase(),
+          ...statusChipColumn,
+          // A node being drained shows a button beside its status that opens the drain.
           render: (row: ClusterNodeRow) => {
-            const status = resolveNodeStatus(row);
             const activeDrain = nodeMaintenance.activeDrainFor(row.ref.clusterId, row.ref.name);
             return (
               <span className="cluster-nodes-status-cell">
-                <span className={status.className}>{status.text}</span>
+                {statusChipColumn.render(row)}
                 {activeDrain && (
                   <button
                     type="button"
@@ -233,9 +210,7 @@ export const NodesTable: React.FC<NodesTableProps> = React.memo(
             );
           },
         },
-        cf.createTextColumn<ClusterNodeRow>('version', 'Version', (row) => row.version || '—', {
-          sortValue: (row) => (row.version || '').toLowerCase(),
-        }),
+        cf.createTextColumn<ClusterNodeRow>('version', 'Version', (row) => row.version || '—'),
         podsToggle ? withRowDetailToggle(podsColumn, podsToggle) : podsColumn,
         cf.createTextColumn<ClusterNodeRow>(
           'restarts',
@@ -245,7 +220,6 @@ export const NodesTable: React.FC<NodesTableProps> = React.memo(
             alignHeader: 'center',
             alignData: 'center',
             getClassName: (row) => resolveNodeRestarts(row).className,
-            sortValue: (row) => row.restarts ?? 0,
           }
         ),
         cf.createResourceBarColumn<ClusterNodeRow>({
@@ -267,7 +241,6 @@ export const NodesTable: React.FC<NodesTableProps> = React.memo(
           getMetricsError: () => metricsInfo?.lastError ?? undefined,
           getAnimationKey: (row) => `${buildRequiredCanonicalObjectRowKey(row.ref)}:cpu`,
           sortable: true,
-          sortValue: (row) => row.cpuUsageMilli ?? 0,
         }),
         cf.createResourceBarColumn<ClusterNodeRow>({
           key: 'memory',
@@ -288,17 +261,10 @@ export const NodesTable: React.FC<NodesTableProps> = React.memo(
           getMetricsError: () => metricsInfo?.lastError ?? undefined,
           getAnimationKey: (row) => `${buildRequiredCanonicalObjectRowKey(row.ref)}:memory`,
           sortable: true,
-          sortValue: (row) => row.memoryUsageBytes ?? 0,
         }),
-        {
-          ...(cf.createAgeColumn<ClusterNodeRow & { age?: string }>('age', 'Age', (row) => {
-            return row.age ?? '—';
-          }) as GridColumnDefinition<ClusterNodeRow>),
-          sortValue: (row: ClusterNodeRow) =>
-            typeof row.ageTimestamp === 'number' && Number.isFinite(row.ageTimestamp)
-              ? Math.max(0, Math.floor((ageSortNow - row.ageTimestamp) / 1000))
-              : parseCompactAgeToSeconds(row.age),
-        },
+        cf.createAgeColumn<ClusterNodeRow & { age?: string }>('age', 'Age', (row) => {
+          return row.age ?? '—';
+        }) as GridColumnDefinition<ClusterNodeRow>,
       ];
 
       const sizing: cf.ColumnSizingMap = {
@@ -348,7 +314,7 @@ export const NodesTable: React.FC<NodesTableProps> = React.memo(
         excludedQueryFacetKeys: RESOURCE_STATUS_QUERY_FACET_KEYS,
         label: 'Cluster Nodes',
         selectRows: selectPayloadRows,
-        viewId: 'cluster-nodes',
+        viewId: NODES_VIEW_ID,
         persistenceData: [],
         columns: tableColumns,
         keyExtractor,
@@ -468,7 +434,8 @@ NodesTable.displayName = 'NodesTable';
 /**
  * The cluster's nodes. A node's Pods count (or Space) opens that node's pods
  * under its row; a row click only highlights; Enter and the Kind/Name links
- * open the node. Highlight and open pods live only while the view is mounted.
+ * open the node. The highlight lives only while the view is mounted; open
+ * pods stay open until the cluster closes.
  */
 const ClusterViewNodes: React.FC<NodesViewProps> = ({ error }) => {
   const { selectedClusterId, selectedClusterName } = useKubeconfig();
@@ -493,7 +460,7 @@ const ClusterViewNodes: React.FC<NodesViewProps> = ({ error }) => {
     toggle: toggleNodePods,
     close: closeNodePods,
     closeKeys: closeNodePodsByKey,
-  } = useOpenRowDetails({ keyOf: rowKeyOf });
+  } = useOpenRowDetails({ clusterId: selectedClusterId, viewId: NODES_VIEW_ID, keyOf: rowKeyOf });
 
   const handleNodeSelect = useCallback(
     (node: ClusterNodeRow) => setSelectedNode(toReference(node)),

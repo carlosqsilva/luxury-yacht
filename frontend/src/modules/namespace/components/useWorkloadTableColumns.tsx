@@ -14,11 +14,10 @@ import {
   type RowDetailToggleOptions,
   withRowDetailToggle,
 } from '@shared/components/tables/rowDetailToggle';
-import { backendStatusTextClass } from '@shared/utils/backendStatusPresentation';
+import { kindDisplayName } from '@shared/kinds/kindDisplay';
 import { buildRequiredCanonicalObjectRowKey } from '@shared/utils/objectIdentity';
 import { useMemo } from 'react';
 import { workloadRowCpuValue, workloadRowMemoryValue } from '@/core/resource-metrics';
-import { getDisplayKind } from '@/utils/kindAliasMap';
 
 interface UseWorkloadTableColumnsParams {
   handleWorkloadClick: (workload: WorkloadData) => void;
@@ -46,18 +45,6 @@ const parseReadyCounts = (value?: string | null): { ready: number; total: number
     ready: Number(match[1]),
     total: Number(match[2]),
   };
-};
-
-const getReadySortValue = (value?: string | null): number | string => {
-  const counts = parseReadyCounts(value);
-  if (counts) {
-    return counts.ready * 1000000 + counts.total;
-  }
-  if (!value) {
-    return -1;
-  }
-  const numeric = Number(value);
-  return Number.isFinite(numeric) ? numeric : value.toLowerCase();
 };
 
 const useWorkloadTableColumns = ({
@@ -90,7 +77,6 @@ const useWorkloadTableColumns = ({
         alignHeader: 'center',
         alignData: 'center',
         getClassName: getReadyClassName,
-        sortValue: (row) => getReadySortValue(row.ready),
       }
     );
     const readyColumn = podsToggle
@@ -103,11 +89,10 @@ const useWorkloadTableColumns = ({
     const columns: GridColumnDefinition<WorkloadData>[] = [
       cf.createKindColumn<WorkloadData>({
         getKind: (row) => row.ref.kind,
-        getDisplayText: (row) => getDisplayKind(row.ref.kind, useShortResourceNames),
+        getDisplayText: (row) => kindDisplayName(row.ref, useShortResourceNames),
         onClick: (row) => handleWorkloadClick(row),
         onAltClick,
         isInteractive: () => true,
-        sortValue: (row) => row.ref.kind.toLowerCase(),
       }),
       cf.createResourceNameColumn<WorkloadData>((row) => row.ref.name, {
         onClick: (row) => handleWorkloadClick(row),
@@ -116,10 +101,10 @@ const useWorkloadTableColumns = ({
         getClassName: () => 'object-panel-link',
         isInteractive: () => true,
       }),
-      cf.createTextColumn<WorkloadData>('status', 'Status', (row) => row.status, {
-        getClassName: (row) => backendStatusTextClass(row.statusPresentation),
-        sortValue: (row) => row.status.toLowerCase(),
-      }),
+      cf.createStatusChipColumn<WorkloadData>('status', 'Status', (row) => ({
+        value: row.status,
+        presentation: row.statusPresentation,
+      })),
       readyColumn,
       cf.createTextColumn<WorkloadData>(
         'restarts',
@@ -129,7 +114,6 @@ const useWorkloadTableColumns = ({
           alignHeader: 'center',
           alignData: 'center',
           getClassName: getRestartsClassName,
-          sortValue: (row) => row.restarts ?? 0,
         }
       ),
       cf.createResourceBarColumn<WorkloadData>({
@@ -144,7 +128,6 @@ const useWorkloadTableColumns = ({
         getAnimationKey: (row) => `${buildRequiredCanonicalObjectRowKey(row.ref)}:cpu`,
         getShowEmptyState: () => true,
         sortable: true,
-        sortValue: (row) => row.cpuUsageMilli ?? 0,
       }),
       cf.createResourceBarColumn<WorkloadData>({
         key: 'memory',
@@ -158,7 +141,6 @@ const useWorkloadTableColumns = ({
         getAnimationKey: (row) => `${buildRequiredCanonicalObjectRowKey(row.ref)}:memory`,
         getShowEmptyState: () => true,
         sortable: true,
-        sortValue: (row) => row.memoryUsageBytes ?? 0,
       }),
       cf.createAgeColumn<WorkloadData & { age?: string }>('age', 'Age', (row) => {
         return row.age ?? '—';
