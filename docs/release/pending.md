@@ -1,10 +1,10 @@
-### Changed
+### Added
 
-- Redesigned rollback and confirmations modals.
-  - Rollback modal makes the current and rollback diffs clearer, and gives more horizontal space for comparison.
-  - Confirmation modals show the object being acted on much more prominently.
+- Support for batch operations.
+  - Batch select on tables. A toolbar button turns on a checkbox column; a floating bar offers the actions that apply to the selected rows. Wired on Pods, Workloads, Nodes, the cluster and namespace resource views, and custom resources. Deliberately not on Browse, CRDs, Namespaces or Helm.
+  - Batch actions. Delete, Restart, Scale, Suspend/Resume, Cordon/Uncordon, and Drain for nodes, with a confirmation that lists the objects, a progress state, and a results dialog with Retry.
+- Added +/- numeric stepper buttons to Scale modals for deployments and statefulsets.
 
 ### Fixed
 
-- Closing a modal or the command palette no longer focuses keyboard control, causing an unexpected highlight of an element.
-- Rolling back a Deployment no longer copies the `pod-template-hash` label into its pod template, and the label no longer appears as a change in the rollback diff.
+- Deleting a Job or ReplicationController now also deletes its Pods, matching `kubectl delete`.
